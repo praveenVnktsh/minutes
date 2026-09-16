@@ -27,7 +27,7 @@
         "tauri:build:hipblas": "tauri build -- --features hipblas",
         "webhook:test-server": "node scripts/webhook-test-server.mjs",
         "lint": "next lint",
-        "test": "bun test",
+        "test": "bun scripts/test-each.mjs",
         "typecheck": "tsc --noEmit"
     },
     "dependencies": {

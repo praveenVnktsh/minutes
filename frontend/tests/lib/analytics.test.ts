@@ -1,4 +1,12 @@
-import { describe, expect, mock, test } from 'bun:test';
+import { afterAll, describe, expect, mock, test } from 'bun:test';
+
+// Bun shares module mocks between test files, and file order differs between
+// macOS and Linux. Restore the real Tauri core so this fake invoke never reaches
+// a later file.
+const originalCore = { ...await import('@tauri-apps/api/core') };
+afterAll(() => {
+  mock.module('@tauri-apps/api/core', () => originalCore);
+});
 
 let sessionSequence = 0;
 const invokeMock = mock(async (command: string, _args?: unknown) =>
