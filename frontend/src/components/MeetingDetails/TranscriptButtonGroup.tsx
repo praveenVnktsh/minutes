@@ -7,6 +7,9 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { Copy, FolderOpen, Link2, MoreHorizontal, RefreshCw, UserRoundCog, Users } from 'lucide-react';
@@ -55,14 +58,14 @@ export function TranscriptButtonGroup({
     }
   }, [onRefetchTranscripts]);
 
-  const handleIdentifySpeakers = useCallback(async () => {
+  const handleIdentifySpeakers = useCallback(async (numSpeakers: number | null) => {
     if (!meetingId || isIdentifyingSpeakers) return;
     setIsIdentifyingSpeakers(true);
     const toastId = toast.loading('Identifying speakers locally…');
     try {
       const result = await invoke<{ speaker_count: number }>('run_speaker_diarization', {
         meetingId,
-        numSpeakers: null,
+        numSpeakers,
       });
       await onRefetchTranscripts?.();
       toast.success(
@@ -140,10 +143,22 @@ export function TranscriptButtonGroup({
               </DropdownMenuItem>
             )}
             {meetingId && meetingFolderPath && transcriptCount > 0 && (
-              <DropdownMenuItem onClick={() => void handleIdentifySpeakers()} disabled={isIdentifyingSpeakers}>
-                <Users className={`mr-2 h-4 w-4 ${isIdentifyingSpeakers ? 'animate-pulse' : ''}`} />
-                {isIdentifyingSpeakers ? 'Identifying speakers…' : 'Identify speakers'}
-              </DropdownMenuItem>
+              <DropdownMenuSub>
+                <DropdownMenuSubTrigger disabled={isIdentifyingSpeakers}>
+                  <Users className={`mr-2 h-4 w-4 ${isIdentifyingSpeakers ? 'animate-pulse' : ''}`} />
+                  {isIdentifyingSpeakers ? 'Identifying speakers…' : 'Identify speakers'}
+                </DropdownMenuSubTrigger>
+                <DropdownMenuSubContent className="w-44">
+                  <DropdownMenuItem onClick={() => void handleIdentifySpeakers(null)}>
+                    Auto-detect
+                  </DropdownMenuItem>
+                  {[2, 3, 4, 5, 6].map((count) => (
+                    <DropdownMenuItem key={count} onClick={() => void handleIdentifySpeakers(count)}>
+                      {count} speakers
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuSubContent>
+              </DropdownMenuSub>
             )}
             {meetingId && transcriptCount > 0 && onOpenSpeakerManager && (
               <DropdownMenuItem onClick={onOpenSpeakerManager}>

@@ -7,6 +7,12 @@ Each GitHub release publishes the section below that matches its version.
 
 ## [Unreleased]
 
+## [1.5.3] - 2026-09-16
+
+### Added
+
+- **Choose the speaker count when identifying speakers** — the transcript "Identify speakers" action now offers Auto-detect or a fixed 2–6 speakers, so meetings with a known number of participants get accurate labels instead of relying on the automatic clustering estimate.
+
 ## [1.5.2] - 2026-09-16
 
 ### Changed
