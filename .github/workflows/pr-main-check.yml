@@ -1,6 +1,8 @@
-name: "Validation Check"
+name: "Release Validation (manual)"
 
-# This workflow runs basic validation checks without building
+# A manual pre-release check of version and branch. It is NOT the pull request
+# gate and builds nothing -- that is PR Check (pr-check.yml). Renamed from
+# "Validation Check" so the two cannot be mistaken for each other.
 # Use this to verify version and configuration before a release
 
 on:

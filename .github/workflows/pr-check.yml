@@ -1,0 +1,111 @@
+name: "PR Check"
+
+# The check every pull request to main must pass before it can merge.
+#
+# Every other workflow here is manual, scheduled, or runs on push to main --
+# and Canary Release, the one that runs automatically, runs AFTER a merge and
+# ships it: every merge to main auto-updates canary installs. So this is the
+# only thing standing between a pull request and a release.
+#
+# ONE JOB, on purpose. The Rust app embeds the built frontend at compile time
+# (tauri.conf.json's frontendDist is ../out), so the Rust tests cannot compile
+# until the frontend is built -- which makes splitting them buy nothing but a
+# second required check name. The ruleset requires this job by its name, and
+# so does anything else that reads it, so do not rename it casually.
+#
+# The commands are the ones CONTRIBUTING.md lists under Verification, CPU-only.
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: pr-check-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  pr-check:
+    name: PR Check
+    # 22.04, not 24.04: build.yml pins exact libwebkit2gtk versions on 24.04
+    # and installs them unpinned on 22.04. The unpinned list is the one that
+    # does not break the day the archive moves on.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # --- frontend -----------------------------------------------------------
+
+      # Same pnpm and node as build.yml, so a check that passes here does not
+      # fail in the release on a toolchain difference.
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      # `pnpm test` is `bun test`.
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        working-directory: frontend
+        run: pnpm typecheck
+
+      - name: Lint
+        working-directory: frontend
+        run: pnpm lint
+
+      - name: Frontend tests
+        working-directory: frontend
+        run: pnpm test
+
+      # Also produces frontend/out, which the Rust build below embeds.
+      - name: Build frontend
+        working-directory: frontend
+        run: pnpm build
+
+      # --- rust ---------------------------------------------------------------
+
+      # The unpinned 22.04 list from build.yml.
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libasound2-dev libopenblas-dev libx11-dev libxtst-dev libxrandr-dev
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # whisper.cpp and llama.cpp dominate a cold build. Caching target/ is
+      # what keeps this cheap enough to run on every pull request.
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      # tauri.conf.json declares llama-helper as an externalBin, and the Tauri
+      # build script refuses to compile the app until a binary sits at
+      # binaries/llama-helper-<host triple>. Releases build it in release mode;
+      # tests only need it to exist, so a debug build is enough and far faster.
+      - name: Stage the llama-helper sidecar
+        run: |
+          cargo build -p llama-helper
+          TARGET="$(rustc -vV | awk '/^host:/ {print $2}')"
+          mkdir -p frontend/src-tauri/binaries
+          cp target/debug/llama-helper "frontend/src-tauri/binaries/llama-helper-${TARGET}"
+
+      - name: Rust tests
+        run: cargo test -p meetily
