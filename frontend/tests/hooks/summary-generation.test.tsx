@@ -4,14 +4,25 @@ import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { parseSummaryContent } from '../../src/lib/summary-content';
 import type { MeetingSummary, SummaryProcessResponse } from '../../src/types';
 
-// Bun shares module mocks between test files; restore application modules after this suite.
+// Bun shares module mocks between test files; restore EVERY module this suite
+// mocks, not only the application ones. Test files run in directory order, which
+// differs between macOS and Linux: on Linux this file runs first, so a mock left
+// in place here reaches every file after it. The partial next/navigation mock
+// below has no useSearchParams, which crashed meeting-details-refresh on import,
+// and the fake invoke broke summary-language-preferences.
+const originalCore = { ...await import('@tauri-apps/api/core') };
 const originalAnalytics = { ...await import('../../src/lib/analytics') };
 const originalPreferences = { ...await import('../../src/lib/summary-language-preferences') };
 const originalToast = { ...await import('sonner') };
+const originalNavigation = { ...await import('next/navigation') };
+const originalRecordingState = { ...await import('../../src/contexts/RecordingStateContext') };
 afterAll(() => {
+  mock.module('@tauri-apps/api/core', () => originalCore);
   mock.module('../../src/lib/analytics', () => originalAnalytics);
   mock.module('../../src/lib/summary-language-preferences', () => originalPreferences);
   mock.module('sonner', () => originalToast);
+  mock.module('next/navigation', () => originalNavigation);
+  mock.module('../../src/contexts/RecordingStateContext', () => originalRecordingState);
 });
 
 mock.module('next/navigation', () => ({ usePathname: () => '/meeting-details', useRouter: () => ({}) }));

@@ -55,7 +55,9 @@ jobs:
           cache: pnpm
           cache-dependency-path: frontend/pnpm-lock.yaml
 
-      # `pnpm test` is `bun test`.
+      # `pnpm test` runs scripts/test-each.mjs, which runs each test file in its
+      # own `bun test` process. See that file for why a single `bun test` passed
+      # on macOS and failed here.
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
 

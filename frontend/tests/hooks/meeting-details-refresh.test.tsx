@@ -9,6 +9,11 @@ const originalPreferences = { ...await import('../../src/lib/summary-language-pr
 const originalToast = { ...await import('sonner') };
 const originalNavigation = { ...await import('next/navigation') };
 const originalConfig = { ...await import('../../src/contexts/ConfigContext') };
+// Every module mocked below is restored, not only most of them: test file order
+// differs between macOS and Linux, so a mock left in place reaches whichever file
+// happens to run next.
+const originalRecordingState = { ...await import('../../src/contexts/RecordingStateContext') };
+const originalPageContent = { ...await import('../../src/app/meeting-details/page-content') };
 afterAll(() => {
   mock.module('@tauri-apps/api/core', () => originalCore);
   mock.module('../../src/lib/analytics', () => originalAnalytics);
@@ -16,6 +21,8 @@ afterAll(() => {
   mock.module('sonner', () => originalToast);
   mock.module('next/navigation', () => originalNavigation);
   mock.module('../../src/contexts/ConfigContext', () => originalConfig);
+  mock.module('../../src/contexts/RecordingStateContext', () => originalRecordingState);
+  mock.module('../../src/app/meeting-details/page-content', () => originalPageContent);
 });
 
 let selectedMeeting = 'meeting-a';
