@@ -21,29 +21,21 @@ Keep unrelated changes separate and never commit API keys, signing keys, recordi
 
 Every pull request to `main` runs **PR Check** (`.github/workflows/pr-check.yml`), and it must pass before the pull request can merge. Merges to `main` publish a canary build that auto-updates immediately, so this check is the gate in front of a release.
 
-To run the same checks locally, from the repository root:
+To run exactly what PR Check runs, from the repository root:
 
 ```bash
-# Frontend. `pnpm build` also produces frontend/out, which the Rust app embeds
-# at compile time, so it must run before the Rust tests.
-cd frontend
-pnpm install --frozen-lockfile
-pnpm typecheck
-pnpm lint
-pnpm test
-pnpm build
-cd ..
-
-# Rust. The Tauri build refuses to compile the app until the llama-helper
-# sidecar exists at binaries/llama-helper-<host triple>.
-cargo build -p llama-helper
-TARGET="$(rustc -vV | awk '/^host:/ {print $2}')"
-mkdir -p frontend/src-tauri/binaries
-cp target/debug/llama-helper "frontend/src-tauri/binaries/llama-helper-${TARGET}"
-cargo test -p meetily
+bash scripts/pr-check.sh
 ```
 
-CI runs these CPU-only on Ubuntu 22.04. On your own machine you can add a GPU feature, such as `cargo test -p meetily --features metal` on macOS. See [docs/BUILDING.md](docs/BUILDING.md) for platform setup.
+It typechecks, lints, tests and builds the frontend, then stages the `llama-helper` sidecar and runs the Rust tests. The order matters: the Rust app embeds the built frontend at compile time, and the Tauri build refuses to compile until the sidecar exists. foreman's `board.toml` uses the same script as its test command, so a change that passes it locally is a change CI will pass.
+
+It needs `pnpm`, `bun` and a Rust toolchain on `PATH`. On Linux it also needs the Tauri system libraries:
+
+```bash
+sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libasound2-dev libopenblas-dev libx11-dev libxtst-dev libxrandr-dev
+```
+
+CI runs it CPU-only on Ubuntu 22.04. On your own machine you can add a GPU feature, such as `cargo test -p meetily --features metal` on macOS. See [docs/BUILDING.md](docs/BUILDING.md) for platform setup.
 
 ## License
 

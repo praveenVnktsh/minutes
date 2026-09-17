@@ -13,7 +13,8 @@ name: "PR Check"
 # second required check name. The ruleset requires this job by its name, and
 # so does anything else that reads it, so do not rename it casually.
 #
-# The commands are the ones CONTRIBUTING.md lists under Verification, CPU-only.
+# The sequence itself is scripts/pr-check.sh; this file only provisions the
+# runner for it (toolchains, system libraries, caches).
 
 on:
   pull_request:
@@ -39,7 +40,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # --- frontend -----------------------------------------------------------
+      # --- toolchains ---------------------------------------------------------
 
       # Same pnpm and node as build.yml, so a check that passes here does not
       # fail in the release on a toolchain difference.
@@ -61,29 +62,6 @@ jobs:
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
 
-      - name: Install frontend dependencies
-        working-directory: frontend
-        run: pnpm install --frozen-lockfile
-
-      - name: Typecheck
-        working-directory: frontend
-        run: pnpm typecheck
-
-      - name: Lint
-        working-directory: frontend
-        run: pnpm lint
-
-      - name: Frontend tests
-        working-directory: frontend
-        run: pnpm test
-
-      # Also produces frontend/out, which the Rust build below embeds.
-      - name: Build frontend
-        working-directory: frontend
-        run: pnpm build
-
-      # --- rust ---------------------------------------------------------------
-
       # The unpinned 22.04 list from build.yml.
       - name: Install system dependencies
         run: |
@@ -98,16 +76,7 @@ jobs:
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
 
-      # tauri.conf.json declares llama-helper as an externalBin, and the Tauri
-      # build script refuses to compile the app until a binary sits at
-      # binaries/llama-helper-<host triple>. Releases build it in release mode;
-      # tests only need it to exist, so a debug build is enough and far faster.
-      - name: Stage the llama-helper sidecar
-        run: |
-          cargo build -p llama-helper
-          TARGET="$(rustc -vV | awk '/^host:/ {print $2}')"
-          mkdir -p frontend/src-tauri/binaries
-          cp target/debug/llama-helper "frontend/src-tauri/binaries/llama-helper-${TARGET}"
-
-      - name: Rust tests
-        run: cargo test -p meetily
+      # The whole verification sequence lives in scripts/pr-check.sh, so this
+      # job and foreman's board.toml [test] command run exactly the same thing.
+      - name: PR Check
+        run: bash scripts/pr-check.sh
