@@ -25,7 +25,7 @@ export interface UseTranscriptRecoveryReturn {
   isLoading: boolean;
   isRecovering: boolean;
   checkForRecoverableTranscripts: () => Promise<void>;
-  recoverMeeting: (meetingId: string) => Promise<{ success: boolean; audioRecoveryStatus?: AudioRecoveryStatus | null; meetingId?: string }>;
+  recoverMeeting: (meetingId: string) => Promise<{ success: boolean; audioRecoveryStatus?: AudioRecoveryStatus | null; meetingId?: string; transcriptCount: number }>;
   loadMeetingTranscripts: (meetingId: string) => Promise<StoredTranscript[]>;
   deleteRecoverableMeeting: (meetingId: string) => Promise<void>;
 }
@@ -79,8 +79,14 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
         })
       );
 
+      // A meeting is only recoverable if it has something to recover: transcript
+      // segments or audio checkpoints. Transcription can be unavailable, so an
+      // audio-only meeting is recoverable too.
+      const recoverable = meetingsWithAudioStatus.filter(
+        (meeting) => (meeting.transcriptCount ?? 0) > 0 || Boolean(meeting.folderPath)
+      );
 
-      setRecoverableMeetings(meetingsWithAudioStatus);
+      setRecoverableMeetings(recoverable);
     } catch (error) {
       console.error('Failed to check for recoverable transcripts:', error);
       setRecoverableMeetings([]);
@@ -107,7 +113,7 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
   /**
    * Recover a meeting from IndexedDB
    */
-  const recoverMeeting = useCallback(async (meetingId: string): Promise<{ success: boolean; audioRecoveryStatus?: AudioRecoveryStatus | null; meetingId?: string }> => {
+  const recoverMeeting = useCallback(async (meetingId: string): Promise<{ success: boolean; audioRecoveryStatus?: AudioRecoveryStatus | null; meetingId?: string; transcriptCount: number }> => {
     setIsRecovering(true);
     try {
       // 1. Load meeting metadata
@@ -116,11 +122,9 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
         throw new Error('Meeting metadata not found');
       }
 
-      // 2. Load all transcripts
+      // 2. Load all transcripts. This can legitimately be empty when
+      // transcription was unavailable; the audio can still be recovered.
       const transcripts = await loadMeetingTranscripts(meetingId);
-      if (transcripts.length === 0) {
-        throw new Error('No transcripts found for this meeting');
-      }
 
       // 3. Check for folder path
       let folderPath = metadata.folderPath;
@@ -133,6 +137,11 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
         } catch (error) {
           folderPath = undefined;
         }
+      }
+
+      // A meeting needs at least one of transcripts or audio to be recoverable.
+      if (transcripts.length === 0 && !folderPath) {
+        throw new Error('No transcripts or audio found for this meeting');
       }
 
       // 4. Attempt audio recovery if folder path exists
@@ -221,7 +230,8 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
       return {
         success: true,
         audioRecoveryStatus,
-        meetingId: savedMeetingId
+        meetingId: savedMeetingId,
+        transcriptCount: transcripts.length
       };
     } catch (error) {
       console.error('Failed to recover meeting:', error);
