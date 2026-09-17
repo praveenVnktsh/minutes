@@ -19,6 +19,11 @@ name: "PR Check"
 on:
   pull_request:
     branches: [main]
+  # Also on every push to main, so main itself always has a verdict. foreman
+  # reads the newest PR Check run on main before it dispatches or merges, and
+  # a check that only runs on pull requests leaves it nothing to read.
+  push:
+    branches: [main]
   workflow_dispatch:
 
 concurrency:
