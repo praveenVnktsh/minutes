@@ -1,0 +1,71 @@
+# What Minutes declares about itself to foreman, the board that builds its
+# meetily++ cards. foreman reads this file and nothing else here to decide what
+# to run, what to wait on, and what it may not merge unattended.
+#
+# PARSED, NEVER SOURCED. Every value is checked against the thing it names; a
+# key that drifts from the workflow or script it points at is a board that waits
+# on a check that never reports.
+
+[linear]
+# The team NAME, not its key, and the project name exactly as Linear spells it.
+team = "Praveenvnktsh"
+project = "meetily++"
+
+[checks]
+# The job `name:` in .github/workflows/pr-check.yml, by exact string. Renaming
+# that job without changing this line makes the board wait forever on a check
+# that never concludes.
+required = ["PR Check"]
+ci_workflow = "PR Check"
+
+[test]
+# The same script PR Check runs, so a build agent verifies exactly what CI will.
+command = "bash scripts/pr-check.sh"
+
+[deploy]
+# EVERY MERGE TO MAIN IS A RELEASE. Canary Release publishes a canary build on
+# each push to main, and canary installs auto-update immediately. A card is not
+# done until that release has actually published, and the last step of the
+# workflow is the one that only runs once it has.
+workflow = "Canary Release"
+step = "Add stable-named aliases"
+
+[risk]
+# Paths whose damage a revert does not undo, or that reach users before anyone
+# reads them. A diff touching any of these parks for a human merge.
+paths = [
+  # The release pipeline and the PR gate itself. A change here can ship a broken
+  # canary to users, or quietly stop checking pull requests.
+  ".github/",
+  "scripts/pr-check.sh",
+  "board.toml",
+  # Database migrations run on every user's machine on update. A revert ships
+  # new code; it does not un-run a migration already applied to their data.
+  "frontend/src-tauri/migrations/",
+  # Updater endpoint, content security policy, bundle identifier, sidecars.
+  "frontend/src-tauri/tauri.conf.json",
+  "frontend/src-tauri/tauri.windows.conf.json",
+  # macOS permissions: microphone, screen recording, sandbox.
+  "frontend/src-tauri/entitlements.plist",
+  "frontend/src-tauri/Info.plist",
+]
+
+[docs]
+required = ["CONTRIBUTING.md"]
+
+[limits]
+# One card at a time. A cold build compiles whisper.cpp and llama.cpp, and the
+# builder has 14 GB of memory shared with every other board on it.
+max_concurrent = 1
+max_build_attempts = 2
+# A Rust build can stay quiet for a long time between compiler lines.
+stall_minutes = 60
+# Sized for one more cold Rust build, not for one more agent.
+min_free_memory_mb = 6144
+# Each worktree gets its own target/ directory, and a debug build of the app is
+# several gigabytes.
+min_free_repo_mb = 20480
+min_free_tmp_mb = 4096
+probe_tmp_mb = 256
+probe_repo_mb = 256
+quick_probe_mb = 16
