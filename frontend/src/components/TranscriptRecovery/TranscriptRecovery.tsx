@@ -150,7 +150,9 @@ export function TranscriptRecovery({
                         </p>
                         <p className="text-xs text-muted-foreground flex items-center gap-1 mt-1">
                           <FileText className="w-3 h-3" />
-                          {meeting.transcriptCount} transcript{meeting.transcriptCount !== 1 ? 's' : ''}
+                          {meeting.transcriptCount > 0
+                            ? `${meeting.transcriptCount} transcript${meeting.transcriptCount !== 1 ? 's' : ''}`
+                            : 'Audio only'}
                         </p>
                       </div>
                       {meeting.folderPath ? (
@@ -184,7 +186,9 @@ export function TranscriptRecovery({
                     <div className="flex items-center gap-4 mt-2 text-sm">
                       <span className="flex items-center gap-1">
                         <FileText className="w-4 h-4" />
-                        {selectedMeeting.transcriptCount} transcripts
+                        {selectedMeeting.transcriptCount > 0
+                          ? `${selectedMeeting.transcriptCount} transcripts`
+                          : 'Audio only'}
                       </span>
                       {selectedMeeting.folderPath ? (
                         <span className="flex items-center gap-1 text-green-600">
@@ -247,6 +251,12 @@ export function TranscriptRecovery({
                             ... and {selectedMeeting.transcriptCount - 10} more transcript{selectedMeeting.transcriptCount - 10 !== 1 ? 's' : ''}
                           </p>
                         )}
+                      </div>
+                    ) : selectedMeeting.folderPath ? (
+                      <div className="flex flex-col items-center justify-center h-full gap-2 px-6 text-center text-muted-foreground">
+                        <AlertCircle className="w-6 h-6" />
+                        <p className="text-sm">No transcripts were captured for this meeting.</p>
+                        <p className="text-xs">Its audio will be recovered when you click Recover.</p>
                       </div>
                     ) : (
                       <div className="flex items-center justify-center h-full text-muted-foreground">
