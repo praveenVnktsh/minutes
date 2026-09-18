@@ -59,36 +59,36 @@ fn default_min_meeting_duration_seconds() -> u32 {
 pub fn get_default_recordings_folder() -> PathBuf {
     #[cfg(target_os = "windows")]
     {
-        // Windows: %USERPROFILE%\Music\meetily-recordings
+        // Windows: %USERPROFILE%\Music\minutes-recordings
         if let Some(music_dir) = dirs::audio_dir() {
-            music_dir.join("meetily-recordings")
+            music_dir.join("minutes-recordings")
         } else {
             // Fallback to Documents if Music folder is not available
             dirs::document_dir()
                 .unwrap_or_else(|| PathBuf::from("."))
-                .join("meetily-recordings")
+                .join("minutes-recordings")
         }
     }
 
     #[cfg(target_os = "macos")]
     {
-        // macOS: ~/Movies/meetily-recordings
+        // macOS: ~/Movies/minutes-recordings
         if let Some(movies_dir) = dirs::video_dir() {
-            movies_dir.join("meetily-recordings")
+            movies_dir.join("minutes-recordings")
         } else {
             // Fallback to Documents if Movies folder is not available
             dirs::document_dir()
                 .unwrap_or_else(|| PathBuf::from("."))
-                .join("meetily-recordings")
+                .join("minutes-recordings")
         }
     }
 
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
-        // Linux/Others: ~/Documents/meetily-recordings
+        // Linux/Others: ~/Documents/minutes-recordings
         dirs::document_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join("meetily-recordings")
+            .join("minutes-recordings")
     }
 }
 
@@ -398,5 +398,21 @@ pub async fn get_audio_backend_info() -> Result<Vec<BackendInfo>, String> {
             name: "ScreenCaptureKit".to_string(),
             description: "Default system audio capture".to_string(),
         }])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_recordings_folder_uses_minutes_name() {
+        let path = get_default_recordings_folder();
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("minutes-recordings"),
+            "default recordings folder should be minutes-recordings, got {}",
+            path.display()
+        );
     }
 }
