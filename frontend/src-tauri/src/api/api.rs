@@ -1379,12 +1379,59 @@ pub async fn debug_backend_connection<R: Runtime>(app: AppHandle<R>) -> Result<S
     }
 }
 
+/// Schemes `open_external_url` is willing to hand to the user's browser.
+///
+/// Anything else — a local path, a `file:` handler, a shell string — is
+/// refused, so a crafted argument cannot ask the OS to run something. Quotes
+/// and control characters are rejected too, because the Windows path below
+/// quotes the URL into a `cmd.exe` command line.
+fn is_browser_url_allowed(url: &str) -> bool {
+    if url.trim() != url || url.is_empty() {
+        return false;
+    }
+
+    if url.chars().any(|c| c.is_control() || c == '"') {
+        return false;
+    }
+
+    let lower = url.to_ascii_lowercase();
+    lower.starts_with("http://") || lower.starts_with("https://")
+}
+
+#[cfg(windows)]
+fn open_url_on_windows(url: &str) -> std::io::Result<std::process::Output> {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+
+    // `cmd.exe` parses this command line itself, so Rust's argument quoting is
+    // not enough: an unquoted `&` in a query string would split the command and
+    // `start` would take the URL as a window title. `raw_arg` writes the quotes
+    // through verbatim, and the empty quoted argument is `start`'s title.
+    Command::new("cmd")
+        .raw_arg("/C")
+        .raw_arg("start")
+        .raw_arg("\"\"")
+        .raw_arg(format!("\"{}\"", url))
+        .output()
+}
+
 #[tauri::command]
 pub async fn open_external_url(url: String) -> Result<(), String> {
     use std::process::Command;
 
+    if !is_browser_url_allowed(&url) {
+        return Err(format!("Refusing to open unsupported URL: {}", url));
+    }
+
     let result = if cfg!(target_os = "windows") {
-        Command::new("cmd").args(&["/C", "start", &url]).output()
+        #[cfg(windows)]
+        {
+            open_url_on_windows(&url)
+        }
+        #[cfg(not(windows))]
+        {
+            unreachable!()
+        }
     } else if cfg!(target_os = "macos") {
         Command::new("open").arg(&url).output()
     } else {
@@ -1635,5 +1682,30 @@ pub async fn api_test_custom_openai_connection<R: Runtime>(
                 Err(format!("Connection failed: {}", e))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_browser_url_allowed;
+
+    #[test]
+    fn allows_http_and_https_urls() {
+        assert!(is_browser_url_allowed(
+            "https://github.com/praveenvnktsh/minutes/issues/new?title=a&body=b"
+        ));
+        assert!(is_browser_url_allowed("http://localhost:3118"));
+    }
+
+    #[test]
+    fn refuses_other_schemes_and_shell_characters() {
+        assert!(!is_browser_url_allowed("file:///etc/passwd"));
+        assert!(!is_browser_url_allowed("javascript:alert(1)"));
+        assert!(!is_browser_url_allowed(
+            "https://example.com/\" --flag"
+        ));
+        assert!(!is_browser_url_allowed("https://example.com/\nhttps://evil"));
+        assert!(!is_browser_url_allowed("  https://example.com"));
+        assert!(!is_browser_url_allowed(""));
     }
 }

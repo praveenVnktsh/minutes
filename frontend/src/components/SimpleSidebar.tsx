@@ -8,6 +8,7 @@ import {
   AudioLines,
   Bug,
   Home,
+  MessageSquare,
   Mic,
   Moon,
   PanelLeftClose,
@@ -29,6 +30,7 @@ import { setDebugMode } from '@/lib/debugMode';
 import { useShell } from '@/contexts/ShellContext';
 import { useImportDialog } from '@/contexts/ImportDialogContext';
 import { useConfig } from '@/contexts/ConfigContext';
+import { SendFeedbackDialog } from '@/components/SendFeedbackDialog';
 
 function formatMeetingDate(iso?: string): string {
   if (!iso) return '';
@@ -64,6 +66,7 @@ export default function SimpleSidebar() {
   const { betaFeatures } = useConfig();
   const [query, setQuery] = useState('');
   const [showArchived, setShowArchived] = useState(false);
+  const [showFeedback, setShowFeedback] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -369,35 +372,58 @@ export default function SimpleSidebar() {
       {collapsed && <div className="flex-1" />}
 
       {/* Footer */}
-      <div className={collapsed ? 'flex flex-col items-center gap-2 border-t border-hairline pt-3' : 'flex items-center gap-2 border-t border-hairline px-1 pt-3'}>
-        {debugMode && (
+      <div className={collapsed ? 'flex flex-col items-center gap-2 border-t border-hairline pt-3' : 'flex flex-col gap-1 border-t border-hairline px-1 pt-3'}>
+        <div className={collapsed ? 'flex flex-col items-center gap-2' : 'flex items-center gap-2'}>
+          {debugMode && (
+            <button
+              type="button"
+              onClick={() => void setDebugMode(false)}
+              title="Debug mode is on — click to turn it off"
+              className={`rounded-lg p-2 text-amber-500 hover:bg-amber-500/10 ${collapsed ? '' : 'flex items-center gap-1.5'}`}
+            >
+              <Bug className="h-4 w-4" />
+              {!collapsed && <span className="text-xs font-medium">Debug on</span>}
+            </button>
+          )}
           <button
             type="button"
-            onClick={() => void setDebugMode(false)}
-            title="Debug mode is on — click to turn it off"
-            className={`rounded-lg p-2 text-amber-500 hover:bg-amber-500/10 ${collapsed ? '' : 'flex items-center gap-1.5'}`}
+            onClick={() => router.push('/settings')}
+            className={`rounded-lg p-2 hover:bg-surface-2 hover:text-ink ${pathname === '/settings' ? 'text-ink' : 'text-ink-subtle'}`}
+            title="Settings"
           >
-            <Bug className="h-4 w-4" />
-            {!collapsed && <span className="text-xs font-medium">Debug on</span>}
+            <Settings className="h-4 w-4" />
+          </button>
+          <button
+            type="button"
+            onClick={toggleTheme}
+            className="rounded-lg p-2 text-ink-subtle hover:bg-surface-2 hover:text-ink"
+            title={theme === 'dark' ? 'Light mode' : 'Dark mode'}
+          >
+            {theme === 'dark' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+          </button>
+          {collapsed && (
+            <button
+              type="button"
+              onClick={() => setShowFeedback(true)}
+              title="Send feedback"
+              className="rounded-lg p-2 text-ink-subtle hover:bg-surface-2 hover:text-ink"
+            >
+              <MessageSquare className="h-4 w-4" />
+            </button>
+          )}
+        </div>
+        {!collapsed && (
+          <button
+            type="button"
+            onClick={() => setShowFeedback(true)}
+            className="flex h-9 w-full items-center gap-2 rounded-xl px-3 text-xs text-ink-subtle transition hover:bg-surface-2 hover:text-ink"
+          >
+            <MessageSquare className="h-3.5 w-3.5" /> Send feedback
           </button>
         )}
-        <button
-          type="button"
-          onClick={() => router.push('/settings')}
-          className={`rounded-lg p-2 hover:bg-surface-2 hover:text-ink ${pathname === '/settings' ? 'text-ink' : 'text-ink-subtle'}`}
-          title="Settings"
-        >
-          <Settings className="h-4 w-4" />
-        </button>
-        <button
-          type="button"
-          onClick={toggleTheme}
-          className="rounded-lg p-2 text-ink-subtle hover:bg-surface-2 hover:text-ink"
-          title={theme === 'dark' ? 'Light mode' : 'Dark mode'}
-        >
-          {theme === 'dark' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-        </button>
       </div>
+
+      <SendFeedbackDialog open={showFeedback} onOpenChange={setShowFeedback} />
     </aside>
   );
 }
