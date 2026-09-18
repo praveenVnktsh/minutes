@@ -1,6 +1,6 @@
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Runtime};
 use tauri_plugin_store::StoreExt;
 
@@ -92,6 +92,18 @@ pub fn get_default_recordings_folder() -> PathBuf {
     }
 }
 
+const LEGACY_DEFAULT_RECORDINGS_FOLDER_NAME: &str = "meetily-recordings";
+
+fn migrate_legacy_default_save_folder(save_folder: &Path) -> PathBuf {
+    if save_folder.file_name().and_then(|name| name.to_str())
+        == Some(LEGACY_DEFAULT_RECORDINGS_FOLDER_NAME)
+    {
+        get_default_recordings_folder()
+    } else {
+        save_folder.to_path_buf()
+    }
+}
+
 /// Ensure the recordings directory exists
 pub fn ensure_recordings_directory(path: &PathBuf) -> Result<()> {
     if !path.exists() {
@@ -126,6 +138,25 @@ pub async fn load_recording_preferences<R: Runtime>(
         match serde_json::from_value::<RecordingPreferences>(value.clone()) {
             Ok(mut p) => {
                 info!("Loaded recording preferences from store");
+                let migrated_save_folder = migrate_legacy_default_save_folder(&p.save_folder);
+                if migrated_save_folder != p.save_folder {
+                    info!(
+                        "Migrating legacy recordings folder {:?} to {:?}",
+                        p.save_folder, migrated_save_folder
+                    );
+                    p.save_folder = migrated_save_folder;
+                    match serde_json::to_value(&p) {
+                        Ok(prefs_value) => {
+                            store.set("preferences", prefs_value);
+                            if let Err(e) = store.save() {
+                                warn!("Failed to persist migrated save_folder: {}", e);
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Failed to serialize migrated preferences: {}", e);
+                        }
+                    }
+                }
                 // Update macOS backend to current value if needed
                 #[cfg(target_os = "macos")]
                 {
@@ -414,5 +445,20 @@ mod tests {
             "default recordings folder should be minutes-recordings, got {}",
             path.display()
         );
+    }
+
+    #[test]
+    fn migrates_legacy_meetily_recordings_folder_to_platform_default() {
+        let stored = PathBuf::from("/Users/someone/Movies/meetily-recordings");
+        assert_eq!(
+            migrate_legacy_default_save_folder(&stored),
+            get_default_recordings_folder()
+        );
+    }
+
+    #[test]
+    fn leaves_custom_save_folder_unchanged() {
+        let stored = PathBuf::from("/Users/someone/Movies/my-recordings");
+        assert_eq!(migrate_legacy_default_save_folder(&stored), stored);
     }
 }
