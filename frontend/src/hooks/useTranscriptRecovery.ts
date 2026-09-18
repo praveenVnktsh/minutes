@@ -170,6 +170,18 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
         };
       }
 
+      // An audio-only meeting is recoverable only once its audio has actually
+      // been merged into audio.mp4. If the merge failed there is nothing to
+      // save, and saving would mark the meeting recovered while leaving the
+      // checkpoints to be deleted below - the only copy of the recording.
+      if (transcripts.length === 0 && audioRecoveryStatus?.status !== 'success') {
+        throw new Error(
+          audioRecoveryStatus?.message
+            ? `Audio recovery failed: ${audioRecoveryStatus.message}`
+            : 'Audio recovery failed'
+        );
+      }
+
       // 5. Convert StoredTranscripts to the format expected by storageService
       const formattedTranscripts = transcripts.map((t, index) => ({
         id: t.id?.toString() || `${Date.now()}-${index}`,
@@ -214,8 +226,9 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
       await indexedDBService.markMeetingSaved(meetingId);
 
 
-      // 8. Clean up checkpoint files
-      if (folderPath) {
+      // 8. Clean up checkpoint files, but only after they have been merged into
+      // audio.mp4. On failure they are the only copy of the audio.
+      if (folderPath && audioRecoveryStatus?.status === 'success') {
         try {
           await invoke('cleanup_checkpoints', { meetingFolder: folderPath });
         } catch (error) {
