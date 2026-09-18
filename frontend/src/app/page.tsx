@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import { PencilLine } from 'lucide-react';
 import { RecordingControls } from '@/components/RecordingControls';
 import { useSidebar } from '@/components/Sidebar/SidebarProvider';
 import { usePermissionCheck } from '@/hooks/usePermissionCheck';
@@ -10,7 +11,6 @@ import { useConfig } from '@/contexts/ConfigContext';
 import { StatusOverlays } from '@/app/_components/StatusOverlays';
 import Analytics from '@/lib/analytics';
 import { SettingsModals } from './_components/SettingsModal';
-import { TranscriptPanel } from './_components/TranscriptPanel';
 import { useModalState } from '@/hooks/useModalState';
 import { useRecordingStateSync } from '@/hooks/useRecordingStateSync';
 import { useRecordingStart } from '@/hooks/useRecordingStart';
@@ -34,11 +34,11 @@ export default function Home() {
   const recordingState = useRecordingState();
 
   // Extract status from global state
-  const { status, isStopping, isProcessing, isSaving } = recordingState;
+  const { status } = recordingState;
 
   // Hooks
   const { hasMicrophone } = usePermissionCheck();
-  const { setIsMeetingActive, refetchMeetings } = useSidebar();
+  const { setIsMeetingActive, refetchMeetings, openActiveRecordingWorkspace } = useSidebar();
   const { collapsed: sidebarCollapsed } = useShell();
   const { modals, messages, showModal, hideModal } = useModalState(transcriptModelConfig);
   const { isRecordingDisabled, setIsRecordingDisabled } = useRecordingStateSync(isRecording, setIsRecordingState, setIsMeetingActive);
@@ -62,6 +62,15 @@ export default function Home() {
   } = useTranscriptRecovery();
 
   const router = useRouter();
+
+  // Home is only the idle surface. While a recording is live the split-screen
+  // workspace owns the session, so send the user back to it instead of showing
+  // a second, stale recording view.
+  useEffect(() => {
+    if (recordingState.isRecording) {
+      openActiveRecordingWorkspace();
+    }
+  }, [recordingState.isRecording, openActiveRecordingWorkspace]);
 
   useEffect(() => {
     // Track page view
@@ -191,8 +200,7 @@ export default function Home() {
     }
   }, [recordingState.isRecording]);
 
-  // Computed values using global status
-  const isProcessingStop = status === RecordingStatus.PROCESSING_TRANSCRIPTS || isProcessing;
+  const isProcessingStop = status === RecordingStatus.PROCESSING_TRANSCRIPTS;
 
   return (
     <div className="flex h-screen flex-col bg-[var(--surface-0)]">
@@ -213,11 +221,17 @@ export default function Home() {
         onLoadPreview={loadMeetingTranscripts}
       />
       <div className="flex flex-1 overflow-hidden">
-        <TranscriptPanel
-          isProcessingStop={isProcessingStop}
-          isStopping={isStopping}
-          showModal={showModal}
-        />
+        {/* Idle hero. Recording itself runs on the split-screen workspace. */}
+        <div className="flex flex-1 items-center justify-center px-8 pb-28">
+          <div className="max-w-xl text-center">
+            <div className="mx-auto mb-7 flex h-16 w-16 items-center justify-center rounded-[22px] bg-[#e7eee5] text-[#55735c]">
+              <PencilLine className="h-7 w-7" />
+            </div>
+            <h1 className="text-[34px] font-semibold tracking-[-0.04em] text-ink">Ready for your next meeting</h1>
+            <p className="mx-auto mt-3 max-w-md text-[15px] leading-6 text-[var(--ink-muted)]">Start once, stay present, and jot only what matters. Minutes records quietly and turns the conversation into useful notes afterward.</p>
+            <p className="mt-7 text-xs text-[var(--ink-subtle)]">Live transcription is off by default · audio stays on this Mac</p>
+          </div>
+        </div>
 
         {/* Recording controls - only show when permissions are granted or already recording and not showing status messages */}
         {(hasMicrophone || isRecording) &&

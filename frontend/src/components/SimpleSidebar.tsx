@@ -239,11 +239,10 @@ export default function SimpleSidebar() {
       <button
         type="button"
         onClick={handleRecordingToggle}
-        disabled={isRecording}
-        title={isRecording ? 'Recording now' : 'New meeting'}
+        title={isRecording ? 'Return to recording' : 'New meeting'}
         className={`mt-5 flex h-10 items-center gap-2 rounded-xl text-sm font-semibold transition ${collapsed ? 'w-full justify-center px-0' : 'w-full px-3'
           } ${isRecording
-            ? 'bg-[#3a2320] text-[#e6938a]'
+            ? 'bg-[#3a2320] text-[#e6938a] hover:opacity-90'
             : 'bg-brand text-brand-foreground hover:opacity-90'}`}
       >
         {isRecording ? (
@@ -251,7 +250,7 @@ export default function SimpleSidebar() {
         ) : (
           <Mic className="h-4 w-4" />
         )}
-        {!collapsed && <span>{isRecording ? 'Recording now' : 'New meeting'}</span>}
+        {!collapsed && <span>{isRecording ? 'Return to recording' : 'New meeting'}</span>}
       </button>
 
       {/* Import recording */}
