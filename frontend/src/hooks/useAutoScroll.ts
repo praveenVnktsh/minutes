@@ -20,6 +20,27 @@ interface UseAutoScrollReturn {
 
 const SCROLL_THRESHOLD = 100;
 export const FOLLOW_THROTTLE_MS = 180;
+export const USER_SCROLL_KEYS = new Set([
+    "ArrowUp",
+    "ArrowDown",
+    "PageUp",
+    "PageDown",
+    "Home",
+    "End",
+    " ",
+]);
+
+export function isUserScrollKey(key: string): boolean {
+    return USER_SCROLL_KEYS.has(key);
+}
+
+export function isScrollbarPointer(event: { clientX: number; clientY: number }, container: HTMLElement): boolean {
+    const vertical = container.offsetWidth - container.clientWidth;
+    const horizontal = container.offsetHeight - container.clientHeight;
+    const rect = container.getBoundingClientRect();
+    return (vertical > 0 && event.clientX >= rect.right - vertical)
+        || (horizontal > 0 && event.clientY >= rect.bottom - horizontal);
+}
 
 export function isActiveSegmentJump(previousIndex: number, nextIndex: number): boolean {
     if (nextIndex < 0) return false;
@@ -66,7 +87,6 @@ export function useAutoScroll({
     autoScrollRef.current = autoScroll;
 
     const userScrolledRef = useRef(false);
-    const isProgrammaticScrollRef = useRef(false);
     const prevSegmentCountRef = useRef(segments.length);
     const followPlaybackRef = useRef(true);
     const lastFollowedIdRef = useRef<string | undefined>(undefined);
@@ -86,39 +106,24 @@ export function useAutoScroll({
      */
     const scrollToBottom = useCallback(() => {
         if (scrollRef.current) {
-            isProgrammaticScrollRef.current = true;
             scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
             userScrolledRef.current = false;
             setAutoScroll(true);
-
-            // Reset the flag after a small delay to account for scroll event propagation
-            setTimeout(() => {
-                isProgrammaticScrollRef.current = false;
-            }, 50);
         }
     }, [scrollRef]);
 
-    // Handle scroll events to detect manual scrolling
     useEffect(() => {
         const container = scrollRef.current;
         if (!container) return;
 
-        let scrollTimeout: ReturnType<typeof setTimeout> | null = null;
+        let settleTimeout: ReturnType<typeof setTimeout> | null = null;
+        const userIntentRef = { current: false };
 
-        const handleScroll = () => {
-            // Skip if this is a programmatic scroll
-            if (isProgrammaticScrollRef.current) {
-                return;
-            }
-
-            // Debounce scroll handling to prevent rapid state changes
-            if (scrollTimeout) {
-                clearTimeout(scrollTimeout);
-            }
-
-            scrollTimeout = setTimeout(() => {
+        const settleUserScroll = () => {
+            if (settleTimeout) clearTimeout(settleTimeout);
+            settleTimeout = setTimeout(() => {
+                userIntentRef.current = false;
                 const nearBottom = isNearBottom();
-
                 if (nearBottom) {
                     userScrolledRef.current = false;
                     setAutoScroll(true);
@@ -126,17 +131,41 @@ export function useAutoScroll({
                     userScrolledRef.current = true;
                     setAutoScroll(false);
                 }
-                followPlaybackRef.current = false;
             }, 100);
         };
 
+        const noteUserScrollIntent = () => {
+            followPlaybackRef.current = false;
+            userIntentRef.current = true;
+            settleUserScroll();
+        };
+
+        const handleScroll = () => {
+            if (!userIntentRef.current) return;
+            settleUserScroll();
+        };
+
+        const handleKeyDown = (event: KeyboardEvent) => {
+            if (isUserScrollKey(event.key)) noteUserScrollIntent();
+        };
+
+        const handlePointerDown = (event: PointerEvent) => {
+            if (isScrollbarPointer(event, container)) noteUserScrollIntent();
+        };
+
         container.addEventListener("scroll", handleScroll, { passive: true });
+        container.addEventListener("wheel", noteUserScrollIntent, { passive: true });
+        container.addEventListener("touchmove", noteUserScrollIntent, { passive: true });
+        container.addEventListener("keydown", handleKeyDown);
+        container.addEventListener("pointerdown", handlePointerDown);
 
         return () => {
             container.removeEventListener("scroll", handleScroll);
-            if (scrollTimeout) {
-                clearTimeout(scrollTimeout);
-            }
+            container.removeEventListener("wheel", noteUserScrollIntent);
+            container.removeEventListener("touchmove", noteUserScrollIntent);
+            container.removeEventListener("keydown", handleKeyDown);
+            container.removeEventListener("pointerdown", handlePointerDown);
+            if (settleTimeout) clearTimeout(settleTimeout);
         };
     }, [isNearBottom, scrollRef]);
 
@@ -164,14 +193,9 @@ export function useAutoScroll({
                 return;
             }
 
-            isProgrammaticScrollRef.current = true;
-
             if (useVirtualization && virtualizer) {
-                // Use scrollToOffset with a large value to ensure we're at the bottom
                 const totalSize = virtualizer.getTotalSize();
                 virtualizer.scrollToOffset(totalSize + 1000, { align: "end" });
-
-                // Also set scrollTop directly as backup after virtualizer updates
                 setTimeout(() => {
                     if (scrollRef.current) {
                         scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
@@ -180,11 +204,6 @@ export function useAutoScroll({
             } else if (scrollRef.current) {
                 scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
             }
-
-            // Reset the flag after a longer delay for virtualization
-            setTimeout(() => {
-                isProgrammaticScrollRef.current = false;
-            }, 150);
         }
     }, [segments.length, isRecording, isPaused, useVirtualization, virtualizer, scrollRef, isNearBottom, disableAutoScroll]);
 
@@ -215,7 +234,6 @@ export function useAutoScroll({
 
         const run = () => {
             if (segmentInView()) return;
-            isProgrammaticScrollRef.current = true;
             if (useVirtualization && virtualizer && nextIndex >= 0) {
                 virtualizer.scrollToIndex(nextIndex, {
                     align: "center",
@@ -226,9 +244,6 @@ export function useAutoScroll({
                 element?.scrollIntoView({ behavior: jumped ? "smooth" : "auto", block: "center" });
             }
             lastFollowAtRef.current = Date.now();
-            window.setTimeout(() => {
-                isProgrammaticScrollRef.current = false;
-            }, 500);
         };
 
         const elapsed = Date.now() - lastFollowAtRef.current;
