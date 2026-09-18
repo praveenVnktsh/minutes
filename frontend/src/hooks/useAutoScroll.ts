@@ -18,8 +18,43 @@ interface UseAutoScrollReturn {
     scrollToBottom: () => void;
 }
 
-// Threshold in pixels to consider "at the bottom"
 const SCROLL_THRESHOLD = 100;
+export const FOLLOW_THROTTLE_MS = 180;
+export const USER_SCROLL_KEYS = new Set([
+    "ArrowUp",
+    "ArrowDown",
+    "PageUp",
+    "PageDown",
+    "Home",
+    "End",
+    " ",
+]);
+
+export function isUserScrollKey(key: string): boolean {
+    return USER_SCROLL_KEYS.has(key);
+}
+
+export function isScrollbarPointer(event: { clientX: number; clientY: number }, container: HTMLElement): boolean {
+    const vertical = container.offsetWidth - container.clientWidth;
+    const horizontal = container.offsetHeight - container.clientHeight;
+    const rect = container.getBoundingClientRect();
+    return (vertical > 0 && event.clientX >= rect.right - vertical)
+        || (horizontal > 0 && event.clientY >= rect.bottom - horizontal);
+}
+
+export function isActiveSegmentJump(previousIndex: number, nextIndex: number): boolean {
+    if (nextIndex < 0) return false;
+    return previousIndex < 0 || Math.abs(nextIndex - previousIndex) > 1;
+}
+
+export function shouldFollowActiveSegment(
+    previousIndex: number,
+    nextIndex: number,
+    followEnabled: boolean,
+): boolean {
+    if (nextIndex < 0) return false;
+    return isActiveSegmentJump(previousIndex, nextIndex) || followEnabled;
+}
 
 /**
  * Custom hook to manage auto-scrolling behavior for transcript
@@ -51,12 +86,11 @@ export function useAutoScroll({
     const autoScrollRef = useRef(autoScroll);
     autoScrollRef.current = autoScroll;
 
-    // Track if user has manually scrolled (to disable auto-scroll temporarily)
     const userScrolledRef = useRef(false);
-    // Track if we're doing a programmatic scroll
-    const isProgrammaticScrollRef = useRef(false);
-    // Track previous segment count to detect new segments
     const prevSegmentCountRef = useRef(segments.length);
+    const followPlaybackRef = useRef(true);
+    const lastFollowedIdRef = useRef<string | undefined>(undefined);
+    const lastFollowAtRef = useRef(0);
 
     /**
      * Check if the user is scrolled near the bottom
@@ -72,59 +106,66 @@ export function useAutoScroll({
      */
     const scrollToBottom = useCallback(() => {
         if (scrollRef.current) {
-            isProgrammaticScrollRef.current = true;
             scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
             userScrolledRef.current = false;
             setAutoScroll(true);
-
-            // Reset the flag after a small delay to account for scroll event propagation
-            setTimeout(() => {
-                isProgrammaticScrollRef.current = false;
-            }, 50);
         }
     }, [scrollRef]);
 
-    // Handle scroll events to detect manual scrolling
     useEffect(() => {
         const container = scrollRef.current;
         if (!container) return;
 
-        let scrollTimeout: ReturnType<typeof setTimeout> | null = null;
+        let settleTimeout: ReturnType<typeof setTimeout> | null = null;
+        const userIntentRef = { current: false };
 
-        const handleScroll = () => {
-            // Skip if this is a programmatic scroll
-            if (isProgrammaticScrollRef.current) {
-                return;
-            }
-
-            // Debounce scroll handling to prevent rapid state changes
-            if (scrollTimeout) {
-                clearTimeout(scrollTimeout);
-            }
-
-            scrollTimeout = setTimeout(() => {
-                // Check if user is near bottom
+        const settleUserScroll = () => {
+            if (settleTimeout) clearTimeout(settleTimeout);
+            settleTimeout = setTimeout(() => {
+                userIntentRef.current = false;
                 const nearBottom = isNearBottom();
-
                 if (nearBottom) {
-                    // User scrolled to bottom - re-enable auto-scroll
                     userScrolledRef.current = false;
                     setAutoScroll(true);
                 } else {
-                    // User scrolled away from bottom - disable auto-scroll
                     userScrolledRef.current = true;
                     setAutoScroll(false);
                 }
             }, 100);
         };
 
+        const noteUserScrollIntent = () => {
+            followPlaybackRef.current = false;
+            userIntentRef.current = true;
+            settleUserScroll();
+        };
+
+        const handleScroll = () => {
+            if (!userIntentRef.current) return;
+            settleUserScroll();
+        };
+
+        const handleKeyDown = (event: KeyboardEvent) => {
+            if (isUserScrollKey(event.key)) noteUserScrollIntent();
+        };
+
+        const handlePointerDown = (event: PointerEvent) => {
+            if (isScrollbarPointer(event, container)) noteUserScrollIntent();
+        };
+
         container.addEventListener("scroll", handleScroll, { passive: true });
+        container.addEventListener("wheel", noteUserScrollIntent, { passive: true });
+        container.addEventListener("touchmove", noteUserScrollIntent, { passive: true });
+        container.addEventListener("keydown", handleKeyDown);
+        container.addEventListener("pointerdown", handlePointerDown);
 
         return () => {
             container.removeEventListener("scroll", handleScroll);
-            if (scrollTimeout) {
-                clearTimeout(scrollTimeout);
-            }
+            container.removeEventListener("wheel", noteUserScrollIntent);
+            container.removeEventListener("touchmove", noteUserScrollIntent);
+            container.removeEventListener("keydown", handleKeyDown);
+            container.removeEventListener("pointerdown", handlePointerDown);
+            if (settleTimeout) clearTimeout(settleTimeout);
         };
     }, [isNearBottom, scrollRef]);
 
@@ -152,14 +193,9 @@ export function useAutoScroll({
                 return;
             }
 
-            isProgrammaticScrollRef.current = true;
-
             if (useVirtualization && virtualizer) {
-                // Use scrollToOffset with a large value to ensure we're at the bottom
                 const totalSize = virtualizer.getTotalSize();
                 virtualizer.scrollToOffset(totalSize + 1000, { align: "end" });
-
-                // Also set scrollTop directly as backup after virtualizer updates
                 setTimeout(() => {
                     if (scrollRef.current) {
                         scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
@@ -168,37 +204,55 @@ export function useAutoScroll({
             } else if (scrollRef.current) {
                 scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
             }
-
-            // Reset the flag after a longer delay for virtualization
-            setTimeout(() => {
-                isProgrammaticScrollRef.current = false;
-            }, 150);
         }
     }, [segments.length, isRecording, isPaused, useVirtualization, virtualizer, scrollRef, isNearBottom, disableAutoScroll]);
 
-    // Auto-scroll to active segment (when clicking on search results, etc.)
     useEffect(() => {
-        if (activeSegmentId) {
-            isProgrammaticScrollRef.current = true;
+        if (!activeSegmentId) return;
 
-            if (useVirtualization && virtualizer) {
-                const index = segments.findIndex((s: any) => s.id === activeSegmentId);
-                if (index >= 0) {
-                    virtualizer.scrollToIndex(index, { align: "center", behavior: "smooth" });
-                }
+        const nextIndex = segments.findIndex((s: { id: string }) => s.id === activeSegmentId);
+        const prevIndex = lastFollowedIdRef.current
+            ? segments.findIndex((s: { id: string }) => s.id === lastFollowedIdRef.current)
+            : -1;
+        const jumped = isActiveSegmentJump(prevIndex, nextIndex);
+        if (jumped) followPlaybackRef.current = true;
+        lastFollowedIdRef.current = activeSegmentId;
+
+        if (!shouldFollowActiveSegment(prevIndex, nextIndex, followPlaybackRef.current)) {
+            return;
+        }
+
+        const segmentInView = () => {
+            const root = scrollRef.current;
+            if (!root || typeof document === "undefined") return false;
+            const element = document.getElementById(`segment-${activeSegmentId}`);
+            if (!element) return false;
+            const rootRect = root.getBoundingClientRect();
+            const rect = element.getBoundingClientRect();
+            return rect.top >= rootRect.top + 8 && rect.bottom <= rootRect.bottom - 8;
+        };
+
+        const run = () => {
+            if (segmentInView()) return;
+            if (useVirtualization && virtualizer && nextIndex >= 0) {
+                virtualizer.scrollToIndex(nextIndex, {
+                    align: "center",
+                    behavior: jumped ? "smooth" : "auto",
+                });
             } else {
                 const element = document.getElementById(`segment-${activeSegmentId}`);
-                if (element) {
-                    element.scrollIntoView({ behavior: "smooth", block: "center" });
-                }
+                element?.scrollIntoView({ behavior: jumped ? "smooth" : "auto", block: "center" });
             }
+            lastFollowAtRef.current = Date.now();
+        };
 
-            // Reset the flag after scroll animation completes
-            setTimeout(() => {
-                isProgrammaticScrollRef.current = false;
-            }, 500);
+        const elapsed = Date.now() - lastFollowAtRef.current;
+        if (!jumped && elapsed < FOLLOW_THROTTLE_MS) {
+            const timeout = window.setTimeout(run, FOLLOW_THROTTLE_MS - elapsed);
+            return () => window.clearTimeout(timeout);
         }
-    }, [activeSegmentId, useVirtualization, virtualizer, segments]);
+        run();
+    }, [activeSegmentId, useVirtualization, virtualizer, segments, scrollRef]);
 
     return {
         autoScroll,

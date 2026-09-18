@@ -6,15 +6,26 @@ import { TranscriptButtonGroup } from './TranscriptButtonGroup';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
-import { ChevronDown, ChevronUp, Loader2, Pause, Play, Search, X } from 'lucide-react';
+import { ChevronDown, ChevronUp, Loader2, Search, X } from 'lucide-react';
 import { useAudioPlayer } from '@/hooks/useAudioPlayer';
 import { useTranscriptionProgress } from '@/hooks/useTranscriptionProgress';
 import { SpeakerCorrectionDialog, SpeakerIdentity } from './SpeakerCorrectionDialog';
+import { AudioScrubber } from './AudioScrubber';
 
-function formatClock(seconds: number): string {
-  if (!Number.isFinite(seconds) || seconds < 0) return '00:00';
-  const total = Math.floor(seconds);
-  return `${Math.floor(total / 60).toString().padStart(2, '0')}:${(total % 60).toString().padStart(2, '0')}`;
+export function findSegmentIdAtTime(
+  segments: Array<{ id: string; timestamp: number; endTime?: number }>,
+  time: number,
+): string | undefined {
+  if (segments.length === 0 || !Number.isFinite(time)) return undefined;
+  let current: string | undefined;
+  for (let i = 0; i < segments.length; i += 1) {
+    const segment = segments[i];
+    const next = segments[i + 1];
+    const end = segment.endTime ?? next?.timestamp ?? Number.POSITIVE_INFINITY;
+    if (time + 0.05 < segment.timestamp) break;
+    if (time < end || !next) current = segment.id;
+  }
+  return current;
 }
 
 interface TranscriptPanelProps {
@@ -64,6 +75,7 @@ export function TranscriptPanel({
   const [speakerOptions, setSpeakerOptions] = useState<SpeakerIdentity[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [audioPath, setAudioPath] = useState<string | null>(null);
+  const [scrubTime, setScrubTime] = useState<number | null>(null);
   // Local speaker edits applied in place so renaming/reassigning does not
   // refetch (and reset) the transcript scroll position.
   const [speakerNames, setSpeakerNames] = useState<Record<string, string>>({});
@@ -100,8 +112,23 @@ export function TranscriptPanel({
   const player = useAudioPlayer(audioPath);
 
   const handleSeek = useCallback(async (seconds: number) => {
+    setScrubTime(null);
     await player.seek(seconds);
     await player.play();
+  }, [player]);
+
+  const handleScrubPreview = useCallback((time: number) => {
+    setScrubTime(time);
+  }, []);
+
+  const handleScrubCommit = useCallback(async (time: number) => {
+    setScrubTime(null);
+    await player.seek(time);
+  }, [player]);
+
+  const handleTogglePlayback = useCallback(() => {
+    if (player.isPlaying) player.pause();
+    else void player.play();
   }, [player]);
 
   const refreshSpeakers = useCallback(async () => {
@@ -185,15 +212,13 @@ export function TranscriptPanel({
     });
   }, [transcripts, usePagination, segments, speakerNames, segmentSpeakerIds]);
 
+  const playbackTime = scrubTime ?? player.currentTime;
+
   const activeSegmentId = useMemo(() => {
-    if (!audioPath || (!player.isPlaying && player.currentTime <= 0)) return undefined;
-    let current: string | undefined;
-    for (const segment of convertedSegments) {
-      if (segment.timestamp <= player.currentTime + 0.1) current = segment.id;
-      else break;
-    }
-    return current;
-  }, [audioPath, convertedSegments, player.currentTime, player.isPlaying]);
+    if (!audioPath) return undefined;
+    if (scrubTime === null && !player.isPlaying && player.currentTime <= 0) return undefined;
+    return findSegmentIdAtTime(convertedSegments, playbackTime);
+  }, [audioPath, convertedSegments, playbackTime, player.currentTime, player.isPlaying, scrubTime]);
 
   const normalizedQuery = searchQuery.trim().toLowerCase();
 
@@ -303,21 +328,17 @@ export function TranscriptPanel({
           )}
         </div>
         {audioPath && (
-          <div className="mt-3 flex items-center gap-3">
-            <button
-              type="button"
-              onClick={() => (player.isPlaying ? player.pause() : player.play())}
-              className="flex h-8 w-8 items-center justify-center rounded-full bg-[var(--surface-2)] text-[var(--ink-muted)] hover:text-ink"
-              title={player.isPlaying ? 'Pause' : 'Play recording'}
-              aria-label={player.isPlaying ? 'Pause' : 'Play recording'}
-            >
-              {player.isPlaying ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
-            </button>
-            <span className="text-xs tabular-nums text-[var(--ink-subtle)]">
-              {formatClock(player.currentTime)} / {formatClock(player.duration)}
-            </span>
-            <span className="hidden text-[11px] text-[var(--ink-subtle)] @[28rem]:inline">Click a timestamp to play from there</span>
-          </div>
+          <AudioScrubber
+            currentTime={playbackTime}
+            duration={player.duration}
+            isPlaying={player.isPlaying}
+            onTogglePlayback={handleTogglePlayback}
+            onScrubPreview={handleScrubPreview}
+            onScrubCommit={handleScrubCommit}
+          />
+        )}
+        {player.error && (
+          <p className="mt-1 text-[11px] text-red-500">{player.error}</p>
         )}
         {locked && convertedSegments.length > 0 && (
           <p className="mt-2 text-[11px] text-[var(--ink-subtle)]">Transcript is locked while the summary is being generated.</p>
