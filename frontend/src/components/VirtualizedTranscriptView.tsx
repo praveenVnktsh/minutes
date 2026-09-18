@@ -247,7 +247,7 @@ const TranscriptSegment = memo(function TranscriptSegment({
         : isMatch
             ? 'bg-amber-400/10'
             : isActive
-                ? 'bg-surface-2'
+                ? 'bg-blue-500/15 shadow-[inset_3px_0_0_0_rgb(59,130,246)] ring-1 ring-inset ring-blue-500/35'
                 : '';
 
     const renderText = (value: string) => {
@@ -276,6 +276,8 @@ const TranscriptSegment = memo(function TranscriptSegment({
     return (
         <div
             id={`segment-${id}`}
+            data-playing={isActive ? 'true' : undefined}
+            aria-current={isActive ? 'true' : undefined}
             className={`mb-3 rounded-lg px-2 -mx-2 transition-colors ${highlightClass}`}
         >
             <div className="flex items-start gap-2">
@@ -376,6 +378,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
         segments,
         isRecording,
         isPaused,
+        activeSegmentId,
         virtualizer,
         virtualizationThreshold: VIRTUALIZATION_THRESHOLD,
         disableAutoScroll,
