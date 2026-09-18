@@ -8,6 +8,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
 import { ChevronDown, ChevronUp, Loader2, Pause, Play, Search, X } from 'lucide-react';
 import { useAudioPlayer } from '@/hooks/useAudioPlayer';
+import { useTranscriptionProgress } from '@/hooks/useTranscriptionProgress';
 import { SpeakerCorrectionDialog, SpeakerIdentity } from './SpeakerCorrectionDialog';
 
 function formatClock(seconds: number): string {
@@ -67,6 +68,9 @@ export function TranscriptPanel({
   // refetch (and reset) the transcript scroll position.
   const [speakerNames, setSpeakerNames] = useState<Record<string, string>>({});
   const [segmentSpeakerIds, setSegmentSpeakerIds] = useState<Record<string, string>>({});
+
+  // Live stage-by-stage progress for the meeting currently being transcribed.
+  const transcriptionProgress = useTranscriptionProgress(meetingId);
 
   useEffect(() => {
     setSpeakerNames(
@@ -323,11 +327,39 @@ export function TranscriptPanel({
       {/* Transcript content - use virtualized view for better performance */}
       {isTranscribing && convertedSegments.length === 0 ? (
         <div className="flex flex-1 flex-col items-center justify-center gap-3 px-8 pb-16 text-center">
-          <Loader2 className="h-6 w-6 animate-spin text-[var(--ink-subtle)]" />
-          <div>
-            <p className="text-sm font-medium text-[var(--ink-muted)]">Transcribing meeting audio…</p>
-            <p className="mt-1 text-xs text-[var(--ink-subtle)]">This can take a moment. Your notes are safe and stay editable meanwhile.</p>
-          </div>
+          {transcriptionProgress ? (
+            <>
+              <Loader2 className="h-6 w-6 animate-spin text-[var(--ink-subtle)]" />
+              <p className="text-2xl font-semibold tabular-nums text-[var(--ink-muted)]">
+                {transcriptionProgress.percent}%
+              </p>
+              <div className="w-full max-w-xs">
+                <div className="h-1.5 w-full overflow-hidden rounded-full bg-[var(--surface-2)]">
+                  <div
+                    className="h-full rounded-full bg-[var(--ink-muted)] transition-all duration-300 ease-out"
+                    style={{ width: `${transcriptionProgress.percent}%` }}
+                  />
+                </div>
+              </div>
+              <div>
+                <p className="text-sm font-medium text-[var(--ink-muted)]">
+                  {transcriptionProgress.stageLabel}…
+                </p>
+                <p className="mt-1 text-xs text-[var(--ink-subtle)]">
+                  {transcriptionProgress.message
+                    ?? 'This can take a moment. Your notes are safe and stay editable meanwhile.'}
+                </p>
+              </div>
+            </>
+          ) : (
+            <>
+              <Loader2 className="h-6 w-6 animate-spin text-[var(--ink-subtle)]" />
+              <div>
+                <p className="text-sm font-medium text-[var(--ink-muted)]">Transcribing meeting audio…</p>
+                <p className="mt-1 text-xs text-[var(--ink-subtle)]">This can take a moment. Your notes are safe and stay editable meanwhile.</p>
+              </div>
+            </>
+          )}
         </div>
       ) : normalizedQuery && matchIndices.length === 0 ? (
         <div className="flex flex-1 items-center justify-center px-8 pb-16 text-center text-sm text-[var(--ink-subtle)]">

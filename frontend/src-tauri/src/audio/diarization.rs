@@ -36,6 +36,37 @@ fn cluster_threshold() -> f32 {
         .unwrap_or(DEFAULT_CLUSTER_THRESHOLD)
 }
 
+/// Payload for a meeting-scoped diarization progress event. Kept in one place so
+/// every stage reports the same `meeting_id`, which is what lets the meeting
+/// workspace attribute progress to the right meeting.
+fn progress_payload(
+    meeting_id: &str,
+    stage: &str,
+    progress_percentage: u32,
+    message: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "meeting_id": meeting_id,
+        "stage": stage,
+        "progress_percentage": progress_percentage,
+        "message": message,
+    })
+}
+
+/// Emit a meeting-scoped diarization progress event.
+fn emit_stage<R: Runtime>(
+    app: &AppHandle<R>,
+    meeting_id: &str,
+    stage: &str,
+    progress_percentage: u32,
+    message: &str,
+) {
+    let _ = app.emit(
+        "diarization-progress",
+        progress_payload(meeting_id, stage, progress_percentage, message),
+    );
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SpeakerTurn {
     pub start: f64,
@@ -79,7 +110,7 @@ async fn download(url: &str, destination: &Path) -> Result<()> {
 }
 
 #[cfg(target_os = "macos")]
-async fn ensure_models<R: Runtime>(app: &AppHandle<R>) -> Result<ModelPaths> {
+async fn ensure_models<R: Runtime>(app: &AppHandle<R>, meeting_id: &str) -> Result<ModelPaths> {
     let root = app
         .path()
         .app_data_dir()?
@@ -91,12 +122,12 @@ async fn ensure_models<R: Runtime>(app: &AppHandle<R>) -> Result<ModelPaths> {
     let segmentation = segmentation_dir.join(SEGMENTATION_FILE);
     if !segmentation.exists() {
         let archive_path = root.join("segmentation.tar.bz2");
-        let _ = app.emit(
-            "diarization-progress",
-            serde_json::json!({
-                "stage": "downloading_models", "progress_percentage": 5,
-                "message": "Downloading local speaker segmentation model..."
-            }),
+        emit_stage(
+            app,
+            meeting_id,
+            "downloading_models",
+            5,
+            "Downloading local speaker segmentation model...",
         );
         download(SEGMENTATION_ARCHIVE_URL, &archive_path).await?;
         let root_for_extract = root.clone();
@@ -114,12 +145,12 @@ async fn ensure_models<R: Runtime>(app: &AppHandle<R>) -> Result<ModelPaths> {
 
     let embedding = root.join(EMBEDDING_FILE);
     if !embedding.exists() {
-        let _ = app.emit(
-            "diarization-progress",
-            serde_json::json!({
-                "stage": "downloading_models", "progress_percentage": 10,
-                "message": "Downloading local speaker embedding model..."
-            }),
+        emit_stage(
+            app,
+            meeting_id,
+            "downloading_models",
+            10,
+            "Downloading local speaker embedding model...",
         );
         download(EMBEDDING_MODEL_URL, &embedding).await?;
     }
@@ -134,7 +165,7 @@ async fn ensure_models<R: Runtime>(app: &AppHandle<R>) -> Result<ModelPaths> {
 }
 
 #[cfg(not(target_os = "macos"))]
-async fn ensure_models<R: Runtime>(_app: &AppHandle<R>) -> Result<ModelPaths> {
+async fn ensure_models<R: Runtime>(_app: &AppHandle<R>, _meeting_id: &str) -> Result<ModelPaths> {
     Err(anyhow!(
         "Local speaker diarization is currently supported on macOS"
     ))
@@ -445,19 +476,29 @@ pub async fn run_for_meeting<R: Runtime>(
     }
     let folder = PathBuf::from(folder_path);
     let audio_path = find_audio_file(&folder)?;
-    let models = ensure_models(app).await?;
-    let _ = app.emit(
-        "diarization-progress",
-        serde_json::json!({
-            "meeting_id": meeting_id, "stage": "processing", "progress_percentage": 25,
-            "message": "Identifying local speakers..."
-        }),
+    let models = ensure_models(app, meeting_id).await?;
+    emit_stage(
+        app,
+        meeting_id,
+        "decoding_audio",
+        20,
+        "Decoding meeting audio for speaker analysis...",
     );
     let samples = tokio::task::spawn_blocking(move || -> Result<Vec<f32>> {
         Ok(decode_audio_file(&audio_path)?.to_whisper_format())
     })
     .await
     .map_err(|error| anyhow!("Audio decode task failed: {error}"))??;
+    // Sherpa's offline pipeline runs segmentation, embedding extraction and
+    // clustering in one call with no progress callback, so this covers the bulk
+    // of the wait and the stage label stands in for all three.
+    emit_stage(
+        app,
+        meeting_id,
+        "segmenting",
+        40,
+        "Detecting and clustering speakers...",
+    );
     let mut turns =
         tokio::task::spawn_blocking(move || diarize_samples(&samples, &models, num_speakers))
             .await
@@ -465,6 +506,13 @@ pub async fn run_for_meeting<R: Runtime>(
     if turns.is_empty() {
         return Err(anyhow!("No speaker turns were detected"));
     }
+    emit_stage(
+        app,
+        meeting_id,
+        "clustering",
+        70,
+        "Grouping speaker turns...",
+    );
     stabilize_turn_labels(&mut turns, &transcripts);
     let user_label = detect_user_speaker_label(&transcripts, &turns);
     if let Some(label) = &user_label {
@@ -488,9 +536,23 @@ pub async fn run_for_meeting<R: Runtime>(
         speaker_count,
         turns,
     };
+    emit_stage(
+        app,
+        meeting_id,
+        "saving_speakers",
+        85,
+        "Saving speaker labels...",
+    );
     persist(app, meeting_id, &folder, &transcripts, &result, user_label.as_deref())
         .await
         .context("Failed to persist diarization output")?;
+    emit_stage(
+        app,
+        meeting_id,
+        "speakers_complete",
+        100,
+        "Speaker identification complete",
+    );
     let _ = app.emit("diarization-complete", &result);
     Ok(result)
 }
@@ -633,6 +695,15 @@ mod tests {
             resolved_speaker(&transcript("b", 2.0, 3.5, Some("system")), &turns, Some("speaker_00")),
             Some("speaker_01".to_string())
         );
+    }
+
+    #[test]
+    fn progress_payload_is_meeting_scoped() {
+        let payload = progress_payload("meeting-1", "segmenting", 40, "Detecting speakers...");
+        assert_eq!(payload["meeting_id"], "meeting-1");
+        assert_eq!(payload["stage"], "segmenting");
+        assert_eq!(payload["progress_percentage"], 40);
+        assert_eq!(payload["message"], "Detecting speakers...");
     }
 
     #[cfg(target_os = "macos")]
