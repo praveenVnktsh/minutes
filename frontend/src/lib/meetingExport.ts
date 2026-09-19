@@ -23,6 +23,7 @@ export async function fetchCompleteTranscripts(
 ): Promise<Transcript[]> {
   const transcripts: Transcript[] = [];
   const seenIds = new Set<string>();
+  let expectedTotal: number | undefined;
   let offset = 0;
 
   for (let pageNumber = 0; pageNumber < MAX_TRANSCRIPT_PAGES; pageNumber += 1) {
@@ -30,24 +31,34 @@ export async function fetchCompleteTranscripts(
     if (!Array.isArray(page.transcripts) || !Number.isFinite(page.total_count) || page.total_count < 0) {
       throw new Error('Transcript service returned an invalid page');
     }
+    if (expectedTotal === undefined) expectedTotal = page.total_count;
+    if (page.total_count !== expectedTotal) {
+      throw new Error('Transcript total changed during pagination');
+    }
 
-    const expectsMore = page.has_more || offset < page.total_count;
     if (page.transcripts.length === 0) {
-      if (expectsMore) throw new Error('Transcript pagination stopped before all segments were read');
+      if (page.has_more || offset < expectedTotal) {
+        throw new Error('Transcript pagination stopped before all segments were read');
+      }
       return transcripts;
     }
 
-    let newRows = 0;
     for (const transcript of page.transcripts) {
-      if (seenIds.has(transcript.id)) continue;
+      if (seenIds.has(transcript.id)) throw new Error('Transcript pages overlap');
       seenIds.add(transcript.id);
       transcripts.push(transcript);
-      newRows += 1;
     }
-    if (newRows === 0) throw new Error('Transcript pagination made no progress');
 
     offset += page.transcripts.length;
-    if (!page.has_more && offset >= page.total_count) return transcripts;
+    if (offset > expectedTotal) throw new Error('Transcript pagination exceeded the reported total');
+    if (page.has_more) {
+      if (offset >= expectedTotal) throw new Error('Transcript pagination has an inconsistent continuation');
+      continue;
+    }
+    if (offset !== expectedTotal || transcripts.length !== expectedTotal) {
+      throw new Error('Transcript pagination stopped before all segments were read');
+    }
+    return transcripts;
   }
 
   throw new Error('Transcript pagination exceeded its safety limit');
@@ -91,10 +102,18 @@ function tableMarkdown(content: unknown): string {
   const rows = table.rows.map((row) => {
     const cells = objectValue(row)?.cells;
     if (!Array.isArray(cells)) return [];
-    return cells.map((cell) => inlineMarkdown(cell).replace(/\|/g, '\\|').replace(/\n/g, '<br>'));
+    return cells.flatMap((cell) => {
+      const tableCell = objectValue(cell);
+      const cellContent = tableCell?.type === 'tableCell' ? tableCell.content : cell;
+      const markdown = inlineMarkdown(cellContent).replace(/\|/g, '\\|').replace(/\n/g, '<br>');
+      const colspan = tableCell?.type === 'tableCell'
+        ? Math.max(1, Number(objectValue(tableCell.props)?.colspan) || 1)
+        : 1;
+      return [markdown, ...Array.from({ length: colspan - 1 }, () => '')];
+    });
   });
   const width = Math.max(...rows.map((row) => row.length));
-  if (width === 0) return '';
+  if (width === 0 || rows.every((row) => row.every((cell) => !cell.trim()))) return '';
   const line = (cells: string[]) => `| ${Array.from({ length: width }, (_, index) => cells[index] ?? '').join(' | ')} |`;
   return [line(rows[0]), line(Array.from({ length: width }, () => '---')), ...rows.slice(1).map(line)].join('\n');
 }
@@ -106,30 +125,36 @@ function blockMarkdown(blockValue: unknown, depth = 0): string {
   const props = objectValue(block.props);
   const content = type === 'table' ? tableMarkdown(block.content) : inlineMarkdown(block.content);
   const indent = '  '.repeat(depth);
-  let line: string;
+  let line = '';
 
   switch (type) {
     case 'heading': {
       const level = Math.min(6, Math.max(1, Number(props?.level) || 2));
-      line = `${'#'.repeat(level)} ${content}`;
+      if (content.trim()) line = `${'#'.repeat(level)} ${content}`;
       break;
     }
     case 'bulletListItem':
-      line = `${indent}- ${content}`;
+      if (content.trim()) line = `${indent}- ${content}`;
       break;
     case 'numberedListItem':
-      line = `${indent}1. ${content}`;
+      if (content.trim()) line = `${indent}1. ${content}`;
       break;
     case 'checkListItem':
-      line = `${indent}- [${props?.checked ? 'x' : ' '}] ${content}`;
+      if (content.trim()) line = `${indent}- [${props?.checked ? 'x' : ' '}] ${content}`;
       break;
     case 'codeBlock': {
       const language = typeof props?.language === 'string' ? props.language : '';
-      line = `\`\`\`${language}\n${content}\n\`\`\``;
+      if (content.trim()) line = `\`\`\`${language}\n${content}\n\`\`\``;
       break;
     }
     case 'quote':
-      line = content.split('\n').map((part) => `> ${part}`).join('\n');
+      if (content.trim()) line = content.split('\n').map((part) => `> ${part}`).join('\n');
+      break;
+    case 'image':
+    case 'audio':
+    case 'video':
+    case 'file':
+      line = fileBlockMarkdown(type, props);
       break;
     default:
       line = content;
@@ -139,6 +164,16 @@ function blockMarkdown(blockValue: unknown, depth = 0): string {
     ? block.children.map((child) => blockMarkdown(child, depth + 1)).filter(Boolean).join('\n')
     : '';
   return [line, children].filter(Boolean).join('\n');
+}
+
+function fileBlockMarkdown(type: string, props: JsonObject | null): string {
+  const url = typeof props?.url === 'string' ? props.url.trim() : '';
+  const name = typeof props?.name === 'string' ? props.name.trim() : '';
+  const caption = typeof props?.caption === 'string' ? props.caption.trim() : '';
+  const defaultLabel = type.charAt(0).toUpperCase() + type.slice(1);
+  const label = caption || name || defaultLabel;
+  if (!url) return name || caption ? `${defaultLabel}: ${label}` : '';
+  return type === 'image' ? `![${label}](${url})` : `[${label}](${url})`;
 }
 
 export function blockNoteBlocksToMarkdown(blocks: unknown[]): string {

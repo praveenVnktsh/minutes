@@ -3,6 +3,7 @@ import { invoke as invokeTauri } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
 import type { MeetingSummary, Transcript } from '@/types';
 import type { BlockNoteSummaryViewRef } from '@/components/AISummary/BlockNoteSummaryView';
+import type { LiveNotesDocument } from '@/lib/liveNotes';
 import Analytics from '@/lib/analytics';
 import { writeClipboardText } from '@/lib/clipboard';
 import {
@@ -17,6 +18,7 @@ import {
 import {
   meetingNotesTarget,
   notePersistenceService,
+  type NoteDocumentTarget,
 } from '@/services/notePersistenceService';
 
 interface UseCopyOperationsProps {
@@ -25,6 +27,8 @@ interface UseCopyOperationsProps {
   meetingTitle: string;
   aiSummary: MeetingSummary | null;
   blockNoteSummaryRef: RefObject<BlockNoteSummaryViewRef>;
+  notesTarget?: NoteDocumentTarget;
+  currentNotesDocument?: LiveNotesDocument | null;
 }
 
 async function readAllTranscripts(meetingId: string): Promise<Transcript[]> {
@@ -45,16 +49,29 @@ export function useCopyOperations({
   meetingTitle,
   aiSummary,
   blockNoteSummaryRef,
+  notesTarget,
+  currentNotesDocument,
 }: UseCopyOperationsProps) {
   const title = meetingTitle || meeting.title || 'Untitled meeting';
 
   const buildSummaryMarkdown = useCallback(async (): Promise<string> => {
     const editor = blockNoteSummaryRef.current;
+    const storedMarkdown = storedSummaryMarkdown(aiSummary);
     if (editor) {
-      if (editor.isDirty) await editor.saveSummary();
-      return (await editor.getMarkdown()).trim();
+      const wasDirty = editor.isDirty;
+      if (wasDirty) await editor.saveSummary();
+      const editorMarkdown = (await editor.getMarkdown()).trim();
+      if (editorMarkdown) return editorMarkdown;
+      if (!storedMarkdown) return '';
+      const isLegacySummary = aiSummary !== null
+        && !('markdown' in aiSummary)
+        && !('summary_json' in aiSummary);
+      if (isLegacySummary) return storedMarkdown;
+      throw new Error(wasDirty
+        ? 'Could not read the saved enhanced notes from the editor'
+        : 'Could not convert the enhanced notes from the editor');
     }
-    return storedSummaryMarkdown(aiSummary);
+    return storedMarkdown;
   }, [aiSummary, blockNoteSummaryRef]);
 
   const handleCopyTranscript = useCallback(async () => {
@@ -105,16 +122,20 @@ export function useCopyOperations({
 
   const handleExportMarkdown = useCallback(async () => {
     try {
-      const target = meetingNotesTarget(meeting.id);
+      const target = notesTarget ?? meetingNotesTarget(meeting.id);
       await notePersistenceService.flushNotes(target);
-      const notesSnapshot = await notePersistenceService.loadNotes(target);
-      if (notesSnapshot.loadState === 'error') throw notesSnapshot.loadError;
+      let notesDocument = currentNotesDocument;
+      if (notesDocument === undefined) {
+        const notesSnapshot = await notePersistenceService.loadNotes(target);
+        if (notesSnapshot.loadState === 'error') throw notesSnapshot.loadError;
+        notesDocument = notesSnapshot.document;
+      }
 
       const [enhancedNotes, allTranscripts] = await Promise.all([
         buildSummaryMarkdown(),
         readAllTranscripts(meeting.id),
       ]);
-      const originalNotes = originalNotesMarkdown(notesSnapshot.document);
+      const originalNotes = originalNotesMarkdown(notesDocument);
       if (!originalNotes && !enhancedNotes && allTranscripts.length === 0) {
         toast.error('Nothing to export yet');
         return;
@@ -136,7 +157,7 @@ export function useCopyOperations({
       console.error('Failed to export meeting:', error);
       toast.error('Failed to export meeting');
     }
-  }, [buildSummaryMarkdown, meeting.created_at, meeting.id, title]);
+  }, [buildSummaryMarkdown, currentNotesDocument, meeting.created_at, meeting.id, notesTarget, title]);
 
   return { handleCopyTranscript, handleCopySummary, handleExportMarkdown };
 }

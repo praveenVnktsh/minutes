@@ -41,13 +41,22 @@ describe('meeting export', () => {
     expect(markdown).toContain('[00:30] **Alex** segment 3');
   });
 
-  test('rejects a page sequence that makes no progress', async () => {
+  test('rejects a repeated page that makes no progress', async () => {
     const repeated = transcript('1');
     await expect(fetchCompleteTranscripts('meeting', async () => ({
       transcripts: [repeated],
       total_count: 2,
       has_more: true,
-    }))).rejects.toThrow('made no progress');
+    }))).rejects.toThrow('overlap');
+  });
+
+  test('rejects partially overlapping pages instead of claiming a complete count', async () => {
+    const pages = [
+      { transcripts: [transcript('1'), transcript('2')], total_count: 4, has_more: true },
+      { transcripts: [transcript('2'), transcript('3')], total_count: 4, has_more: false },
+    ];
+    await expect(fetchCompleteTranscripts('meeting', async () => pages.shift()!))
+      .rejects.toThrow('overlap');
   });
 
   test('exports notes-only documents from complete editor blocks without internal ids', () => {
@@ -68,13 +77,26 @@ describe('meeting export', () => {
       }, {
         id: 'private-table-id',
         type: 'table',
-        content: { rows: [{ cells: [[{ type: 'text', text: 'Owner', styles: {} }], [{ type: 'text', text: 'Task', styles: {} }]] }, { cells: [[{ type: 'text', text: 'Sam', styles: {} }], [{ type: 'text', text: 'Review', styles: {} }]] }] },
+        content: {
+          type: 'tableContent',
+          rows: [{
+            cells: [
+              { type: 'tableCell', props: { colspan: 1, rowspan: 1 }, content: [{ type: 'text', text: 'Owner', styles: {} }] },
+              { type: 'tableCell', props: { colspan: 2, rowspan: 1 }, content: [{ type: 'text', text: 'Task', styles: {} }] },
+            ],
+          }, {
+            cells: [
+              { type: 'tableCell', props: { colspan: 1, rowspan: 1 }, content: [{ type: 'text', text: 'Sam', styles: {} }] },
+              { type: 'tableCell', props: { colspan: 1, rowspan: 1 }, content: [{ type: 'text', text: 'Review', styles: {} }] },
+            ],
+          }],
+        },
       }],
     });
 
     expect(markdown).toContain('- Read [**brief**](https://example.com)');
     expect(markdown).toContain('  - [x] Ship');
-    expect(markdown).toContain('| Owner | Task |');
+    expect(markdown).toContain('| Owner | Task |  |');
     expect(markdown).not.toContain('private-');
     expect(markdown).not.toContain('stale markdown');
 
@@ -97,6 +119,41 @@ describe('meeting export', () => {
       rawMarkdown: 'stale',
       editorBlocks: [],
     })).toBe('');
+  });
+
+  test('omits empty structural blocks but preserves a visible nested child', () => {
+    expect(blockNoteBlocksToMarkdown([
+      { id: 'bullet', type: 'bulletListItem', content: [] },
+      { id: 'heading', type: 'heading', props: { level: 2 }, content: [] },
+      { id: 'code', type: 'codeBlock', content: [] },
+    ])).toBe('');
+
+    expect(blockNoteBlocksToMarkdown([{
+      id: 'empty-parent',
+      type: 'bulletListItem',
+      content: [],
+      children: [{ id: 'child', type: 'bulletListItem', content: [{ type: 'text', text: 'Visible child', styles: {} }] }],
+    }])).toBe('- Visible child');
+  });
+
+  test('exports visible image and file blocks from their props', () => {
+    expect(blockNoteBlocksToMarkdown([{
+      id: 'image-id',
+      type: 'image',
+      props: { url: 'https://example.com/diagram.png', name: 'diagram.png', caption: 'System diagram' },
+    }, {
+      id: 'file-id',
+      type: 'file',
+      props: { url: 'https://example.com/brief.pdf', name: 'brief.pdf', caption: '' },
+    }, {
+      id: 'audio-id',
+      type: 'audio',
+      props: { url: '', name: 'local recording.wav', caption: '' },
+    }])).toBe([
+      '![System diagram](https://example.com/diagram.png)',
+      '[brief.pdf](https://example.com/brief.pdf)',
+      'Audio: local recording.wav',
+    ].join('\n\n'));
   });
 
   test('converts structured enhanced notes when the editor is unmounted', () => {
