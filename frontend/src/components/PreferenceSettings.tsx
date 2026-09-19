@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState, useRef } from "react"
+import { useCallback, useEffect, useState, useRef } from "react"
 import { Switch } from "./ui/switch"
 import { FolderOpen, Keyboard, X } from "lucide-react"
 import { invoke } from "@tauri-apps/api/core"
@@ -9,6 +9,7 @@ import Analytics from "@/lib/analytics"
 import { useConfig, NotificationSettings } from "@/contexts/ConfigContext"
 import { usePlatform } from "@/hooks/usePlatform"
 import { UpdateSettings } from "./UpdateSettings"
+import { SaveFeedback, type SaveFeedbackState } from "./ui/status-feedback"
 
 const OS_MODIFIER_KEYS = /^(Meta|Control|Alt|Shift)/
 
@@ -62,6 +63,31 @@ export function PreferenceSettings() {
   const isMac = platform === 'macos';
   const [shortcuts, setShortcuts] = useState<{ recording: string; window: string } | null>(null);
   const [recordingKey, setRecordingKey] = useState<'recording' | 'window' | null>(null);
+  const [shortcutSaveState, setShortcutSaveState] = useState<SaveFeedbackState | null>(null);
+  const [notificationSaveState, setNotificationSaveState] = useState<SaveFeedbackState | null>(null);
+  const [folderError, setFolderError] = useState('');
+  const shortcutSavingRef = useRef(false);
+
+  const saveShortcuts = useCallback(async (
+    previous: { recording: string; window: string },
+    next: { recording: string; window: string },
+    successMessage: string,
+  ) => {
+    if (shortcutSavingRef.current) return;
+    shortcutSavingRef.current = true;
+    setShortcuts(next);
+    setShortcutSaveState('saving');
+    try {
+      await invoke('set_global_shortcuts', { recording: next.recording, window: next.window });
+      setShortcutSaveState('saved');
+      toast.success(successMessage);
+    } catch {
+      setShortcuts(previous);
+      setShortcutSaveState('error');
+    } finally {
+      shortcutSavingRef.current = false;
+    }
+  }, []);
 
   useEffect(() => {
     invoke<{ recording: string; window: string }>('get_global_shortcuts')
@@ -79,25 +105,19 @@ export function PreferenceSettings() {
         return;
       }
       const value = eventToShortcut(event, isMac);
-      if (!value) return;
-      const next = { ...shortcuts, [recordingKey]: value };
-      setShortcuts(next);
+      if (!value || shortcutSavingRef.current) return;
+      const previous = shortcuts;
+      const next = { ...previous, [recordingKey]: value };
       setRecordingKey(null);
-      invoke('set_global_shortcuts', { recording: next.recording, window: next.window })
-        .then(() => toast.success('Shortcut updated'))
-        .catch((error) => toast.error(`Could not update shortcut: ${String(error)}`));
+      void saveShortcuts(previous, next, 'Shortcut updated');
     };
     window.addEventListener('keydown', onKeyDown, true);
     return () => window.removeEventListener('keydown', onKeyDown, true);
-  }, [recordingKey, shortcuts, isMac]);
+  }, [recordingKey, shortcuts, isMac, saveShortcuts]);
 
   const clearShortcut = (which: 'recording' | 'window') => {
     if (!shortcuts) return;
-    const next = { ...shortcuts, [which]: '' };
-    setShortcuts(next);
-    invoke('set_global_shortcuts', { recording: next.recording, window: next.window })
-      .then(() => toast.success('Shortcut disabled'))
-      .catch((error) => toast.error(`Could not update shortcut: ${String(error)}`));
+    void saveShortcuts(shortcuts, { ...shortcuts, [which]: '' }, 'Shortcut disabled');
   };
 
   // Lazy load preferences on mount (only loads if not already cached)
@@ -152,43 +172,32 @@ export function PreferenceSettings() {
     }
   }, [notificationSettings, isLoadingPreferences, isInitialLoad])
 
-  useEffect(() => {
-    // Skip update on initial load or if value hasn't actually changed
-    if (isInitialLoad || notificationsEnabled === null || notificationsEnabled === previousNotificationsEnabled) return;
-    if (!notificationSettings) return;
-
-    const handleUpdateNotificationSettings = async () => {
-      console.log("Updating notification settings to:", notificationsEnabled);
-
-      try {
-        // Update the notification preferences
-        const updatedSettings: NotificationSettings = {
-          ...notificationSettings,
-          notification_preferences: {
-            ...notificationSettings.notification_preferences,
-            show_recording_started: notificationsEnabled,
-            show_recording_stopped: notificationsEnabled,
-          }
-        };
-
-        console.log("Calling updateNotificationSettings with:", updatedSettings);
-        await updateNotificationSettings(updatedSettings);
-        setPreviousNotificationsEnabled(notificationsEnabled);
-        console.log("Successfully updated notification settings to:", notificationsEnabled);
-
-        // Track notification preference change - only fires when user manually toggles
-        await Analytics.track('notification_settings_changed', {
-          notifications_enabled: notificationsEnabled.toString()
-        });
-      } catch (error) {
-        console.error('Failed to update notification settings:', error);
-      }
-    };
-
-    handleUpdateNotificationSettings();
-  }, [notificationsEnabled, notificationSettings, isInitialLoad, previousNotificationsEnabled, updateNotificationSettings])
+  const handleNotificationToggle = async (enabled: boolean) => {
+    if (!notificationSettings || notificationSaveState === 'saving') return;
+    const previous = notificationsEnabled ?? previousNotificationsEnabled ?? true;
+    setNotificationsEnabled(enabled);
+    setNotificationSaveState('saving');
+    try {
+      const updatedSettings: NotificationSettings = {
+        ...notificationSettings,
+        notification_preferences: {
+          ...notificationSettings.notification_preferences,
+          show_recording_started: enabled,
+          show_recording_stopped: enabled,
+        },
+      };
+      await updateNotificationSettings(updatedSettings);
+      setPreviousNotificationsEnabled(enabled);
+      setNotificationSaveState('saved');
+      await Analytics.track('notification_settings_changed', { notifications_enabled: enabled.toString() });
+    } catch {
+      setNotificationsEnabled(previous);
+      setNotificationSaveState('error');
+    }
+  };
 
   const handleOpenFolder = async (folderType: 'database' | 'models' | 'recordings') => {
+    setFolderError('');
     try {
       switch (folderType) {
         case 'database':
@@ -208,6 +217,7 @@ export function PreferenceSettings() {
       });
     } catch (error) {
       console.error(`Failed to open ${folderType} folder:`, error);
+      setFolderError(`Could not open the ${folderType} folder: ${String(error)}`);
     }
   };
 
@@ -233,8 +243,20 @@ export function PreferenceSettings() {
             <h3 className="text-lg font-semibold text-ink mb-2">Notifications</h3>
             <p className="text-sm text-ink-muted">Enable or disable notifications of start and end of meeting</p>
           </div>
-          <Switch checked={notificationsEnabledValue} onCheckedChange={setNotificationsEnabled} />
+          <Switch
+            aria-label="Show operating system notifications when recording starts and stops"
+            checked={notificationsEnabledValue}
+            onCheckedChange={value => void handleNotificationToggle(value)}
+            disabled={notificationSaveState === 'saving'}
+          />
         </div>
+        {notificationSaveState && (
+          <SaveFeedback
+            className="mt-3"
+            state={notificationSaveState}
+            labels={{ saving: 'Saving recording notifications', saved: 'Recording notifications saved', error: 'Could not save recording notifications; previous setting restored' }}
+          />
+        )}
       </div>
 
       {/* Keyboard Shortcuts Section */}
@@ -260,6 +282,8 @@ export function PreferenceSettings() {
                 <button
                   type="button"
                   onClick={() => setRecordingKey(key)}
+                  disabled={shortcutSaveState === 'saving'}
+                  aria-label={`Change shortcut for ${label}`}
                   className={`rounded border px-2 py-1 text-xs font-medium ${
                     recordingKey === key
                       ? 'border-blue-400 text-blue-500'
@@ -273,6 +297,8 @@ export function PreferenceSettings() {
                     type="button"
                     onClick={() => clearShortcut(key)}
                     title="Disable this shortcut"
+                    aria-label={`Disable shortcut for ${label}`}
+                    disabled={shortcutSaveState === 'saving'}
                     className="rounded p-1 text-ink-subtle hover:bg-surface-2 hover:text-ink"
                   >
                     <X className="h-3.5 w-3.5" />
@@ -288,6 +314,13 @@ export function PreferenceSettings() {
             </kbd>
           </li>
         </ul>
+        {shortcutSaveState && (
+          <SaveFeedback
+            className="mt-3"
+            state={shortcutSaveState}
+            labels={{ saving: 'Saving shortcut', saved: 'Shortcut saved', error: 'Could not save shortcut; previous shortcut restored' }}
+          />
+        )}
       </div>
 
       {/* Data Storage Locations Section */}
@@ -344,8 +377,9 @@ export function PreferenceSettings() {
           </div>
         </div>
 
-        <div className="mt-4 p-3 bg-blue-50 rounded-md">
-          <p className="text-xs text-blue-800">
+        {folderError && <p role="alert" className="mt-4 text-xs font-medium text-error">{folderError}</p>}
+        <div className="mt-4 rounded-md border border-info bg-info-subtle p-3">
+          <p className="text-xs text-info">
             <strong>Note:</strong> Database and models are stored together in your application data directory for unified management.
           </p>
         </div>

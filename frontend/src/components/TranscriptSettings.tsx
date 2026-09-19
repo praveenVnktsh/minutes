@@ -8,6 +8,7 @@ import { Label } from './ui/label';
 import { Eye, EyeOff, Lock, Unlock } from 'lucide-react';
 import { ModelManager } from './WhisperModelManager';
 import { ParakeetModelManager } from './ParakeetModelManager';
+import { SaveFeedback, type SaveFeedbackState } from './ui/status-feedback';
 
 
 export interface TranscriptModelProps {
@@ -30,6 +31,12 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
     const [uiProvider, setUiProvider] = useState<TranscriptModelProps['provider']>(transcriptModelConfig.provider);
     const [vocabulary, setVocabulary] = useState<string>('');
     const [savedVocabulary, setSavedVocabulary] = useState<string>('');
+    const [vocabularySaveState, setVocabularySaveState] = useState<SaveFeedbackState | null>(null);
+    const vocabularyFeedbackState = vocabularySaveState === 'saving' || vocabularySaveState === 'error'
+        ? vocabularySaveState
+        : vocabulary !== savedVocabulary
+            ? 'unsaved'
+            : vocabularySaveState;
 
     useEffect(() => {
         invoke('api_get_transcription_vocabulary')
@@ -42,11 +49,14 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
     }, []);
 
     const handleSaveVocabulary = async () => {
+        setVocabularySaveState('saving');
         try {
             await invoke('api_set_transcription_vocabulary', { vocabulary });
             setSavedVocabulary(vocabulary);
+            setVocabularySaveState('saved');
         } catch (err) {
             console.error('Failed to save transcription vocabulary:', err);
+            setVocabularySaveState('error');
         }
     };
 
@@ -139,7 +149,7 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                                     }
                                 }}
                             >
-                                <SelectTrigger className='focus:ring-1 focus:ring-blue-500 focus:border-blue-500'>
+                                <SelectTrigger aria-label="Transcription provider" className='focus:ring-2 focus:ring-focus'>
                                     <SelectValue placeholder="Select provider" />
                                 </SelectTrigger>
                                 <SelectContent>
@@ -160,7 +170,7 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                                         setTranscriptModelConfig({ ...transcriptModelConfig, provider: uiProvider, model });
                                     }}
                                 >
-                                    <SelectTrigger className='focus:ring-1 focus:ring-blue-500 focus:border-blue-500'>
+                                    <SelectTrigger aria-label="Transcription model" className='focus:ring-2 focus:ring-focus'>
                                         <SelectValue placeholder="Select model" />
                                     </SelectTrigger>
                                     <SelectContent>
@@ -196,28 +206,39 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
 
                     {uiProvider === 'localWhisper' && (
                         <div className="mt-6">
-                            <Label className="block text-sm font-medium text-ink mb-1">
+                            <Label htmlFor="transcription-vocabulary" className="block text-sm font-medium text-ink mb-1">
                                 Custom vocabulary
                             </Label>
                             <p className="text-xs text-ink-muted mb-2 mx-1">
                                 Names, acronyms, and product terms to bias Whisper. Separate with commas.
                             </p>
                             <Textarea
-                                className="mx-1 focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
+                                id="transcription-vocabulary"
+                                className="mx-1 focus:ring-2 focus:ring-focus"
                                 rows={3}
                                 value={vocabulary}
-                                onChange={(e) => setVocabulary(e.target.value)}
+                                onChange={(e) => {
+                                    setVocabulary(e.target.value);
+                                    setVocabularySaveState(current => current === 'saving' ? current : null);
+                                }}
+                                disabled={vocabularySaveState === 'saving'}
                                 placeholder="e.g. Minutes, OKR, Kubernetes, Acme Corp"
                             />
-                            <div className="mt-2 mx-1">
+                            <div className="mx-1 mt-2 flex flex-wrap items-center gap-3">
                                 <Button
                                     type="button"
                                     size="sm"
                                     onClick={handleSaveVocabulary}
-                                    disabled={vocabulary === savedVocabulary}
+                                    disabled={vocabulary === savedVocabulary || vocabularySaveState === 'saving'}
                                 >
-                                    Save vocabulary
+                                    {vocabularySaveState === 'saving' ? 'Saving…' : 'Save vocabulary'}
                                 </Button>
+                                {vocabularyFeedbackState && (
+                                    <SaveFeedback
+                                        state={vocabularyFeedbackState}
+                                        labels={{ unsaved: 'Vocabulary changes not saved', saving: 'Saving vocabulary', saved: 'Vocabulary saved', error: 'Could not save vocabulary; draft preserved' }}
+                                    />
+                                )}
                             </div>
                         </div>
                     )}
@@ -231,7 +252,7 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                             <div className="relative mx-1">
                                 <Input
                                     type={showApiKey ? "text" : "password"}
-                                    className={`pr-24 focus:ring-1 focus:ring-blue-500 focus:border-blue-500 ${isApiKeyLocked ? 'bg-surface-2 cursor-not-allowed' : ''
+                                    className={`pr-24 focus:ring-2 focus:ring-focus ${isApiKeyLocked ? 'bg-surface-2 cursor-not-allowed' : ''
                                         }`}
                                     value={apiKey || ''}
                                     onChange={(e) => setApiKey(e.target.value)}
@@ -274,10 +295,6 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
         </div >
     )
 }
-
-
-
-
 
 
 
