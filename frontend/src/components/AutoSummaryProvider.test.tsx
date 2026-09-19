@@ -12,10 +12,13 @@ const claims = new Set<string>();
 const originalConfig = { ...await import('@/contexts/ConfigContext') };
 const originalActivity = { ...await import('@/contexts/MeetingActivityContext') };
 const originalAutoSummary = { ...await import('@/lib/autoSummary') };
+const originalWindow = globalThis.window;
 afterAll(() => {
   mock.module('@/contexts/ConfigContext', () => originalConfig);
   mock.module('@/contexts/MeetingActivityContext', () => originalActivity);
   mock.module('@/lib/autoSummary', () => originalAutoSummary);
+  if (originalWindow) Object.defineProperty(globalThis, 'window', { configurable: true, value: originalWindow });
+  else Reflect.deleteProperty(globalThis, 'window');
 });
 mock.module('@/contexts/ConfigContext', () => ({
   useConfig: () => ({
@@ -44,6 +47,8 @@ const { AutoSummaryProvider } = await import('./AutoSummaryProvider');
 
 describe('AutoSummaryProvider', () => {
   beforeEach(() => {
+    Object.defineProperty(globalThis, 'window', { configurable: true, value: new EventTarget() });
+    snapshot = { revision: 1, recording: null, activities: [] };
     claims.clear();
     generateAutomaticSummary.mockClear();
     model = 'model-a';
@@ -108,6 +113,54 @@ describe('AutoSummaryProvider', () => {
     await act(async () => { renderer = create(<AutoSummaryProvider />); });
     await act(async () => { renderer.update(<AutoSummaryProvider />); });
     expect(generateAutomaticSummary).toHaveBeenCalledTimes(1);
+    await act(async () => renderer.unmount());
+  });
+
+  test('waits for transcript persistence before starting a live recording summary', async () => {
+    snapshot = {
+      revision: 5,
+      recording: null,
+      activities: [{
+        task_id: 'recording-session', meeting_id: 'meeting-live', kind: 'recording', status: 'ready',
+        title: 'Live meeting', stage: 'complete', progress_percentage: 100, message: null,
+        error: null, warning: null, controls_available: false, revision: 5,
+      }],
+    };
+    let renderer: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<AutoSummaryProvider />); });
+    expect(generateAutomaticSummary).not.toHaveBeenCalled();
+
+    await act(async () => {
+      const event = Object.assign(new Event('meetily:meeting-ready-for-summary'), {
+        detail: { meetingId: 'meeting-live' },
+      });
+      window.dispatchEvent(event);
+    });
+    expect(generateAutomaticSummary).toHaveBeenCalledWith(
+      'meeting-live',
+      expect.objectContaining({ provider: 'ollama', model: 'model-a' }),
+    );
+    await act(async () => renderer.unmount());
+  });
+
+  test('retains persistence readiness until model configuration finishes saving', async () => {
+    saving = true;
+    let renderer: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<AutoSummaryProvider />); });
+    await act(async () => {
+      const event = Object.assign(new Event('meetily:meeting-ready-for-summary'), {
+        detail: { meetingId: 'meeting-saving' },
+      });
+      window.dispatchEvent(event);
+    });
+    expect(generateAutomaticSummary).not.toHaveBeenCalled();
+
+    saving = false;
+    await act(async () => renderer.update(<AutoSummaryProvider />));
+    expect(generateAutomaticSummary).toHaveBeenCalledWith(
+      'meeting-saving',
+      expect.objectContaining({ provider: 'ollama', model: 'model-a' }),
+    );
     await act(async () => renderer.unmount());
   });
 });

@@ -102,6 +102,13 @@ function isSummaryTerminal(status: SummaryActivityStatus): boolean {
   return status === 'completed' || status === 'failed' || status === 'cancelled';
 }
 
+const NATIVE_PROCESS_ID = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{9}Z$/;
+
+function compareNativeProcessIds(left: string, right: string): number | null {
+  if (!NATIVE_PROCESS_ID.test(left) || !NATIVE_PROCESS_ID.test(right)) return null;
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
 export class MeetingActivityStore {
   private state: MeetingActivityState = {
     hydrationStatus: 'idle',
@@ -169,7 +176,7 @@ export class MeetingActivityStore {
       summary.meetingId === meetingId && summary.processId === processId && isSummaryTerminal(summary.status)
     ));
     if (retained?.response) {
-      if (listener) void Promise.resolve(listener(retained.response)).catch((error: unknown) => {
+      if (listener) void Promise.resolve().then(() => listener(retained.response!)).catch((error: unknown) => {
         console.error('Failed to handle retained summary update:', error);
       });
       return () => {};
@@ -196,10 +203,19 @@ export class MeetingActivityStore {
     return () => listener && poll?.listeners.delete(listener);
   };
 
-  hydrateSummary = (response: SummaryProcessResponse): void => {
-    if (response.status === 'idle' || !response.start) return;
+  hydrateSummary = (response: SummaryProcessResponse): SummaryProcessResponse | null => {
+    if (response.status === 'idle' || !response.start) return null;
     const status = summaryStatus(response);
-    if (!status) return;
+    if (!status) return null;
+    const current = this.latestSummaryForMeeting(response.meeting_id);
+    if (current?.processId) {
+      const order = compareNativeProcessIds(response.start, current.processId);
+      if (order !== null && order < 0) return this.summaryResponse(current, response);
+      if (order === 0 && isSummaryTerminal(current.status) && !isSummaryTerminal(status)) {
+        this.stopSummaryPolling(current.meetingId, current.processId);
+        return this.summaryResponse(current, response);
+      }
+    }
     this.setSummary({
       activityId: this.summaryKey(response.meeting_id, response.start), revision: 0,
       meetingId: response.meeting_id,
@@ -209,7 +225,14 @@ export class MeetingActivityStore {
       error: status === 'failed' ? response.error ?? 'Summary generation failed.' : null,
       reconciliationError: null,
     });
-    if (!isSummaryTerminal(status)) this.startSummaryPolling(response.meeting_id, response.start);
+    if (isSummaryTerminal(status)) this.stopSummaryPolling(response.meeting_id, response.start);
+    else this.startSummaryPolling(response.meeting_id, response.start);
+    for (const poll of [...this.summaryPolls.values()]) {
+      if (poll.meetingId !== response.meeting_id || poll.processId === response.start) continue;
+      const order = compareNativeProcessIds(response.start, poll.processId);
+      if (order !== null && order > 0) this.supersedeSummaryPoll(poll, response);
+    }
+    return response;
   };
 
   startSummary = (request: SummaryStartRequest): Promise<SummaryStartResult> => {
@@ -298,6 +321,13 @@ export class MeetingActivityStore {
     return true;
   };
 
+  cancelPendingSummaryStart = async (meetingId: string): Promise<boolean> => {
+    const pendingStart = this.summaryStarts.get(meetingId);
+    if (!pendingStart) return false;
+    const result = await pendingStart;
+    return result.processId ? this.cancelSummary(meetingId, result.processId) : false;
+  };
+
   dismissSummary = (meetingId: string, processId?: string): void => {
     this.update({
       summaries: this.state.summaries.filter((summary) => (
@@ -354,25 +384,23 @@ export class MeetingActivityStore {
       if (this.summaryPolls.get(poll.key) !== poll) return;
       if (response.meeting_id !== poll.meetingId) return;
       if (response.start && response.start !== poll.processId) {
-        // A newly-started process can briefly observe the previous stored
-        // terminal response. Only a different live process proves this one was
-        // superseded; otherwise wait for storage to catch up.
-        if (response.status === 'pending' || response.status === 'processing') {
-          await this.publishSummary(poll, {
-            ...response,
-            status: 'cancelled',
-            meeting_id: poll.meetingId,
-            start: poll.processId,
-            error: 'This summary attempt was superseded by a newer process.',
-          });
-        }
+        const order = compareNativeProcessIds(response.start, poll.processId);
+        if (order !== null && order > 0) this.hydrateSummary(response);
         return;
       }
       if (response.status === 'idle') return;
+      const current = this.summaryForProcess(poll.meetingId, poll.processId);
+      if (current && isSummaryTerminal(current.status)) {
+        this.stopSummaryPolling(poll.meetingId, poll.processId);
+        return;
+      }
       await this.publishSummary(poll, response);
     } catch (error) {
+      if (this.summaryPolls.get(poll.key) !== poll) return;
       const current = this.summaryForProcess(poll.meetingId, poll.processId);
-      if (current) this.setSummary({ ...current, reconciliationError: errorText(error) });
+      if (current && !isSummaryTerminal(current.status)) {
+        this.setSummary({ ...current, reconciliationError: errorText(error) });
+      }
     } finally {
       poll.inFlight = false;
     }
@@ -400,6 +428,31 @@ export class MeetingActivityStore {
     if (isSummaryTerminal(status)) this.stopSummaryPolling(poll.meetingId, poll.processId);
   }
 
+  private supersedeSummaryPoll(poll: SummaryPoll, authoritative: SummaryProcessResponse): void {
+    const listeners = [...poll.listeners];
+    this.stopSummaryPolling(poll.meetingId, poll.processId);
+    const previous = this.summaryForProcess(poll.meetingId, poll.processId);
+    this.setSummary({
+      activityId: poll.key,
+      revision: 0,
+      meetingId: poll.meetingId,
+      processId: poll.processId,
+      status: 'cancelled',
+      response: previous?.response ?? null,
+      error: 'This summary attempt was superseded by a newer process.',
+      reconciliationError: null,
+    });
+
+    if (!authoritative.start) return;
+    const replacement = this.summaryPolls.get(this.summaryKey(poll.meetingId, authoritative.start));
+    if (replacement) listeners.forEach((listener) => replacement.listeners.add(listener));
+    listeners.forEach((listener) => {
+      void Promise.resolve().then(() => listener(authoritative)).catch((error: unknown) => {
+        console.error('Failed to handle superseding summary update:', error);
+      });
+    });
+  }
+
   private setSummary(summary: SummaryActivity): void {
     const summaries = this.state.summaries.filter((candidate) => (
       candidate.activityId !== summary.activityId
@@ -418,6 +471,30 @@ export class MeetingActivityStore {
     ));
   }
 
+  private latestSummaryForMeeting(meetingId: string): SummaryActivity | undefined {
+    return this.state.summaries
+      .filter((summary) => summary.meetingId === meetingId && summary.processId)
+      .sort((left, right) => {
+        const order = compareNativeProcessIds(left.processId!, right.processId!);
+        return order === null || order === 0 ? right.revision - left.revision : -order;
+      })[0];
+  }
+
+  private summaryResponse(
+    summary: SummaryActivity,
+    fallback: SummaryProcessResponse,
+  ): SummaryProcessResponse {
+    if (summary.response) return summary.response;
+    return {
+      ...fallback,
+      status: summary.status === 'queued' ? 'pending' : summary.status,
+      meeting_id: summary.meetingId,
+      start: summary.processId,
+      data: null,
+      error: summary.error,
+    };
+  }
+
   private async startSummaryLocked(request: SummaryStartRequest): Promise<SummaryStartResult> {
     this.summaryRequests.set(request.meetingId, request);
     let stored: SummaryProcessResponse;
@@ -427,12 +504,12 @@ export class MeetingActivityStore {
       this.retainSummaryStartFailure(request.meetingId, error);
       throw error;
     }
-    this.hydrateSummary(stored);
-    if (stored.start && (stored.status === 'pending' || stored.status === 'processing')) {
-      return { started: false, processId: stored.start, response: stored };
+    const authoritative = this.hydrateSummary(stored) ?? stored;
+    if (authoritative.start && (authoritative.status === 'pending' || authoritative.status === 'processing')) {
+      return { started: false, processId: authoritative.start, response: authoritative };
     }
-    if (stored.status === 'completed' && !request.replaceExisting) {
-      return { started: false, processId: stored.start, response: stored };
+    if (authoritative.status === 'completed' && !request.replaceExisting) {
+      return { started: false, processId: authoritative.start, response: authoritative };
     }
 
     const attemptId = `summary-start:${request.meetingId}:${++this.nextSummaryAttempt}`;
@@ -484,7 +561,7 @@ export interface MeetingActivityContextValue extends MeetingActivityState {
   getMeetingActivities: (meetingId: string) => MeetingActivity[];
   getTaskActivity: (taskId: string) => MeetingActivity | null;
   getSummaryActivity: (meetingId: string, processId?: string) => SummaryActivity | null;
-  hydrateSummary: (response: SummaryProcessResponse) => void;
+  hydrateSummary: (response: SummaryProcessResponse) => SummaryProcessResponse | null;
   startSummary: (request: SummaryStartRequest) => Promise<SummaryStartResult>;
   prepareAndStartSummary: (
     meetingId: string,
@@ -492,6 +569,7 @@ export interface MeetingActivityContextValue extends MeetingActivityState {
   ) => Promise<SummaryStartResult>;
   retrySummary: (meetingId: string) => Promise<SummaryStartResult>;
   cancelSummary: (meetingId: string, processId: string) => Promise<boolean>;
+  cancelPendingSummaryStart: (meetingId: string) => Promise<boolean>;
   dismissSummary: (meetingId: string, processId?: string) => void;
   startSummaryPolling: MeetingActivityStore['startSummaryPolling'];
   cancelTranscription: (taskId: string) => Promise<boolean>;
@@ -526,7 +604,13 @@ export function useMeetingActivity(): MeetingActivityContextValue {
     const matching = state.summaries.filter((summary) => (
       summary.meetingId === meetingId && (!processId || summary.processId === processId)
     ));
-    return matching.sort((left, right) => right.revision - left.revision)[0] ?? null;
+    return matching.sort((left, right) => {
+      if (left.processId && right.processId) {
+        const order = compareNativeProcessIds(left.processId, right.processId);
+        if (order !== null && order !== 0) return -order;
+      }
+      return right.revision - left.revision;
+    })[0] ?? null;
   }, [state.summaries]);
 
   return useMemo(() => ({
@@ -541,6 +625,7 @@ export function useMeetingActivity(): MeetingActivityContextValue {
     prepareAndStartSummary: store.prepareAndStartSummary,
     retrySummary: store.retrySummary,
     cancelSummary: store.cancelSummary,
+    cancelPendingSummaryStart: store.cancelPendingSummaryStart,
     dismissSummary: store.dismissSummary,
     startSummaryPolling: store.startSummaryPolling,
     cancelTranscription: (taskId: string) => invoke<boolean>('cancel_transcription_task', { taskId }),

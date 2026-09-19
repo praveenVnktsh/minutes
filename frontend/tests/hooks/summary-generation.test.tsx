@@ -278,6 +278,44 @@ describe('summary state restored when returning to a meeting', () => {
     expect(state.summaryStatus).toBe('completed');
   });
 
+  test('Stop during native start cancels the exact process after its token resolves', async () => {
+    const processId = '2026-09-18T10:00:00.123456789Z';
+    let resolve!: (value: { process_id: string }) => void;
+    startProcess = () => new Promise(done => { resolve = done; });
+    getSummary = async () => response({ status: 'idle', start: null });
+    await show(response({ status: 'idle', start: null }));
+    let generation!: Promise<void>;
+    await act(async () => { generation = state.handleGenerateSummary(); });
+    let stopping!: Promise<void>;
+    await act(async () => { stopping = state.handleStopGeneration(); });
+    expect(state.summaryStatus).toBe('idle');
+
+    await act(async () => {
+      resolve({ process_id: processId });
+      await Promise.all([generation, stopping]);
+    });
+    expect(invoke.mock.calls).toContainEqual([
+      'api_cancel_summary',
+      { meetingId: 'meeting-a', processId },
+    ]);
+    expect(timers.size).toBe(0);
+  });
+
+  test('an older initial response follows the newer owner process', async () => {
+    const older = '2026-09-18T10:00:00.123456700Z';
+    const newer = '2026-09-18T10:00:00.123456789Z';
+    getSummary = async () => response({ start: newer, status: 'processing' });
+    meetingActivityStore.hydrateSummary(response({ start: newer, status: 'processing' }));
+    await show(response({ start: older, status: 'pending' }));
+
+    await act(async () => state.handleStopGeneration());
+    expect(invoke.mock.calls).toContainEqual([
+      'api_cancel_summary',
+      { meetingId: 'meeting-a', processId: newer },
+    ]);
+    expect(timers.size).toBe(0);
+  });
+
   test('completion analytics retain the model used to start the attempt after settings change', async () => {
     const initial = response({ status: 'idle', start: null });
     await show(initial);

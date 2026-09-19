@@ -21,6 +21,7 @@ export function AutoSummaryProvider() {
   const { snapshot: { activities } } = useMeetingActivity();
   const activeMeetingIds = useRef(new Set<string>());
   const pendingByMeeting = useRef(new Map<string, { taskId: string; config: ModelConfig }>());
+  const persistedRecordingIds = useRef(new Set<string>());
 
   useEffect(() => {
     const startSummary = async (taskId: string, meetingId: string, config: ModelConfig) => {
@@ -59,7 +60,9 @@ export function AutoSummaryProvider() {
     if (isAutoSummary && !isModelConfigLoading && !isModelConfigSaving && !modelConfigSaveError) {
       const latestReadyByMeeting = new Map<string, (typeof activities)[number]>();
       for (const activity of activities) {
-        if (activity.status !== 'ready' || !activity.meeting_id) continue;
+        // Native recording readiness precedes the frontend transcript save.
+        // The persistence-ready event below is authoritative for live recordings.
+        if (activity.status !== 'ready' || activity.kind === 'recording' || !activity.meeting_id) continue;
         const current = latestReadyByMeeting.get(activity.meeting_id);
         if (!current || activity.revision > current.revision) {
           latestReadyByMeeting.set(activity.meeting_id, activity);
@@ -68,7 +71,20 @@ export function AutoSummaryProvider() {
       for (const activity of latestReadyByMeeting.values()) {
         void startSummary(activity.task_id, activity.meeting_id!, modelConfig);
       }
+      for (const meetingId of persistedRecordingIds.current) {
+        void startSummary(`persisted-recording:${meetingId}`, meetingId, modelConfig);
+      }
     }
+
+    const handleMeetingReady = (event: Event) => {
+      const meetingId = (event as CustomEvent<{ meetingId?: string }>).detail?.meetingId;
+      if (!meetingId) return;
+      persistedRecordingIds.current.add(meetingId);
+      void startSummary(`persisted-recording:${meetingId}`, meetingId, modelConfig);
+    };
+    if (typeof window === 'undefined') return undefined;
+    window.addEventListener('meetily:meeting-ready-for-summary', handleMeetingReady);
+    return () => window.removeEventListener('meetily:meeting-ready-for-summary', handleMeetingReady);
   }, [activities, isAutoSummary, isModelConfigLoading, isModelConfigSaving, modelConfig, modelConfigSaveError]);
 
   return null;

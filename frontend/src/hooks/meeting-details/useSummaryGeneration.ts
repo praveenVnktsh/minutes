@@ -121,6 +121,7 @@ export function useSummaryGeneration({
   } | null>(null);
   const {
     cancelSummary,
+    cancelPendingSummaryStart,
     hydrateSummary,
     startSummary,
     startSummaryPolling,
@@ -187,6 +188,7 @@ export function useSummaryGeneration({
     if (!mountedRef.current || visibleMeetingIdRef.current !== meeting.id || generationId !== generationIdRef.current) {
       return;
     }
+    if (pollingResult.start) activeProcessIdRef.current = pollingResult.start;
     if (pollingResult.status === 'cancelled') {
       let existing: SummaryProcessResponse;
       try {
@@ -314,19 +316,21 @@ export function useSummaryGeneration({
 
   useEffect(() => {
     if (!initialSummary || initialSummary.meeting_id !== meeting.id) return;
-    hydrateSummary(initialSummary);
-    const status = restoredSummaryStatus(initialSummary);
+    const authoritative = hydrateSummary(initialSummary);
+    if (!authoritative) return;
+    const status = restoredSummaryStatus(authoritative);
     setSummaryStatus(status);
     setSummaryError(status === 'error'
-      ? initialSummary.error || 'Summary generation failed. Please retry.'
+      ? authoritative.error || 'Summary generation failed. Please retry.'
       : null);
-    if (status !== 'processing' || !initialSummary.start) return;
+    setAiSummary(parseSummaryContent(authoritative.data));
+    if (status !== 'processing' || !authoritative.start) return;
 
     const generationId = ++generationIdRef.current;
-    activeProcessIdRef.current = initialSummary.start;
-    const isRegeneration = !!parseSummaryContent(initialSummary.data);
-    subscribeToProcess(initialSummary.start, generationId, isRegeneration);
-  }, [hydrateSummary, initialSummary, meeting.id, subscribeToProcess]);
+    activeProcessIdRef.current = authoritative.start;
+    const isRegeneration = !!parseSummaryContent(authoritative.data);
+    subscribeToProcess(authoritative.start, generationId, isRegeneration);
+  }, [hydrateSummary, initialSummary, meeting.id, setAiSummary, subscribeToProcess]);
 
   const processSummary = useCallback(async ({
     transcriptText,
@@ -562,6 +566,7 @@ export function useSummaryGeneration({
     const generationId = generationIdRef.current;
     const processId = activeProcessIdRef.current;
     if (!processId) {
+      const cancellation = cancelPendingSummaryStart(meeting.id);
       generationIdRef.current += 1;
       activeProcessIdRef.current = null;
       setSummaryStatus('idle');
@@ -571,6 +576,16 @@ export function useSummaryGeneration({
         description: 'You can generate a new summary anytime',
         duration: 3000,
       });
+      try {
+        await cancellation;
+      } catch (error) {
+        console.error('Failed to cancel summary generation after it started:', error);
+        if (mountedRef.current && visibleMeetingIdRef.current === meeting.id) {
+          toast.error('Failed to stop summary generation', {
+            description: 'Generation may still be running in the background.',
+          });
+        }
+      }
       return;
     }
 
@@ -604,7 +619,7 @@ export function useSummaryGeneration({
         });
       }
     }
-  }, [cancelSummary, finishGeneration, meeting.id]);
+  }, [cancelPendingSummaryStart, cancelSummary, finishGeneration, meeting.id]);
 
   return {
     summaryStatus,

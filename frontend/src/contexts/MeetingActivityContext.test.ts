@@ -234,4 +234,109 @@ describe('MeetingActivityStore', () => {
     expect(second).toHaveBeenCalledTimes(1);
     expect(timers.size).toBe(0);
   });
+
+  test('keeps the newer nanosecond process authoritative when an older response hydrates later', async () => {
+    const older = '2026-09-18T10:00:00.123456700Z';
+    const newer = '2026-09-18T10:00:00.123456789Z';
+    const timers = new Set<() => void>();
+    const store = new MeetingActivityStore({
+      service: { subscribe: async () => () => {} },
+      readSummary: async () => summary('meeting-a', newer, 'processing'),
+      setIntervalFn: (callback) => { timers.add(callback); return callback; },
+      clearIntervalFn: (callback) => timers.delete(callback as () => void),
+    });
+    store.hydrateSummary(summary('meeting-a', newer, 'processing'));
+    const authoritative = store.hydrateSummary(summary('meeting-a', older, 'pending'));
+    await Promise.resolve();
+
+    expect(authoritative?.start).toBe(newer);
+    expect(store.getState().summaries.at(-1)?.processId).toBe(newer);
+    expect(timers.size).toBe(1);
+  });
+
+  test('terminal hydration stops its poll and a late processing read cannot revive it', async () => {
+    const processId = '2026-09-18T10:00:00.123456789Z';
+    let resolveRead!: (value: SummaryProcessResponse) => void;
+    const timers = new Set<() => void>();
+    const store = new MeetingActivityStore({
+      service: { subscribe: async () => () => {} },
+      readSummary: () => new Promise((resolve) => { resolveRead = resolve; }),
+      setIntervalFn: (callback) => { timers.add(callback); return callback; },
+      clearIntervalFn: (callback) => timers.delete(callback as () => void),
+    });
+    store.startSummaryPolling('meeting-a', processId);
+    store.hydrateSummary(summary('meeting-a', processId, 'completed'));
+    resolveRead(summary('meeting-a', processId, 'processing'));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(store.getState().summaries.at(-1)?.status).toBe('completed');
+    expect(timers.size).toBe(0);
+  });
+
+  test('moves observers to a newer terminal process instead of waiting on the superseded poll', async () => {
+    const older = '2026-09-18T10:00:00.123456700Z';
+    const newer = '2026-09-18T10:00:00.123456789Z';
+    const listener = mock(() => {});
+    const timers = new Set<() => void>();
+    const store = new MeetingActivityStore({
+      service: { subscribe: async () => () => {} },
+      readSummary: async () => summary('meeting-a', newer, 'completed'),
+      setIntervalFn: (callback) => { timers.add(callback); return callback; },
+      clearIntervalFn: (callback) => timers.delete(callback as () => void),
+    });
+    store.startSummaryPolling('meeting-a', older, listener);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(listener).toHaveBeenCalledWith(expect.objectContaining({ start: newer, status: 'completed' }));
+    expect(store.getState().summaries.some((item) => item.processId === newer && item.status === 'completed')).toBe(true);
+    expect(timers.size).toBe(0);
+  });
+
+  test('terminal hydration immediately resolves observers of an older process', async () => {
+    const older = '2026-09-18T10:00:00.123456700Z';
+    const newer = '2026-09-18T10:00:00.123456789Z';
+    const listener = mock(() => {});
+    const timers = new Set<() => void>();
+    const store = new MeetingActivityStore({
+      service: { subscribe: async () => () => {} },
+      readSummary: () => new Promise(() => {}),
+      setIntervalFn: (callback) => { timers.add(callback); return callback; },
+      clearIntervalFn: (callback) => timers.delete(callback as () => void),
+    });
+    store.startSummaryPolling('meeting-a', older, listener);
+    store.hydrateSummary(summary('meeting-a', newer, 'completed'));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(listener).toHaveBeenCalledWith(expect.objectContaining({ start: newer, status: 'completed' }));
+    expect(timers.size).toBe(0);
+  });
+
+  test('does not attach a late poll failure to retained state after that poll was removed', async () => {
+    let rejectRead!: (error: Error) => void;
+    const store = new MeetingActivityStore({
+      service: { subscribe: async () => () => {} },
+      readSummary: () => new Promise((_, reject) => { rejectRead = reject; }),
+      setIntervalFn: (callback) => callback,
+      clearIntervalFn: () => {},
+    });
+    store.startSummaryPolling('meeting-a', 'process-a');
+    store.stopSummaryPolling('meeting-a', 'process-a');
+    rejectRead(new Error('late transport failure'));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(store.getState().summaries.at(-1)?.reconciliationError).toBeNull();
+  });
+
+  test('defers a retained listener so a synchronous throw cannot escape subscription', async () => {
+    const store = new MeetingActivityStore({ service: { subscribe: async () => () => {} } });
+    store.hydrateSummary(summary('meeting-a', 'process-a', 'completed'));
+    expect(() => store.startSummaryPolling('meeting-a', 'process-a', () => {
+      throw new Error('consumer failed');
+    })).not.toThrow();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
 });
