@@ -78,6 +78,40 @@ describe('MeetingWorkspace composition', () => {
     expect(html).not.toContain('Transcript content');
   });
 
+  test('shows retry instead of Generate while the initial summary read is unknown', () => {
+    const html = renderToStaticMarkup(
+      <SummaryPanel
+        meeting={{ id: 'meeting-1', title: 'Planning', created_at: '2026-09-18T10:00:00Z' }}
+        meetingTitle="Planning"
+        isSummaryDirty={false}
+        summaryRef={{ current: null }}
+        isSaving={false}
+        onCopySummary={async () => {}}
+        aiSummary={null}
+        summaryStatus="idle"
+        transcripts={[]}
+        modelConfig={{ provider: 'ollama', model: 'gemma3:1b', whisperModel: 'base' }}
+        onGenerateSummary={async () => {}}
+        onStopGeneration={() => {}}
+        customPrompt=""
+        onSaveSummary={async () => {}}
+        onSummaryChange={() => {}}
+        onDirtyChange={() => {}}
+        summaryError={null}
+        summaryReadError="database busy"
+        onRetrySummaryRead={() => {}}
+        onRegenerateSummary={async () => {}}
+        getSummaryStatusMessage={() => ''}
+        availableTemplates={[]}
+        selectedTemplate="standard_meeting"
+        onTemplateSelect={() => {}}
+      />,
+    );
+    expect(html).toContain('Could not load enhanced notes');
+    expect(html).toContain('Retry');
+    expect(html).not.toContain('Generate Summary');
+  });
+
   test('keeps a failed title draft, cancels on Escape, and resizes with the keyboard', async () => {
     compact = false;
     const rename = mock(async () => { throw new Error('database busy'); });

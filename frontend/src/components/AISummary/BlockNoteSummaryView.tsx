@@ -9,6 +9,7 @@ import { useCreateBlockNote } from '@blocknote/react';
 import { BlockNoteView } from '@blocknote/shadcn';
 import { blocksToMarkdownSafely } from '@/lib/blocknote-markdown';
 import { toast } from 'sonner';
+import { storedSummaryMarkdown } from '@/lib/meetingExport';
 import "@blocknote/shadcn/style.css";
 
 // Dynamically import BlockNote Editor to avoid SSR issues
@@ -16,7 +17,7 @@ const Editor = dynamic(() => import('../BlockNoteEditor/Editor'), { ssr: false }
 
 interface BlockNoteSummaryViewProps {
   summaryData: SummaryDataResponse | Summary | null;
-  onSave?: (data: { markdown?: string; summary_json?: BlockNoteBlock[] }) => Promise<void>;
+  onSave?: (data: Pick<SummaryDataResponse, 'markdown' | 'summary_json' | 'manually_cleared'>) => Promise<void>;
   onSummaryChange?: (summary: Summary) => void;
   status?: 'idle' | 'processing' | 'summarizing' | 'regenerating' | 'completed' | 'error';
   error?: string | null;
@@ -84,6 +85,8 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
   const [hasCurrentDocument, setHasCurrentDocument] = useState(false);
   const isContentLoaded = useRef(false);
   const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout>>();
+  const structuredDocumentKey = format === 'blocknote' ? JSON.stringify(data?.summary_json ?? []) : '';
+  const structuredBlocks = data?.summary_json;
 
   // Create BlockNote editor for markdown parsing
   const editor = useCreateBlockNote({
@@ -114,13 +117,18 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
 
   // Set content loaded flag for blocknote format
   useEffect(() => {
-    if (format === 'blocknote' && data?.summary_json) {
+    if (format === 'blocknote' && structuredBlocks) {
+      isContentLoaded.current = false;
+      setCurrentBlocks([]);
+      setHasCurrentDocument(false);
+      setIsDirty(false);
       // Delay to ensure editor has finished rendering
-      setTimeout(() => {
+      const timer = setTimeout(() => {
         isContentLoaded.current = true;
       }, 100);
+      return () => clearTimeout(timer);
     }
-  }, [format, data?.summary_json]);
+  }, [format, structuredBlocks, structuredDocumentKey]);
 
   const handleEditorChange = useCallback((blocks: Block[]) => {
     // Only set dirty flag if content has finished loading
@@ -149,12 +157,16 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
         source: 'BlockNoteSummaryView.handleSave',
       });
 
-      const saveData: { markdown?: string; summary_json?: BlockNoteBlock[] } = {
+      const saveData: Pick<SummaryDataResponse, 'markdown' | 'summary_json' | 'manually_cleared'> = {
         summary_json: currentBlocks as unknown as BlockNoteBlock[]
       };
 
       if (markdownResult.markdown !== undefined) {
         saveData.markdown = markdownResult.markdown;
+      }
+      if (markdownResult.ok && markdownResult.markdown?.trim().length === 0) {
+        saveData.markdown = '';
+        saveData.manually_cleared = true;
       }
 
       await onSave(saveData);
@@ -202,7 +214,10 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
   useImperativeHandle(ref, () => ({
     saveSummary: handleSave,
     getMarkdownResult: async () => {
-      if (format === 'legacy') return { ok: true, markdown: '', empty: true };
+      if (format === 'legacy') {
+        const markdown = storedSummaryMarkdown(summaryData as Summary);
+        return { ok: true, markdown, empty: markdown.trim().length === 0 };
+      }
       const blocks = format === 'markdown'
         ? editor.document
         : hasCurrentDocument
@@ -222,7 +237,7 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
         : hasCurrentDocument
           ? currentBlocks
           : (data?.summary_json as unknown as Block[] | undefined) || [];
-      if (format === 'legacy') return '';
+      if (format === 'legacy') return storedSummaryMarkdown(summaryData as Summary);
       const result = await blocksToMarkdownSafely(editor, blocks, { source: 'BlockNoteSummaryView.getMarkdown' });
       if (!result.ok || result.markdown === undefined) throw new Error('Could not convert the current enhanced notes to Markdown');
       return result.markdown;
@@ -231,7 +246,7 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
       ? currentBlocks
       : (data?.summary_json as unknown as Block[] | undefined) || []) as unknown as BlockNoteBlock[],
     isDirty
-  }), [handleSave, isDirty, editor, format, currentBlocks, data, hasCurrentDocument]);
+  }), [handleSave, isDirty, editor, format, currentBlocks, data, hasCurrentDocument, summaryData]);
 
   // Render legacy format
   if (format === 'legacy') {
@@ -255,7 +270,8 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
       <div className="flex flex-col w-full">
         <div className="w-full">
           <Editor
-            initialContent={data.summary_json}
+            key={structuredDocumentKey}
+            initialContent={structuredBlocks}
             onChange={(blocks) => {
               console.log('📝 Editor blocks changed:', blocks.length);
               handleEditorChange(blocks);

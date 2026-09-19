@@ -81,6 +81,7 @@ export interface BlockNoteBlock {
 export interface SummaryDataResponse {
   markdown?: string;
   summary_json?: BlockNoteBlock[];
+  manually_cleared?: boolean;
   reasoning_stripped?: boolean;
   normalization_fallback?: boolean;
   // Legacy format fields

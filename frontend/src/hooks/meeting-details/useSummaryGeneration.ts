@@ -99,10 +99,16 @@ export function useSummaryGeneration({
   const modelConfigurationLoading = isModelConfigLoading || committedConfig.isModelConfigLoading;
   const modelConfigurationSaving = isModelConfigSaving || committedConfig.isModelConfigSaving;
   const modelConfigurationError = modelConfigSaveError ?? committedConfig.modelConfigSaveError;
+  const meetingActivity = useMeetingActivity();
+  const initialOwnerSummary = meetingActivity.getSummaryActivity(meeting.id);
   const restored = initialSummary?.meeting_id === meeting.id ? initialSummary : null;
-  const [summaryStatus, setSummaryStatus] = useState<SummaryStatus>(() => restoredSummaryStatus(restored));
+  const initialOwnerPending = initialOwnerSummary?.status === 'queued' || initialOwnerSummary?.status === 'processing';
+  const initialStatus = initialOwnerPending
+    ? (parseSummaryContent(restored?.data) ? 'regenerating' : 'processing')
+    : restoredSummaryStatus(restored);
+  const [summaryStatus, setSummaryStatus] = useState<SummaryStatus>(() => initialStatus);
   const [summaryError, setSummaryError] = useState<string | null>(() =>
-    restoredSummaryStatus(restored) === 'error'
+    initialStatus === 'error'
       ? restored?.error || 'Summary generation failed. Please retry.'
       : null,
   );
@@ -113,6 +119,8 @@ export function useSummaryGeneration({
   const activeProcessIdRef = useRef<string | null>(null);
   const pendingNativeStartGenerationRef = useRef<number | null>(null);
   const pollSubscriptionRef = useRef<(() => void) | null>(null);
+  const initializedResponseRef = useRef<SummaryProcessResponse | null>(null);
+  const adoptOwnerUpdatesRef = useRef(false);
   const trackedAttemptRef = useRef<{
     generationId: number;
     startedAt: number;
@@ -126,7 +134,9 @@ export function useSummaryGeneration({
     hydrateSummary,
     startSummary,
     startSummaryPolling,
-  } = useMeetingActivity();
+    getSummaryActivity,
+  } = meetingActivity;
+  const ownerSummaryActivity = getSummaryActivity(meeting.id);
 
   const getSummaryStatusMessage = useCallback((status: SummaryStatus) => {
     switch (status) {
@@ -317,6 +327,23 @@ export function useSummaryGeneration({
 
   useEffect(() => {
     if (!initialSummary || initialSummary.meeting_id !== meeting.id) return;
+    if (initializedResponseRef.current === initialSummary) return;
+    initializedResponseRef.current = initialSummary;
+    const existingOwner = getSummaryActivity(meeting.id);
+    if (existingOwner && (existingOwner.status === 'queued' || existingOwner.status === 'processing')) {
+      const generationId = ++generationIdRef.current;
+      adoptOwnerUpdatesRef.current = true;
+      setAiSummary(parseSummaryContent(initialSummary.data));
+      setSummaryStatus(parseSummaryContent(initialSummary.data) ? 'regenerating' : 'processing');
+      setSummaryError(null);
+      if (existingOwner.processId) {
+        activeProcessIdRef.current = existingOwner.processId;
+        subscribeToProcess(existingOwner.processId, generationId, Boolean(parseSummaryContent(initialSummary.data)));
+      } else {
+        pendingNativeStartGenerationRef.current = generationId;
+      }
+      return;
+    }
     const authoritative = hydrateSummary(initialSummary);
     if (!authoritative) return;
     const status = restoredSummaryStatus(authoritative);
@@ -331,7 +358,36 @@ export function useSummaryGeneration({
     activeProcessIdRef.current = authoritative.start;
     const isRegeneration = !!parseSummaryContent(authoritative.data);
     subscribeToProcess(authoritative.start, generationId, isRegeneration);
-  }, [hydrateSummary, initialSummary, meeting.id, setAiSummary, subscribeToProcess]);
+  }, [getSummaryActivity, hydrateSummary, initialSummary, meeting.id, setAiSummary, subscribeToProcess]);
+
+  useEffect(() => {
+    if (!adoptOwnerUpdatesRef.current || !ownerSummaryActivity) return;
+    const generationId = generationIdRef.current;
+    const isRegeneration = Boolean(initialSummary && parseSummaryContent(initialSummary.data));
+    if (ownerSummaryActivity.status === 'queued' && !ownerSummaryActivity.processId) return;
+    if (
+      ownerSummaryActivity.processId
+      && (ownerSummaryActivity.status === 'queued' || ownerSummaryActivity.status === 'processing')
+    ) {
+      pendingNativeStartGenerationRef.current = null;
+      if (activeProcessIdRef.current !== ownerSummaryActivity.processId) {
+        activeProcessIdRef.current = ownerSummaryActivity.processId;
+        subscribeToProcess(ownerSummaryActivity.processId, generationId, isRegeneration);
+      }
+      return;
+    }
+    if (ownerSummaryActivity.response) {
+      adoptOwnerUpdatesRef.current = false;
+      void handlePollingResult(ownerSummaryActivity.response, generationId, isRegeneration);
+    } else if (ownerSummaryActivity.status === 'failed') {
+      adoptOwnerUpdatesRef.current = false;
+      void failGeneration(
+        generationId,
+        isRegeneration,
+        ownerSummaryActivity.error || 'Summary generation failed.',
+      );
+    }
+  }, [failGeneration, handlePollingResult, initialSummary, ownerSummaryActivity, subscribeToProcess]);
 
   const processSummary = useCallback(async ({
     transcriptText,

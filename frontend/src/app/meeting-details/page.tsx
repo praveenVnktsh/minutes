@@ -27,6 +27,8 @@ function MeetingDetailsContent() {
   const [meetingDetails, setMeetingDetails] = useState<MeetingDetailsResponse | null>(null);
   const [summaryResponse, setSummaryResponse] = useState<SummaryProcessResponse | null>(null);
   const [meetingSummary, setMeetingSummary] = useState<MeetingSummary | null>(null);
+  const [summaryLoadError, setSummaryLoadError] = useState<string | null>(null);
+  const [summaryReadRevision, setSummaryReadRevision] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
 
@@ -83,6 +85,7 @@ function MeetingDetailsContent() {
     setMeetingDetails(null);
     setMeetingSummary(null);
     setSummaryResponse(null);
+    setSummaryLoadError(null);
     setError(null);
     setIsLoading(true);
   }, [meetingId]);
@@ -100,12 +103,6 @@ function MeetingDetailsContent() {
 
     console.log('Valid meeting ID found, fetching details for:', meetingId);
 
-    setMeetingDetails(null);
-    setMeetingSummary(null);
-    setSummaryResponse(null);
-    setError(null);
-    setIsLoading(true);
-
     let cancelled = false;
     const fetchMeetingSummary = async () => {
       try {
@@ -113,6 +110,7 @@ function MeetingDetailsContent() {
           meetingId,
         });
         if (cancelled) return;
+        setSummaryLoadError(null);
         setSummaryResponse(response);
         const summary = parseSummaryContent(response.data);
         setMeetingSummary(response.status === 'idle' ? null : summary);
@@ -120,6 +118,8 @@ function MeetingDetailsContent() {
         if (cancelled) return;
         console.error('FETCH SUMMARY: Error fetching meeting summary:', error);
         setMeetingSummary(null);
+        setSummaryResponse(null);
+        setSummaryLoadError(error instanceof Error ? error.message : String(error));
       }
     };
 
@@ -133,7 +133,7 @@ function MeetingDetailsContent() {
 
     loadData();
     return () => { cancelled = true; };
-  }, [meetingId]);
+  }, [meetingId, summaryReadRevision]);
 
   if (error) {
     return (
@@ -161,6 +161,8 @@ function MeetingDetailsContent() {
   return <PageContent
     key={meetingId}
     initialSummary={summaryResponse}
+    initialSummaryError={summaryLoadError}
+    onRetryInitialSummary={() => setSummaryReadRevision((revision) => revision + 1)}
     meeting={meetingDetails}
     summaryData={meetingSummary}
     onMeetingUpdated={async () => {

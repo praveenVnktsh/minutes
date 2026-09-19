@@ -61,7 +61,7 @@ export function useCopyOperations({
       if (editor.getMarkdownResult) {
         const result = await editor.getMarkdownResult();
         if (!result.ok) throw result.error;
-        if (editor.isDirty && !result.empty) await editor.saveSummary();
+        if (editor.isDirty) await editor.saveSummary();
         return result.markdown;
       }
       if (editor.isDirty) await editor.saveSummary();

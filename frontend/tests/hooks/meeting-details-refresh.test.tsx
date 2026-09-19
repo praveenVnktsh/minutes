@@ -59,9 +59,10 @@ const transcriptPage = {
   transcripts: [{ id: 'transcript', text: 'Meeting transcript', timestamp: '00:00' }], total_count: 1, has_more: false,
 };
 let savedSummary: SummaryProcessResponse;
+let readSummary: (meetingId: string) => Promise<SummaryProcessResponse>;
 const invoke = mock(async (command: string, args?: Record<string, unknown>): Promise<unknown> => {
   if (command === 'api_get_meetings') return [];
-  if (command === 'api_get_summary') return { ...savedSummary, meeting_id: args!.meetingId };
+  if (command === 'api_get_summary') return readSummary(args!.meetingId as string);
   if (command === 'api_get_meeting_metadata') return readMetadata(args!.meetingId as string);
   if (command === 'api_get_meeting_transcripts') return readTranscripts(args!.meetingId as string);
   if (command === 'get_meeting_live_notes') return null;
@@ -107,6 +108,7 @@ beforeEach(() => {
   readMetadata = async id => metadata(id);
   readTranscripts = async () => transcriptPage;
   savedSummary = { meeting_id: selectedMeeting, status: 'pending', start: 'attempt-a', end: null, data: null, error: null, meetingName: 'Meeting A' };
+  readSummary = async (id) => ({ ...savedSummary, meeting_id: id });
   mounts = 0; timers.clear(); invoke.mockClear(); notify.mockClear();
   globalThis.setInterval = ((callback: () => Promise<void>) => {
     const id = ++nextTimer; timers.set(id, callback); return id;
@@ -203,5 +205,24 @@ describe('meeting route transcript refresh', () => {
     await act(async () => { await summaryState.handleStopGeneration(); });
     expect(invoke.mock.calls.find(([command]) => command === 'api_cancel_summary')?.[1]?.processId).toBe('attempt-b');
     expect(timers.size).toBe(0);
+  });
+
+  test('keeps an initial summary read failure explicit and retries the route read', async () => {
+    let reads = 0;
+    readSummary = async (id) => {
+      reads += 1;
+      if (reads === 1) throw new Error('summary database busy');
+      return { ...savedSummary, meeting_id: id, status: 'idle', start: null };
+    };
+    await show();
+    expect(latestPageProps.initialSummary).toBeNull();
+    expect(latestPageProps.initialSummaryError).toBe('summary database busy');
+
+    await act(async () => {
+      (latestPageProps.onRetryInitialSummary as () => void)();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(reads).toBe(2);
+    expect(latestPageProps.initialSummaryError).toBeNull();
   });
 });

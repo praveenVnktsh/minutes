@@ -248,7 +248,7 @@ describe('useCopyOperations', () => {
     const save = invoke.mock.calls.find(([command]) => command === 'save_text_export');
     expect(save).toBeDefined();
     expect((save?.[1] as { contents: string }).contents).not.toContain('Stale enhanced content');
-    expect(saveSummary).not.toHaveBeenCalled();
+    expect(saveSummary).toHaveBeenCalledTimes(1);
     expect(success).toHaveBeenCalledTimes(1);
   });
 

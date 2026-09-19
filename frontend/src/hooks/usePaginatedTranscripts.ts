@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Transcript, MeetingMetadata, PaginatedTranscriptsResponse, TranscriptSegmentData } from "@/types";
+import { fetchCompleteTranscripts } from '@/lib/meetingExport';
 
 const DEFAULT_PAGE_SIZE = 100;
 
@@ -154,39 +155,33 @@ export function usePaginatedTranscripts({
         if (!meetingId || !isCurrentRequest(requestId)) return;
 
         try {
-            const first = await invoke<PaginatedTranscriptsResponse>(
-                'api_get_meeting_transcripts',
-                { meetingId, limit: DEFAULT_PAGE_SIZE, offset: 0 }
-            );
-            if (!isCurrentRequest(requestId)) return;
-
-            const total = first.total_count;
-            const all = [...first.transcripts];
-            let offset = first.transcripts.length;
-            if (offset < total && !first.has_more) {
-                throw new Error('Transcript pagination ended before all rows were loaded');
+            let all: Transcript[] | null = null;
+            for (let attempt = 0; attempt < 2; attempt += 1) {
+                try {
+                    all = await fetchCompleteTranscripts(meetingId, async (args) => {
+                        if (!isCurrentRequest(requestId)) throw new Error('Transcript request was superseded');
+                        const page = await invoke<PaginatedTranscriptsResponse>('api_get_meeting_transcripts', args);
+                        if (!isCurrentRequest(requestId)) throw new Error('Transcript request was superseded');
+                        return page;
+                    });
+                    break;
+                } catch (error) {
+                    if (!isCurrentRequest(requestId)) return;
+                    if (attempt === 0 && error instanceof Error && error.message === 'Transcript total changed during pagination') {
+                        continue;
+                    }
+                    throw error;
+                }
             }
-            while (offset < total) {
-                const page = await invoke<PaginatedTranscriptsResponse>(
-                    'api_get_meeting_transcripts',
-                    { meetingId, limit: DEFAULT_PAGE_SIZE, offset }
-                );
-                if (!isCurrentRequest(requestId)) return;
-                if (page.transcripts.length === 0) throw new Error('Transcript pagination ended before all rows were loaded');
-                const known = new Set(all.map((item) => item.id));
-                const unique = page.transcripts.filter((item) => !known.has(item.id));
-                if (unique.length !== page.transcripts.length) throw new Error('Transcript pagination returned duplicate rows');
-                all.push(...unique);
-                offset += page.transcripts.length;
-                if (!page.has_more && offset < total) throw new Error('Transcript pagination ended before all rows were loaded');
-            }
+            if (!all || !isCurrentRequest(requestId)) return;
 
             const sorted = [...all].sort(
                 (a, b) => (a.audio_start_time ?? 0) - (b.audio_start_time ?? 0)
             );
             setTranscripts(sorted);
-            setTotalCount(total);
+            setTotalCount(sorted.length);
             setHasMore(false);
+            setError(null);
             offsetRef.current = sorted.length;
         } catch (err) {
             if (!isCurrentRequest(requestId)) return;

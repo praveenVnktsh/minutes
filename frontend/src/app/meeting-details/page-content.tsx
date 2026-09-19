@@ -36,6 +36,8 @@ export default function PageContent({
   meeting,
   summaryData,
   initialSummary,
+  initialSummaryError,
+  onRetryInitialSummary,
   onMeetingUpdated,
   onRefetchTranscripts,
   // Pagination props for efficient transcript loading
@@ -49,6 +51,8 @@ export default function PageContent({
   meeting: any;
   summaryData: MeetingSummary | null;
   initialSummary: SummaryProcessResponse | null;
+  initialSummaryError?: string | null;
+  onRetryInitialSummary?: () => void;
   onMeetingUpdated?: () => Promise<void>;
   onRefetchTranscripts?: () => Promise<void>;
   // Pagination props
@@ -83,7 +87,6 @@ export default function PageContent({
   const isTranscribing = latestMeetingActivity?.status === 'queued' || latestMeetingActivity?.status === 'transcribing';
   const activityError = latestMeetingActivity?.status === 'failed' ? latestMeetingActivity.error : null;
   const summaryActivity = activity.getSummaryActivity(meeting.id);
-  const hydratedInitialSummary = summaryActivity?.response ?? initialSummary;
   const [liveFolderPath, setLiveFolderPath] = useState<string | null>(null);
 
   // Ref to store the modal open function from SummaryGeneratorButtonGroup
@@ -102,25 +105,36 @@ export default function PageContent({
   const templates = useTemplates();
   const meetingTitle = meetingData.meetingTitle;
   const updateMeetingTitle = meetingData.updateMeetingTitle;
+  const lifetimeRef = useRef({ meetingId: meeting.id, mounted: true });
+  lifetimeRef.current.meetingId = meeting.id;
+  useEffect(() => {
+    const lifetime = lifetimeRef.current;
+    lifetime.mounted = true;
+    return () => { lifetime.mounted = false; };
+  }, []);
 
   const handleTitleChange = useCallback(async (nextTitle: string) => {
     const trimmed = nextTitle.trim();
     if (!trimmed || trimmed === meetingTitle) return;
     await renameMeeting(meeting.id, trimmed);
-    updateMeetingTitle(trimmed);
+    if (lifetimeRef.current.mounted && lifetimeRef.current.meetingId === meeting.id) {
+      updateMeetingTitle(trimmed);
+    }
   }, [meeting.id, meetingTitle, renameMeeting, updateMeetingTitle]);
 
   const handleOpenModelSettings = useCallback(async () => {
     try {
       await notePersistenceService.flushNotes(meetingNotesTarget(meeting.id));
-      router.push(settingsHref('summary'));
+      if (lifetimeRef.current.mounted && lifetimeRef.current.meetingId === meeting.id) {
+        router.push(settingsHref('summary'));
+      }
     } catch (error) {
       toast.error('Could not leave while notes are unsaved', { description: String(error) });
     }
   }, [meeting.id, router]);
 
   const summaryGeneration = useSummaryGeneration({
-    initialSummary: hydratedInitialSummary,
+    initialSummary,
     meeting,
     transcripts: meetingData.transcripts,
     modelConfig: modelConfig,
@@ -183,6 +197,15 @@ export default function PageContent({
     }
     previousActivityRevision.current = latestMeetingActivity?.revision ?? null;
   }, [latestMeetingActivity, onRefetchTranscripts]);
+
+  useEffect(() => {
+    const handleFinalized = (event: Event) => {
+      const finalizedMeetingId = (event as CustomEvent<{ meetingId?: string }>).detail?.meetingId;
+      if (finalizedMeetingId === meeting.id) void onRefetchTranscripts?.();
+    };
+    window.addEventListener('meetily:recording-finalized', handleFinalized);
+    return () => window.removeEventListener('meetily:recording-finalized', handleFinalized);
+  }, [meeting.id, onRefetchTranscripts]);
 
   // Glow the re-enhance control when the user's notes changed after the last
   // enhancement. Enhancement itself stays manual.
@@ -419,6 +442,8 @@ export default function PageContent({
               onSummaryChange={meetingData.handleSummaryChange}
               onDirtyChange={meetingData.setIsSummaryDirty}
               summaryError={summaryGeneration.summaryError}
+              summaryReadError={initialSummaryError}
+              onRetrySummaryRead={onRetryInitialSummary}
               onRegenerateSummary={summaryGeneration.handleRegenerateSummary}
               getSummaryStatusMessage={summaryGeneration.getSummaryStatusMessage}
               availableTemplates={templates.availableTemplates}

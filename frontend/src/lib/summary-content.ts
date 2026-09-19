@@ -62,6 +62,15 @@ export function hasVisibleSummaryContent(value: unknown): value is MeetingSummar
     .some(([, section]) => hasLegacySectionText(section));
 }
 
+export function isManuallyClearedSummary(value: unknown): value is MeetingSummary {
+  const object = parseSummaryObject(value);
+  if (!object || object.manually_cleared !== true || containsReasoningMarker(value)) return false;
+  return Object.keys(object).every((key) => ['markdown', 'summary_json', 'manually_cleared'].includes(key))
+    && object.markdown === ''
+    && Array.isArray(object.summary_json)
+    && !hasBlockText(object.summary_json);
+}
+
 const SummaryMetadata = z.object({
   MeetingName: z.string().optional(),
   reasoning_stripped: z.boolean().optional(),
@@ -91,5 +100,5 @@ export function parseSummaryContent(value: unknown): MeetingSummary | null {
       return null;
     }
   }
-  return hasVisibleSummaryContent(value) ? value : null;
+  return hasVisibleSummaryContent(value) || isManuallyClearedSummary(value) ? value : null;
 }

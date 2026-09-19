@@ -133,6 +133,9 @@ export function MeetingWorkspace({
     return () => observer.disconnect();
   }, [sidebarWidth]);
 
+  const activePointerCleanupRef = useRef<(() => void) | null>(null);
+  useEffect(() => () => activePointerCleanupRef.current?.(), []);
+
   useEffect(() => {
     const stored = localStorage.getItem(DOCK_RATIO_KEY);
     if (stored) {
@@ -162,6 +165,7 @@ export function MeetingWorkspace({
 
   const onDividerPointerDown = useCallback((event: React.PointerEvent) => {
     event.preventDefault();
+    activePointerCleanupRef.current?.();
     const rect = dockRef.current?.getBoundingClientRect();
     if (!rect) return;
     const startY = event.clientY;
@@ -172,9 +176,14 @@ export function MeetingWorkspace({
       const next = Math.min(80, Math.max(20, startRatio + deltaPct));
       setRatio(next);
     };
-    const up = () => {
+    const cleanup = () => {
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
+      activePointerCleanupRef.current = null;
+    };
+    const up = () => {
+      cleanup();
       setRatio((current) => {
         localStorage.setItem(DOCK_RATIO_KEY, String(current));
         return current;
@@ -182,10 +191,13 @@ export function MeetingWorkspace({
     };
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
+    activePointerCleanupRef.current = cleanup;
   }, [ratio]);
 
   const onColumnDividerPointerDown = useCallback((event: React.PointerEvent) => {
     event.preventDefault();
+    activePointerCleanupRef.current?.();
     const startX = event.clientX;
     const startWidth = dockWidth;
 
@@ -193,9 +205,14 @@ export function MeetingWorkspace({
       const delta = moveEvent.clientX - startX;
       setDockWidth(clampDockWidth(startWidth - delta, window.innerWidth, sidebarWidth));
     };
-    const up = () => {
+    const cleanup = () => {
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
+      activePointerCleanupRef.current = null;
+    };
+    const up = () => {
+      cleanup();
       setDockWidth((current) => {
         localStorage.setItem(DOCK_WIDTH_KEY, String(current));
         return current;
@@ -204,6 +221,8 @@ export function MeetingWorkspace({
 
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
+    activePointerCleanupRef.current = cleanup;
   }, [dockWidth, sidebarWidth]);
 
   const dateSubtitle = useMemo(() => formatDateSubtitle(createdAt), [createdAt]);
@@ -270,7 +289,7 @@ export function MeetingWorkspace({
             spellCheck={false}
             aria-label="Meeting title"
             placeholder="Untitled meeting"
-            className="w-full truncate bg-transparent font-serif text-[26px] font-semibold tracking-[-0.02em] text-ink outline-none placeholder:text-ink-subtle"
+            className="w-full truncate rounded bg-transparent font-serif text-[26px] font-semibold tracking-[-0.02em] text-ink outline-none placeholder:text-ink-subtle focus-visible:ring-2 focus-visible:ring-focus"
           />
           {(dateSubtitle || peopleCount > 0) && (
             <p className="mt-0.5 text-xs text-ink-subtle">

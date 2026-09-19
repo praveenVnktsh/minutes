@@ -303,6 +303,34 @@ describe('summary state restored when returning to a meeting', () => {
     expect(timers.size).toBe(0);
   });
 
+  test('remounts a pending regeneration with Stop attached to the delayed native start', async () => {
+    const initial = response({ status: 'completed', data: { markdown: 'Previous summary' } });
+    const processId = '2026-09-18T10:00:00.223456789Z';
+    let resolve!: (value: { process_id: string }) => void;
+    startProcess = () => new Promise(done => { resolve = done; });
+    getSummary = async () => initial;
+    await show(initial);
+    let generation!: Promise<void>;
+    await act(async () => {
+      generation = state.handleRegenerateSummary();
+      await new Promise((done) => setTimeout(done, 0));
+    });
+    await show(null);
+    await show(initial);
+    expect(state.summaryStatus).toBe('regenerating');
+
+    let stopping!: Promise<void>;
+    await act(async () => { stopping = state.handleStopGeneration(); });
+    await act(async () => {
+      resolve({ process_id: processId });
+      await Promise.all([generation, stopping]);
+    });
+    expect(invoke.mock.calls).toContainEqual([
+      'api_cancel_summary',
+      { meetingId: 'meeting-a', processId },
+    ]);
+  });
+
   test.each(['false', 'error'])('keeps observing when pending-start cancellation returns %s', async (outcome) => {
     const processId = '2026-09-18T10:00:00.123456789Z';
     let resolve!: (value: { process_id: string }) => void;

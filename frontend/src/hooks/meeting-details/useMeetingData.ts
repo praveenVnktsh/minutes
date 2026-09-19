@@ -1,9 +1,8 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
-import { MeetingSummary, Summary, Transcript } from '@/types';
+import { MeetingSummary, Summary } from '@/types';
 import { BlockNoteSummaryViewRef } from '@/components/AISummary/BlockNoteSummaryView';
-import { CurrentMeeting, useSidebar } from '@/components/Sidebar/SidebarProvider';
 import { invoke as invokeTauri } from '@tauri-apps/api/core';
-import { hasVisibleSummaryContent } from '@/lib/summary-content';
+import { hasVisibleSummaryContent, isManuallyClearedSummary } from '@/lib/summary-content';
 
 interface UseMeetingDataProps {
   meeting: any;
@@ -23,9 +22,6 @@ export function useMeetingData({ meeting, summaryData, onMeetingUpdated }: UseMe
   // Ref for BlockNoteSummaryView
   const blockNoteSummaryRef = useRef<BlockNoteSummaryViewRef>(null);
 
-  // Sidebar context
-  const { setCurrentMeeting, setMeetings, meetings: sidebarMeetings } = useSidebar();
-
   // Sync aiSummary state when summaryData prop changes (fixes display of fetched summaries)
   useEffect(() => {
     console.log('[useMeetingData] Syncing summary data from prop:', summaryData ? 'present' : 'null');
@@ -39,7 +35,7 @@ export function useMeetingData({ meeting, summaryData, onMeetingUpdated }: UseMe
 
 
   const handleSaveSummary = useCallback(async (summary: MeetingSummary) => {
-    if (!hasVisibleSummaryContent(summary)) {
+    if (!hasVisibleSummaryContent(summary) && !isManuallyClearedSummary(summary)) {
       throw new Error('Summary contains no visible content to save.');
     }
 
@@ -56,12 +52,7 @@ export function useMeetingData({ meeting, summaryData, onMeetingUpdated }: UseMe
   const updateMeetingTitle = useCallback((newTitle: string) => {
     console.log('📝 Updating meeting title to:', newTitle);
     setMeetingTitle(newTitle);
-    const updatedMeetings = sidebarMeetings.map((m: CurrentMeeting) =>
-      m.id === meeting.id ? { ...m, title: newTitle } : m
-    );
-    setMeetings(updatedMeetings);
-    setCurrentMeeting({ id: meeting.id, title: newTitle });
-  }, [meeting.id, sidebarMeetings, setMeetings, setCurrentMeeting]);
+  }, []);
 
   return {
     // State

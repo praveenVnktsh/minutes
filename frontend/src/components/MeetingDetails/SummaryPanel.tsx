@@ -6,7 +6,7 @@ import { EmptyStateSummary } from '@/components/EmptyStateSummary';
 import { ModelConfig } from '@/components/ModelSettingsModal';
 import Analytics from '@/lib/analytics';
 import { RefObject } from 'react';
-import { hasVisibleSummaryContent } from '@/lib/summary-content';
+import { parseSummaryContent } from '@/lib/summary-content';
 import { Button } from '@/components/ui/button';
 import { Loader2, Square } from 'lucide-react';
 
@@ -32,6 +32,8 @@ interface SummaryPanelProps {
   onSummaryChange: (summary: Summary) => void;
   onDirtyChange: (isDirty: boolean) => void;
   summaryError: string | null;
+  summaryReadError?: string | null;
+  onRetrySummaryRead?: () => void;
   onRegenerateSummary: () => Promise<void>;
   getSummaryStatusMessage: (status: 'idle' | 'processing' | 'summarizing' | 'regenerating' | 'completed' | 'error') => string;
   availableTemplates: Array<{ id: string, name: string, description: string }>;
@@ -55,18 +57,26 @@ export function SummaryPanel({
   onSummaryChange,
   onDirtyChange,
   summaryError,
+  summaryReadError,
+  onRetrySummaryRead,
   onRegenerateSummary,
   getSummaryStatusMessage,
   transcripts,
   onOpenModelSettings,
 }: SummaryPanelProps) {
   const isSummaryLoading = summaryStatus === 'processing' || summaryStatus === 'summarizing' || summaryStatus === 'regenerating';
-  const hasSummary = hasVisibleSummaryContent(aiSummary);
+  const hasSummary = parseSummaryContent(aiSummary) !== null;
 
   return (
     <div className="flex-1 min-w-0 flex flex-col bg-[var(--surface-0)] overflow-hidden h-full w-full">
       {!hasSummary ? (
-        isSummaryLoading ? (
+        summaryReadError ? (
+          <div className="flex flex-1 flex-col items-center justify-center gap-3 px-8 text-center" role="alert">
+            <p className="text-sm font-medium text-error">Could not load enhanced notes</p>
+            <p className="max-w-md text-xs text-ink-muted">{summaryReadError}</p>
+            <Button variant="outline" size="sm" onClick={onRetrySummaryRead}>Retry</Button>
+          </div>
+        ) : isSummaryLoading ? (
           <div className="flex flex-1 flex-col items-center justify-center gap-4" role="status">
             <Loader2 className="h-8 w-8 animate-spin text-info" />
             <p className="text-sm text-ink-muted">Generating summary…</p>
