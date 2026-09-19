@@ -419,7 +419,9 @@ async fn run_retranscription<R: Runtime>(
     );
 
     // Check for cancellation
-    if RETRANSCRIPTION_CANCELLED.load(Ordering::SeqCst) {
+    if RETRANSCRIPTION_CANCELLED.load(Ordering::SeqCst)
+        || !super::transcription_queue::enter_non_cancellable_stage(&app).await
+    {
         return Err(anyhow!("Retranscription cancelled"));
     }
 
@@ -495,8 +497,7 @@ async fn run_retranscription<R: Runtime>(
         warn!("Failed to update metadata.json: {}", e);
     }
 
-    // The diarizer cannot currently pause or cancel safely once model inference starts.
-    super::transcription_queue::set_active_task_controls_available(false);
+    // Persistence and diarization are one non-cancellable tail once committed.
     emit_progress(&app, &meeting_id, "diarizing", 95, "Identifying speakers...");
     let warning = super::diarization::run_for_meeting(&app, &meeting_id, None)
         .await

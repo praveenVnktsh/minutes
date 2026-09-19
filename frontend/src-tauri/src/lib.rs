@@ -226,6 +226,11 @@ async fn start_recording<R: Runtime>(
             }
 
             if let Some(request_id) = request_id {
+                if let Err(error) =
+                    meeting_prompt::associate_started_session(&request_id, &session_id)
+                {
+                    log_error!("Failed to associate recording request: {}", error);
+                }
                 if let Err(error) = meeting_prompt::acknowledge_recording_request(
                     app.clone(),
                     request_id,
@@ -485,6 +490,11 @@ async fn start_recording_with_devices_and_meeting<R: Runtime>(
             }
 
             if let Some(request_id) = request_id {
+                if let Err(error) =
+                    meeting_prompt::associate_started_session(&request_id, &session_id)
+                {
+                    log_error!("Failed to associate recording request: {}", error);
+                }
                 if let Err(error) = meeting_prompt::acknowledge_recording_request(
                     app.clone(),
                     request_id,

@@ -27,6 +27,7 @@ pub struct RecordingRequest {
     pub source: String,
     pub status: RecordingRequestStatus,
     pub claimed_by: Option<String>,
+    pub started_session_id: Option<String>,
 }
 
 fn pending_or_insert(pending: &mut Option<RecordingRequest>, source: &str) -> RecordingRequest {
@@ -36,6 +37,7 @@ fn pending_or_insert(pending: &mut Option<RecordingRequest>, source: &str) -> Re
             source: source.to_string(),
             status: RecordingRequestStatus::Pending,
             claimed_by: None,
+            started_session_id: None,
         })
         .clone()
 }
@@ -66,28 +68,24 @@ fn install_legacy_fallback<R: Runtime>(app: &AppHandle<R>, request_id: &str) {
     }
 }
 
-fn clear_legacy_fallback<R: Runtime>(app: &AppHandle<R>) {
+fn clear_legacy_fallback<R: Runtime>(app: &AppHandle<R>, request_id: &str) {
     if let Some(window) = app.get_webview_window("main") {
-        let _ = window.eval(
-            "sessionStorage.removeItem('autoStartRecording');sessionStorage.removeItem('pendingRecordingRequestId')",
+        let id = serde_json::to_string(request_id).unwrap_or_else(|_| "null".to_string());
+        let script = format!(
+            "if(sessionStorage.getItem('pendingRecordingRequestId')==={id}){{sessionStorage.removeItem('autoStartRecording');sessionStorage.removeItem('pendingRecordingRequestId')}}"
         );
+        let _ = window.eval(script);
     }
 }
 
 /// Dismiss the prompt for the current call (until audio stops).
 pub fn dismiss() {
     PROMPT_DISMISSED.store(true, Ordering::SeqCst);
-    *PENDING_REQUEST
-        .lock()
-        .unwrap_or_else(|error| error.into_inner()) = None;
 }
 
 /// Allow prompting again (called when system audio stops).
 pub fn reset() {
     PROMPT_DISMISSED.store(false, Ordering::SeqCst);
-    *PENDING_REQUEST
-        .lock()
-        .unwrap_or_else(|error| error.into_inner()) = None;
 }
 
 #[tauri::command]
@@ -124,6 +122,14 @@ fn claim_request_state(
     Ok(request.clone())
 }
 
+fn cancel_unclaimed(pending: &mut Option<RecordingRequest>) -> Option<String> {
+    if pending.as_ref().map(|request| &request.status) == Some(&RecordingRequestStatus::Pending) {
+        pending.take().map(|request| request.request_id)
+    } else {
+        None
+    }
+}
+
 #[tauri::command]
 pub fn claim_recording_request<R: Runtime>(
     app: AppHandle<R>,
@@ -131,7 +137,7 @@ pub fn claim_recording_request<R: Runtime>(
     claimant: String,
 ) -> Result<RecordingRequest, String> {
     let request = claim_request(&request_id, &claimant)?;
-    clear_legacy_fallback(&app);
+    clear_legacy_fallback(&app, &request_id);
     Ok(request)
 }
 
@@ -149,6 +155,13 @@ pub fn begin_recording_request(request_id: &str) -> Result<(), String> {
     let mut pending = PENDING_REQUEST
         .lock()
         .map_err(|_| "Recording request lock failed")?;
+    begin_recording_request_state(&mut pending, request_id)
+}
+
+fn begin_recording_request_state(
+    pending: &mut Option<RecordingRequest>,
+    request_id: &str,
+) -> Result<(), String> {
     let request = pending
         .as_mut()
         .ok_or_else(|| "No recording request is pending".to_string())?;
@@ -162,11 +175,45 @@ pub fn begin_recording_request(request_id: &str) -> Result<(), String> {
     Ok(())
 }
 
+pub fn associate_started_session(request_id: &str, session_id: &str) -> Result<(), String> {
+    let mut pending = PENDING_REQUEST
+        .lock()
+        .map_err(|_| "Recording request lock failed")?;
+    associate_started_session_state(&mut pending, request_id, session_id)
+}
+
+fn associate_started_session_state(
+    pending: &mut Option<RecordingRequest>,
+    request_id: &str,
+    session_id: &str,
+) -> Result<(), String> {
+    let request = pending
+        .as_mut()
+        .ok_or_else(|| "No recording request is pending".to_string())?;
+    if request.request_id != request_id || request.status != RecordingRequestStatus::Starting {
+        return Err("Recording request is not the active start".to_string());
+    }
+    request.started_session_id = Some(session_id.to_string());
+    Ok(())
+}
+
+fn matches_started_session(request: &RecordingRequest, current_session_id: Option<&str>) -> bool {
+    request.started_session_id.as_deref() == current_session_id && current_session_id.is_some()
+}
+
 /// Tauri command so the webview can dismiss the prompt.
 #[tauri::command]
 pub fn dismiss_meeting_prompt<R: Runtime>(app: AppHandle<R>) {
     dismiss();
-    clear_legacy_fallback(&app);
+    let request_id = {
+        let mut pending = PENDING_REQUEST
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        cancel_unclaimed(&mut pending)
+    };
+    if let Some(request_id) = request_id {
+        clear_legacy_fallback(&app, &request_id);
+    }
 }
 
 /// Position and show the `meeting-prompt` window for a detected app.
@@ -235,30 +282,34 @@ pub fn acknowledge_recording_request<R: Runtime>(
     if pending.as_ref().map(|request| request.request_id.as_str()) != Some(request_id.as_str()) {
         return Err("Recording request is stale".to_string());
     }
+    let request = pending.as_ref().expect("checked above");
+    let started_session_id = request.started_session_id.clone();
     if accepted {
-        let recording_started = crate::meeting_activity::recording_identity()
-            .map(|recording| {
+        let current_session_id = crate::meeting_activity::recording_identity()
+            .filter(|recording| {
                 matches!(
                     recording.status,
                     crate::meeting_activity::ActivityStatus::Recording
                         | crate::meeting_activity::ActivityStatus::Paused
                 )
             })
-            .unwrap_or(false);
-        if !recording_started {
+            .map(|recording| recording.session_id);
+        if !matches_started_session(request, current_session_id.as_deref()) {
             return Err("Recording request cannot be accepted before recording starts".to_string());
         }
     }
     *pending = None;
     drop(pending);
-    clear_legacy_fallback(&app);
+    clear_legacy_fallback(&app, &request_id);
     let result = serde_json::json!({
         "request_id": request_id,
         "accepted": accepted,
         "error": error,
+        "session_id": started_session_id,
     });
-    app.emit_to("meeting-prompt", "meeting-prompt-start-result", result)
-        .map_err(|error| error.to_string())?;
+    if let Err(error) = app.emit_to("meeting-prompt", "meeting-prompt-start-result", result) {
+        log::warn!("Failed to emit meeting prompt result: {error}");
+    }
     if accepted {
         dismiss();
         if let Some(window) = app.get_webview_window("meeting-prompt") {
@@ -294,5 +345,28 @@ mod tests {
         assert_eq!(claimed.status, RecordingRequestStatus::Claimed);
         assert_eq!(claimed.claimed_by.as_deref(), Some("controller"));
         assert!(claim_request_state(&mut pending, &request.request_id, "legacy").is_err());
+    }
+
+    #[test]
+    fn dismiss_does_not_erase_an_in_flight_request() {
+        let mut pending = None;
+        let request = pending_or_insert(&mut pending, "tray");
+        claim_request_state(&mut pending, &request.request_id, "controller").unwrap();
+
+        assert!(cancel_unclaimed(&mut pending).is_none());
+        assert_eq!(pending.unwrap().request_id, request.request_id);
+    }
+
+    #[test]
+    fn success_requires_the_session_started_for_that_request() {
+        let mut pending = None;
+        let request = pending_or_insert(&mut pending, "tray");
+        claim_request_state(&mut pending, &request.request_id, "controller").unwrap();
+        begin_recording_request_state(&mut pending, &request.request_id).unwrap();
+        associate_started_session_state(&mut pending, &request.request_id, "session-a").unwrap();
+        let request = pending.as_ref().unwrap();
+
+        assert!(matches_started_session(request, Some("session-a")));
+        assert!(!matches_started_session(request, Some("session-b")));
     }
 }

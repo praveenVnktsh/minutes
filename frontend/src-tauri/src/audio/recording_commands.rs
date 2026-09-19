@@ -51,24 +51,29 @@ fn recording_live() -> bool {
     IS_RECORDING.load(Ordering::SeqCst) && !IS_RECORDING_STOPPING.load(Ordering::SeqCst)
 }
 
-fn stopped_capture_needs_cleanup() -> bool {
-    IS_RECORDING.load(Ordering::SeqCst)
+fn stopped_capture_needing_cleanup() -> Option<String> {
+    let needs_cleanup = IS_RECORDING.load(Ordering::SeqCst)
         && !IS_RECORDING_STOPPING.load(Ordering::SeqCst)
         && RECORDING_MANAGER
             .lock()
             .unwrap()
             .as_ref()
             .map(|manager| !manager.get_state().is_recording())
-            .unwrap_or(false)
+            .unwrap_or(false);
+    needs_cleanup
+        .then(crate::meeting_activity::recording_identity)
+        .flatten()
+        .map(|recording| recording.session_id)
 }
 
 async fn cleanup_stopped_capture<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
-    if stopped_capture_needs_cleanup() {
-        let result = stop_recording(
+    if let Some(session_id) = stopped_capture_needing_cleanup() {
+        let result = stop_recording_session(
             app.clone(),
             RecordingArgs {
                 save_path: String::new(),
             },
+            Some(session_id),
         )
         .await;
         if result.is_err() && has_recording_session() {
@@ -111,6 +116,10 @@ fn claim_stop(flag: &AtomicBool) -> bool {
         .is_ok()
 }
 
+fn session_matches(expected: Option<&str>, current: &str) -> bool {
+    expected.map(|expected| expected == current).unwrap_or(true)
+}
+
 impl StoppingGuard {
     fn try_new() -> Result<Self, String> {
         claim_stop(&IS_RECORDING_STOPPING)
@@ -132,6 +141,13 @@ mod lifecycle_tests {
         assert!(IS_RECORDING_STOPPING.load(Ordering::SeqCst));
         drop(owner);
         assert!(!IS_RECORDING_STOPPING.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn failed_session_cleanup_cannot_target_a_replacement_session() {
+        assert!(super::session_matches(Some("failed-a"), "failed-a"));
+        assert!(!super::session_matches(Some("failed-a"), "healthy-b"));
+        assert!(super::session_matches(None, "manual-stop"));
     }
 }
 impl Drop for StoppingGuard {
@@ -852,7 +868,15 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
 /// Stop recording with optimized graceful shutdown ensuring NO transcript chunks are lost
 pub async fn stop_recording<R: Runtime>(
     app: AppHandle<R>,
+    args: RecordingArgs,
+) -> Result<(), String> {
+    stop_recording_session(app, args, None).await
+}
+
+async fn stop_recording_session<R: Runtime>(
+    app: AppHandle<R>,
     _args: RecordingArgs,
+    expected_session_id: Option<String>,
 ) -> Result<(), String> {
     info!(
         "🛑 Starting optimized recording shutdown - ensuring ALL transcript chunks are preserved"
@@ -870,6 +894,9 @@ pub async fn stop_recording<R: Runtime>(
     let session_id = crate::meeting_activity::recording_identity()
         .map(|recording| recording.session_id)
         .ok_or_else(|| "Active recording has no session identity".to_string())?;
+    if !session_matches(expected_session_id.as_deref(), &session_id) {
+        return Err("Recording session changed before cleanup".to_string());
+    }
 
     // Emit shutdown progress to frontend
     let _ = app.emit(
@@ -1281,7 +1308,7 @@ pub async fn stop_recording<R: Runtime>(
         let _ = app.emit(
             "recording-stopped",
             serde_json::json!({
-                "message": "Recording stopped but its audio could not be saved",
+                "message": "Recording stopped with an error",
                 "folder_path": folder_path_str,
                 "meeting_name": meeting_name_str,
                 "error": error

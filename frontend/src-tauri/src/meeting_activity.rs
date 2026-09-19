@@ -52,6 +52,7 @@ pub struct MeetingActivity {
     pub progress_percentage: Option<u32>,
     pub message: Option<String>,
     pub error: Option<String>,
+    pub warning: Option<String>,
     pub controls_available: bool,
     pub revision: u64,
 }
@@ -82,6 +83,13 @@ impl ActivityStore {
             recording: self.recording.clone(),
             activities: self.activities.iter().cloned().collect(),
         }
+    }
+
+    fn task_meeting_id(&self, task_id: &str) -> Option<String> {
+        self.activities
+            .iter()
+            .find(|activity| activity.task_id == task_id)
+            .and_then(|activity| activity.meeting_id.clone())
     }
 
     fn trim_terminal(&mut self) {
@@ -150,6 +158,7 @@ impl ActivityStore {
             progress_percentage: None,
             message: None,
             error: terminal_error,
+            warning: None,
             controls_available: false,
             revision,
         });
@@ -242,6 +251,13 @@ pub fn recording_identity() -> Option<RecordingActivity> {
         .clone()
 }
 
+pub fn task_meeting_id(task_id: &str) -> Option<String> {
+    STORE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .task_meeting_id(task_id)
+}
+
 #[tauri::command]
 pub fn bind_active_recording_meeting<R: Runtime>(
     app: AppHandle<R>,
@@ -280,6 +296,7 @@ pub fn register_task<R: Runtime>(
             progress_percentage: None,
             message: None,
             error: None,
+            warning: None,
             controls_available: true,
             revision,
         });
@@ -295,6 +312,20 @@ pub fn set_task_controls_available<R: Runtime>(app: &AppHandle<R>, task_id: &str
             .find(|activity| activity.task_id == task_id && !activity.status.is_terminal())
         {
             activity.controls_available = available;
+            activity.revision = revision;
+        }
+    });
+}
+
+pub fn set_task_warning<R: Runtime>(app: &AppHandle<R>, task_id: &str, warning: Option<String>) {
+    update(app, |store| {
+        let revision = store.next_revision();
+        if let Some(activity) = store
+            .activities
+            .iter_mut()
+            .find(|activity| activity.task_id == task_id)
+        {
+            activity.warning = warning;
             activity.revision = revision;
         }
     });
@@ -413,6 +444,30 @@ mod tests {
     }
 
     #[test]
+    fn task_lookup_uses_the_meeting_bound_after_import_persistence() {
+        let mut store = ActivityStore::default();
+        store.activities.push_back(MeetingActivity {
+            task_id: "import-1".to_string(),
+            meeting_id: Some("meeting-created".to_string()),
+            kind: ActivityKind::Import,
+            status: ActivityStatus::Saving,
+            title: "Import".to_string(),
+            stage: Some("saving".to_string()),
+            progress_percentage: Some(90),
+            message: None,
+            error: None,
+            warning: None,
+            controls_available: false,
+            revision: 1,
+        });
+
+        assert_eq!(
+            store.task_meeting_id("import-1").as_deref(),
+            Some("meeting-created")
+        );
+    }
+
+    #[test]
     fn terminal_activity_retention_is_bounded_without_dropping_active_jobs() {
         let mut store = ActivityStore::default();
         for index in 0..=TERMINAL_ACTIVITY_LIMIT {
@@ -426,6 +481,7 @@ mod tests {
                 progress_percentage: Some(100),
                 message: None,
                 error: None,
+                warning: None,
                 controls_available: false,
                 revision: index as u64,
             });
@@ -440,6 +496,7 @@ mod tests {
             progress_percentage: None,
             message: None,
             error: None,
+            warning: None,
             controls_available: true,
             revision: 100,
         });

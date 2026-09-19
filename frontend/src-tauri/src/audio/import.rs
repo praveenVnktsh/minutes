@@ -632,7 +632,9 @@ async fn run_import<R: Runtime>(
     );
 
     // Check for cancellation
-    if IMPORT_CANCELLED.load(Ordering::SeqCst) {
+    if IMPORT_CANCELLED.load(Ordering::SeqCst)
+        || !super::transcription_queue::enter_non_cancellable_stage(&app).await
+    {
         let _ = std::fs::remove_dir_all(&meeting_folder);
         return Err(anyhow!("Import cancelled"));
     }

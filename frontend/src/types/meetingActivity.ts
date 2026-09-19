@@ -32,6 +32,7 @@ export interface MeetingActivity {
   progress_percentage: number | null;
   message: string | null;
   error: string | null;
+  warning: string | null;
   controls_available: boolean;
   revision: number;
 }
@@ -47,10 +48,12 @@ export interface RecordingStartRequest {
   source: 'meeting_prompt' | 'tray' | string;
   status: 'pending' | 'claimed' | 'starting';
   claimed_by: string | null;
+  started_session_id: string | null;
 }
 
 export interface RecordingRequestResult {
   request_id: string;
   accepted: boolean;
   error: string | null;
+  session_id: string | null;
 }
