@@ -17,7 +17,7 @@
         "height": 700,
         "resizable": true,
         "fullscreen": false,
-        "theme": "Light",
+        "minWidth": 760,
         "decorations": true
       },
       {
@@ -80,6 +80,7 @@
             "core:window:allow-show",
             "core:window:allow-hide",
             "core:window:allow-set-focus",
+            "core:window:allow-set-theme",
             "store:default",
             "deep-link:default",
             "notification:default",

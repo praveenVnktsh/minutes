@@ -1,11 +1,16 @@
 'use client';
 
-import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
-
-type Theme = 'light' | 'dark';
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useRecordingController } from '@/contexts/RecordingControllerContext';
+import { useRecordingState } from '@/contexts/RecordingStateContext';
+import { useMeetingNavigation } from '@/hooks/useNavigation';
+import { useImportDialog } from '@/contexts/ImportDialogContext';
+import { useConfig } from '@/contexts/ConfigContext';
+import { settingsHref } from '@/components/settings/settingsSections';
+import type { CurrentMeeting } from '@/components/Sidebar/SidebarProvider';
+import { applyTheme, persistAndBroadcastTheme, readTheme, type AppTheme } from '@/lib/theme';
 
 const COLLAPSED_KEY = 'meetily:sidebar-collapsed';
-const THEME_KEY = 'meetily:theme';
 
 /** Below this viewport width the app switches to a compact, collapsed layout. */
 export const COMPACT_BREAKPOINT = 1280;
@@ -14,11 +19,19 @@ interface ShellContextValue {
   collapsed: boolean;
   setCollapsed: (value: boolean) => void;
   toggleCollapsed: () => void;
-  theme: Theme;
-  setTheme: (theme: Theme) => void;
+  theme: AppTheme;
+  setTheme: (theme: AppTheme) => void;
   toggleTheme: () => void;
   /** True when the window is narrow; the sidebar auto-collapses and docks stack. */
   compact: boolean;
+  recordingActionLabel: 'New meeting' | 'Return to recording' | 'Stop recording';
+  runRecordingAction: () => Promise<void>;
+  importActionLabel: 'Import recording' | 'Enable audio import';
+  runImportAction: () => Promise<void>;
+  navigate: (href: string) => Promise<void>;
+  openMeeting: (meeting: CurrentMeeting) => Promise<void>;
+  isNavigating: boolean;
+  navigationError: Error | null;
 }
 
 const ShellContext = createContext<ShellContextValue | null>(null);
@@ -28,16 +41,24 @@ export const SIDEBAR_COLLAPSED_WIDTH = 72;
 
 export function ShellProvider({ children }: { children: React.ReactNode }) {
   const [collapsed, setCollapsedState] = useState(false);
-  const [theme, setThemeState] = useState<Theme>('dark');
+  const [theme, setThemeState] = useState<AppTheme>(readTheme);
   const [compact, setCompact] = useState(false);
   // Remembers the user's own collapse choice so leaving compact mode restores it.
   const userCollapsedRef = useRef(false);
 
+  const controller = useRecordingController();
+  const recordingState = useRecordingState();
+  const meetingNavigation = useMeetingNavigation();
+  const { openImportDialog } = useImportDialog();
+  const { betaFeatures } = useConfig();
+
+  useLayoutEffect(() => {
+    applyTheme(theme);
+  }, [theme]);
+
   useEffect(() => {
     const storedCollapsed = localStorage.getItem(COLLAPSED_KEY) === 'true';
     userCollapsedRef.current = storedCollapsed;
-    const storedTheme = localStorage.getItem(THEME_KEY);
-    if (storedTheme === 'light' || storedTheme === 'dark') setThemeState(storedTheme);
 
     const applyViewport = () => {
       const isCompact = window.innerWidth < COMPACT_BREAKPOINT;
@@ -48,10 +69,6 @@ export function ShellProvider({ children }: { children: React.ReactNode }) {
     window.addEventListener('resize', applyViewport);
     return () => window.removeEventListener('resize', applyViewport);
   }, []);
-
-  useEffect(() => {
-    document.documentElement.classList.toggle('dark', theme === 'dark');
-  }, [theme]);
 
   const setCollapsed = useCallback((value: boolean) => {
     userCollapsedRef.current = value;
@@ -68,21 +85,76 @@ export function ShellProvider({ children }: { children: React.ReactNode }) {
     });
   }, []);
 
-  const setTheme = useCallback((next: Theme) => {
+  const setTheme = useCallback((next: AppTheme) => {
     setThemeState(next);
-    localStorage.setItem(THEME_KEY, next);
+    void persistAndBroadcastTheme(next);
   }, []);
 
   const toggleTheme = useCallback(() => {
     setThemeState((current) => {
       const next = current === 'dark' ? 'light' : 'dark';
-      localStorage.setItem(THEME_KEY, next);
+      void persistAndBroadcastTheme(next);
       return next;
     });
   }, []);
 
+  const hasNativeSession = recordingState.isRecording;
+  const recordingActionLabel = hasNativeSession
+    ? controller.activeMeetingId ? 'Return to recording' : 'Stop recording'
+    : 'New meeting';
+  const runRecordingAction = useCallback(async () => {
+    if (recordingState.isRecording) {
+      if (controller.activeMeetingId) await controller.returnToRecording();
+      else await controller.stopRecording();
+      return;
+    }
+    await controller.startRecording({ source: 'app_shell' });
+  }, [controller, recordingState.isRecording]);
+  const importEnabled = betaFeatures.importAndRetranscribe;
+  const runImportAction = useCallback(async () => {
+    if (importEnabled) {
+      openImportDialog();
+      return;
+    }
+    await meetingNavigation.navigate(settingsHref('beta'));
+  }, [importEnabled, meetingNavigation, openImportDialog]);
+
+  const value = useMemo<ShellContextValue>(() => ({
+    collapsed,
+    setCollapsed,
+    toggleCollapsed,
+    theme,
+    setTheme,
+    toggleTheme,
+    compact,
+    recordingActionLabel,
+    runRecordingAction,
+    importActionLabel: importEnabled ? 'Import recording' : 'Enable audio import',
+    runImportAction,
+    navigate: meetingNavigation.navigate,
+    openMeeting: meetingNavigation.openMeeting,
+    isNavigating: meetingNavigation.isNavigating,
+    navigationError: meetingNavigation.navigationError,
+  }), [
+    collapsed,
+    compact,
+    importEnabled,
+    meetingNavigation.isNavigating,
+    meetingNavigation.navigate,
+    meetingNavigation.navigationError,
+    meetingNavigation.openMeeting,
+    recordingActionLabel,
+    runImportAction,
+    runRecordingAction,
+    setCollapsed,
+    setTheme,
+    theme,
+    toggleCollapsed,
+    toggleTheme,
+  ]);
+
   return (
-    <ShellContext.Provider value={{ collapsed, setCollapsed, toggleCollapsed, theme, setTheme, toggleTheme, compact }}>
+    <ShellContext.Provider value={value}>
       {children}
     </ShellContext.Provider>
   );

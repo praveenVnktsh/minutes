@@ -1,13 +1,12 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
-import { usePathname, useRouter } from 'next/navigation';
+import { usePathname } from 'next/navigation';
 import {
   Archive,
   ArchiveRestore,
   AudioLines,
   Bug,
-  Home,
   MessageSquare,
   Mic,
   Moon,
@@ -22,15 +21,13 @@ import {
   Video,
   X,
 } from 'lucide-react';
-import { invoke } from '@tauri-apps/api/core';
 import { useSidebar, type CurrentMeeting } from '@/components/Sidebar/SidebarProvider';
-import { useRecordingState } from '@/contexts/RecordingStateContext';
 import { useDebugMode } from '@/hooks/useDebugMode';
 import { setDebugMode } from '@/lib/debugMode';
 import { useShell } from '@/contexts/ShellContext';
-import { useImportDialog } from '@/contexts/ImportDialogContext';
-import { useConfig } from '@/contexts/ConfigContext';
 import { SendFeedbackDialog } from '@/components/SendFeedbackDialog';
+import { useMeetingActivity } from '@/contexts/MeetingActivityContext';
+import { StatusFeedback } from '@/components/ui/status-feedback';
 
 function formatMeetingDate(iso?: string): string {
   if (!iso) return '';
@@ -47,27 +44,47 @@ function formatMeetingDate(iso?: string): string {
 }
 
 export default function SimpleSidebar() {
-  const router = useRouter();
   const pathname = usePathname();
-  const { collapsed, toggleCollapsed, theme, toggleTheme } = useShell();
   const {
-    meetings,
+    collapsed,
+    toggleCollapsed,
+    theme,
+    toggleTheme,
+    recordingActionLabel,
+    runRecordingAction,
+    importActionLabel,
+    runImportAction,
+    navigate,
+    openMeeting,
+  } = useShell();
+  const {
     currentMeeting,
-    setCurrentMeeting,
-    handleRecordingToggle,
     searchTranscripts,
-    searchResults,
     isSearching,
-    refetchMeetings,
+    searchStatus,
+    searchError,
+    selectMeetings,
+    selectSearchResults,
+    setMeetingPinned,
+    setMeetingArchived,
+    meetingMutations,
   } = useSidebar();
-  const { isRecording } = useRecordingState();
+  const { activeMeetingId } = useMeetingActivity();
   const debugMode = useDebugMode();
-  const { openImportDialog } = useImportDialog();
-  const { betaFeatures } = useConfig();
   const [query, setQuery] = useState('');
   const [showArchived, setShowArchived] = useState(false);
   const [showFeedback, setShowFeedback] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
+
+  const runShellAction = async (action: () => Promise<void>) => {
+    setActionError(null);
+    try {
+      await action();
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : String(error));
+    }
+  };
 
   useEffect(() => {
     const timer = setTimeout(() => void searchTranscripts(query), 250);
@@ -85,41 +102,30 @@ export default function SimpleSidebar() {
   }, [collapsed, toggleCollapsed]);
 
   // Debug recordings are hidden unless debug mode is on.
-  const scopedMeetings = useMemo(
-    () => (debugMode ? meetings : meetings.filter((meeting) => !meeting.debug)),
-    [meetings, debugMode],
-  );
+  const scopedMeetings = useMemo(() => selectMeetings({ includeArchived: true, debugMode }), [debugMode, selectMeetings]);
 
   const visibleMeetings = useMemo(() => {
     if (!query.trim()) return scopedMeetings;
-    const byId = new Map(scopedMeetings.map((meeting) => [meeting.id, meeting]));
-    return searchResults
-      .map((result) => byId.get(result.id) ?? { id: result.id, title: result.title, created_at: undefined })
-      .filter((meeting) => debugMode || !meeting.debug);
-  }, [scopedMeetings, debugMode, query, searchResults]);
-
-  const openMeeting = (meeting: { id: string; title: string; created_at?: string }) => {
-    setCurrentMeeting(meeting);
-    router.push(`/meeting-details?id=${meeting.id}`);
-  };
+    return selectSearchResults({ includeArchived: showArchived, debugMode });
+  }, [scopedMeetings, debugMode, query, selectSearchResults, showArchived]);
 
   const togglePinned = async (event: MouseEvent, meeting: CurrentMeeting) => {
     event.stopPropagation();
+    setActionError(null);
     try {
-      await invoke('api_set_meeting_pinned', { meetingId: meeting.id, pinned: !meeting.pinned });
-      await refetchMeetings();
+      await setMeetingPinned(meeting.id, !meeting.pinned);
     } catch (error) {
-      console.error('Failed to update pin:', error);
+      setActionError(error instanceof Error ? error.message : String(error));
     }
   };
 
   const toggleArchived = async (event: MouseEvent, meeting: CurrentMeeting) => {
     event.stopPropagation();
+    setActionError(null);
     try {
-      await invoke('api_set_meeting_archived', { meetingId: meeting.id, archived: !meeting.archived });
-      await refetchMeetings();
+      await setMeetingArchived(meeting.id, !meeting.archived);
     } catch (error) {
-      console.error('Failed to update archive:', error);
+      setActionError(error instanceof Error ? error.message : String(error));
     }
   };
 
@@ -131,6 +137,9 @@ export default function SimpleSidebar() {
 
   const renderMeetingRow = (meeting: CurrentMeeting) => {
     const active = Boolean(pathname?.includes('/meeting-details')) && currentMeeting?.id === meeting.id;
+    const live = activeMeetingId === meeting.id;
+    const mutation = meetingMutations[meeting.id];
+    const pending = mutation?.pin?.status === 'pending' || mutation?.archive?.status === 'pending';
     return (
       <div
         key={meeting.id}
@@ -138,7 +147,7 @@ export default function SimpleSidebar() {
       >
         <button
           type="button"
-          onClick={() => openMeeting(meeting)}
+          onClick={() => void openMeeting(meeting).catch(() => {})}
           title={meeting.title}
           className="flex min-w-0 flex-1 items-start gap-2.5 px-3 py-2.5 text-left"
         >
@@ -149,6 +158,7 @@ export default function SimpleSidebar() {
           <span className="min-w-0 flex-1">
             <span className={`flex items-center gap-1.5 text-[13px] leading-5 ${active ? 'font-medium text-ink' : 'text-ink-muted'}`}>
               <span className="truncate">{meeting.title}</span>
+              {live && <span className="shrink-0 rounded bg-recording-subtle px-1 py-px text-[9px] font-semibold uppercase tracking-wide text-recording">live</span>}
               {meeting.debug && (
                 <span className="shrink-0 rounded bg-amber-400/20 px-1 py-px text-[9px] font-semibold uppercase tracking-wide text-amber-600">
                   debug
@@ -164,6 +174,7 @@ export default function SimpleSidebar() {
           <button
             type="button"
             onClick={(event) => togglePinned(event, meeting)}
+            disabled={pending}
             title={meeting.pinned ? 'Unpin' : 'Pin'}
             className="rounded p-1 text-ink-subtle hover:bg-surface-1 hover:text-ink"
           >
@@ -172,6 +183,7 @@ export default function SimpleSidebar() {
           <button
             type="button"
             onClick={(event) => toggleArchived(event, meeting)}
+            disabled={pending}
             title={meeting.archived ? 'Unarchive' : 'Archive'}
             className="rounded p-1 text-ink-subtle hover:bg-surface-1 hover:text-ink"
           >
@@ -182,15 +194,12 @@ export default function SimpleSidebar() {
     );
   };
 
-  const navItems = [
-    { label: 'Home', icon: Home, active: pathname === '/', onClick: () => router.push('/') },
-    {
-      label: 'Meetings',
-      icon: Video,
-      active: Boolean(pathname?.includes('/meeting-details')),
-      onClick: () => router.push('/'),
-    },
-  ];
+  const navItems = [{
+    label: 'Meetings',
+    icon: Video,
+    active: pathname === '/' || Boolean(pathname?.includes('/meeting-details')),
+    onClick: () => void navigate('/').catch(() => {}),
+  }];
 
   return (
     <aside
@@ -204,7 +213,7 @@ export default function SimpleSidebar() {
         <div className="mt-8 flex flex-col items-center gap-3">
           <button
             type="button"
-            onClick={() => router.push('/')}
+            onClick={() => void navigate('/').catch(() => {})}
             className="no-drag flex h-7 w-7 items-center justify-center rounded-[10px] bg-brand text-brand-foreground"
             title="minutes"
           >
@@ -221,7 +230,7 @@ export default function SimpleSidebar() {
         </div>
       ) : (
         <div className="mt-8 flex items-center justify-between px-1">
-          <button type="button" onClick={() => router.push('/')} className="no-drag flex items-center gap-2 text-left" title="minutes">
+          <button type="button" onClick={() => void navigate('/').catch(() => {})} className="no-drag flex items-center gap-2 text-left" title="minutes">
             <span className="flex h-7 w-7 items-center justify-center rounded-[10px] bg-brand text-brand-foreground">
               <AudioLines className="h-4 w-4" />
             </span>
@@ -241,28 +250,27 @@ export default function SimpleSidebar() {
       {/* New meeting */}
       <button
         type="button"
-        onClick={handleRecordingToggle}
-        title={isRecording ? 'Return to recording' : 'New meeting'}
+        onClick={() => void runShellAction(runRecordingAction)}
+        title={recordingActionLabel}
         className={`mt-5 flex h-10 items-center gap-2 rounded-xl text-sm font-semibold transition ${collapsed ? 'w-full justify-center px-0' : 'w-full px-3'
-          } ${isRecording
+          } ${recordingActionLabel !== 'New meeting'
             ? 'bg-[#3a2320] text-[#e6938a] hover:opacity-90'
             : 'bg-brand text-brand-foreground hover:opacity-90'}`}
       >
-        {isRecording ? (
+        {recordingActionLabel !== 'New meeting' ? (
           <span className="h-2 w-2 animate-pulse rounded-full bg-[#d74d3f]" />
         ) : (
           <Mic className="h-4 w-4" />
         )}
-        {!collapsed && <span>{isRecording ? 'Return to recording' : 'New meeting'}</span>}
+        {!collapsed && <span>{recordingActionLabel}</span>}
       </button>
 
       {/* Import recording */}
-      {betaFeatures.importAndRetranscribe && (
-        collapsed ? (
+      {collapsed ? (
           <button
             type="button"
-            onClick={() => openImportDialog()}
-            title="Import recording"
+            onClick={() => void runShellAction(runImportAction)}
+            title={importActionLabel}
             className="mt-2 flex h-10 w-full items-center justify-center rounded-xl text-ink-subtle hover:bg-surface-2 hover:text-ink"
           >
             <Upload className="h-4 w-4" />
@@ -270,13 +278,12 @@ export default function SimpleSidebar() {
         ) : (
           <button
             type="button"
-            onClick={() => openImportDialog()}
+            onClick={() => void runShellAction(runImportAction)}
             className="mt-2 flex h-10 w-full items-center gap-3 rounded-xl px-3 text-sm text-ink-muted hover:bg-surface-2 hover:text-ink"
           >
-            <Upload className="h-4 w-4" /> Import recording
+            <Upload className="h-4 w-4" /> {importActionLabel}
           </button>
-        )
-      )}
+        )}
 
       {/* Search */}
       {collapsed ? (
@@ -352,8 +359,10 @@ export default function SimpleSidebar() {
                 {archivedMeetings.map(renderMeetingRow)}
               </>
             )}
-            {!isSearching && regularMeetings.length === 0 && pinnedMeetings.length === 0 && !(showArchived && archivedMeetings.length > 0) && (
-              <p className="px-3 py-6 text-center text-xs leading-5 text-ink-subtle">Your meetings will appear here.</p>
+            {searchStatus === 'error' && <StatusFeedback tone="error" className="mx-2 text-xs">{searchError ?? 'Search failed.'}</StatusFeedback>}
+            {actionError && <StatusFeedback tone="error" className="mx-2 text-xs">{actionError}</StatusFeedback>}
+            {!isSearching && searchStatus !== 'error' && regularMeetings.length === 0 && pinnedMeetings.length === 0 && !(showArchived && archivedMeetings.length > 0) && (
+              <p className="px-3 py-6 text-center text-xs leading-5 text-ink-subtle">{query.trim() ? 'No meetings match this search.' : 'Your meetings will appear here.'}</p>
             )}
           </nav>
           {(archivedCount > 0 || showArchived) && (
@@ -387,7 +396,7 @@ export default function SimpleSidebar() {
           )}
           <button
             type="button"
-            onClick={() => router.push('/settings')}
+            onClick={() => void navigate('/settings').catch(() => {})}
             className={`rounded-lg p-2 hover:bg-surface-2 hover:text-ink ${pathname === '/settings' ? 'text-ink' : 'text-ink-subtle'}`}
             title="Settings"
           >
