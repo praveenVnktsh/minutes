@@ -52,6 +52,7 @@ pub struct QueueProgressEvent {
     pub task_id: String,
     pub task_type: TaskType,
     pub title: String,
+    pub meeting_id: Option<String>,
     pub stage: String,
     pub progress_percentage: u32,
     pub message: String,
@@ -69,6 +70,7 @@ pub struct QueueCompleteEvent {
     pub meeting_id: String,
     pub segments_count: usize,
     pub duration_seconds: f64,
+    pub warning: Option<String>,
 }
 
 /// Error event emitted by the queue
@@ -77,6 +79,8 @@ pub struct QueueErrorEvent {
     pub task_id: String,
     pub task_type: TaskType,
     pub title: String,
+    pub meeting_id: Option<String>,
+    pub status: TaskStatus,
     pub error: String,
 }
 
@@ -94,40 +98,106 @@ pub struct QueueTaskInfo {
     pub task_id: String,
     pub task_type: TaskType,
     pub title: String,
+    pub meeting_id: Option<String>,
     pub status: TaskStatus,
+    pub controls_available: bool,
+}
+
+fn correlated_meeting_id(task: &TranscriptionTask) -> Option<String> {
+    crate::meeting_activity::task_meeting_id(&task.task_id).or_else(|| task.meeting_id.clone())
 }
 
 /// Per-task control flags (cancel + pause)
 struct TaskFlags {
     cancelled: Arc<AtomicBool>,
     paused: Arc<AtomicBool>,
+    controls_available: Arc<AtomicBool>,
 }
 
-static TASK_FLAGS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, TaskFlags>>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+static TASK_FLAGS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, TaskFlags>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
 /// Global notify used to wake paused tasks when resume is called
 static RESUME_NOTIFY: std::sync::LazyLock<Arc<Notify>> =
     std::sync::LazyLock::new(|| Arc::new(Notify::new()));
 
-/// Get or create a cancellation flag for a task
-fn get_cancel_flag(task_id: &str) -> Arc<AtomicBool> {
+fn create_task_flags(task_id: &str) {
     let mut flags = TASK_FLAGS.lock().unwrap_or_else(|e| e.into_inner());
-    let entry = flags.entry(task_id.to_string()).or_insert_with(|| TaskFlags {
-        cancelled: Arc::new(AtomicBool::new(false)),
-        paused: Arc::new(AtomicBool::new(false)),
-    });
-    entry.cancelled.clone()
+    flags.insert(
+        task_id.to_string(),
+        TaskFlags {
+            cancelled: Arc::new(AtomicBool::new(false)),
+            paused: Arc::new(AtomicBool::new(false)),
+            controls_available: Arc::new(AtomicBool::new(true)),
+        },
+    );
 }
 
-/// Get or create a pause flag for a task
-fn get_pause_flag(task_id: &str) -> Arc<AtomicBool> {
-    let mut flags = TASK_FLAGS.lock().unwrap_or_else(|e| e.into_inner());
-    let entry = flags.entry(task_id.to_string()).or_insert_with(|| TaskFlags {
-        cancelled: Arc::new(AtomicBool::new(false)),
-        paused: Arc::new(AtomicBool::new(false)),
-    });
-    entry.paused.clone()
+fn task_flags(task_id: &str) -> Option<(Arc<AtomicBool>, Arc<AtomicBool>, Arc<AtomicBool>)> {
+    TASK_FLAGS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(task_id)
+        .map(|flags| {
+            (
+                flags.cancelled.clone(),
+                flags.paused.clone(),
+                flags.controls_available.clone(),
+            )
+        })
+}
+
+fn request_cancel(task_id: &str) -> bool {
+    let flags = TASK_FLAGS.lock().unwrap_or_else(|error| error.into_inner());
+    let Some(flags) = flags.get(task_id) else {
+        return false;
+    };
+    if !flags.controls_available.load(Ordering::SeqCst) {
+        return false;
+    }
+    flags.cancelled.store(true, Ordering::SeqCst);
+    true
+}
+
+fn request_pause(task_id: &str, paused: bool) -> bool {
+    let flags = TASK_FLAGS.lock().unwrap_or_else(|error| error.into_inner());
+    let Some(flags) = flags.get(task_id) else {
+        return false;
+    };
+    if !flags.controls_available.load(Ordering::SeqCst) {
+        return false;
+    }
+    flags.paused.store(paused, Ordering::SeqCst);
+    true
+}
+
+enum BoundaryState {
+    Entered,
+    Paused,
+    Cancelled,
+}
+
+fn close_controls(task_id: &str) -> BoundaryState {
+    let flags = TASK_FLAGS.lock().unwrap_or_else(|error| error.into_inner());
+    let Some(flags) = flags.get(task_id) else {
+        return BoundaryState::Cancelled;
+    };
+    if flags.cancelled.load(Ordering::SeqCst) {
+        return BoundaryState::Cancelled;
+    }
+    if flags.paused.load(Ordering::SeqCst) {
+        return BoundaryState::Paused;
+    }
+    flags.controls_available.store(false, Ordering::SeqCst);
+    BoundaryState::Entered
+}
+
+fn disable_controls(task_id: &str) {
+    let flags = TASK_FLAGS.lock().unwrap_or_else(|error| error.into_inner());
+    if let Some(flags) = flags.get(task_id) {
+        flags.controls_available.store(false, Ordering::SeqCst);
+    }
 }
 
 /// Remove flags for a completed/failed task
@@ -158,14 +228,40 @@ pub fn is_task_paused(task_id: &str) -> bool {
 /// Returns false if the task was cancelled while paused.
 pub async fn wait_if_paused(task_id: &str) -> bool {
     loop {
-        if !is_task_paused(task_id) {
-            return true; // not paused, continue
-        }
+        let notified = RESUME_NOTIFY.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
         if is_task_cancelled(task_id) {
             return false; // cancelled while paused
         }
-        // Wait for a resume signal, then re-check
-        RESUME_NOTIFY.notified().await;
+        if !is_task_paused(task_id) {
+            return true; // not paused, continue
+        }
+        notified.await;
+    }
+}
+
+pub async fn enter_non_cancellable_stage<R: Runtime>(app: &AppHandle<R>) -> bool {
+    let task_id = ACTIVE_TASK_ID
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let Some(task_id) = task_id else {
+        return true;
+    };
+    loop {
+        match close_controls(&task_id) {
+            BoundaryState::Entered => {
+                crate::meeting_activity::set_task_controls_available(app, &task_id, false);
+                return true;
+            }
+            BoundaryState::Cancelled => return false,
+            BoundaryState::Paused => {
+                if !wait_if_paused(&task_id).await {
+                    return false;
+                }
+            }
+        }
     }
 }
 
@@ -197,6 +293,7 @@ pub async fn check_pause() -> bool {
 pub struct TranscriptionQueue {
     tasks: Arc<Mutex<VecDeque<TranscriptionTask>>>,
     active_task: Arc<Mutex<Option<TranscriptionTask>>>,
+    transition: Arc<Mutex<()>>,
     notify: Arc<Notify>,
 }
 
@@ -205,21 +302,46 @@ impl TranscriptionQueue {
         Self {
             tasks: Arc::new(Mutex::new(VecDeque::new())),
             active_task: Arc::new(Mutex::new(None)),
+            transition: Arc::new(Mutex::new(())),
             notify: Arc::new(Notify::new()),
         }
     }
 
+    async fn activate_next(&self) -> Option<TranscriptionTask> {
+        let _transition = self.transition.lock().await;
+        let mut tasks = self.tasks.lock().await;
+        let task = tasks.pop_front();
+        if let Some(task) = task.as_ref() {
+            let mut active = self.active_task.lock().await;
+            *active = Some(task.clone());
+        }
+        task
+    }
+
     /// Add a task to the queue and return its task_id
-    pub async fn enqueue(&self, mut task: TranscriptionTask) -> String {
+    pub async fn enqueue<R: Runtime>(
+        &self,
+        app: &AppHandle<R>,
+        mut task: TranscriptionTask,
+    ) -> String {
         if task.task_id.is_empty() {
             task.task_id = format!("task-{}", Uuid::new_v4());
         }
         task.status = TaskStatus::Pending;
 
-        // Create cancellation flag
-        let _flag = get_cancel_flag(&task.task_id);
+        create_task_flags(&task.task_id);
 
         let task_id = task.task_id.clone();
+        crate::meeting_activity::register_task(
+            app,
+            task_id.clone(),
+            task.meeting_id.clone(),
+            match &task.task_type {
+                TaskType::Import => crate::meeting_activity::ActivityKind::Import,
+                TaskType::Retranscribe => crate::meeting_activity::ActivityKind::Retranscription,
+            },
+            task.title.clone(),
+        );
         {
             let mut queue = self.tasks.lock().await;
             queue.push_back(task);
@@ -233,35 +355,42 @@ impl TranscriptionQueue {
     }
 
     /// Cancel a task by ID (works for both pending and active tasks)
-    pub async fn cancel_task(&self, task_id: &str) -> bool {
-        // Set the cancellation flag
-        let flag = get_cancel_flag(task_id);
-        flag.store(true, Ordering::SeqCst);
-
-        // Check if it's a pending task and remove it
-        {
-            let mut queue = self.tasks.lock().await;
-            if let Some(pos) = queue.iter().position(|t| t.task_id == task_id) {
-                queue.remove(pos);
-                remove_cancel_flag(task_id);
-                info!("Removed pending task from queue: {}", task_id);
-                return true;
-            }
+    pub async fn cancel_task(&self, task_id: &str) -> Option<(TranscriptionTask, bool)> {
+        let _transition = self.transition.lock().await;
+        let mut queue = self.tasks.lock().await;
+        if let Some(pos) = queue.iter().position(|task| task.task_id == task_id) {
+            let task = queue.remove(pos).expect("position checked");
+            remove_cancel_flag(task_id);
+            info!("Removed pending task from queue: {}", task_id);
+            return Some((task, true));
         }
+        drop(queue);
 
-        // Check if it's the active task
-        {
-            let active = self.active_task.lock().await;
-            if let Some(ref task) = *active {
-                if task.task_id == task_id {
-                    info!("Cancellation flag set for active task: {}", task_id);
-                    return true;
-                }
+        let active = self.active_task.lock().await;
+        if let Some(task) = active.as_ref().filter(|task| task.task_id == task_id) {
+            if request_cancel(task_id) {
+                RESUME_NOTIFY.notify_waiters();
+                info!("Cancellation flag set for active task: {}", task_id);
+                return Some((task.clone(), false));
             }
         }
 
         warn!("Task not found for cancellation: {}", task_id);
-        false
+        None
+    }
+
+    pub async fn set_paused(&self, task_id: &str, paused: bool) -> bool {
+        let active = self.active_task.lock().await;
+        if active.as_ref().map(|task| task.task_id.as_str()) != Some(task_id) {
+            return false;
+        }
+        if !request_pause(task_id, paused) {
+            return false;
+        }
+        if !paused {
+            RESUME_NOTIFY.notify_waiters();
+        }
+        true
     }
 
     /// Get current queue status
@@ -281,7 +410,11 @@ impl TranscriptionQueue {
                 task_id: task.task_id.clone(),
                 task_type: task.task_type.clone(),
                 title: task.title.clone(),
+                meeting_id: correlated_meeting_id(task),
                 status,
+                controls_available: task_flags(&task.task_id)
+                    .map(|(_, _, controls)| controls.load(Ordering::SeqCst))
+                    .unwrap_or(false),
             });
         }
 
@@ -290,7 +423,9 @@ impl TranscriptionQueue {
                 task_id: task.task_id.clone(),
                 task_type: task.task_type.clone(),
                 title: task.title.clone(),
+                meeting_id: correlated_meeting_id(task),
                 status: TaskStatus::Pending,
+                controls_available: true,
             });
         }
 
@@ -320,29 +455,24 @@ impl TranscriptionQueue {
 
                 // Process all available tasks
                 loop {
-                    let task = {
-                        let mut tasks = queue.tasks.lock().await;
-                        tasks.pop_front()
-                    };
+                    let task = queue.activate_next().await;
 
                     let task = match task {
                         Some(t) => t,
                         None => break, // No more tasks
                     };
 
-                    // Skip cancelled tasks
-                    if is_task_cancelled(&task.task_id) {
-                        info!("Skipping cancelled task: {}", task.task_id);
-                        remove_cancel_flag(&task.task_id);
-                        continue;
-                    }
-
-                    // Set as active
-                    {
-                        let mut active = queue.active_task.lock().await;
-                        *active = Some(task.clone());
-                    }
                     set_active_task_id(Some(&task.task_id));
+                    crate::meeting_activity::update_task(
+                        &app,
+                        &task.task_id,
+                        crate::meeting_activity::ActivityStatus::Transcribing,
+                        correlated_meeting_id(&task),
+                        Some("starting".to_string()),
+                        None,
+                        Some("Starting transcription".to_string()),
+                        None,
+                    );
 
                     // Emit queue status update
                     emit_queue_status(&app, &queue).await;
@@ -357,10 +487,10 @@ impl TranscriptionQueue {
                             process_retranscribe_task(&app, &task).await;
                         }
                     }
-
                     // Clear active task
                     set_active_task_id(None);
                     {
+                        let _transition = queue.transition.lock().await;
                         let mut active = queue.active_task.lock().await;
                         *active = None;
                     }
@@ -396,17 +526,23 @@ async fn process_import_task<R: Runtime>(app: &AppHandle<R>, task: &Transcriptio
     // so we need to bridge our per-task flag to it
     use super::import::IMPORT_CANCELLED;
     IMPORT_CANCELLED.store(false, Ordering::SeqCst);
+    if is_task_cancelled(&task.task_id) {
+        emit_cancelled(app, task, "Import cancelled");
+        return;
+    }
 
     // Set up a cancellation watcher
     let task_id = task.task_id.clone();
-    let cancel_flag = get_cancel_flag(&task_id);
+    let cancel_flag = task_flags(&task_id)
+        .map(|(cancelled, _, _)| cancelled)
+        .expect("active import task must have control flags");
     let cancel_watcher = tauri::async_runtime::spawn(async move {
         loop {
-            tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
             if cancel_flag.load(Ordering::SeqCst) {
                 IMPORT_CANCELLED.store(true, Ordering::SeqCst);
                 break;
             }
+            tokio::time::sleep(tokio::time::Duration::from_millis(25)).await;
         }
     });
 
@@ -414,20 +550,36 @@ async fn process_import_task<R: Runtime>(app: &AppHandle<R>, task: &Transcriptio
     let app_for_bridge = app.clone();
     let task_clone = task.clone();
     let progress_bridge = app.listen("import-progress", move |event| {
-        if let Ok(progress) = serde_json::from_str::<super::import::ImportProgress>(event.payload()) {
+        if let Ok(progress) = serde_json::from_str::<super::import::ImportProgress>(event.payload())
+        {
             let _ = app_for_bridge.emit(
                 "transcription-queue-progress",
                 QueueProgressEvent {
                     task_id: task_clone.task_id.clone(),
                     task_type: task_clone.task_type.clone(),
                     title: task_clone.title.clone(),
-                    stage: progress.stage,
+                    meeting_id: correlated_meeting_id(&task_clone),
+                    stage: progress.stage.clone(),
                     progress_percentage: progress.progress_percentage,
-                    message: progress.message,
+                    message: progress.message.clone(),
                     is_paused: is_task_paused(&task_clone.task_id),
                     queue_position: None,
                     queue_total: None,
                 },
+            );
+            crate::meeting_activity::update_task(
+                &app_for_bridge,
+                &task_clone.task_id,
+                if is_task_paused(&task_clone.task_id) {
+                    crate::meeting_activity::ActivityStatus::Paused
+                } else {
+                    crate::meeting_activity::ActivityStatus::Transcribing
+                },
+                correlated_meeting_id(&task_clone),
+                Some(progress.stage),
+                Some(progress.progress_percentage),
+                Some(progress.message),
+                None,
             );
         }
     });
@@ -440,12 +592,14 @@ async fn process_import_task<R: Runtime>(app: &AppHandle<R>, task: &Transcriptio
         task.language.clone(),
         task.model.clone(),
         task.provider.clone(),
+        task.task_id.clone(),
     )
     .await;
 
     // Clean up
     cancel_watcher.abort();
     app.unlisten(progress_bridge);
+    disable_controls(&task.task_id);
 
     match result {
         Ok(import_result) => {
@@ -463,14 +617,23 @@ async fn process_import_task<R: Runtime>(app: &AppHandle<R>, task: &Transcriptio
                     meeting_id: import_result.meeting_id.clone(),
                     segments_count: import_result.segments_count,
                     duration_seconds: import_result.duration_seconds,
+                    warning: None,
                 },
             );
-
-            if let Err(error) = crate::webhooks::enqueue_transcription_complete(
+            crate::meeting_activity::update_task(
                 app,
-                &import_result.meeting_id,
-            )
-            .await
+                &task.task_id,
+                crate::meeting_activity::ActivityStatus::Ready,
+                Some(import_result.meeting_id.clone()),
+                Some("complete".to_string()),
+                Some(100),
+                Some("Import complete".to_string()),
+                None,
+            );
+
+            if let Err(error) =
+                crate::webhooks::enqueue_transcription_complete(app, &import_result.meeting_id)
+                    .await
             {
                 warn!("Failed to enqueue import completion webhook: {}", error);
             }
@@ -496,8 +659,20 @@ async fn process_import_task<R: Runtime>(app: &AppHandle<R>, task: &Transcriptio
                         task_id: task.task_id.clone(),
                         task_type: task.task_type.clone(),
                         title: task.title.clone(),
+                        meeting_id: correlated_meeting_id(task),
+                        status: TaskStatus::Cancelled,
                         error: "Import cancelled".to_string(),
                     },
+                );
+                crate::meeting_activity::update_task(
+                    app,
+                    &task.task_id,
+                    crate::meeting_activity::ActivityStatus::Cancelled,
+                    correlated_meeting_id(task),
+                    Some("cancelled".to_string()),
+                    None,
+                    Some("Import cancelled".to_string()),
+                    None,
                 );
             } else {
                 error!("Import task {} failed: {}", task.task_id, error_msg);
@@ -520,7 +695,11 @@ async fn process_retranscribe_task<R: Runtime>(app: &AppHandle<R>, task: &Transc
     let meeting_folder_path = match &task.meeting_folder_path {
         Some(p) => p.clone(),
         None => {
-            emit_error(app, task, "Missing meeting_folder_path for retranscribe task");
+            emit_error(
+                app,
+                task,
+                "Missing meeting_folder_path for retranscribe task",
+            );
             return;
         }
     };
@@ -528,16 +707,22 @@ async fn process_retranscribe_task<R: Runtime>(app: &AppHandle<R>, task: &Transc
     // Bridge cancellation flag
     use super::retranscription::RETRANSCRIPTION_CANCELLED;
     RETRANSCRIPTION_CANCELLED.store(false, Ordering::SeqCst);
+    if is_task_cancelled(&task.task_id) {
+        emit_cancelled(app, task, "Retranscription cancelled");
+        return;
+    }
 
     let task_id = task.task_id.clone();
-    let cancel_flag = get_cancel_flag(&task_id);
+    let cancel_flag = task_flags(&task_id)
+        .map(|(cancelled, _, _)| cancelled)
+        .expect("active retranscription task must have control flags");
     let cancel_watcher = tauri::async_runtime::spawn(async move {
         loop {
-            tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
             if cancel_flag.load(Ordering::SeqCst) {
                 RETRANSCRIPTION_CANCELLED.store(true, Ordering::SeqCst);
                 break;
             }
+            tokio::time::sleep(tokio::time::Duration::from_millis(25)).await;
         }
     });
 
@@ -545,23 +730,45 @@ async fn process_retranscribe_task<R: Runtime>(app: &AppHandle<R>, task: &Transc
     let app_for_bridge = app.clone();
     let task_clone = task.clone();
     let progress_bridge = app.listen("retranscription-progress", move |event| {
-        if let Ok(progress) = serde_json::from_str::<super::retranscription::RetranscriptionProgress>(
-            event.payload(),
-        ) {
+        if let Ok(progress) =
+            serde_json::from_str::<super::retranscription::RetranscriptionProgress>(event.payload())
+        {
             if progress.meeting_id == task_clone.meeting_id.as_deref().unwrap_or("") {
+                if matches!(progress.stage.as_str(), "diarizing" | "diarization_warning") {
+                    crate::meeting_activity::set_task_controls_available(
+                        &app_for_bridge,
+                        &task_clone.task_id,
+                        false,
+                    );
+                }
                 let _ = app_for_bridge.emit(
                     "transcription-queue-progress",
                     QueueProgressEvent {
                         task_id: task_clone.task_id.clone(),
                         task_type: task_clone.task_type.clone(),
                         title: task_clone.title.clone(),
-                        stage: progress.stage,
+                        meeting_id: correlated_meeting_id(&task_clone),
+                        stage: progress.stage.clone(),
                         progress_percentage: progress.progress_percentage,
-                        message: progress.message,
+                        message: progress.message.clone(),
                         is_paused: is_task_paused(&task_clone.task_id),
                         queue_position: None,
                         queue_total: None,
                     },
+                );
+                crate::meeting_activity::update_task(
+                    &app_for_bridge,
+                    &task_clone.task_id,
+                    if is_task_paused(&task_clone.task_id) {
+                        crate::meeting_activity::ActivityStatus::Paused
+                    } else {
+                        crate::meeting_activity::ActivityStatus::Transcribing
+                    },
+                    correlated_meeting_id(&task_clone),
+                    Some(progress.stage),
+                    Some(progress.progress_percentage),
+                    Some(progress.message),
+                    None,
                 );
             }
         }
@@ -581,6 +788,7 @@ async fn process_retranscribe_task<R: Runtime>(app: &AppHandle<R>, task: &Transc
     // Clean up
     cancel_watcher.abort();
     app.unlisten(progress_bridge);
+    disable_controls(&task.task_id);
 
     match result {
         Ok(retranscription_result) => {
@@ -598,7 +806,26 @@ async fn process_retranscribe_task<R: Runtime>(app: &AppHandle<R>, task: &Transc
                     meeting_id: retranscription_result.meeting_id.clone(),
                     segments_count: retranscription_result.segments_count,
                     duration_seconds: retranscription_result.duration_seconds,
+                    warning: retranscription_result.warning.clone(),
                 },
+            );
+            crate::meeting_activity::set_task_warning(
+                app,
+                &task.task_id,
+                retranscription_result.warning.clone(),
+            );
+            crate::meeting_activity::update_task(
+                app,
+                &task.task_id,
+                crate::meeting_activity::ActivityStatus::Ready,
+                Some(retranscription_result.meeting_id.clone()),
+                Some("complete".to_string()),
+                Some(100),
+                retranscription_result
+                    .warning
+                    .clone()
+                    .or_else(|| Some("Retranscription complete".to_string())),
+                None,
             );
 
             if let Err(error) = crate::webhooks::enqueue_transcription_complete(
@@ -607,7 +834,10 @@ async fn process_retranscribe_task<R: Runtime>(app: &AppHandle<R>, task: &Transc
             )
             .await
             {
-                warn!("Failed to enqueue retranscription completion webhook: {}", error);
+                warn!(
+                    "Failed to enqueue retranscription completion webhook: {}",
+                    error
+                );
             }
 
             // Also emit the original retranscription-complete event
@@ -617,7 +847,8 @@ async fn process_retranscribe_task<R: Runtime>(app: &AppHandle<R>, task: &Transc
                     "meeting_id": retranscription_result.meeting_id,
                     "segments_count": retranscription_result.segments_count,
                     "duration_seconds": retranscription_result.duration_seconds,
-                    "language": retranscription_result.language
+                    "language": retranscription_result.language,
+                    "warning": retranscription_result.warning
                 }),
             );
         }
@@ -631,8 +862,20 @@ async fn process_retranscribe_task<R: Runtime>(app: &AppHandle<R>, task: &Transc
                         task_id: task.task_id.clone(),
                         task_type: task.task_type.clone(),
                         title: task.title.clone(),
+                        meeting_id: correlated_meeting_id(task),
+                        status: TaskStatus::Cancelled,
                         error: "Retranscription cancelled".to_string(),
                     },
+                );
+                crate::meeting_activity::update_task(
+                    app,
+                    &task.task_id,
+                    crate::meeting_activity::ActivityStatus::Cancelled,
+                    correlated_meeting_id(task),
+                    Some("cancelled".to_string()),
+                    None,
+                    Some("Retranscription cancelled".to_string()),
+                    None,
                 );
             } else {
                 error!("Retranscribe task {} failed: {}", task.task_id, error_msg);
@@ -642,16 +885,54 @@ async fn process_retranscribe_task<R: Runtime>(app: &AppHandle<R>, task: &Transc
     }
 }
 
-/// Emit an error event for a task
-fn emit_error<R: Runtime>(app: &AppHandle<R>, task: &TranscriptionTask, error: &str) {
+fn emit_cancelled<R: Runtime>(app: &AppHandle<R>, task: &TranscriptionTask, message: &str) {
+    disable_controls(&task.task_id);
     let _ = app.emit(
         "transcription-queue-error",
         QueueErrorEvent {
             task_id: task.task_id.clone(),
             task_type: task.task_type.clone(),
             title: task.title.clone(),
+            meeting_id: correlated_meeting_id(task),
+            status: TaskStatus::Cancelled,
+            error: message.to_string(),
+        },
+    );
+    crate::meeting_activity::update_task(
+        app,
+        &task.task_id,
+        crate::meeting_activity::ActivityStatus::Cancelled,
+        correlated_meeting_id(task),
+        Some("cancelled".to_string()),
+        None,
+        Some(message.to_string()),
+        None,
+    );
+}
+
+/// Emit an error event for a task
+fn emit_error<R: Runtime>(app: &AppHandle<R>, task: &TranscriptionTask, error: &str) {
+    disable_controls(&task.task_id);
+    let _ = app.emit(
+        "transcription-queue-error",
+        QueueErrorEvent {
+            task_id: task.task_id.clone(),
+            task_type: task.task_type.clone(),
+            title: task.title.clone(),
+            meeting_id: correlated_meeting_id(task),
+            status: TaskStatus::Failed,
             error: error.to_string(),
         },
+    );
+    crate::meeting_activity::update_task(
+        app,
+        &task.task_id,
+        crate::meeting_activity::ActivityStatus::Failed,
+        correlated_meeting_id(task),
+        Some("failed".to_string()),
+        None,
+        None,
+        Some(error.to_string()),
     );
 }
 
@@ -686,26 +967,81 @@ pub async fn get_transcription_queue_status() -> QueueStatus {
 
 /// Cancel a transcription task by ID
 #[tauri::command]
-pub async fn cancel_transcription_task(task_id: String) -> Result<bool, String> {
-    Ok(get_queue().cancel_task(&task_id).await)
+pub async fn cancel_transcription_task<R: Runtime>(
+    app: AppHandle<R>,
+    task_id: String,
+) -> Result<bool, String> {
+    let queue = get_queue();
+    let cancellation = queue.cancel_task(&task_id).await;
+    if let Some((task, true)) = cancellation.as_ref() {
+        crate::meeting_activity::update_task(
+            &app,
+            &task_id,
+            crate::meeting_activity::ActivityStatus::Cancelled,
+            None,
+            Some("cancelled".to_string()),
+            None,
+            Some("Transcription cancelled".to_string()),
+            None,
+        );
+        let _ = app.emit(
+            "transcription-queue-error",
+            QueueErrorEvent {
+                task_id,
+                task_type: task.task_type.clone(),
+                title: task.title.clone(),
+                meeting_id: correlated_meeting_id(task),
+                status: TaskStatus::Cancelled,
+                error: "Transcription cancelled".to_string(),
+            },
+        );
+    }
+    Ok(cancellation.is_some())
 }
 
 /// Pause an active transcription task (pauses between segments)
 #[tauri::command]
-pub async fn pause_transcription_task(task_id: String) -> Result<bool, String> {
-    let flag = get_pause_flag(&task_id);
-    flag.store(true, Ordering::SeqCst);
+pub async fn pause_transcription_task<R: Runtime>(
+    app: AppHandle<R>,
+    task_id: String,
+) -> Result<bool, String> {
+    if !get_queue().set_paused(&task_id, true).await {
+        return Ok(false);
+    }
     info!("Pause requested for task: {}", task_id);
+    crate::meeting_activity::update_task(
+        &app,
+        &task_id,
+        crate::meeting_activity::ActivityStatus::Paused,
+        None,
+        Some("paused".to_string()),
+        None,
+        Some("Transcription paused".to_string()),
+        None,
+    );
     Ok(true)
 }
 
 /// Resume a paused transcription task
 #[tauri::command]
-pub async fn resume_transcription_task(task_id: String) -> Result<bool, String> {
-    let flag = get_pause_flag(&task_id);
-    flag.store(false, Ordering::SeqCst);
-    RESUME_NOTIFY.notify_waiters();
+pub async fn resume_transcription_task<R: Runtime>(
+    app: AppHandle<R>,
+    task_id: String,
+) -> Result<bool, String> {
+    if !get_queue().set_paused(&task_id, false).await {
+        return Ok(false);
+    }
     info!("Resume requested for task: {}", task_id);
+    crate::meeting_activity::update_task(
+        &app,
+        &task_id,
+        crate::meeting_activity::ActivityStatus::Transcribing,
+        None,
+        Some("transcribing".to_string()),
+        None,
+        Some("Transcription resumed".to_string()),
+        None,
+    );
     Ok(true)
 }
 
@@ -713,4 +1049,97 @@ pub async fn resume_transcription_task(task_id: String) -> Result<bool, String> 
 #[tauri::command]
 pub async fn is_transcription_queue_active() -> bool {
     get_queue().has_active_task().await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn task(id: &str) -> TranscriptionTask {
+        TranscriptionTask {
+            task_id: id.to_string(),
+            task_type: TaskType::Retranscribe,
+            title: "test".to_string(),
+            status: TaskStatus::Pending,
+            source_path: None,
+            meeting_id: Some("meeting-1".to_string()),
+            meeting_folder_path: Some("folder".to_string()),
+            language: None,
+            model: None,
+            provider: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_paused_task_wakes_its_waiter() {
+        let id = "paused-cancel-test";
+        create_task_flags(id);
+        let (cancelled, paused, _) = task_flags(id).unwrap();
+        paused.store(true, Ordering::SeqCst);
+        let waiter = tokio::spawn(wait_if_paused(id));
+        tokio::task::yield_now().await;
+        cancelled.store(true, Ordering::SeqCst);
+        RESUME_NOTIFY.notify_waiters();
+
+        assert!(
+            !tokio::time::timeout(tokio::time::Duration::from_secs(1), waiter)
+                .await
+                .unwrap()
+                .unwrap()
+        );
+        remove_cancel_flag(id);
+    }
+
+    #[tokio::test]
+    async fn dequeue_and_cancel_have_no_unowned_transition() {
+        let queue = Arc::new(TranscriptionQueue::new());
+        let item = task("transition-test");
+        create_task_flags(&item.task_id);
+        queue.tasks.lock().await.push_back(item);
+
+        let (activated, cancelled) =
+            tokio::join!(queue.activate_next(), queue.cancel_task("transition-test"));
+        assert!(activated.is_some() || cancelled.is_some());
+        assert!(cancelled.is_some() || is_task_cancelled("transition-test"));
+        remove_cancel_flag("transition-test");
+    }
+
+    #[tokio::test]
+    async fn controls_reject_unknown_tasks_without_allocating_flags() {
+        let queue = TranscriptionQueue::new();
+        assert!(!queue.set_paused("unknown", true).await);
+        assert!(queue.cancel_task("unknown").await.is_none());
+        assert!(task_flags("unknown").is_none());
+    }
+
+    #[tokio::test]
+    async fn persistence_boundary_rejects_late_controls() {
+        let queue = TranscriptionQueue::new();
+        let item = task("boundary-test");
+        create_task_flags(&item.task_id);
+        *queue.active_task.lock().await = Some(item);
+
+        assert!(matches!(
+            close_controls("boundary-test"),
+            BoundaryState::Entered
+        ));
+        assert!(queue.cancel_task("boundary-test").await.is_none());
+        assert!(!queue.set_paused("boundary-test", true).await);
+        remove_cancel_flag("boundary-test");
+    }
+
+    #[tokio::test]
+    async fn persistence_boundary_observes_an_accepted_control() {
+        let queue = TranscriptionQueue::new();
+        let item = task("accepted-cancel-test");
+        create_task_flags(&item.task_id);
+        *queue.active_task.lock().await = Some(item);
+
+        assert!(queue.cancel_task("accepted-cancel-test").await.is_some());
+        assert!(matches!(
+            close_controls("accepted-cancel-test"),
+            BoundaryState::Cancelled
+        ));
+        remove_cancel_flag("accepted-cancel-test");
+    }
 }

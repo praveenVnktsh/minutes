@@ -7,6 +7,7 @@
 
 import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
+import type { RecordingCommandResult } from '@/types/meetingActivity';
 
 export interface RecordingState {
   is_recording: boolean;
@@ -14,12 +15,15 @@ export interface RecordingState {
   is_active: boolean;
   recording_duration: number | null;
   active_duration: number | null;
+  session_id: string | null;
+  active_meeting_id: string | null;
 }
 
 export interface RecordingStoppedPayload {
   message: string;
   folder_path?: string;
   meeting_name?: string;
+  error?: string;
 }
 
 // Bound the start invoke: > ~40s Bluetooth mic cold-start and ~90s worst-case
@@ -72,12 +76,19 @@ export class RecordingService {
     return invoke<string | null>('get_recording_meeting_name');
   }
 
+  /** Bind the frontend-created meeting row to the exact native recording session. */
+  async bindMeeting(sessionId: string, meetingId: string): Promise<void> {
+    await invoke('bind_active_recording_meeting', { sessionId, meetingId });
+  }
+
   /**
    * Start recording (no device configuration)
-   * @returns Promise<void>
+   * @returns Exact native recording session identity
    */
-  async startRecording(): Promise<void> {
-    return withStartTimeout(invoke('start_recording'));
+  async startRecording(requestId?: string): Promise<RecordingCommandResult> {
+    return withStartTimeout(invoke<RecordingCommandResult>('start_recording', {
+      requestId,
+    }));
   }
 
   /**
@@ -85,17 +96,19 @@ export class RecordingService {
    * @param micDeviceName - Microphone device name (null for default)
    * @param systemDeviceName - System audio device name (null for default)
    * @param meetingName - Meeting name/title
-   * @returns Promise<void>
+   * @returns Exact native recording session identity
    */
   async startRecordingWithDevices(
     micDeviceName: string | null,
     systemDeviceName: string | null,
-    meetingName: string
-  ): Promise<void> {
-    return withStartTimeout(invoke('start_recording_with_devices_and_meeting', {
+    meetingName: string,
+    requestId?: string
+  ): Promise<RecordingCommandResult> {
+    return withStartTimeout(invoke<RecordingCommandResult>('start_recording_with_devices_and_meeting', {
       micDeviceName,
       systemDeviceName,
-      meetingName
+      meetingName,
+      requestId,
     }));
   }
 
@@ -133,8 +146,8 @@ export class RecordingService {
    * @param callback - Function to call when recording starts
    * @returns Promise that resolves to unlisten function
    */
-  async onRecordingStarted(callback: () => void): Promise<UnlistenFn> {
-    return listen('recording-started', callback);
+  async onRecordingStarted(callback: (payload: RecordingCommandResult) => void): Promise<UnlistenFn> {
+    return listen<RecordingCommandResult>('recording-started', (event) => callback(event.payload));
   }
 
   /**

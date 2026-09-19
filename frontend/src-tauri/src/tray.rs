@@ -306,9 +306,9 @@ pub(crate) fn toggle_recording_handler<R: Runtime>(app: &AppHandle<R>) {
             // Immediately show starting state
             set_tray_state(&app_clone, RecordingState::Starting);
 
-            log::info!("Emitting start recording event from tray");
+            log::info!("Emitting correlated start recording request from tray");
+            crate::meeting_prompt::request_recording(&app_clone, "tray");
             if let Some(window) = app_clone.get_webview_window("main") {
-                let _ = window.eval("sessionStorage.setItem('autoStartRecording', 'true')"); // Set the flag to start recording automatically
                 let _ = window.eval("window.location.assign('/')");
             }
         }
