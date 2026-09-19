@@ -1,11 +1,11 @@
 'use client';
 
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useRef } from 'react';
 import type { Block, PartialBlock } from '@blocknote/core';
 import { useCreateBlockNote } from '@blocknote/react';
 import { BlockNoteView } from '@blocknote/shadcn';
 import { blocksToMarkdownSafely } from '@/lib/blocknote-markdown';
-import { createLiveNote, type LiveNote, type LiveNotesDocument } from '@/lib/liveNotes';
+import type { LiveNote, LiveNotesDocument } from '@/lib/liveNotes';
 import '@blocknote/shadcn/style.css';
 import '@blocknote/core/fonts/inter.css';
 
@@ -35,6 +35,10 @@ function initialBlocks(document: LiveNotesDocument): PartialBlock[] {
   return [{ type: 'bulletListItem', content: '' }];
 }
 
+function documentSignature(document: LiveNotesDocument): string {
+  return JSON.stringify(document.editorBlocks ?? document.notes);
+}
+
 export function BlockNotesEditor({
   document,
   onChange,
@@ -44,11 +48,13 @@ export function BlockNotesEditor({
   onChange?: (document: LiveNotesDocument) => void;
   editable?: boolean;
 }) {
-  const startingBlocks = useMemo(() => initialBlocks(document), []); // document is the mount snapshot
+  const startingBlocks = useRef(initialBlocks(document)).current;
   const timestamps = useRef(new Map(document.notes.map((note) => [note.id, note.timestampSeconds])));
   const latestDocument = useRef(document);
   latestDocument.current = document;
   const changeVersion = useRef(0);
+  const applyingExternalDocument = useRef(false);
+  const appliedSignature = useRef(documentSignature(document));
   const editor = useCreateBlockNote({
     initialContent: startingBlocks,
     placeholders: {
@@ -58,8 +64,21 @@ export function BlockNotesEditor({
   });
 
   useEffect(() => {
+    const nextSignature = documentSignature(document);
+    if (nextSignature === appliedSignature.current) return;
+    applyingExternalDocument.current = true;
+    appliedSignature.current = nextSignature;
+    timestamps.current = new Map(document.notes.map((note) => [note.id, note.timestampSeconds]));
+    editor.replaceBlocks(editor.document, initialBlocks(document));
+    void Promise.resolve().then(() => {
+      applyingExternalDocument.current = false;
+    });
+  }, [document, editor]);
+
+  useEffect(() => {
     if (!onChange || !editable) return;
     return editor.onChange(() => {
+      if (applyingExternalDocument.current) return;
       const version = ++changeVersion.current;
       const blocks = editor.document;
       void blocksToMarkdownSafely(editor, blocks, {
@@ -80,14 +99,16 @@ export function BlockNotesEditor({
             important: previous?.important ?? false,
           };
         });
-        onChange({
+        const nextDocument = {
           ...latestDocument.current,
           version: 2,
           updatedAt: new Date().toISOString(),
           notes,
           rawMarkdown: result.markdown,
           editorBlocks: blocks,
-        });
+        };
+        appliedSignature.current = documentSignature(nextDocument);
+        onChange(nextDocument);
       });
     });
   }, [editable, editor, onChange]);
