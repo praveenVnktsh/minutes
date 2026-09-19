@@ -195,12 +195,14 @@ export function ModelConfigForm({
       } else if (provider === 'groq' && apiKey?.trim()) {
         result = await invoke<RemoteModel[]>('get_groq_models', { apiKey });
       }
-      const loaded = result.map(item => item.id || item.name).filter((value): value is string => Boolean(value));
+      const loaded = result
+        .map(item => provider === 'ollama' ? item.name : item.id || item.name)
+        .filter((value): value is string => Boolean(value));
       if (!isCurrentRequest()) return;
-      setModels(loaded.length ? loaded : FALLBACK_MODELS[provider] ?? modelOptions[provider] ?? []);
+      setModels(loaded.length ? loaded : provider === 'ollama' ? [] : FALLBACK_MODELS[provider] ?? modelOptions[provider] ?? []);
     } catch (error) {
       if (!isCurrentRequest()) return;
-      setModels(FALLBACK_MODELS[provider] ?? modelOptions[provider] ?? []);
+      setModels(provider === 'ollama' ? [] : FALLBACK_MODELS[provider] ?? modelOptions[provider] ?? []);
       setModelLoadError(isOllamaNotInstalledError(messageFrom(error))
         ? 'Ollama is not installed or is not running.'
         : `Could not load models: ${messageFrom(error)}`);

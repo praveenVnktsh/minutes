@@ -278,6 +278,39 @@ describe('transactional model configuration form', () => {
     expect(text()).toContain('llama3 deleted from Ollama');
   });
 
+  test('uses the native Ollama name instead of its digest for selection, commit, and deletion', async () => {
+    invokeImplementation = async command => command === 'get_ollama_models'
+      ? [{ name: 'llama3:latest', id: 'abc123digest', size: '4 GB', modified: 'today' }]
+      : null;
+    context.modelConfig = { ...committed, provider: 'ollama', model: 'old-model', apiKey: undefined };
+    await renderForm();
+    expect(optionValues()).toContain('llama3:latest');
+    expect(optionValues()).not.toContain('abc123digest');
+    act(() => modelSelect().props.onChange({ target: { value: 'llama3:latest' } }));
+    await act(async () => { await submit(); });
+    expect(commitModelConfig.mock.calls[0][0].model).toBe('llama3:latest');
+
+    await act(async () => renderer.unmount());
+    context.modelConfig = { ...committed, provider: 'ollama', model: 'old-model', apiKey: undefined };
+    await renderForm();
+    await act(async () => renderer.root.findByProps({ 'aria-label': 'Delete llama3:latest from Ollama' }).props.onClick());
+    const deleteCall = invoke.mock.calls.find(call => call[0] === 'delete_ollama_model');
+    expect(deleteCall?.[1]?.modelName).toBe('llama3:latest');
+  });
+
+  test('does not expose committed-endpoint Ollama models after a draft-endpoint fetch fails', async () => {
+    context.modelOptions.ollama = ['committed-endpoint-model'];
+    invokeImplementation = async command => {
+      if (command === 'get_ollama_models') throw new Error('draft endpoint unavailable');
+      return null;
+    };
+    context.modelConfig = { ...committed, provider: 'ollama', model: 'selected-draft', apiKey: undefined, ollamaEndpoint: 'http://draft-endpoint:11434' };
+    await renderForm();
+    expect(renderer.root.findAllByProps({ 'aria-label': 'Delete committed-endpoint-model from Ollama' })).toHaveLength(0);
+    expect(buttonContaining('Download gemma3:1b')).toBeDefined();
+    expect(text()).toContain('draft endpoint unavailable');
+  });
+
   test('refreshes Ollama models when a shared download completes', async () => {
     invokeImplementation = async command => command === 'get_ollama_models' ? [{ name: 'llama3' }] : null;
     downloadState.downloadingModels = new Set(['gemma3:1b']);
@@ -329,16 +362,16 @@ describe('transactional model configuration form', () => {
   test('preserves a newer model selection when deletion finishes', async () => {
     const deletion = deferred<null>();
     invokeImplementation = async command => {
-      if (command === 'get_ollama_models') return [{ name: 'llama3' }, { name: 'other-model' }];
+      if (command === 'get_ollama_models') return [{ name: 'llama3' }, { name: 'second-model' }, { name: 'third-model' }];
       if (command === 'delete_ollama_model') return deletion.promise;
       return null;
     };
     context.modelConfig = { ...committed, provider: 'ollama', model: 'llama3', apiKey: undefined };
     await renderForm();
     act(() => renderer.root.findByProps({ 'aria-label': 'Delete llama3 from Ollama' }).props.onClick());
-    act(() => modelSelect().props.onChange({ target: { value: 'other-model' } }));
+    act(() => modelSelect().props.onChange({ target: { value: 'third-model' } }));
     await act(async () => deletion.resolve(null));
-    expect(modelSelect().props.value).toBe('other-model');
+    expect(modelSelect().props.value).toBe('third-model');
   });
 
   test('does not publish a stale deletion failure after the endpoint changes', async () => {

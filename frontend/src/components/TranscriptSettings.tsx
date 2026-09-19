@@ -32,6 +32,11 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
     const [vocabulary, setVocabulary] = useState<string>('');
     const [savedVocabulary, setSavedVocabulary] = useState<string>('');
     const [vocabularySaveState, setVocabularySaveState] = useState<SaveFeedbackState | null>(null);
+    const vocabularyFeedbackState = vocabularySaveState === 'saving' || vocabularySaveState === 'error'
+        ? vocabularySaveState
+        : vocabulary !== savedVocabulary
+            ? 'unsaved'
+            : vocabularySaveState;
 
     useEffect(() => {
         invoke('api_get_transcription_vocabulary')
@@ -212,7 +217,10 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                                 className="mx-1 focus:ring-2 focus:ring-focus"
                                 rows={3}
                                 value={vocabulary}
-                                onChange={(e) => setVocabulary(e.target.value)}
+                                onChange={(e) => {
+                                    setVocabulary(e.target.value);
+                                    setVocabularySaveState(current => current === 'saving' ? current : null);
+                                }}
                                 disabled={vocabularySaveState === 'saving'}
                                 placeholder="e.g. Minutes, OKR, Kubernetes, Acme Corp"
                             />
@@ -225,10 +233,10 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                                 >
                                     {vocabularySaveState === 'saving' ? 'Saving…' : 'Save vocabulary'}
                                 </Button>
-                                {vocabularySaveState && (
+                                {vocabularyFeedbackState && (
                                     <SaveFeedback
-                                        state={vocabularySaveState}
-                                        labels={{ saving: 'Saving vocabulary', saved: 'Vocabulary saved', error: 'Could not save vocabulary; draft preserved' }}
+                                        state={vocabularyFeedbackState}
+                                        labels={{ unsaved: 'Vocabulary changes not saved', saving: 'Saving vocabulary', saved: 'Vocabulary saved', error: 'Could not save vocabulary; draft preserved' }}
                                     />
                                 )}
                             </div>
@@ -287,7 +295,6 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
         </div >
     )
 }
-
 
 
 
