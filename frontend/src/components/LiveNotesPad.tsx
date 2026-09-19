@@ -1,16 +1,16 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import dynamic from 'next/dynamic';
 import { invoke } from '@tauri-apps/api/core';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
+import { SaveFeedback, StatusFeedback } from '@/components/ui/status-feedback';
+import { createEmptyLiveNotesDocument } from '@/lib/liveNotes';
 import {
-  createLiveNote,
-  LIVE_NOTES_FALLBACK_KEY,
-  LIVE_NOTES_FALLBACK_FOLDER_KEY,
-  type LiveNote,
-  type LiveNotesDocument,
-} from '@/lib/liveNotes';
+  liveNotesTarget,
+  notePersistenceService,
+  type NotePersistenceSnapshot,
+} from '@/services/notePersistenceService';
 
 const BlockNotesEditor = dynamic(
   () => import('@/components/BlockNotesEditor').then((module) => module.BlockNotesEditor),
@@ -20,91 +20,107 @@ const BlockNotesEditor = dynamic(
   },
 );
 
-function storedFallback(folderPath: string | null): LiveNotesDocument | null {
-  try {
-    if (!folderPath || localStorage.getItem(LIVE_NOTES_FALLBACK_FOLDER_KEY) !== folderPath) return null;
-    const raw = localStorage.getItem(LIVE_NOTES_FALLBACK_KEY);
-    return raw ? JSON.parse(raw) as LiveNotesDocument : null;
-  } catch {
-    return null;
-  }
-}
-
 export function LiveNotesPad({ bare = false }: { bare?: boolean } = {}) {
   const { isRecording, recordingDuration } = useRecordingState();
-  const [document, setDocument] = useState<LiveNotesDocument | null>(null);
   const [folderPath, setFolderPath] = useState<string | null>(null);
-  const [saveState, setSaveState] = useState<'saved' | 'saving'>('saved');
-  const saveTimer = useRef<ReturnType<typeof setTimeout>>();
+  const [folderError, setFolderError] = useState(false);
   const durationRef = useRef(0);
+  const folderRequestRef = useRef(0);
   durationRef.current = recordingDuration ?? 0;
+  const target = useMemo(() => folderPath ? liveNotesTarget(folderPath) : null, [folderPath]);
+  const [snapshot, setSnapshot] = useState<NotePersistenceSnapshot | null>(null);
 
-  const persist = useCallback(async (next: LiveNotesDocument, targetFolder: string | null) => {
-    localStorage.setItem(LIVE_NOTES_FALLBACK_KEY, JSON.stringify(next));
-    if (targetFolder) localStorage.setItem(LIVE_NOTES_FALLBACK_FOLDER_KEY, targetFolder);
-    if (!targetFolder) return;
-    setSaveState('saving');
-    try {
-      await invoke('save_live_notes', { folderPath: targetFolder, document: next });
-      setSaveState('saved');
-    } catch (error) {
-      console.warn('Could not persist live notes to the meeting folder:', error);
+  const findFolder = useCallback(async () => {
+    if (!isRecording) return;
+    const request = ++folderRequestRef.current;
+    setFolderError(false);
+    let path: string | null = null;
+    for (let attempt = 0; attempt < 8 && !path; attempt += 1) {
+      path = await invoke<string | null>('get_meeting_folder_path').catch(() => null);
+      if (!path) await new Promise((resolve) => setTimeout(resolve, 250));
     }
-  }, []);
-
-  const scheduleSave = useCallback((next: LiveNotesDocument) => {
-    localStorage.setItem(LIVE_NOTES_FALLBACK_KEY, JSON.stringify(next));
-    if (folderPath) localStorage.setItem(LIVE_NOTES_FALLBACK_FOLDER_KEY, folderPath);
-    if (saveTimer.current) clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(() => void persist(next, folderPath), 180);
-  }, [folderPath, persist]);
+    if (request !== folderRequestRef.current) return;
+    if (path) setFolderPath(path);
+    else setFolderError(true);
+  }, [isRecording]);
 
   useEffect(() => {
-    if (!isRecording) return;
-    let cancelled = false;
-    const initialize = async () => {
-      let path: string | null = null;
-      for (let attempt = 0; attempt < 8 && !path && !cancelled; attempt += 1) {
-        path = await invoke<string | null>('get_meeting_folder_path').catch(() => null);
-        if (!path) await new Promise((resolve) => setTimeout(resolve, 250));
-      }
-      if (cancelled) return;
-      setFolderPath(path);
-      const fromDisk = path
-        ? await invoke<LiveNotesDocument | null>('load_live_notes', { folderPath: path }).catch(() => null)
-        : null;
-      const fallback = storedFallback(path);
-      const initial = fromDisk ?? fallback ?? {
-        version: 1,
-        meetingStartedAtMs: Date.now() - (durationRef.current * 1000),
-        updatedAt: new Date().toISOString(),
-        notes: [createLiveNote(durationRef.current)],
-      };
-      setDocument(initial);
-      void persist(initial, path);
+    folderRequestRef.current += 1;
+    setFolderPath(null);
+    setSnapshot(null);
+    if (isRecording) void findFolder();
+    return () => { folderRequestRef.current += 1; };
+  }, [findFolder, isRecording]);
+
+  useEffect(() => {
+    if (!target) return;
+    setSnapshot({ ...notePersistenceService.getSnapshot(target) });
+    const unsubscribe = notePersistenceService.subscribeNotes(target, () => {
+      setSnapshot({ ...notePersistenceService.getSnapshot(target) });
+    });
+    void notePersistenceService.loadNotes(target, {
+      createEmpty: () => createEmptyLiveNotesDocument(Date.now() - (durationRef.current * 1000)),
+    });
+    return () => {
+      unsubscribe();
+      void notePersistenceService.flushNotes(target).catch(() => {});
     };
-    void initialize();
-    return () => { cancelled = true; };
-  }, [isRecording, persist]);
+  }, [target]);
 
-  useEffect(() => () => {
-    if (saveTimer.current) clearTimeout(saveTimer.current);
-  }, []);
+  const handleDocumentChange = useCallback((next: Parameters<typeof notePersistenceService.saveNotes>[1]) => {
+    if (target) notePersistenceService.saveNotes(target, next);
+  }, [target]);
 
-  const handleDocumentChange = useCallback((next: LiveNotesDocument) => {
-    setDocument(next);
-    scheduleSave(next);
-  }, [scheduleSave]);
+  const reloadNotes = useCallback(() => {
+    if (!target) return Promise.resolve();
+    return notePersistenceService.loadNotes(target, {
+      createEmpty: () => createEmptyLiveNotesDocument(Date.now() - (durationRef.current * 1000)),
+    }).then(() => undefined);
+  }, [target]);
 
-  if (!document) {
+  if (folderError) {
+    return (
+      <div className="flex h-full items-center justify-center px-8 text-center">
+        <div>
+          <p className="text-sm font-medium text-error">Could not open this meeting’s notes</p>
+          <p className="mt-1 text-xs text-[var(--ink-subtle)]">No unscoped draft was created, so another meeting’s notes cannot be reused.</p>
+          <button type="button" className="mt-3 text-xs font-semibold text-info underline" onClick={() => void findFolder()}>Retry</button>
+        </div>
+      </div>
+    );
+  }
+  if (snapshot?.loadState === 'error' && !snapshot.document) {
+    return (
+      <div className="flex h-full items-center justify-center px-8 text-center">
+        <div>
+          <p className="text-sm font-medium text-error">Could not load your notes</p>
+          <p className="mt-1 text-xs text-[var(--ink-subtle)]">The existing document was not replaced.</p>
+          <button type="button" className="mt-3 text-xs font-semibold text-info underline" onClick={() => void reloadNotes()}>Retry</button>
+        </div>
+      </div>
+    );
+  }
+  if (!snapshot?.document) {
     return <div className="flex h-full items-center justify-center text-sm text-ink-subtle">Preparing notes…</div>;
   }
 
   if (bare) {
     return (
       <div className="meeting-notes-editor raw-notes-editor h-full overflow-y-auto">
+        <div className="sticky top-0 z-10 flex justify-end bg-[var(--surface-0)] px-10 py-2">
+          {snapshot.loadState === 'error' && (
+            <StatusFeedback tone="error" actionLabel="Retry" onAction={() => void reloadNotes()} className="mr-auto">
+              Could not refresh notes; showing your local draft
+            </StatusFeedback>
+          )}
+          <SaveFeedback
+            state={snapshot.saveState}
+            actionLabel={snapshot.saveState === 'error' ? 'Retry' : undefined}
+            onAction={snapshot.saveState === 'error' ? () => target && void notePersistenceService.retryNotes(target).catch(() => {}) : undefined}
+          />
+        </div>
         <div className="mx-auto w-full max-w-[860px] px-10 pb-24 pt-6">
-          <BlockNotesEditor document={document} onChange={handleDocumentChange} />
+          <BlockNotesEditor document={snapshot.document} onChange={handleDocumentChange} />
         </div>
       </div>
     );
@@ -117,11 +133,22 @@ export function LiveNotesPad({ bare = false }: { bare?: boolean } = {}) {
           <div className="text-sm font-medium text-ink">Your notes</div>
           <div className="text-xs text-[var(--ink-subtle)]">Use / for blocks and Markdown · AI will enrich these after the meeting</div>
         </div>
-        <span className="text-[11px] text-[var(--ink-subtle)]">{saveState === 'saving' ? 'Saving…' : 'Saved'}</span>
+        <div className="flex items-center gap-3">
+          {snapshot.loadState === 'error' && (
+            <StatusFeedback tone="error" actionLabel="Retry" onAction={() => void reloadNotes()}>
+              Showing local draft
+            </StatusFeedback>
+          )}
+          <SaveFeedback
+            state={snapshot.saveState}
+            actionLabel={snapshot.saveState === 'error' ? 'Retry' : undefined}
+            onAction={snapshot.saveState === 'error' ? () => target && void notePersistenceService.retryNotes(target).catch(() => {}) : undefined}
+          />
+        </div>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto px-8 pb-36 pt-3">
         <div className="mx-auto min-h-full max-w-[820px] rounded-2xl bg-[var(--surface-raised)] px-8 py-8 shadow-[0_1px_0_rgba(45,43,37,0.04)]">
-          <BlockNotesEditor document={document} onChange={handleDocumentChange} />
+          <BlockNotesEditor document={snapshot.document} onChange={handleDocumentChange} />
         </div>
       </div>
     </div>

@@ -1,48 +1,40 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { BlockNotesEditor } from '@/components/BlockNotesEditor';
-import { createLiveNote, type LiveNotesDocument } from '@/lib/liveNotes';
+import { SaveFeedback, StatusFeedback } from '@/components/ui/status-feedback';
+import { createEmptyLiveNotesDocument, type LiveNotesDocument } from '@/lib/liveNotes';
+import {
+  meetingNotesTarget,
+  noteDocumentId,
+  notePersistenceService,
+  type NotePersistenceSnapshot,
+} from '@/services/notePersistenceService';
 
 export function MeetingRawNotesEditor({ meetingId }: { meetingId: string }) {
-  const [document, setDocument] = useState<LiveNotesDocument | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [loadedFromStore, setLoadedFromStore] = useState(false);
-  const [saveState, setSaveState] = useState<'saved' | 'saving'>('saved');
-  const saveTimer = useRef<ReturnType<typeof setTimeout>>();
-  const pendingDocumentRef = useRef<LiveNotesDocument | null>(null);
-  const hasPendingSaveRef = useRef(false);
+  const target = useMemo(() => meetingNotesTarget(meetingId), [meetingId]);
+  const [snapshot, setSnapshot] = useState<NotePersistenceSnapshot>(() => ({
+    ...notePersistenceService.getSnapshot(target),
+  }));
+  const visibleSnapshot = noteDocumentId(snapshot.target) === noteDocumentId(target)
+    ? snapshot
+    : { ...notePersistenceService.getSnapshot(target) };
 
-  const emptyDocument = useCallback((): LiveNotesDocument => ({
-    version: 1,
-    meetingStartedAtMs: Date.now(),
-    updatedAt: new Date().toISOString(),
-    notes: [createLiveNote(0)],
-  }), []);
-
-  const loadNotes = useCallback(async (showLoading: boolean) => {
-    if (showLoading) setLoading(true);
-    try {
-      const result = await invoke<LiveNotesDocument | null>('get_meeting_live_notes', { meetingId });
-      if (result) {
-        setDocument(result);
-        setLoadedFromStore(true);
-      } else {
-        // Keep anything already on screen; only seed an empty editor once.
-        setDocument((current) => current ?? emptyDocument());
-      }
-    } catch (error) {
-      console.warn('Could not load original meeting notes:', error);
-      setDocument((current) => current ?? emptyDocument());
-    } finally {
-      if (showLoading) setLoading(false);
-    }
-  }, [meetingId, emptyDocument]);
+  const loadNotes = useCallback(async () => {
+    await notePersistenceService.loadNotes(target, { createEmpty: createEmptyLiveNotesDocument });
+  }, [target]);
 
   useEffect(() => {
-    void loadNotes(true);
-  }, [loadNotes]);
+    setSnapshot({ ...notePersistenceService.getSnapshot(target) });
+    const unsubscribe = notePersistenceService.subscribeNotes(target, () => {
+      setSnapshot({ ...notePersistenceService.getSnapshot(target) });
+    });
+    void loadNotes();
+    return () => {
+      unsubscribe();
+      void notePersistenceService.flushNotes(target).catch(() => {});
+    };
+  }, [loadNotes, target]);
 
   // The live-notes capture unmounts on stop, before the meeting row is finalized.
   // Refetch once the stop pipeline has persisted the notes so nothing disappears.
@@ -50,7 +42,7 @@ export function MeetingRawNotesEditor({ meetingId }: { meetingId: string }) {
     const handler = (event: Event) => {
       const id = (event as CustomEvent<{ meetingId?: string }>).detail?.meetingId;
       if (id && id !== meetingId) return;
-      void loadNotes(false);
+      void loadNotes();
     };
     window.addEventListener('meetily:recording-finalized', handler);
     window.addEventListener('meetily:transcription-complete', handler);
@@ -61,35 +53,26 @@ export function MeetingRawNotesEditor({ meetingId }: { meetingId: string }) {
   }, [meetingId, loadNotes]);
 
   const handleChange = useCallback((next: LiveNotesDocument) => {
-    setDocument(next);
-    pendingDocumentRef.current = next;
-    hasPendingSaveRef.current = true;
-    setSaveState('saving');
+    notePersistenceService.saveNotes(target, next);
     // Let the workspace glow the re-enhance control; enhancement stays manual.
     window.dispatchEvent(new CustomEvent('meetily:raw-notes-changed', { detail: { meetingId } }));
-    if (saveTimer.current) clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(() => {
-      void invoke('save_meeting_live_notes', { meetingId, document: next })
-        .then(() => {
-          hasPendingSaveRef.current = false;
-          setSaveState('saved');
-        })
-        .catch((error) => console.warn('Could not save original meeting notes:', error));
-    }, 250);
-  }, [meetingId]);
+  }, [meetingId, target]);
 
-  useEffect(() => () => {
-    if (saveTimer.current) clearTimeout(saveTimer.current);
-    if (hasPendingSaveRef.current && pendingDocumentRef.current) {
-      void invoke('save_meeting_live_notes', {
-        meetingId,
-        document: pendingDocumentRef.current,
-      }).catch(() => {});
-    }
-  }, [meetingId]);
-
-  if (loading) return <div className="flex h-full items-center justify-center text-sm text-[var(--ink-subtle)]">Loading your notes…</div>;
-  if (!document) {
+  if (visibleSnapshot.loadState === 'loading' && !visibleSnapshot.document) {
+    return <div className="flex h-full items-center justify-center text-sm text-[var(--ink-subtle)]">Loading your notes…</div>;
+  }
+  if (visibleSnapshot.loadState === 'error' && !visibleSnapshot.document) {
+    return (
+      <div className="flex h-full items-center justify-center px-8 text-center">
+        <div>
+          <p className="text-sm font-medium text-error">Could not load your notes</p>
+          <p className="mt-1 text-xs text-[var(--ink-subtle)]">The existing document was not replaced. Retry when storage is available.</p>
+          <button type="button" className="mt-3 text-xs font-semibold text-info underline" onClick={() => void loadNotes()}>Retry</button>
+        </div>
+      </div>
+    );
+  }
+  if (!visibleSnapshot.document) {
     return (
       <div className="flex h-full items-center justify-center px-8 text-center">
         <div>
@@ -102,10 +85,22 @@ export function MeetingRawNotesEditor({ meetingId }: { meetingId: string }) {
 
   return (
     <div className="h-full overflow-y-auto">
+      <div className="sticky top-0 z-10 flex justify-end bg-[var(--surface-0)] px-10 py-2">
+        {visibleSnapshot.loadState === 'error' && (
+          <StatusFeedback tone="error" actionLabel="Retry" onAction={() => void loadNotes()} className="mr-auto">
+            Could not refresh notes; showing your local draft
+          </StatusFeedback>
+        )}
+        <SaveFeedback
+          state={visibleSnapshot.saveState}
+          actionLabel={visibleSnapshot.saveState === 'error' ? 'Retry' : undefined}
+          onAction={visibleSnapshot.saveState === 'error' ? () => void notePersistenceService.retryNotes(target).catch(() => {}) : undefined}
+        />
+      </div>
       <div className="meeting-notes-editor raw-notes-editor mx-auto w-full max-w-[860px] px-10 pb-24 pt-6">
         <BlockNotesEditor
-          key={`${meetingId}-${loadedFromStore ? 'stored' : 'blank'}`}
-          document={document}
+          key={meetingId}
+          document={visibleSnapshot.document}
           onChange={handleChange}
         />
       </div>

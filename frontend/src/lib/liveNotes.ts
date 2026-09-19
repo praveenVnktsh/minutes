@@ -17,6 +17,15 @@ export interface LiveNotesDocument {
 export const LIVE_NOTES_FALLBACK_KEY = 'meetily.liveNotes.current';
 export const LIVE_NOTES_FALLBACK_FOLDER_KEY = 'meetily.liveNotes.currentFolder';
 
+export function createEmptyLiveNotesDocument(meetingStartedAtMs = Date.now()): LiveNotesDocument {
+  return {
+    version: 1,
+    meetingStartedAtMs,
+    updatedAt: new Date().toISOString(),
+    notes: [createLiveNote(0)],
+  };
+}
+
 export function formatNoteTimestamp(seconds: number): string {
   const wholeSeconds = Math.max(0, Math.floor(seconds));
   return `${Math.floor(wholeSeconds / 60).toString().padStart(2, '0')}:${(wholeSeconds % 60).toString().padStart(2, '0')}`;
