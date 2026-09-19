@@ -86,6 +86,7 @@ export interface RecordingControllerValue {
   command: RecordingCommand;
   isCommandPending: boolean;
   feedback: RecordingFeedbackState | null;
+  feedbackManagedGlobally: boolean;
   startRecording: (options?: StartRecordingOptions) => Promise<void>;
   stopRecording: (options?: StopRecordingOptions) => Promise<void>;
   pauseRecording: () => Promise<void>;
@@ -273,7 +274,13 @@ export function useOptionalRecordingController(): RecordingControllerValue | nul
   return useContext(RecordingControllerContext);
 }
 
-export function RecordingControllerProvider({ children }: { children: React.ReactNode }) {
+export function RecordingControllerProvider({
+  children,
+  feedbackManagedGlobally = false,
+}: {
+  children: React.ReactNode;
+  feedbackManagedGlobally?: boolean;
+}) {
   const router = useRouter();
   const { selectedDevices, betaFeatures, selectedLanguage, transcriptModelConfig } = useConfig();
   const { recording, activeMeetingId: authoritativeMeetingId, snapshot, rehydrate } = useMeetingActivity();
@@ -1141,6 +1148,7 @@ export function RecordingControllerProvider({ children }: { children: React.Reac
     command,
     isCommandPending: command !== null,
     feedback,
+    feedbackManagedGlobally,
     startRecording,
     stopRecording,
     pauseRecording,
@@ -1161,6 +1169,7 @@ export function RecordingControllerProvider({ children }: { children: React.Reac
     authoritativeMeetingId,
     command,
     feedback,
+    feedbackManagedGlobally,
     isRecoveryOpen,
     openFeedbackSettings,
     pauseRecording,
