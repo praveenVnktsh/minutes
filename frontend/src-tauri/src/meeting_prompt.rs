@@ -197,8 +197,25 @@ fn associate_started_session_state(
     Ok(())
 }
 
-fn matches_started_session(request: &RecordingRequest, current_session_id: Option<&str>) -> bool {
-    request.started_session_id.as_deref() == current_session_id && current_session_id.is_some()
+fn has_started_session(request: &RecordingRequest) -> bool {
+    request.started_session_id.is_some()
+}
+
+fn settle_request_state(
+    pending: &mut Option<RecordingRequest>,
+    request_id: &str,
+    accepted: bool,
+) -> Result<RecordingRequest, String> {
+    let request = pending
+        .as_ref()
+        .ok_or_else(|| "No recording request is pending".to_string())?;
+    if request.request_id != request_id {
+        return Err("Recording request is stale".to_string());
+    }
+    if accepted && !has_started_session(request) {
+        return Err("Recording request cannot be accepted before recording starts".to_string());
+    }
+    Ok(pending.take().expect("checked above"))
 }
 
 /// Tauri command so the webview can dismiss the prompt.
@@ -279,26 +296,8 @@ pub fn acknowledge_recording_request<R: Runtime>(
     let mut pending = PENDING_REQUEST
         .lock()
         .map_err(|_| "Recording request lock failed")?;
-    if pending.as_ref().map(|request| request.request_id.as_str()) != Some(request_id.as_str()) {
-        return Err("Recording request is stale".to_string());
-    }
-    let request = pending.as_ref().expect("checked above");
-    let started_session_id = request.started_session_id.clone();
-    if accepted {
-        let current_session_id = crate::meeting_activity::recording_identity()
-            .filter(|recording| {
-                matches!(
-                    recording.status,
-                    crate::meeting_activity::ActivityStatus::Recording
-                        | crate::meeting_activity::ActivityStatus::Paused
-                )
-            })
-            .map(|recording| recording.session_id);
-        if !matches_started_session(request, current_session_id.as_deref()) {
-            return Err("Recording request cannot be accepted before recording starts".to_string());
-        }
-    }
-    *pending = None;
+    let request = settle_request_state(&mut pending, &request_id, accepted)?;
+    let started_session_id = request.started_session_id;
     drop(pending);
     clear_legacy_fallback(&app, &request_id);
     let result = serde_json::json!({
@@ -364,9 +363,12 @@ mod tests {
         claim_request_state(&mut pending, &request.request_id, "controller").unwrap();
         begin_recording_request_state(&mut pending, &request.request_id).unwrap();
         associate_started_session_state(&mut pending, &request.request_id, "session-a").unwrap();
-        let request = pending.as_ref().unwrap();
+        let settled = settle_request_state(&mut pending, &request.request_id, true).unwrap();
 
-        assert!(matches_started_session(request, Some("session-a")));
-        assert!(!matches_started_session(request, Some("session-b")));
+        assert_eq!(settled.started_session_id.as_deref(), Some("session-a"));
+        assert!(pending.is_none());
+
+        let replacement = pending_or_insert(&mut pending, "meeting_prompt");
+        assert_ne!(replacement.request_id, request.request_id);
     }
 }

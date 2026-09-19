@@ -205,6 +205,22 @@ async fn start_recording<R: Runtime>(
             RECORDING_FLAG.store(true, Ordering::SeqCst);
             tray::update_tray_menu(&app);
 
+            if let Some(request_id) = request_id {
+                if let Err(error) =
+                    meeting_prompt::associate_started_session(&request_id, &session_id)
+                {
+                    log_error!("Failed to associate recording request: {}", error);
+                }
+                if let Err(error) = meeting_prompt::acknowledge_recording_request(
+                    app.clone(),
+                    request_id,
+                    true,
+                    None,
+                ) {
+                    log_error!("Failed to acknowledge recording request: {}", error);
+                }
+            }
+
             log_info!("Recording started successfully");
 
             // Show recording started notification through NotificationManager
@@ -225,21 +241,6 @@ async fn start_recording<R: Runtime>(
                 log_info!("Successfully showed recording started notification");
             }
 
-            if let Some(request_id) = request_id {
-                if let Err(error) =
-                    meeting_prompt::associate_started_session(&request_id, &session_id)
-                {
-                    log_error!("Failed to associate recording request: {}", error);
-                }
-                if let Err(error) = meeting_prompt::acknowledge_recording_request(
-                    app.clone(),
-                    request_id,
-                    true,
-                    None,
-                ) {
-                    log_error!("Failed to acknowledge recording request: {}", error);
-                }
-            }
             Ok(RecordingStarted { session_id })
         }
         Err(e) => {
@@ -473,6 +474,22 @@ async fn start_recording_with_devices_and_meeting<R: Runtime>(
         Ok(session_id) => {
             log_info!("Recording started successfully via tauri command");
 
+            if let Some(request_id) = request_id {
+                if let Err(error) =
+                    meeting_prompt::associate_started_session(&request_id, &session_id)
+                {
+                    log_error!("Failed to associate recording request: {}", error);
+                }
+                if let Err(error) = meeting_prompt::acknowledge_recording_request(
+                    app.clone(),
+                    request_id,
+                    true,
+                    None,
+                ) {
+                    log_error!("Failed to acknowledge recording request: {}", error);
+                }
+            }
+
             // Show recording started notification through NotificationManager
             // This respects user's notification preferences
             let notification_manager_state = app.state::<NotificationManagerState<R>>();
@@ -489,21 +506,6 @@ async fn start_recording_with_devices_and_meeting<R: Runtime>(
                 );
             }
 
-            if let Some(request_id) = request_id {
-                if let Err(error) =
-                    meeting_prompt::associate_started_session(&request_id, &session_id)
-                {
-                    log_error!("Failed to associate recording request: {}", error);
-                }
-                if let Err(error) = meeting_prompt::acknowledge_recording_request(
-                    app.clone(),
-                    request_id,
-                    true,
-                    None,
-                ) {
-                    log_error!("Failed to acknowledge recording request: {}", error);
-                }
-            }
             Ok(RecordingStarted { session_id })
         }
         Err(e) => {

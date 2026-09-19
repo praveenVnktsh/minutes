@@ -6,6 +6,7 @@
 use anyhow::Result;
 use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
+use std::ops::{Deref, DerefMut};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
@@ -52,18 +53,13 @@ fn recording_live() -> bool {
 }
 
 fn stopped_capture_needing_cleanup() -> Option<String> {
-    let needs_cleanup = IS_RECORDING.load(Ordering::SeqCst)
-        && !IS_RECORDING_STOPPING.load(Ordering::SeqCst)
-        && RECORDING_MANAGER
-            .lock()
-            .unwrap()
-            .as_ref()
-            .map(|manager| !manager.get_state().is_recording())
-            .unwrap_or(false);
-    needs_cleanup
-        .then(crate::meeting_activity::recording_identity)
-        .flatten()
-        .map(|recording| recording.session_id)
+    if !IS_RECORDING.load(Ordering::SeqCst) || IS_RECORDING_STOPPING.load(Ordering::SeqCst) {
+        return None;
+    }
+    let manager = RECORDING_MANAGER.lock().unwrap();
+    manager
+        .as_ref()
+        .and_then(RecordingSession::stopped_session_id)
 }
 
 async fn cleanup_stopped_capture<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
@@ -149,6 +145,16 @@ mod lifecycle_tests {
         assert!(!super::session_matches(Some("failed-a"), "healthy-b"));
         assert!(super::session_matches(None, "manual-stop"));
     }
+
+    #[test]
+    fn cleanup_observation_uses_the_stopped_manager_slots_session() {
+        let session = super::RecordingSession {
+            manager: super::RecordingManager::new(),
+            session_id: "failed-a".to_string(),
+        };
+
+        assert_eq!(session.stopped_session_id().as_deref(), Some("failed-a"));
+    }
 }
 impl Drop for StoppingGuard {
     fn drop(&mut self) {
@@ -171,8 +177,33 @@ fn finalize_recording_start<R: Runtime>(app: &AppHandle<R>, session_id: String) 
     );
 }
 
+struct RecordingSession {
+    manager: RecordingManager,
+    session_id: String,
+}
+
+impl RecordingSession {
+    fn stopped_session_id(&self) -> Option<String> {
+        (!self.manager.get_state().is_recording()).then(|| self.session_id.clone())
+    }
+}
+
+impl Deref for RecordingSession {
+    type Target = RecordingManager;
+
+    fn deref(&self) -> &Self::Target {
+        &self.manager
+    }
+}
+
+impl DerefMut for RecordingSession {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.manager
+    }
+}
+
 // Global recording manager and transcription task to keep them alive during recording
-static RECORDING_MANAGER: Mutex<Option<RecordingManager>> = Mutex::new(None);
+static RECORDING_MANAGER: Mutex<Option<RecordingSession>> = Mutex::new(None);
 static TRANSCRIPTION_TASK: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
 
 // Listener ID for proper cleanup - prevents microphone from staying active after recording stops
@@ -536,7 +567,10 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     // Store the manager globally to keep it alive
     {
         let mut global_manager = RECORDING_MANAGER.lock().unwrap();
-        *global_manager = Some(manager);
+        *global_manager = Some(RecordingSession {
+            manager,
+            session_id: session_id.clone(),
+        });
     }
 
     // Spawn background device event processor (mic-disconnect fallback).
@@ -778,7 +812,10 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     // Store the manager globally to keep it alive
     {
         let mut global_manager = RECORDING_MANAGER.lock().unwrap();
-        *global_manager = Some(manager);
+        *global_manager = Some(RecordingSession {
+            manager,
+            session_id: session_id.clone(),
+        });
     }
 
     // Spawn background device event processor (mic-disconnect fallback).
