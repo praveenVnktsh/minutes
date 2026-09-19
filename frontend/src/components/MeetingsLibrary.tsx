@@ -42,6 +42,8 @@ export function MeetingsLibrary() {
     setMeetingSearchQuery: setQuery,
     isMeetingSearchPending,
     recordingActionDisabled,
+    meetingSearchFocusRequest,
+    consumeMeetingSearchFocus,
   } = useShell()
   const { activeMeetingId, getMeetingActivities } = useMeetingActivity()
   const debugMode = useDebugMode()
@@ -50,10 +52,10 @@ export function MeetingsLibrary() {
   const searchRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
-    const focus = () => searchRef.current?.focus()
-    window.addEventListener('focus-meetings-search', focus)
-    return () => window.removeEventListener('focus-meetings-search', focus)
-  }, [])
+    if (meetingSearchFocusRequest == null || !searchRef.current) return
+    searchRef.current.focus()
+    consumeMeetingSearchFocus(meetingSearchFocusRequest)
+  }, [consumeMeetingSearchFocus, meetingSearchFocusRequest])
 
   const visibility = useMemo(() => ({
     includeArchived: filter === 'archived',

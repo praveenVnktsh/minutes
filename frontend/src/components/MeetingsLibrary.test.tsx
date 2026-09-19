@@ -15,6 +15,7 @@ const setMeetingArchived = mock(async () => {})
 const runRecordingAction = mock(async () => {})
 const runImportAction = mock(async () => {})
 const openMeeting = mock(async () => {})
+const consumeMeetingSearchFocus = mock(() => {})
 
 const originalSidebar = { ...await import('@/components/Sidebar/SidebarProvider') }
 const originalShell = { ...await import('@/contexts/ShellContext') }
@@ -38,6 +39,7 @@ mock.module('@/contexts/ShellContext', () => ({
     openMeeting, isNavigating: false, navigationError: null,
     meetingSearchQuery: '', setMeetingSearchQuery: () => {}, isMeetingSearchPending: false,
     recordingActionDisabled: false,
+    meetingSearchFocusRequest: null, consumeMeetingSearchFocus,
   }),
 }))
 mock.module('@/contexts/MeetingActivityContext', () => ({
@@ -50,7 +52,7 @@ const originalWindow = globalThis.window
 const { MeetingsLibrary } = await import('./MeetingsLibrary')
 
 beforeEach(() => {
-  for (const fn of [searchTranscripts, refetchMeetings, setMeetingPinned, setMeetingArchived, runRecordingAction, runImportAction, openMeeting]) fn.mockClear()
+  for (const fn of [searchTranscripts, refetchMeetings, setMeetingPinned, setMeetingArchived, runRecordingAction, runImportAction, openMeeting, consumeMeetingSearchFocus]) fn.mockClear()
   Object.defineProperty(globalThis, 'window', { configurable: true, value: new EventTarget() })
 })
 
