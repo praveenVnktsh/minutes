@@ -14,16 +14,21 @@ export function RecordingControllerFeedback() {
       <div className="flex items-start gap-3">
         <StatusFeedback
           tone={controller.feedback.kind === 'warning' ? 'warning' : 'error'}
-          actionLabel={controller.feedback.settingsSection
-            ? 'Open settings'
-            : controller.canRetryFeedback ? 'Retry' : undefined}
-          onAction={controller.feedback.settingsSection
-            ? () => void controller.openFeedbackSettings()
-            : controller.canRetryFeedback ? () => void controller.retryFeedback() : undefined}
+          actionLabel={controller.canRetryFeedback ? 'Retry' : undefined}
+          onAction={controller.canRetryFeedback ? () => void controller.retryFeedback() : undefined}
           className="text-sm"
         >
           {controller.feedback.title}: {controller.feedback.message}
         </StatusFeedback>
+        {controller.feedback.settingsSection ? (
+          <button
+            type="button"
+            className="rounded-sm text-xs font-semibold text-[var(--ink-muted)] underline underline-offset-2 hover:no-underline"
+            onClick={() => void controller.openFeedbackSettings()}
+          >
+            Open settings
+          </button>
+        ) : null}
         <button
           type="button"
           aria-label="Dismiss recording message"

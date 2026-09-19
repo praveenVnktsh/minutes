@@ -31,6 +31,15 @@ let audioRecoveryResult: AudioRecoveryStatus = {
   status: 'none', chunk_count: 0, estimated_duration_seconds: 0, message: 'none',
 };
 let audioCheckpoints: Record<string, boolean> = {};
+const sessionValues = new Map<string, string>();
+Object.defineProperty(globalThis, 'sessionStorage', {
+  configurable: true,
+  value: {
+    getItem: (key: string) => sessionValues.get(key) ?? null,
+    setItem: (key: string, value: string) => sessionValues.set(key, value),
+    removeItem: (key: string) => sessionValues.delete(key),
+  },
+});
 
 const indexedDBService = {
   getAllMeetings: mock(async () => allMeetings),
@@ -38,7 +47,13 @@ const indexedDBService = {
   getTranscripts: mock(async () => meetingTranscripts),
   markMeetingSaved: mock(async () => {}),
 };
-const saveMeeting = mock(async () => ({ meeting_id: 'saved-meeting' }));
+const saveMeeting = mock(async (
+  _title: string,
+  _transcripts: unknown[],
+  _folderPath: string | null,
+  _webhookOnComplete?: boolean,
+  _meetingId?: string | null,
+) => ({ meeting_id: 'saved-meeting' }));
 const storageService = { saveMeeting };
 const applyPinnedSummaryLanguageToMeeting = mock(async () => {});
 const toast = { success: mock(() => {}), error: mock(() => {}), warning: mock(() => {}), info: mock(() => {}) };
@@ -89,6 +104,7 @@ beforeEach(() => {
   allMeetings = [];
   audioRecoveryResult = { status: 'none', chunk_count: 0, estimated_duration_seconds: 0, message: 'none' };
   audioCheckpoints = {};
+  sessionValues.clear();
 });
 
 afterEach(async () => {
@@ -122,6 +138,26 @@ const emptyMeeting: MeetingMetadata = {
   transcriptCount: 0,
   savedToSQLite: false,
   folderPath: '/recordings/empty',
+};
+
+const transcriptMeeting: MeetingMetadata = {
+  meetingId: 'meeting-transcript',
+  title: 'Transcript and audio',
+  startTime: recent,
+  lastUpdated: recent,
+  transcriptCount: 1,
+  savedToSQLite: false,
+  folderPath: '/recordings/transcript',
+};
+
+const transcript: StoredTranscript = {
+  id: 1,
+  meetingId: 'meeting-transcript',
+  text: 'Recovered words',
+  timestamp: '12:00:00',
+  confidence: 0.9,
+  sequenceId: 1,
+  storedAt: recent,
 };
 
 describe('recoverMeeting for an audio-only meeting', () => {
@@ -159,7 +195,9 @@ describe('recoverMeeting for an audio-only meeting', () => {
     let result: Awaited<ReturnType<typeof state.recoverMeeting>> | undefined;
     await act(async () => { result = await state.recoverMeeting('meeting-audio'); });
 
-    expect(saveMeeting).toHaveBeenCalledWith('Audio only', [], '/recordings/audio-only');
+    expect(saveMeeting).toHaveBeenCalledWith(
+      'Audio only', [], '/recordings/audio-only', false, null,
+    );
     expect(commands()).toContain('cleanup_checkpoints');
     expect(result!.transcriptCount).toBe(0);
     expect(result!.audioRecoveryStatus?.status).toBe('success');
@@ -175,5 +213,84 @@ describe('checkForRecoverableTranscripts', () => {
     await act(async () => { await state.checkForRecoverableTranscripts(); });
 
     expect(state.recoverableMeetings.map(m => m.meetingId)).toEqual(['meeting-audio']);
+  });
+});
+
+describe('recoverMeeting integrity', () => {
+  test('does not save or mark recovery complete when the transcript read fails', async () => {
+    meetingMetadata = transcriptMeeting;
+    audioRecoveryResult = {
+      status: 'success', chunk_count: 2, estimated_duration_seconds: 60, message: 'recovered',
+    };
+    indexedDBService.getTranscripts.mockImplementationOnce(async () => {
+      throw new Error('IndexedDB temporarily unavailable');
+    });
+    await mount();
+
+    await act(async () => { await state.recoverMeeting('meeting-transcript').catch(() => {}); });
+
+    expect(saveMeeting).not.toHaveBeenCalled();
+    expect(indexedDBService.markMeetingSaved).not.toHaveBeenCalled();
+    expect(commands()).not.toContain('cleanup_checkpoints');
+  });
+
+  for (const status of ['failed', 'partial'] as const) {
+    test(`saves transcripts but retains retry state when audio recovery is ${status}`, async () => {
+      meetingMetadata = transcriptMeeting;
+      meetingTranscripts = [transcript];
+      allMeetings = [transcriptMeeting];
+      audioCheckpoints = { '/recordings/transcript': true };
+      audioRecoveryResult = {
+        status, chunk_count: 1, estimated_duration_seconds: 30, message: `${status} merge`,
+      };
+      await mount();
+      await act(async () => { await state.checkForRecoverableTranscripts(); });
+
+      let result: Awaited<ReturnType<typeof state.recoverMeeting>> | undefined;
+      await act(async () => { result = await state.recoverMeeting('meeting-transcript'); });
+
+      expect(result?.success).toBe(false);
+      expect(saveMeeting).toHaveBeenCalledWith(
+        'Transcript and audio', expect.any(Array), '/recordings/transcript', false, null,
+      );
+      expect(indexedDBService.markMeetingSaved).not.toHaveBeenCalled();
+      expect(commands()).not.toContain('cleanup_checkpoints');
+      expect(state.recoverableMeetings.map((meeting) => meeting.meetingId)).toEqual(['meeting-transcript']);
+    });
+  }
+
+  test('updates the original bound row when exact persisted folder identity is available', async () => {
+    meetingMetadata = transcriptMeeting;
+    meetingTranscripts = [transcript];
+    audioRecoveryResult = {
+      status: 'success', chunk_count: 2, estimated_duration_seconds: 60, message: 'recovered',
+    };
+    sessionStorage.setItem('active_recording_sessions', JSON.stringify([{
+      sessionId: 'native-session', meetingId: 'bound-sqlite-row',
+      folderPath: '/recordings/transcript', recordingSeconds: 30,
+    }]));
+    await mount();
+
+    await act(async () => { await state.recoverMeeting('meeting-transcript'); });
+
+    expect(saveMeeting.mock.calls[0]?.[4]).toBe('bound-sqlite-row');
+  });
+
+  test('reuses the first saved row when retrying a partial audio recovery', async () => {
+    meetingMetadata = transcriptMeeting;
+    meetingTranscripts = [transcript];
+    audioRecoveryResult = {
+      status: 'partial', chunk_count: 1, estimated_duration_seconds: 30, message: 'one chunk missing',
+    };
+    await mount();
+    await act(async () => { await state.recoverMeeting('meeting-transcript'); });
+    audioRecoveryResult = {
+      status: 'success', chunk_count: 2, estimated_duration_seconds: 60, message: 'recovered',
+    };
+    await act(async () => { await state.recoverMeeting('meeting-transcript'); });
+
+    expect(saveMeeting.mock.calls[0]?.[4]).toBeNull();
+    expect(saveMeeting.mock.calls[1]?.[4]).toBe('saved-meeting');
+    expect(indexedDBService.markMeetingSaved).toHaveBeenCalledTimes(1);
   });
 });

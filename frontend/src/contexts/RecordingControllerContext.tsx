@@ -38,16 +38,24 @@ import {
   applyPinnedSummaryLanguageToMeeting,
   detectAndCacheSummaryLanguage,
 } from '@/lib/summary-language-preferences';
-import { flushNotes } from '@/services/notePersistenceService';
 import { meetingActivityService } from '@/services/meetingActivityService';
-import { recordingService, type RecordingStoppedPayload } from '@/services/recordingService';
+import { recordingService } from '@/services/recordingService';
 import { storageService } from '@/services/storageService';
 import { transcriptService } from '@/services/transcriptService';
 import { indexedDBService } from '@/services/indexedDBService';
 import type { RecordingStartRequest } from '@/types/meetingActivity';
 import { useTranscriptRecovery, type UseTranscriptRecoveryReturn } from '@/hooks/useTranscriptRecovery';
+import {
+  flushNotes,
+  meetingNotesTarget,
+  notePersistenceService,
+} from '@/services/notePersistenceService';
+import { originalNotesMarkdown } from '@/lib/meetingExport';
+import type { LiveNotesDocument } from '@/lib/liveNotes';
+import type { Transcript } from '@/types';
 
 const ACTIVE_MEETING_KEY = 'active_recording_meeting_id';
+const ACTIVE_SESSIONS_KEY = 'active_recording_sessions';
 const CONTROLLER_CLAIMANT = 'main-recording-controller';
 const RUNTIME_ERROR_CODE = 'TRANSCRIPTION_RUNTIME_INITIALIZATION_FAILED';
 const RUNTIME_ERROR_MESSAGE = 'Speech recognition could not initialize. Restart Minutes. If the problem continues, repair or reinstall the app.';
@@ -98,8 +106,31 @@ interface SessionRecord {
   meetingId: string | null;
   title: string;
   folderPath: string | null;
-  recordingSeconds: number;
+  recordingSeconds: number | null;
 }
+
+interface FinalizationRecord {
+  promise: Promise<void> | null;
+  completed: boolean;
+  deferred: boolean | null;
+  transcripts: Transcript[] | null;
+  savedMeetingId: string | null;
+  attachedNotesRead: boolean;
+  attachedNotes: LiveNotesDocument | null;
+  notesAttached: boolean;
+  postProcessingStarted: boolean;
+  markedSaved: boolean;
+  catalogRefreshed: boolean;
+  discarded: boolean;
+}
+
+interface LifecycleOperation {
+  kind: Exclude<RecordingCommand, null>;
+  sessionId: string | null;
+  promise: Promise<void>;
+}
+
+class LifecycleBusyError extends Error {}
 
 interface TranscriptConfig {
   provider?: string;
@@ -131,6 +162,37 @@ async function recordingFolderPath(): Promise<string | null> {
   return null;
 }
 
+function readPersistedSessions(): Map<string, SessionRecord> {
+  try {
+    const value = sessionStorage.getItem(ACTIVE_SESSIONS_KEY);
+    if (!value) return new Map();
+    const records = JSON.parse(value) as SessionRecord[];
+    return new Map(records.map((record) => [record.sessionId, record]));
+  } catch {
+    return new Map();
+  }
+}
+
+function persistSessions(sessions: Map<string, SessionRecord>): void {
+  sessionStorage.setItem(ACTIVE_SESSIONS_KEY, JSON.stringify([...sessions.values()]));
+}
+
+function formatTranscriptHistory(history: Array<Record<string, unknown>>): Transcript[] {
+  return history.map((segment, index) => ({
+    id: String(segment.id ?? segment.sequence_id ?? index),
+    text: String(segment.text ?? ''),
+    timestamp: String(segment.display_time ?? segment.timestamp ?? ''),
+    speaker: typeof segment.speaker === 'string' ? segment.speaker : undefined,
+    sequence_id: typeof segment.sequence_id === 'number' ? segment.sequence_id : index,
+    chunk_start_time: typeof segment.audio_start_time === 'number' ? segment.audio_start_time : undefined,
+    is_partial: false,
+    confidence: typeof segment.confidence === 'number' ? segment.confidence : undefined,
+    audio_start_time: typeof segment.audio_start_time === 'number' ? segment.audio_start_time : undefined,
+    audio_end_time: typeof segment.audio_end_time === 'number' ? segment.audio_end_time : undefined,
+    duration: typeof segment.duration === 'number' ? segment.duration : undefined,
+  }));
+}
+
 const RecordingControllerContext = createContext<RecordingControllerValue | null>(null);
 
 export function useRecordingController(): RecordingControllerValue {
@@ -148,11 +210,9 @@ export function useOptionalRecordingController(): RecordingControllerValue | nul
 export function RecordingControllerProvider({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const { selectedDevices, betaFeatures, selectedLanguage, transcriptModelConfig } = useConfig();
-  const { recording, activeMeetingId: authoritativeMeetingId, rehydrate } = useMeetingActivity();
+  const { recording, activeMeetingId: authoritativeMeetingId, snapshot, rehydrate } = useMeetingActivity();
   const recordingState = useRecordingState();
   const {
-    transcriptsRef,
-    flushBuffer,
     clearTranscripts,
     setMeetingTitle,
     markMeetingAsSaved,
@@ -163,18 +223,16 @@ export function RecordingControllerProvider({ children }: { children: React.Reac
   const [command, setCommand] = useState<RecordingCommand>(null);
   const [feedback, setFeedback] = useState<RecordingFeedbackState | null>(null);
   const [isRecoveryOpen, setIsRecoveryOpen] = useState(false);
-  const startPromiseRef = useRef<Promise<void> | null>(null);
-  const stopPromiseRef = useRef<Promise<void> | null>(null);
-  const pausePromiseRef = useRef<Promise<void> | null>(null);
-  const resumePromiseRef = useRef<Promise<void> | null>(null);
-  const finalizePromisesRef = useRef(new Map<string, Promise<void>>());
-  const sessionsRef = useRef(new Map<string, SessionRecord>());
-  const latestSessionIdRef = useRef<string | null>(null);
-  const stoppedMetadataRef = useRef<RecordingStoppedPayload | null>(null);
+  const lifecycleOperationRef = useRef<LifecycleOperation | null>(null);
+  const finalizationsRef = useRef(new Map<string, FinalizationRecord>());
+  const sessionsRef = useRef(readPersistedSessions());
+  const latestSessionIdRef = useRef<string | null>([...sessionsRef.current.keys()].at(-1) ?? null);
+  const durationSessionIdRef = useRef<string | null>(null);
   const handledRequestsRef = useRef(new Set<string>());
   const requestHandlerRef = useRef<(request: RecordingStartRequest) => void>(() => {});
   const startHandlerRef = useRef<(options?: StartRecordingOptions) => Promise<void>>(async () => {});
   const stopHandlerRef = useRef<(options?: StopRecordingOptions) => Promise<void>>(async () => {});
+  const finalizeHandlerRef = useRef<(sessionId: string, saveMeeting?: boolean) => Promise<void>>(async () => {});
   const retryActionRef = useRef<(() => Promise<void>) | null>(null);
   const mountedRef = useRef(true);
 
@@ -192,9 +250,58 @@ export function RecordingControllerProvider({ children }: { children: React.Reac
       meetingId: recording.meeting_id ?? current?.meetingId ?? null,
       title: current?.title ?? 'New Meeting',
       folderPath: current?.folderPath ?? null,
-      recordingSeconds: current?.recordingSeconds ?? 0,
+      recordingSeconds: current?.recordingSeconds ?? null,
     });
+    persistSessions(sessionsRef.current);
   }, [recording]);
+
+  useEffect(() => {
+    if (!recording) return;
+    const sessionId = recording.session_id;
+    let disposed = false;
+    void (async () => {
+      const nativeState = await recordingService.getRecordingState().catch(() => null);
+      if (disposed || nativeState?.session_id !== sessionId) return;
+      const current = sessionsRef.current.get(sessionId) ?? {
+        sessionId,
+        meetingId: recording.meeting_id,
+        title: 'New Meeting',
+        folderPath: null,
+        recordingSeconds: null,
+      };
+      const [folderPath, title] = await Promise.all([
+        current.folderPath ? Promise.resolve(current.folderPath) : recordingFolderPath(),
+        current.title !== 'New Meeting'
+          ? Promise.resolve(current.title)
+          : recordingService.getRecordingMeetingName().catch(() => null),
+      ]);
+      if (disposed) return;
+      current.meetingId = recording.meeting_id ?? current.meetingId;
+      current.folderPath = folderPath ?? current.folderPath;
+      current.title = title ?? current.title;
+      current.recordingSeconds = nativeState.recording_duration ?? current.recordingSeconds;
+      sessionsRef.current.set(sessionId, current);
+      persistSessions(sessionsRef.current);
+      if (current.meetingId && !recording.meeting_id) {
+        await meetingActivityService.bindActiveRecordingMeeting(sessionId, current.meetingId).catch(() => {});
+        if (!disposed) await rehydrate().catch(() => {});
+      }
+    })();
+    return () => { disposed = true; };
+  }, [recording, rehydrate]);
+
+  useEffect(() => {
+    const sessionId = recording?.session_id ?? durationSessionIdRef.current;
+    if (!sessionId || recordingState.recordingDuration == null) return;
+    if (recording && durationSessionIdRef.current !== recording.session_id) {
+      durationSessionIdRef.current = recording.session_id;
+      return;
+    }
+    const session = sessionsRef.current.get(sessionId);
+    if (!session) return;
+    session.recordingSeconds = Math.max(session.recordingSeconds ?? 0, recordingState.recordingDuration);
+    persistSessions(sessionsRef.current);
+  }, [recording, recordingState.recordingDuration]);
 
   const reportError = useCallback((
     kind: RecordingFeedbackKind,
@@ -224,6 +331,8 @@ export function RecordingControllerProvider({ children }: { children: React.Reac
   const persistStartedSession = useCallback(async (session: SessionRecord) => {
     try {
       session.folderPath = await recordingFolderPath();
+      sessionsRef.current.set(session.sessionId, session);
+      persistSessions(sessionsRef.current);
       const created = await storageService.createMeeting(
         session.title,
         session.folderPath,
@@ -232,8 +341,9 @@ export function RecordingControllerProvider({ children }: { children: React.Reac
       if (!created.meeting_id) throw new Error('The meeting row was not created.');
       session.meetingId = created.meeting_id;
       sessionsRef.current.set(session.sessionId, session);
-      await meetingActivityService.bindActiveRecordingMeeting(session.sessionId, created.meeting_id);
       sessionStorage.setItem(ACTIVE_MEETING_KEY, created.meeting_id);
+      persistSessions(sessionsRef.current);
+      await meetingActivityService.bindActiveRecordingMeeting(session.sessionId, created.meeting_id);
       setCurrentMeeting({ id: created.meeting_id, title: session.title });
       await refetchMeetings();
       await flushNotes();
@@ -260,6 +370,14 @@ export function RecordingControllerProvider({ children }: { children: React.Reac
       betaFeatures.liveTranscription,
     );
 
+    let nativeStartInvoked = false;
+    let requestRejected = false;
+    const rejectRequest = async (error: string) => {
+      if (!options.requestId || nativeStartInvoked || requestRejected) return;
+      requestRejected = true;
+      await meetingActivityService.acknowledgeRecordingRequest(options.requestId, false, error).catch(() => {});
+    };
+
     try {
       await invoke('set_live_transcription_enabled', { enabled: liveTranscription });
       if (liveTranscription) {
@@ -269,9 +387,7 @@ export function RecordingControllerProvider({ children }: { children: React.Reac
             ? 'The transcription model is still downloading. Wait for it to finish, then try again.'
             : 'Download a transcription model before starting live transcription.';
           reportError('setup', 'Transcription setup required', error, 'transcription');
-          if (options.requestId) {
-            await meetingActivityService.acknowledgeRecordingRequest(options.requestId, false, error);
-          }
+          await rejectRequest(error);
           return;
         }
       }
@@ -279,6 +395,7 @@ export function RecordingControllerProvider({ children }: { children: React.Reac
       const title = meetingTitleNow();
       setMeetingTitle(title);
       recordingState.setStatus(RecordingStatus.STARTING, 'Initializing recording...');
+      nativeStartInvoked = true;
       const result = await recordingService.startRecordingWithDevices(
         selectedDevices?.micDevice ?? null,
         selectedDevices?.systemDevice ?? null,
@@ -290,10 +407,11 @@ export function RecordingControllerProvider({ children }: { children: React.Reac
         meetingId: null,
         title,
         folderPath: null,
-        recordingSeconds: 0,
+        recordingSeconds: null,
       };
       latestSessionIdRef.current = result.session_id;
       sessionsRef.current.set(result.session_id, session);
+      persistSessions(sessionsRef.current);
       clearTranscripts();
       setIsMeetingActive(true);
       Analytics.trackButtonClick('start_recording', options.source ?? 'recording_controller');
@@ -304,6 +422,7 @@ export function RecordingControllerProvider({ children }: { children: React.Reac
       await rehydrate();
     } catch (error) {
       const text = messageOf(error);
+      await rejectRequest(text);
       const runtimeError = text === RUNTIME_ERROR_CODE;
       reportError(
         runtimeError ? 'setup' : 'capture',
@@ -331,83 +450,132 @@ export function RecordingControllerProvider({ children }: { children: React.Reac
     setMeetingTitle,
   ]);
 
-  const startRecording = useCallback((options: StartRecordingOptions = {}): Promise<void> => {
-    if (startPromiseRef.current) return startPromiseRef.current;
-    const promise = performStart(options).finally(() => {
-      if (startPromiseRef.current === promise) startPromiseRef.current = null;
-    });
-    startPromiseRef.current = promise;
-    return promise;
-  }, [performStart]);
-  startHandlerRef.current = startRecording;
-
-  const waitForLiveTranscription = useCallback(async (deferred: boolean) => {
-    if (deferred) return;
-    let complete = false;
-    let disposed = false;
-    let unlisten: UnlistenFn | undefined;
-    try {
-      unlisten = await transcriptService.onTranscriptionComplete(() => { complete = true; });
-      for (let elapsed = 0; elapsed < 60_000 && !complete; elapsed += 500) {
-        const status = await transcriptService.getTranscriptionStatus();
-        if (!status.is_processing && status.chunks_in_queue === 0) break;
-        await new Promise((resolve) => setTimeout(resolve, 500));
-      }
-    } finally {
-      disposed = true;
-      if (disposed) unlisten?.();
+  const runLifecycle = useCallback((
+    kind: Exclude<RecordingCommand, null>,
+    sessionId: string | null,
+    operation: () => Promise<void>,
+  ): Promise<void> => {
+    const active = lifecycleOperationRef.current;
+    if (active) {
+      if (active.kind === kind && active.sessionId === sessionId) return active.promise;
+      return Promise.reject(new LifecycleBusyError(`Cannot ${kind} while ${active.kind} is in progress.`));
     }
+    const promise = operation().finally(() => {
+      if (lifecycleOperationRef.current?.promise === promise) lifecycleOperationRef.current = null;
+    });
+    lifecycleOperationRef.current = { kind, sessionId, promise };
+    return promise;
   }, []);
 
+  const startRecording = useCallback((options: StartRecordingOptions = {}): Promise<void> => {
+    if ([...finalizationsRef.current.values()].some((state) => !state.completed)) {
+      return Promise.reject(new LifecycleBusyError('Finish saving the previous meeting before starting another.'));
+    }
+    return runLifecycle('start', null, () => performStart(options));
+  }, [performStart, runLifecycle]);
+  startHandlerRef.current = startRecording;
+
   const finalizeRecording = useCallback((sessionId: string, saveMeeting = true): Promise<void> => {
-    const existing = finalizePromisesRef.current.get(sessionId);
-    if (existing) return existing;
+    let state = finalizationsRef.current.get(sessionId);
+    if (state?.completed) return Promise.resolve();
+    if (state?.promise) return state.promise;
+    if (!state) {
+      state = {
+        promise: null,
+        completed: false,
+        deferred: null,
+        transcripts: null,
+        savedMeetingId: null,
+        attachedNotesRead: false,
+        attachedNotes: null,
+        notesAttached: false,
+        postProcessingStarted: false,
+        markedSaved: false,
+        catalogRefreshed: false,
+        discarded: false,
+      };
+      finalizationsRef.current.set(sessionId, state);
+    }
+    const finalization = state;
     const promise = (async () => {
       setCommand('finalize');
       recordingState.setStatus(RecordingStatus.PROCESSING_TRANSCRIPTS, 'Finishing transcription...');
-      const session = sessionsRef.current.get(sessionId) ?? {
-        sessionId,
-        meetingId: authoritativeMeetingId,
-        title: stoppedMetadataRef.current?.meeting_name ?? 'New Meeting',
-        folderPath: stoppedMetadataRef.current?.folder_path ?? null,
-        recordingSeconds: 0,
-      };
-      session.folderPath = stoppedMetadataRef.current?.folder_path ?? session.folderPath;
-      session.title = stoppedMetadataRef.current?.meeting_name ?? session.title;
+      const session = sessionsRef.current.get(sessionId);
+      if (!session) throw new Error('The stopped recording could not be matched to its saved session.');
 
       if (!saveMeeting) {
+        finalization.completed = true;
+        sessionsRef.current.delete(sessionId);
+        persistSessions(sessionsRef.current);
         recordingState.setStatus(RecordingStatus.IDLE);
+        if (mountedRef.current) setCommand(null);
         return;
       }
 
       try {
         if (session.folderPath) await flushNotes({ sessionId: session.folderPath });
-        const deferred = shouldDeferTranscription(
-          localStorage.getItem(LIVE_TRANSCRIPTION_STORAGE_KEY),
-          betaFeatures.liveTranscription,
-        );
-        await waitForLiveTranscription(deferred);
-        flushBuffer();
-        await new Promise((resolve) => setTimeout(resolve, 0));
-        recordingState.setStatus(RecordingStatus.SAVING, 'Saving meeting...');
-        const freshTranscripts = [...transcriptsRef.current];
-        const saved = await storageService.saveMeeting(
-          session.title,
-          freshTranscripts,
-          session.folderPath,
-          !deferred,
-          session.meetingId,
-        );
-        if (!saved.meeting_id) throw new Error('No meeting ID was returned while saving.');
-        session.meetingId = saved.meeting_id;
-
-        if (session.folderPath) {
-          await flushNotes({ sessionId: session.folderPath });
-          await invoke('attach_live_notes', {
-            meetingId: saved.meeting_id,
-            folderPath: session.folderPath,
-          });
+        if (session.meetingId) await flushNotes({ meetingId: session.meetingId });
+        if (finalization.deferred === null) {
+          finalization.deferred = shouldDeferTranscription(
+            localStorage.getItem(LIVE_TRANSCRIPTION_STORAGE_KEY),
+            betaFeatures.liveTranscription,
+          );
         }
+        const deferred = finalization.deferred;
+        if (!finalization.transcripts) {
+          finalization.transcripts = deferred
+            ? []
+            : formatTranscriptHistory(
+              await transcriptService.getTranscriptHistory() as unknown as Array<Record<string, unknown>>,
+            );
+        }
+        recordingState.setStatus(RecordingStatus.SAVING, 'Saving meeting...');
+        const freshTranscripts = finalization.transcripts;
+        if (!finalization.savedMeetingId) {
+          const saved = await storageService.saveMeeting(
+            session.title,
+            freshTranscripts,
+            session.folderPath,
+            !deferred,
+            session.meetingId,
+          );
+          if (!saved.meeting_id) throw new Error('No meeting ID was returned while saving.');
+          finalization.savedMeetingId = saved.meeting_id;
+          session.meetingId = saved.meeting_id;
+          persistSessions(sessionsRef.current);
+        }
+        const savedMeetingId = finalization.savedMeetingId;
+
+        const notesTarget = meetingNotesTarget(savedMeetingId);
+        if (!finalization.notesAttached && session.folderPath) {
+          await flushNotes({ sessionId: session.folderPath });
+          await flushNotes({ meetingId: savedMeetingId });
+          const existingNotes = await notePersistenceService.loadNotes(notesTarget);
+          if (existingNotes.loadState === 'error') throw existingNotes.loadError;
+          if (!finalization.attachedNotesRead) {
+            finalization.attachedNotes = await invoke<LiveNotesDocument | null>('attach_live_notes', {
+              meetingId: savedMeetingId,
+              folderPath: session.folderPath,
+            });
+            finalization.attachedNotesRead = true;
+          }
+          if (
+            existingNotes.document
+            && finalization.attachedNotes
+            && (
+              !Number.isFinite(Date.parse(existingNotes.document.updatedAt))
+              || !Number.isFinite(Date.parse(finalization.attachedNotes.updatedAt))
+              || Date.parse(existingNotes.document.updatedAt) > Date.parse(finalization.attachedNotes.updatedAt)
+            )
+          ) {
+            notePersistenceService.saveNotes(notesTarget, existingNotes.document);
+            await flushNotes({ meetingId: savedMeetingId });
+          }
+          finalization.notesAttached = true;
+        }
+
+        const notes = await notePersistenceService.loadNotes(notesTarget);
+        if (notes.loadState === 'error') throw notes.loadError;
 
         const preferences = await invoke<{ min_meeting_duration_seconds?: number }>(
           'get_recording_preferences',
@@ -417,80 +585,107 @@ export function RecordingControllerProvider({ children }: { children: React.Reac
           (maximum, transcript) => Math.max(maximum, transcript.audio_end_time ?? 0),
           0,
         );
-        const notes = await invoke<{ rawMarkdown?: string; notes?: Array<{ text: string }> } | null>(
-          'get_meeting_live_notes',
-          { meetingId: saved.meeting_id },
-        ).catch(() => null);
-        const hasNotes = Boolean(notes && (
-          (notes.rawMarkdown ?? '').trim()
-          || (notes.notes ?? []).some((note) => note.text.trim())
-        ));
+        const hasNotes = Boolean(originalNotesMarkdown(notes.document).trim());
         const hasTranscript = freshTranscripts.some((transcript) => transcript.text.trim());
         if (
           minimumSeconds > 0
+          && session.recordingSeconds !== null
           && Math.max(session.recordingSeconds, transcriptSeconds) < minimumSeconds
           && !hasNotes
           && !hasTranscript
         ) {
-          await invoke('api_discard_meeting', { meetingId: saved.meeting_id });
-          await markMeetingAsSaved();
-          localStorage.removeItem(LIVE_NOTES_FALLBACK_KEY);
-          localStorage.removeItem(LIVE_NOTES_FALLBACK_FOLDER_KEY);
-          sessionStorage.removeItem(ACTIVE_MEETING_KEY);
-          await refetchMeetings();
-          setIsMeetingActive(false);
-          clearTranscripts();
-          recordingState.setStatus(RecordingStatus.IDLE);
+          if (!finalization.discarded) {
+            await invoke('api_discard_meeting', { meetingId: savedMeetingId });
+            finalization.discarded = true;
+          }
+          const ownsCurrentSession = latestSessionIdRef.current === sessionId;
+          if (ownsCurrentSession && !finalization.markedSaved) {
+            await markMeetingAsSaved();
+            finalization.markedSaved = true;
+          }
+          if (ownsCurrentSession) {
+            localStorage.removeItem(LIVE_NOTES_FALLBACK_KEY);
+            localStorage.removeItem(LIVE_NOTES_FALLBACK_FOLDER_KEY);
+            sessionStorage.removeItem(ACTIVE_MEETING_KEY);
+          }
+          if (!finalization.catalogRefreshed) {
+            await refetchMeetings();
+            finalization.catalogRefreshed = true;
+          }
+          if (ownsCurrentSession) {
+            setIsMeetingActive(false);
+            clearTranscripts();
+            recordingState.setStatus(RecordingStatus.IDLE);
+          }
+          finalization.completed = true;
+          sessionsRef.current.delete(sessionId);
+          persistSessions(sessionsRef.current);
           return;
         }
 
-        if (deferred) {
+        if (!finalization.postProcessingStarted && deferred) {
           if (!session.folderPath) throw new Error('The recording has no audio folder for deferred transcription.');
           await invoke('start_retranscription_command', {
-            meetingId: saved.meeting_id,
+            meetingId: savedMeetingId,
             meetingFolderPath: session.folderPath,
             language: selectedLanguage === 'auto' || selectedLanguage === 'auto-translate' ? null : selectedLanguage,
             model: transcriptModelConfig.model || null,
             provider: transcriptModelConfig.provider || null,
           });
-          markDeferredMeetingForAutoSummary(saved.meeting_id);
-        } else {
-          const pinned = await applyPinnedSummaryLanguageToMeeting(saved.meeting_id).catch(() => false);
+          markDeferredMeetingForAutoSummary(savedMeetingId);
+          finalization.postProcessingStarted = true;
+        } else if (!finalization.postProcessingStarted) {
+          const pinned = await applyPinnedSummaryLanguageToMeeting(savedMeetingId).catch(() => false);
           if (!pinned) {
             await detectAndCacheSummaryLanguage(
-              saved.meeting_id,
+              savedMeetingId,
               freshTranscripts.map((transcript) => transcript.text),
             ).catch(() => {});
           }
           window.dispatchEvent(new CustomEvent('meetily:meeting-ready-for-summary', {
-            detail: { meetingId: saved.meeting_id },
+            detail: { meetingId: savedMeetingId },
           }));
           void invoke<{ speaker_count: number }>('run_speaker_diarization', {
-            meetingId: saved.meeting_id,
+            meetingId: savedMeetingId,
             numSpeakers: null,
           }).catch((error) => console.warn('Automatic speaker identification skipped:', error));
+          finalization.postProcessingStarted = true;
         }
 
-        await markMeetingAsSaved();
-        localStorage.removeItem(LIVE_NOTES_FALLBACK_KEY);
-        localStorage.removeItem(LIVE_NOTES_FALLBACK_FOLDER_KEY);
-        sessionStorage.removeItem(ACTIVE_MEETING_KEY);
-        setCurrentMeeting({ id: saved.meeting_id, title: session.title });
-        await refetchMeetings();
-        setIsMeetingActive(false);
-        clearTranscripts();
-        recordingState.setStatus(RecordingStatus.IDLE);
+        const ownsCurrentSession = latestSessionIdRef.current === sessionId;
+        if (ownsCurrentSession && !finalization.markedSaved) {
+          await markMeetingAsSaved();
+          finalization.markedSaved = true;
+        }
+        if (ownsCurrentSession) {
+          localStorage.removeItem(LIVE_NOTES_FALLBACK_KEY);
+          localStorage.removeItem(LIVE_NOTES_FALLBACK_FOLDER_KEY);
+          sessionStorage.removeItem(ACTIVE_MEETING_KEY);
+          setCurrentMeeting({ id: savedMeetingId, title: session.title });
+        }
+        if (!finalization.catalogRefreshed) {
+          await refetchMeetings();
+          finalization.catalogRefreshed = true;
+        }
+        if (ownsCurrentSession) {
+          setIsMeetingActive(false);
+          clearTranscripts();
+          recordingState.setStatus(RecordingStatus.IDLE);
+        }
         window.dispatchEvent(new CustomEvent('meetily:recording-finalized', {
-          detail: { meetingId: saved.meeting_id, transcribing: deferred },
+          detail: { meetingId: savedMeetingId, transcribing: deferred },
         }));
-        const durationSeconds = Math.max(session.recordingSeconds, transcriptSeconds);
+        finalization.completed = true;
+        sessionsRef.current.delete(sessionId);
+        persistSessions(sessionsRef.current);
+        const durationSeconds = Math.max(session.recordingSeconds ?? transcriptSeconds, transcriptSeconds);
         const wordCount = freshTranscripts.reduce(
           (count, transcript) => count + transcript.text.split(/\s+/).filter(Boolean).length,
           0,
         );
         void (async () => {
           const meetingsToday = await Analytics.getMeetingsCountToday();
-          await Analytics.trackMeetingCompleted(saved.meeting_id, {
+          await Analytics.trackMeetingCompleted(savedMeetingId, {
             duration_seconds: durationSeconds,
             transcript_segments: freshTranscripts.length,
             transcript_word_count: wordCount,
@@ -506,20 +701,20 @@ export function RecordingControllerProvider({ children }: { children: React.Reac
           'Meeting needs attention',
           `${messageOf(error)} Your local draft and recording files were kept so you can retry.`,
           undefined,
-          () => finalizeRecording(sessionId, saveMeeting),
+          () => runLifecycle('finalize', sessionId, () => finalizeRecording(sessionId, saveMeeting)),
         );
         throw error;
       } finally {
         if (mountedRef.current) setCommand(null);
       }
-    })().finally(() => finalizePromisesRef.current.delete(sessionId));
-    finalizePromisesRef.current.set(sessionId, promise);
+    })().finally(() => {
+      if (finalization.promise === promise) finalization.promise = null;
+    });
+    finalization.promise = promise;
     return promise;
   }, [
-    authoritativeMeetingId,
     betaFeatures.liveTranscription,
     clearTranscripts,
-    flushBuffer,
     markMeetingAsSaved,
     recordingState,
     refetchMeetings,
@@ -529,9 +724,9 @@ export function RecordingControllerProvider({ children }: { children: React.Reac
     setIsMeetingActive,
     transcriptModelConfig.model,
     transcriptModelConfig.provider,
-    transcriptsRef,
-    waitForLiveTranscription,
+    runLifecycle,
   ]);
+  finalizeHandlerRef.current = finalizeRecording;
 
   const performStop = useCallback(async (options: StopRecordingOptions = {}) => {
     const sessionId = recording?.session_id ?? latestSessionIdRef.current;
@@ -539,25 +734,52 @@ export function RecordingControllerProvider({ children }: { children: React.Reac
     const session = sessionsRef.current.get(sessionId);
     setCommand('stop');
     setFeedback(null);
+    let nativeStopCompleted = options.nativeAlreadyStopped ?? false;
     try {
       if (!options.nativeAlreadyStopped) {
         const folderPath = session?.folderPath ?? await recordingFolderPath();
         if (session) {
           session.folderPath = folderPath;
-          session.recordingSeconds = recordingState.recordingDuration ?? session.recordingSeconds;
+          const nativeState = await recordingService.getRecordingState();
+          if (nativeState.session_id === sessionId && nativeState.recording_duration != null) {
+            session.recordingSeconds = nativeState.recording_duration;
+          }
+          persistSessions(sessionsRef.current);
         }
         if (folderPath) await flushNotes({ sessionId: folderPath });
+        if (session?.meetingId) await flushNotes({ meetingId: session.meetingId });
         const dataDir = await appDataDir();
         const savePath = `${dataDir}/recording-${new Date().toISOString().replace(/[:.]/g, '-')}.wav`;
         recordingState.setStatus(RecordingStatus.STOPPING, 'Stopping recording...');
         await recordingService.stopRecording(savePath);
+        nativeStopCompleted = true;
       }
       await finalizeRecording(sessionId, options.saveMeeting ?? true);
-      await rehydrate();
-    } catch (error) {
       await rehydrate().catch(() => {});
-      if (recording?.session_id === sessionId) {
-        reportError('capture', 'Recording is still active', error, 'recording', () => stopHandlerRef.current(options));
+    } catch (error) {
+      if (!nativeStopCompleted) {
+        const nativeState = await recordingService.getRecordingState().catch(() => null);
+        await rehydrate().catch(() => {});
+        if (!nativeState) {
+          reportError(
+            'capture',
+            'Recording state could not be confirmed',
+            error,
+            'recording',
+            () => stopHandlerRef.current(options),
+          );
+        } else if (nativeState.is_recording && nativeState.session_id === sessionId) {
+          reportError('capture', 'Recording is still active', error, 'recording', () => stopHandlerRef.current(options));
+        } else {
+          try {
+            await finalizeRecording(sessionId, options.saveMeeting ?? true);
+            reportError('capture', 'Recording stopped with an error', error, 'recording');
+          } catch {
+            // Finalization installs its own persistence-only retry.
+          }
+        }
+      } else if (!finalizationsRef.current.get(sessionId)?.completed) {
+        // Finalization installs its own persistence-only retry.
       }
       throw error;
     } finally {
@@ -566,17 +788,31 @@ export function RecordingControllerProvider({ children }: { children: React.Reac
   }, [finalizeRecording, recording?.session_id, recordingState, rehydrate, reportError]);
 
   const stopRecording = useCallback((options: StopRecordingOptions = {}): Promise<void> => {
-    if (stopPromiseRef.current) return stopPromiseRef.current;
-    const promise = performStop(options).finally(() => {
-      if (stopPromiseRef.current === promise) stopPromiseRef.current = null;
-    });
-    stopPromiseRef.current = promise;
-    return promise;
-  }, [performStop]);
+    const sessionId = recording?.session_id ?? latestSessionIdRef.current;
+    return runLifecycle('stop', sessionId, () => performStop(options));
+  }, [performStop, recording?.session_id, runLifecycle]);
   stopHandlerRef.current = stopRecording;
 
+  useEffect(() => {
+    for (const activity of snapshot.activities) {
+      if (
+        activity.kind !== 'recording'
+        || (activity.status !== 'ready' && activity.status !== 'failed')
+        || !sessionsRef.current.has(activity.task_id)
+        || (recording !== null && recording.session_id !== activity.task_id)
+      ) continue;
+      const finalization = finalizationsRef.current.get(activity.task_id);
+      if (finalization?.completed || finalization?.promise) continue;
+      void runLifecycle(
+        'finalize',
+        activity.task_id,
+        () => finalizeRecording(activity.task_id, true),
+      ).catch(() => {});
+    }
+  }, [finalizeRecording, recording, runLifecycle, snapshot.activities]);
+
   const performPause = useCallback(async () => {
-    if (!recording || recording.status !== 'recording' || command) return;
+    if (!recording || recording.status !== 'recording') return;
     setCommand('pause');
     setFeedback(null);
     try {
@@ -588,26 +824,21 @@ export function RecordingControllerProvider({ children }: { children: React.Reac
         'Recording could not be paused',
         error,
         'recording',
-        async () => { await recordingService.pauseRecording(); await rehydrate(); },
+        () => runLifecycle('pause', recording.session_id, performPause),
       );
       await rehydrate().catch(() => {});
       throw error;
     } finally {
       if (mountedRef.current) setCommand(null);
     }
-  }, [command, recording, rehydrate, reportError]);
+  }, [recording, rehydrate, reportError, runLifecycle]);
 
-  const pauseRecording = useCallback((): Promise<void> => {
-    if (pausePromiseRef.current) return pausePromiseRef.current;
-    const promise = performPause().finally(() => {
-      if (pausePromiseRef.current === promise) pausePromiseRef.current = null;
-    });
-    pausePromiseRef.current = promise;
-    return promise;
-  }, [performPause]);
+  const pauseRecording = useCallback((): Promise<void> => (
+    runLifecycle('pause', recording?.session_id ?? null, performPause)
+  ), [performPause, recording?.session_id, runLifecycle]);
 
   const performResume = useCallback(async () => {
-    if (!recording || recording.status !== 'paused' || command) return;
+    if (!recording || recording.status !== 'paused') return;
     setCommand('resume');
     setFeedback(null);
     try {
@@ -619,23 +850,18 @@ export function RecordingControllerProvider({ children }: { children: React.Reac
         'Recording could not be resumed',
         error,
         'recording',
-        async () => { await recordingService.resumeRecording(); await rehydrate(); },
+        () => runLifecycle('resume', recording.session_id, performResume),
       );
       await rehydrate().catch(() => {});
       throw error;
     } finally {
       if (mountedRef.current) setCommand(null);
     }
-  }, [command, recording, rehydrate, reportError]);
+  }, [recording, rehydrate, reportError, runLifecycle]);
 
-  const resumeRecording = useCallback((): Promise<void> => {
-    if (resumePromiseRef.current) return resumePromiseRef.current;
-    const promise = performResume().finally(() => {
-      if (resumePromiseRef.current === promise) resumePromiseRef.current = null;
-    });
-    resumePromiseRef.current = promise;
-    return promise;
-  }, [performResume]);
+  const resumeRecording = useCallback((): Promise<void> => (
+    runLifecycle('resume', recording?.session_id ?? null, performResume)
+  ), [performResume, recording?.session_id, runLifecycle]);
 
   const returnToRecording = useCallback(async () => {
     const meetingId = authoritativeMeetingId;
@@ -665,6 +891,13 @@ export function RecordingControllerProvider({ children }: { children: React.Reac
         }
         await startRecording({ requestId: request.request_id, source: request.source });
       } catch (error) {
+        if (error instanceof LifecycleBusyError) {
+          await meetingActivityService.acknowledgeRecordingRequest(
+            request.request_id,
+            false,
+            error.message,
+          ).catch(() => {});
+        }
         handledRequestsRef.current.delete(request.request_id);
         reportError('capture', 'Recording request failed', error, 'recording');
       }
@@ -679,56 +912,72 @@ export function RecordingControllerProvider({ children }: { children: React.Reac
     let unlistenTranscriptionError: UnlistenFn | undefined;
     let unlistenChunkWarning: UnlistenFn | undefined;
 
-    void (async () => {
+    const retain = async (registration: Promise<UnlistenFn>, assign: (unlisten: UnlistenFn) => void) => {
       try {
-        unlistenRequest = await meetingActivityService.onRecordingStartRequested((request) => {
-          requestHandlerRef.current(request);
-        });
-        if (disposed) { unlistenRequest(); return; }
-        const pending = await meetingActivityService.getPendingRecordingRequest();
-        if (pending && !disposed) requestHandlerRef.current(pending);
-
-        unlistenStopped = await recordingService.onRecordingStopped((payload) => {
-          stoppedMetadataRef.current = payload;
-          const sessionId = latestSessionIdRef.current;
-          if (sessionId) {
-            const session = sessionsRef.current.get(sessionId);
-            if (session) {
-              session.folderPath = payload.folder_path ?? session.folderPath;
-              session.title = payload.meeting_name ?? session.title;
-            }
-          }
-          if (payload.error) reportError('capture', 'Recording stopped with an error', payload.error, 'recording');
-        });
-        if (disposed) { unlistenStopped(); return; }
-
-        unlistenTrayStop = await listen<boolean>('recording-stop-complete', (event) => {
-          const sessionId = latestSessionIdRef.current;
-          if (sessionId) void stopHandlerRef.current({ nativeAlreadyStopped: true, saveMeeting: event.payload }).catch(() => {});
-        });
-        if (disposed) { unlistenTrayStop(); return; }
-
-        unlistenTranscriptionError = await transcriptService.onTranscriptionError((error) => {
-          if (error.phase === 'startup' || error.actionable) {
-            reportError('setup', 'Transcription needs attention', error.userMessage || error.error, 'transcription');
-          } else {
-            setFeedback({
-              kind: 'warning',
-              title: 'Live transcription issue',
-              message: error.userMessage || error.error,
-            });
-          }
-        });
-        if (disposed) { unlistenTranscriptionError(); return; }
-
-        unlistenChunkWarning = await recordingService.onChunkDropWarning((warning) => {
-          setFeedback({ kind: 'warning', title: 'Some audio could not be processed', message: warning });
-        });
-        if (disposed) unlistenChunkWarning();
+        const unlisten = await registration;
+        if (disposed) unlisten();
+        else assign(unlisten);
       } catch (error) {
         if (!disposed) reportError('capture', 'Recording controls could not initialize', error);
       }
-    })();
+    };
+
+    void retain(
+      meetingActivityService.onRecordingStartRequested((request) => requestHandlerRef.current(request)),
+      (unlisten) => { unlistenRequest = unlisten; },
+    );
+    void meetingActivityService.getPendingRecordingRequest()
+      .then((pending) => { if (pending && !disposed) requestHandlerRef.current(pending); })
+      .catch((error) => { if (!disposed) reportError('capture', 'Recording controls could not initialize', error); });
+    void retain(
+      recordingService.onRecordingStopped(() => {
+        // Legacy metadata is unscoped. Session identity is reconciled from activity state.
+        void rehydrate().catch(() => {});
+      }),
+      (unlisten) => { unlistenStopped = unlisten; },
+    );
+    void retain(
+      listen<boolean>('recording-stop-complete', () => {
+        void (async () => {
+          const latestSessionId = latestSessionIdRef.current;
+          const latest = await meetingActivityService.getSnapshot().catch(() => null);
+          const terminal = latest?.activities.find((activity) => (
+            activity.kind === 'recording'
+            && activity.task_id === latestSessionId
+            && (activity.status === 'ready' || activity.status === 'failed')
+          ));
+          if (terminal) {
+            await runLifecycle(
+              'finalize',
+              terminal.task_id,
+              () => finalizeHandlerRef.current(terminal.task_id, true),
+            ).catch(() => {});
+          }
+          await rehydrate().catch(() => {});
+        })();
+      }),
+      (unlisten) => { unlistenTrayStop = unlisten; },
+    );
+    void retain(
+      transcriptService.onTranscriptionError((error) => {
+        if (error.phase === 'startup' || error.actionable) {
+          reportError('setup', 'Transcription needs attention', error.userMessage || error.error, 'transcription');
+        } else {
+          setFeedback({
+            kind: 'warning',
+            title: 'Live transcription issue',
+            message: error.userMessage || error.error,
+          });
+        }
+      }),
+      (unlisten) => { unlistenTranscriptionError = unlisten; },
+    );
+    void retain(
+      recordingService.onChunkDropWarning((warning) => {
+        setFeedback({ kind: 'warning', title: 'Some audio could not be processed', message: warning });
+      }),
+      (unlisten) => { unlistenChunkWarning = unlisten; },
+    );
 
     return () => {
       disposed = true;
@@ -738,7 +987,7 @@ export function RecordingControllerProvider({ children }: { children: React.Reac
       unlistenTranscriptionError?.();
       unlistenChunkWarning?.();
     };
-  }, [reportError]);
+  }, [rehydrate, reportError, runLifecycle]);
 
   useEffect(() => {
     const startFromCompatibilityEntry = () => {

@@ -5,7 +5,7 @@
  * Displays recoverable meetings, allows preview, and enables recovery or deletion.
  */
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { formatDistanceToNow } from 'date-fns';
 import { AlertCircle, CheckCircle2, Clock, FileText, Trash2, XCircle } from 'lucide-react';
 import {
@@ -45,6 +45,7 @@ export function TranscriptRecovery({
   const [isRecovering, setIsRecovering] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [operationError, setOperationError] = useState<string | null>(null);
+  const previewRequestRef = useRef(0);
 
   // Reset selection when dialog opens
   useEffect(() => {
@@ -52,22 +53,29 @@ export function TranscriptRecovery({
       setSelectedMeetingId(null);
       setPreviewTranscripts([]);
       setOperationError(null);
+    } else {
+      previewRequestRef.current += 1;
+      setIsLoadingPreview(false);
     }
   }, [isOpen]);
 
   const handleMeetingSelect = useCallback(async (meetingId: string) => {
+    const request = ++previewRequestRef.current;
     setSelectedMeetingId(meetingId);
     setIsLoadingPreview(true);
+    setOperationError(null);
 
     try {
       const transcripts = await onLoadPreview(meetingId);
+      if (request !== previewRequestRef.current) return;
       // Limit to first 10 for preview
       setPreviewTranscripts(transcripts.slice(0, 10));
     } catch (error) {
+      if (request !== previewRequestRef.current) return;
       console.error('Failed to load preview:', error);
       setPreviewTranscripts([]);
     } finally {
-      setIsLoadingPreview(false);
+      if (request === previewRequestRef.current) setIsLoadingPreview(false);
     }
   }, [onLoadPreview]);
 
@@ -85,8 +93,17 @@ export function TranscriptRecovery({
     setOperationError(null);
     try {
       const result = await onRecover(selectedMeetingId);
-      console.log('Recovery successful:', result);
-      onClose();
+      const outcome = result as { success?: boolean; audioRecoveryStatus?: { message?: string } } | undefined;
+      if (outcome?.success !== false) {
+        console.log('Recovery successful:', result);
+        onClose();
+      } else {
+        setOperationError(
+          outcome.audioRecoveryStatus?.message
+            ? `Transcript saved, but audio recovery needs another attempt: ${outcome.audioRecoveryStatus.message}`
+            : 'Transcript saved, but audio recovery needs another attempt.',
+        );
+      }
     } catch (error) {
       console.error('Recovery failed:', error);
       setOperationError(error instanceof Error ? error.message : 'Failed to recover meeting. Please try again.');

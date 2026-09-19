@@ -1,4 +1,4 @@
-import { afterAll, afterEach, describe, expect, mock, test } from 'bun:test';
+import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 
 const originalEvent = { ...await import('@tauri-apps/api/event') };
@@ -15,8 +15,12 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-const registration = deferred<() => void>();
-const listen = mock(() => registration.promise);
+let registration = deferred<() => void>();
+let downloadCallback: ((event: { payload: { modelName: string } }) => void) | null = null;
+const listen = mock((_event: string, callback: typeof downloadCallback) => {
+  downloadCallback = callback;
+  return registration.promise;
+});
 mock.module('@tauri-apps/api/event', () => ({ ...originalEvent, listen }));
 mock.module('sonner', () => ({ toast: { success: mock(() => {}) } }));
 
@@ -27,6 +31,12 @@ function Probe() {
   useModalState({ provider: 'localWhisper', model: 'base', apiKey: null });
   return null;
 }
+
+beforeEach(() => {
+  registration = deferred();
+  downloadCallback = null;
+  listen.mockClear();
+});
 
 afterEach(async () => {
   if (renderer) await act(async () => renderer!.unmount());
@@ -42,5 +52,25 @@ describe('useModalState listener lifecycle', () => {
     await act(async () => { registration.resolve(unlisten); await registration.promise; });
 
     expect(unlisten).toHaveBeenCalledTimes(1);
+  });
+
+  test('clears a pending model-close timer on unmount', async () => {
+    const unlisten = mock(() => {});
+    await act(async () => { renderer = create(<Probe />); });
+    await act(async () => { registration.resolve(unlisten); await registration.promise; });
+    const originalSetTimeout = globalThis.setTimeout;
+    const originalClearTimeout = globalThis.clearTimeout;
+    const clearTimeoutMock = mock(() => {});
+    globalThis.setTimeout = mock(() => 41 as unknown as ReturnType<typeof setTimeout>) as unknown as typeof setTimeout;
+    globalThis.clearTimeout = clearTimeoutMock as typeof clearTimeout;
+    try {
+      await act(async () => { downloadCallback?.({ payload: { modelName: 'base' } }); });
+      await act(async () => renderer!.unmount());
+      renderer = undefined;
+      expect(clearTimeoutMock).toHaveBeenCalledWith(41);
+    } finally {
+      globalThis.setTimeout = originalSetTimeout;
+      globalThis.clearTimeout = originalClearTimeout;
+    }
   });
 });

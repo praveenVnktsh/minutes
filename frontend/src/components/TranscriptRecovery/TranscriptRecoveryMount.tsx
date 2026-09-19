@@ -16,7 +16,7 @@ export function TranscriptRecoveryMount() {
   const recover = async (meetingId: string) => {
     const result = await recovery.recoverMeeting(meetingId);
     await refetchMeetings();
-    if (result.meetingId) {
+    if (result.success && result.meetingId) {
       toast.success('Meeting recovered', {
         description: result.transcriptCount > 0 ? 'Transcript recovery completed.' : 'Audio recovery completed.',
       });

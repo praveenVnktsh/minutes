@@ -113,18 +113,25 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
           )}
         </div>
         {controller.feedback ? (
-          <StatusFeedback
-            tone={controller.feedback.kind === 'warning' ? 'warning' : 'error'}
-            actionLabel={controller.feedback.settingsSection
-              ? 'Open settings'
-              : controller.canRetryFeedback ? 'Retry' : undefined}
-            onAction={controller.feedback.settingsSection
-              ? () => void controller.openFeedbackSettings()
-              : controller.canRetryFeedback ? () => void controller.retryFeedback() : undefined}
-            className="max-w-xl rounded-lg bg-[var(--surface-raised)] px-3 py-2"
-          >
-            {controller.feedback.title}: {controller.feedback.message}
-          </StatusFeedback>
+          <div className="flex items-center gap-2">
+            <StatusFeedback
+              tone={controller.feedback.kind === 'warning' ? 'warning' : 'error'}
+              actionLabel={controller.canRetryFeedback ? 'Retry' : undefined}
+              onAction={controller.canRetryFeedback ? () => void controller.retryFeedback() : undefined}
+              className="max-w-xl rounded-lg bg-[var(--surface-raised)] px-3 py-2"
+            >
+              {controller.feedback.title}: {controller.feedback.message}
+            </StatusFeedback>
+            {controller.feedback.settingsSection ? (
+              <button
+                type="button"
+                className="text-xs font-semibold text-[var(--ink-muted)] underline underline-offset-2 hover:no-underline"
+                onClick={() => void controller.openFeedbackSettings()}
+              >
+                Open settings
+              </button>
+            ) : null}
+          </div>
         ) : null}
       </div>
     </TooltipProvider>

@@ -5,7 +5,7 @@
  * Provides functionality to detect, preview, and recover meetings from IndexedDB.
  */
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { indexedDBService, MeetingMetadata, StoredTranscript } from '@/services/indexedDBService';
 import { storageService } from '@/services/storageService';
@@ -37,10 +37,28 @@ export interface UseTranscriptRecoveryReturn {
   deleteRecoverableMeeting: (meetingId: string) => Promise<void>;
 }
 
+interface PersistedRecordingSession {
+  meetingId: string | null;
+  folderPath: string | null;
+}
+
+function boundMeetingId(folderPath?: string): string | null {
+  if (!folderPath || typeof sessionStorage === 'undefined') return null;
+  try {
+    const value = sessionStorage.getItem('active_recording_sessions');
+    if (!value) return null;
+    const sessions = JSON.parse(value) as PersistedRecordingSession[];
+    return sessions.find((session) => session.folderPath === folderPath)?.meetingId ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
   const [recoverableMeetings, setRecoverableMeetings] = useState<MeetingMetadata[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [isRecovering, setIsRecovering] = useState(false);
+  const recoveredMeetingIdsRef = useRef(new Map<string, string>());
 
   /**
    * Check for recoverable meetings in IndexedDB
@@ -131,20 +149,11 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
 
       // 2. Load all transcripts. This can legitimately be empty when
       // transcription was unavailable; the audio can still be recovered.
-      const transcripts = await loadMeetingTranscripts(meetingId);
+      const transcripts = await indexedDBService.getTranscripts(meetingId);
+      transcripts.sort((a, b) => (a.sequenceId || 0) - (b.sequenceId || 0));
 
       // 3. Check for folder path
-      let folderPath = metadata.folderPath;
-
-
-      if (!folderPath) {
-        // Try to get from backend (might exist if only app crashed, not system)
-        try {
-          folderPath = await invoke<string>('get_meeting_folder_path');
-        } catch {
-          folderPath = undefined;
-        }
-      }
+      const folderPath = metadata.folderPath;
 
       // A meeting needs at least one of transcripts or audio to be recoverable.
       if (transcripts.length === 0 && !folderPath) {
@@ -177,10 +186,7 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
         };
       }
 
-      // An audio-only meeting is recoverable only once its audio has actually
-      // been merged into audio.mp4. If the merge failed there is nothing to
-      // save, and saving would mark the meeting recovered while leaving the
-      // checkpoints to be deleted below - the only copy of the recording.
+      // Audio-only recovery cannot create a useful meeting until merge succeeds.
       if (transcripts.length === 0 && audioRecoveryStatus?.status !== 'success') {
         throw new Error(
           audioRecoveryStatus?.message
@@ -207,10 +213,13 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
       const saveResponse = await storageService.saveMeeting(
         metadata.title,
         formattedTranscripts,
-        folderPath ?? null
+        folderPath ?? null,
+        false,
+        recoveredMeetingIdsRef.current.get(meetingId) ?? boundMeetingId(folderPath),
       );
 
       const savedMeetingId = saveResponse.meeting_id;
+      recoveredMeetingIdsRef.current.set(meetingId, savedMeetingId);
 
       if (folderPath) {
         try {
@@ -227,6 +236,15 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
         toast.warning('Could not apply default summary language', {
           description: 'The recovered meeting was saved, but the default summary language was not applied.',
         });
+      }
+
+      if (audioRecoveryStatus?.status === 'failed' || audioRecoveryStatus?.status === 'partial') {
+        return {
+          success: false,
+          audioRecoveryStatus,
+          meetingId: savedMeetingId,
+          transcriptCount: transcripts.length,
+        };
       }
 
       // 7. Mark as saved in IndexedDB
@@ -246,6 +264,7 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
 
       // 9. Remove from recoverable list
       setRecoverableMeetings(prev => prev.filter(m => m.meetingId !== meetingId));
+      recoveredMeetingIdsRef.current.delete(meetingId);
 
       return {
         success: true,
@@ -259,7 +278,7 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
     } finally {
       setIsRecovering(false);
     }
-  }, [loadMeetingTranscripts]);
+  }, []);
 
   /**
    * Delete a recoverable meeting
