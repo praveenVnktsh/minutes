@@ -17,6 +17,7 @@ let command: string | null = null
 let isCommandPending = false
 let isProcessing = false
 let isSaving = false
+let pathname = '/'
 
 const originalController = { ...await import('@/contexts/RecordingControllerContext') }
 const originalRecording = { ...await import('@/contexts/RecordingStateContext') }
@@ -60,7 +61,7 @@ mock.module('@/components/Sidebar/SidebarProvider', () => ({
 }))
 mock.module('@/contexts/MeetingActivityContext', () => ({ ...originalActivity, useMeetingActivity: () => ({ activeMeetingId: null, getMeetingActivities: () => [] }) }))
 mock.module('@/hooks/useDebugMode', () => ({ ...originalDebug, useDebugMode: () => false }))
-mock.module('next/navigation', () => ({ ...originalNextNavigation, usePathname: () => '/' }))
+mock.module('next/navigation', () => ({ ...originalNextNavigation, usePathname: () => pathname }))
 
 const originalWindow = globalThis.window
 const originalDocument = globalThis.document
@@ -84,6 +85,7 @@ beforeEach(() => {
   isCommandPending = false
   isProcessing = false
   isSaving = false
+  pathname = '/'
   for (const fn of [startRecording, stopRecording, returnToRecording, openImportDialog, navigate, openMeeting, searchTranscripts]) fn.mockClear()
   const browserWindow = new EventTarget() as Window & typeof globalThis
   Object.assign(browserWindow, { innerWidth: 1440 })
@@ -204,6 +206,43 @@ describe('ShellProvider shared actions', () => {
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 300)) })
     expect(searchTranscripts).toHaveBeenCalledTimes(1)
     expect(searchTranscripts).toHaveBeenCalledWith('roadmap')
+    await act(async () => renderer!.unmount())
+  })
+
+  test('carries library focus across route commit, consumes it once, and clears stale intent', async () => {
+    pathname = '/settings'
+    const focus = mock(() => {})
+    let renderer: ReturnType<typeof create>
+    await act(async () => {
+      renderer = create(<ShellProvider><Probe /></ShellProvider>, {
+        createNodeMock: (element) => element.type === 'input' && element.props['aria-label'] === 'Search meetings'
+          ? { focus }
+          : {},
+      })
+    })
+
+    await act(async () => current.focusMeetingsSearch())
+    expect(navigate).toHaveBeenLastCalledWith('/')
+    expect(current.meetingSearchFocusRequest).not.toBeNull()
+
+    pathname = '/'
+    await act(async () => renderer!.update(<ShellProvider><Probe /><MeetingsLibrary /></ShellProvider>))
+    expect(focus).toHaveBeenCalledTimes(1)
+    expect(current.meetingSearchFocusRequest).toBeNull()
+
+    await act(async () => current.focusMeetingsSearch())
+    expect(focus).toHaveBeenCalledTimes(2)
+    expect(navigate).toHaveBeenCalledTimes(1)
+    expect(current.meetingSearchFocusRequest).toBeNull()
+
+    pathname = '/settings'
+    await act(async () => renderer!.update(<ShellProvider><Probe /></ShellProvider>))
+    await act(async () => current.focusMeetingsSearch())
+    expect(current.meetingSearchFocusRequest).not.toBeNull()
+
+    pathname = '/meeting-details'
+    await act(async () => renderer!.update(<ShellProvider><Probe /></ShellProvider>))
+    expect(current.meetingSearchFocusRequest).toBeNull()
     await act(async () => renderer!.unmount())
   })
 })

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   FileText,
   Import,
@@ -43,9 +43,12 @@ export function CommandPalette() {
     navigate,
     openMeeting,
     recordingActionDisabled,
+    focusMeetingsSearch,
   } = useShell();
   const debugMode = useDebugMode();
   const meetings = selectMeetings({ debugMode });
+  const invokingElementRef = useRef<HTMLElement | null>(null);
+  const restoreFocusOnCloseRef = useRef(true);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -66,23 +69,51 @@ export function CommandPalette() {
       }
 
       event.preventDefault();
-      setOpen((previous) => !previous);
+      if (open) {
+        setOpen(false);
+      } else {
+        invokingElementRef.current = document.activeElement instanceof HTMLElement
+          ? document.activeElement
+          : null;
+        restoreFocusOnCloseRef.current = true;
+        setOpen(true);
+      }
     };
 
     document.addEventListener('keydown', handleKeyDown);
     return () => document.removeEventListener('keydown', handleKeyDown);
   }, [open]);
 
-  const runCommand = (action: () => void | Promise<void>) => {
+  const handleOpenChange = (nextOpen: boolean) => {
+    if (nextOpen && !open) {
+      invokingElementRef.current = document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+      restoreFocusOnCloseRef.current = true;
+    }
+    setOpen(nextOpen);
+  };
+
+  const handleCloseAutoFocus = (event: Event) => {
+    event.preventDefault();
+    const invokingElement = invokingElementRef.current;
+    if (restoreFocusOnCloseRef.current && invokingElement?.isConnected) {
+      invokingElement.focus();
+    }
+    invokingElementRef.current = null;
+    restoreFocusOnCloseRef.current = true;
+  };
+
+  const runCommand = (action: () => void | Promise<void>, restoreFocus = false) => {
+    restoreFocusOnCloseRef.current = restoreFocus;
     setOpen(false);
-    // Let the dialog close before navigating or opening another dialog.
-    setTimeout(() => void Promise.resolve(action()).catch((error) => {
+    queueMicrotask(() => void Promise.resolve(action()).catch((error) => {
       handleShellActionError(error, (description) => toast.error('Action failed', { description }));
-    }), 0);
+    }));
   };
 
   return (
-    <CommandDialog open={open} onOpenChange={setOpen}>
+    <CommandDialog open={open} onOpenChange={handleOpenChange} onCloseAutoFocus={handleCloseAutoFocus}>
       <CommandInput placeholder="Search meetings or type a command..." />
       <CommandList>
         <CommandEmpty>No results found.</CommandEmpty>
@@ -97,12 +128,7 @@ export function CommandPalette() {
             Open Meetings
           </CommandItem>
           <CommandItem
-            onSelect={() =>
-              runCommand(async () => {
-                await navigate('/');
-                setTimeout(() => window.dispatchEvent(new CustomEvent('focus-meetings-search')), 0);
-              })
-            }
+            onSelect={() => runCommand(focusMeetingsSearch)}
           >
             <Search />
             Search meetings
@@ -115,7 +141,7 @@ export function CommandPalette() {
             <Import />
             {importActionLabel}
           </CommandItem>
-          <CommandItem onSelect={() => runCommand(toggleTheme)}>
+          <CommandItem onSelect={() => runCommand(toggleTheme, true)}>
             <SunMoon />
             Toggle theme
           </CommandItem>
@@ -135,7 +161,7 @@ export function CommandPalette() {
                     description: error instanceof Error ? error.message : String(error),
                   });
                 }
-              })
+              }, true)
             }
           >
             <Link2 />

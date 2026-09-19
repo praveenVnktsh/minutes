@@ -1,6 +1,7 @@
 'use client';
 
 import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { usePathname } from 'next/navigation';
 import { useRecordingController } from '@/contexts/RecordingControllerContext';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
 import { useMeetingNavigation } from '@/hooks/useNavigation';
@@ -49,6 +50,14 @@ interface ShellContextValue {
   meetingSearchQuery: string;
   setMeetingSearchQuery: (query: string) => void;
   isMeetingSearchPending: boolean;
+  focusMeetingsSearch: () => Promise<void>;
+  meetingSearchFocusRequest: number | null;
+  consumeMeetingSearchFocus: (requestId: number) => void;
+}
+
+interface MeetingSearchFocusIntent {
+  requestId: number;
+  sourcePath: string;
 }
 
 const ShellContext = createContext<ShellContextValue | null>(null);
@@ -57,10 +66,13 @@ export const SIDEBAR_WIDTH = 280;
 export const SIDEBAR_COLLAPSED_WIDTH = 72;
 
 export function ShellProvider({ children }: { children: React.ReactNode }) {
+  const pathname = usePathname();
   const [collapsed, setCollapsedState] = useState(false);
   const [theme, setThemeState] = useState<AppTheme>(readTheme);
   const [compact, setCompact] = useState(false);
   const [meetingSearchQuery, setMeetingSearchQuery] = useState('');
+  const [meetingSearchFocusIntent, setMeetingSearchFocusIntent] = useState<MeetingSearchFocusIntent | null>(null);
+  const meetingSearchFocusRequestRef = useRef(0);
   // Remembers the user's own collapse choice so leaving compact mode restores it.
   const userCollapsedRef = useRef(false);
 
@@ -99,6 +111,13 @@ export function ShellProvider({ children }: { children: React.ReactNode }) {
     const timer = setTimeout(() => void searchTranscripts(meetingSearchQuery), 250);
     return () => clearTimeout(timer);
   }, [meetingSearchQuery, searchTranscripts]);
+
+  useEffect(() => {
+    setMeetingSearchFocusIntent((current) => {
+      if (!current || pathname === '/' || pathname === current.sourcePath) return current;
+      return null;
+    });
+  }, [pathname]);
 
   const setCollapsed = useCallback((value: boolean) => {
     userCollapsedRef.current = value;
@@ -173,6 +192,21 @@ export function ShellProvider({ children }: { children: React.ReactNode }) {
   const retryNavigation = useCallback(async () => {
     await retryNavigationRef.current?.();
   }, []);
+  const focusMeetingsSearch = useCallback(async () => {
+    const requestId = ++meetingSearchFocusRequestRef.current;
+    setMeetingSearchFocusIntent({ requestId, sourcePath: pathname });
+    if (pathname === '/') return;
+
+    try {
+      await navigate('/');
+    } catch (error) {
+      setMeetingSearchFocusIntent((current) => current?.requestId === requestId ? null : current);
+      throw error;
+    }
+  }, [navigate, pathname]);
+  const consumeMeetingSearchFocus = useCallback((requestId: number) => {
+    setMeetingSearchFocusIntent((current) => current?.requestId === requestId ? null : current);
+  }, []);
   const runImportAction = useCallback(async () => {
     if (importEnabled) {
       openImportDialog();
@@ -202,6 +236,9 @@ export function ShellProvider({ children }: { children: React.ReactNode }) {
     meetingSearchQuery,
     setMeetingSearchQuery,
     isMeetingSearchPending: searchStatus === 'searching',
+    focusMeetingsSearch,
+    meetingSearchFocusRequest: meetingSearchFocusIntent?.requestId ?? null,
+    consumeMeetingSearchFocus,
   }), [
     collapsed,
     compact,
@@ -209,7 +246,10 @@ export function ShellProvider({ children }: { children: React.ReactNode }) {
     isNavigating,
     navigationError,
     meetingSearchQuery,
+    meetingSearchFocusIntent,
     searchStatus,
+    consumeMeetingSearchFocus,
+    focusMeetingsSearch,
     navigate,
     openMeeting,
     recordingActionLabel,
