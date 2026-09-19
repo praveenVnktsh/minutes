@@ -1,10 +1,8 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { useRouter } from 'next/navigation';
 import {
   FileText,
-  Home,
   Import,
   Link2,
   Mic,
@@ -24,8 +22,9 @@ import {
   CommandShortcut,
 } from '@/components/ui/command';
 import { useSidebar } from '@/components/Sidebar/SidebarProvider';
-import { useImportDialog } from '@/contexts/ImportDialogContext';
-import { useShell } from '@/contexts/ShellContext';
+import { handleShellActionError, useShell } from '@/contexts/ShellContext';
+import { useDebugMode } from '@/hooks/useDebugMode';
+import { copyMeetingLink } from '@/lib/clipboard';
 
 const RECENT_MEETINGS_SHOWN = 8;
 
@@ -34,10 +33,19 @@ const RECENT_MEETINGS_SHOWN = 8;
  */
 export function CommandPalette() {
   const [open, setOpen] = useState(false);
-  const router = useRouter();
-  const { meetings, handleRecordingToggle } = useSidebar();
-  const { openImportDialog } = useImportDialog();
-  const { toggleTheme } = useShell();
+  const { currentMeeting, selectMeetings } = useSidebar();
+  const {
+    toggleTheme,
+    recordingActionLabel,
+    runRecordingAction,
+    importActionLabel,
+    runImportAction,
+    navigate,
+    openMeeting,
+    recordingActionDisabled,
+  } = useShell();
+  const debugMode = useDebugMode();
+  const meetings = selectMeetings({ debugMode });
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -65,10 +73,12 @@ export function CommandPalette() {
     return () => document.removeEventListener('keydown', handleKeyDown);
   }, [open]);
 
-  const runCommand = (action: () => void) => {
+  const runCommand = (action: () => void | Promise<void>) => {
     setOpen(false);
     // Let the dialog close before navigating or opening another dialog.
-    setTimeout(action, 0);
+    setTimeout(() => void Promise.resolve(action()).catch((error) => {
+      handleShellActionError(error, (description) => toast.error('Action failed', { description }));
+    }), 0);
   };
 
   return (
@@ -78,29 +88,32 @@ export function CommandPalette() {
         <CommandEmpty>No results found.</CommandEmpty>
 
         <CommandGroup heading="Actions">
-          <CommandItem onSelect={() => runCommand(handleRecordingToggle)}>
+          <CommandItem disabled={recordingActionDisabled} onSelect={() => runCommand(runRecordingAction)}>
             <Mic />
-            Start recording
+            {recordingActionLabel}
           </CommandItem>
-          <CommandItem onSelect={() => runCommand(() => router.push('/'))}>
-            <Home />
-            Go to Home
+          <CommandItem onSelect={() => runCommand(() => navigate('/'))}>
+            <FileText />
+            Open Meetings
           </CommandItem>
           <CommandItem
             onSelect={() =>
-              runCommand(() => window.dispatchEvent(new CustomEvent('focus-sidebar-search')))
+              runCommand(async () => {
+                await navigate('/');
+                setTimeout(() => window.dispatchEvent(new CustomEvent('focus-meetings-search')), 0);
+              })
             }
           >
             <Search />
             Search meetings
           </CommandItem>
-          <CommandItem onSelect={() => runCommand(() => router.push('/settings'))}>
+          <CommandItem onSelect={() => runCommand(() => navigate('/settings'))}>
             <Settings />
             Open Settings
           </CommandItem>
-          <CommandItem onSelect={() => runCommand(() => openImportDialog())}>
+          <CommandItem onSelect={() => runCommand(runImportAction)}>
             <Import />
-            Import audio
+            {importActionLabel}
           </CommandItem>
           <CommandItem onSelect={() => runCommand(toggleTheme)}>
             <SunMoon />
@@ -108,14 +121,20 @@ export function CommandPalette() {
           </CommandItem>
           <CommandItem
             onSelect={() =>
-              runCommand(() => {
-                const meetingId = new URLSearchParams(window.location.search).get('id');
+              runCommand(async () => {
+                const meetingId = currentMeeting?.id === 'intro-call' ? null : currentMeeting?.id;
                 if (!meetingId) {
                   toast.error('Open a meeting first');
                   return;
                 }
-                void navigator.clipboard.writeText(`minutes://meeting/${meetingId}`);
-                toast.success('Meeting link copied');
+                try {
+                  await copyMeetingLink(meetingId);
+                  toast.success('Meeting link copied');
+                } catch (error) {
+                  toast.error('Could not copy meeting link', {
+                    description: error instanceof Error ? error.message : String(error),
+                  });
+                }
               })
             }
           >
@@ -133,7 +152,7 @@ export function CommandPalette() {
                   key={meeting.id}
                   value={`${meeting.title} ${meeting.id}`}
                   onSelect={() =>
-                    runCommand(() => router.push(`/meeting-details?id=${meeting.id}`))
+                    runCommand(() => openMeeting(meeting))
                   }
                 >
                   <FileText />

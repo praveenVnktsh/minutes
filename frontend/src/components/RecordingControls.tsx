@@ -112,7 +112,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
             </>
           )}
         </div>
-        {controller.feedback ? (
+        {controller.feedback && !controller.feedbackManagedGlobally ? (
           <div className="flex items-center gap-2">
             <StatusFeedback
               tone={controller.feedback.kind === 'warning' ? 'warning' : 'error'}
