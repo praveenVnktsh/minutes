@@ -6,23 +6,32 @@ const originalCore = { ...await import('@tauri-apps/api/core') };
 const originalAnalytics = { ...await import('../../src/lib/analytics') };
 const originalNavigation = { ...await import('next/navigation') };
 const originalRecordingState = { ...await import('../../src/contexts/RecordingStateContext') };
+const originalPersistence = { ...await import('../../src/services/notePersistenceService') };
 
 afterAll(() => {
   mock.module('@tauri-apps/api/core', () => originalCore);
   mock.module('../../src/lib/analytics', () => originalAnalytics);
   mock.module('next/navigation', () => originalNavigation);
   mock.module('../../src/contexts/RecordingStateContext', () => originalRecordingState);
+  mock.module('../../src/services/notePersistenceService', () => originalPersistence);
 });
 
+let pathname = '/';
+const push = mock(() => {});
+const replace = mock(() => {});
 mock.module('next/navigation', () => ({
-  usePathname: () => '/',
-  useRouter: () => ({ push() {}, replace() {} }),
+  usePathname: () => pathname,
+  useRouter: () => ({ push, replace }),
 }));
 mock.module('../../src/contexts/RecordingStateContext', () => ({
   useRecordingState: () => ({ isRecording: false }),
 }));
 mock.module('../../src/lib/analytics', () => ({
   default: { trackBackendConnection() {}, trackButtonClick() {} },
+}));
+let flush: () => Promise<void> = async () => {};
+mock.module('../../src/services/notePersistenceService', () => ({
+  flushNotes: () => flush(),
 }));
 
 type Invocation = { command: string; args?: Record<string, unknown> };
@@ -61,6 +70,10 @@ async function render(children: ReactNode = <Probe />) {
 }
 
 beforeEach(() => {
+  pathname = '/';
+  push.mockClear();
+  replace.mockClear();
+  flush = async () => {};
   invocations.length = 0;
   invoke.mockClear();
   handler = async (command) => command === 'api_get_meetings' ? [] : undefined;
@@ -146,7 +159,7 @@ describe('SidebarProvider catalog state', () => {
     expect(sidebar.searchError).toBe('search offline');
   });
 
-  test('preserves metadata and ignores an older rename rollback after newer success', async () => {
+  test('serializes same-field writes and keeps a newer success after an older failure', async () => {
     const first = deferred<unknown>();
     const second = deferred<unknown>();
     let renameCount = 0;
@@ -165,13 +178,155 @@ describe('SidebarProvider catalog state', () => {
     });
     expect(sidebar.meetings[0]).toEqual({ ...catalog[0], title: 'Second' });
     expect(sidebar.meetingMutations['meeting-a']?.rename?.status).toBe('pending');
+    expect(renameCount).toBe(1);
     const firstOutcome = firstRename.then(() => null, (error) => error as Error);
-    await act(async () => second.resolve(true));
     await act(async () => first.reject(new Error('older failure')));
+    expect(renameCount).toBe(2);
+    await act(async () => second.resolve(true));
     expect((await firstOutcome)?.message).toBe('older failure');
     await secondRename;
     expect(sidebar.meetings[0]).toEqual({ ...catalog[0], title: 'Second' });
     expect(sidebar.meetingMutations['meeting-a']).toBeUndefined();
+  });
+
+  test('rolls two rejected renames back to the last acknowledged title', async () => {
+    const first = deferred<unknown>();
+    const second = deferred<unknown>();
+    let renameCount = 0;
+    handler = async (command) => {
+      if (command === 'api_get_meetings') return catalog;
+      if (command === 'api_save_meeting_title') return (++renameCount === 1 ? first : second).promise;
+      throw new Error(`Unexpected command: ${command}`);
+    };
+    await render();
+
+    const firstRename = sidebar.renameMeeting('meeting-a', 'First');
+    const firstOutcome = firstRename.then(() => null, (error) => error as Error);
+    const secondRename = sidebar.renameMeeting('meeting-a', 'Second');
+    const secondOutcome = secondRename.then(() => null, (error) => error as Error);
+    await act(async () => first.reject(new Error('first rejected')));
+    expect(sidebar.meetings[0].title).toBe('Second');
+    expect(renameCount).toBe(2);
+    await act(async () => second.reject(new Error('second rejected')));
+
+    expect((await firstOutcome)?.message).toBe('first rejected');
+    expect((await secondOutcome)?.message).toBe('second rejected');
+    expect(sidebar.meetings[0]).toEqual(catalog[0]);
+    expect(sidebar.meetingMutations['meeting-a']?.rename).toEqual({
+      status: 'error', error: 'second rejected',
+    });
+  });
+
+  test('prevents successful native writes from completing out of order', async () => {
+    const first = deferred<unknown>();
+    const second = deferred<unknown>();
+    let renameCount = 0;
+    handler = async (command) => {
+      if (command === 'api_get_meetings') return catalog;
+      if (command === 'api_save_meeting_title') return (++renameCount === 1 ? first : second).promise;
+      throw new Error(`Unexpected command: ${command}`);
+    };
+    await render();
+
+    const firstRename = sidebar.renameMeeting('meeting-a', 'First');
+    const secondRename = sidebar.renameMeeting('meeting-a', 'Second');
+    await act(async () => second.resolve(true));
+    expect(renameCount).toBe(1);
+    await act(async () => first.resolve(true));
+    await Promise.all([firstRename, secondRename]);
+
+    expect(renameCount).toBe(2);
+    expect(sidebar.meetings[0]).toEqual({ ...catalog[0], title: 'Second' });
+    expect(sidebar.meetingMutations['meeting-a']).toBeUndefined();
+  });
+
+  test('rolls a rejected newer rename back to the preceding acknowledged success', async () => {
+    const first = deferred<unknown>();
+    const second = deferred<unknown>();
+    let renameCount = 0;
+    handler = async (command) => {
+      if (command === 'api_get_meetings') return catalog;
+      if (command === 'api_save_meeting_title') return (++renameCount === 1 ? first : second).promise;
+      throw new Error(`Unexpected command: ${command}`);
+    };
+    await render();
+
+    const firstRename = sidebar.renameMeeting('meeting-a', 'First');
+    const secondRename = sidebar.renameMeeting('meeting-a', 'Second');
+    const secondOutcome = secondRename.then(() => null, (error) => error as Error);
+    await act(async () => first.resolve(true));
+    await firstRename;
+    await act(async () => second.reject(new Error('second rejected')));
+
+    expect((await secondOutcome)?.message).toBe('second rejected');
+    expect(sidebar.meetings[0]).toEqual({ ...catalog[0], title: 'First' });
+  });
+
+  test('does not let an older refresh overwrite a mutation that settles after it started', async () => {
+    const refresh = deferred<unknown>();
+    let catalogReads = 0;
+    handler = async (command) => {
+      if (command === 'api_get_meetings') return ++catalogReads === 1 ? catalog : refresh.promise;
+      if (command === 'api_set_meeting_pinned') return true;
+      throw new Error(`Unexpected command: ${command}`);
+    };
+    await render();
+
+    let refreshing!: Promise<void>;
+    await act(async () => { refreshing = sidebar.refetchMeetings(); });
+    await act(async () => { await sidebar.setMeetingPinned('meeting-a', false); });
+    await act(async () => refresh.resolve([{ ...catalog[0], title: 'Stale', pinned: true }]));
+    await refreshing;
+
+    expect(sidebar.meetings).toEqual([{ ...catalog[0], title: 'Stale', pinned: false }]);
+  });
+
+  test('retains a pending mutation and its catalog row when refresh omits it', async () => {
+    const rename = deferred<unknown>();
+    const refresh = deferred<unknown>();
+    let catalogReads = 0;
+    handler = async (command) => {
+      if (command === 'api_get_meetings') return ++catalogReads === 1 ? catalog : refresh.promise;
+      if (command === 'api_save_meeting_title') return rename.promise;
+      throw new Error(`Unexpected command: ${command}`);
+    };
+    await render();
+
+    const renaming = sidebar.renameMeeting('meeting-a', 'Pending');
+    let refreshing!: Promise<void>;
+    await act(async () => { refreshing = sidebar.refetchMeetings(); });
+    await act(async () => refresh.resolve([]));
+    await refreshing;
+    expect(sidebar.meetings).toEqual([{ ...catalog[0], title: 'Pending' }]);
+    await act(async () => rename.resolve(true));
+    await renaming;
+    expect(sidebar.meetings[0].title).toBe('Pending');
+  });
+
+  test('lets only the latest provider navigation complete after overlapping flushes', async () => {
+    pathname = '/meeting-details';
+    const first = deferred<void>();
+    const second = deferred<void>();
+    let flushCount = 0;
+    flush = () => (++flushCount === 1 ? first : second).promise;
+    const stored: Record<string, string> = {};
+    Object.defineProperty(globalThis, 'sessionStorage', {
+      configurable: true,
+      value: { setItem: (key: string, value: string) => { stored[key] = value; } },
+    });
+    await render();
+
+    const firstNavigation = sidebar.handleRecordingToggle();
+    const secondNavigation = sidebar.handleRecordingToggle();
+    await act(async () => second.resolve());
+    expect(push).toHaveBeenCalledTimes(1);
+    expect(stored.autoStartRecording).toBe('true');
+    await act(async () => first.reject(new Error('stale flush failure')));
+    await Promise.all([firstNavigation, secondNavigation]);
+
+    expect(push).toHaveBeenCalledTimes(1);
+    expect(sidebar.navigationError).toBeNull();
+    delete (globalThis as { sessionStorage?: Storage }).sessionStorage;
   });
 
   test('rolls back only the failed field and exposes retryable mutation error state', async () => {

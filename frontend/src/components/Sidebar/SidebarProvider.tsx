@@ -55,6 +55,16 @@ interface SummaryPoll {
   inFlight: boolean;
 }
 
+type MutableMeetingField = 'title' | 'pinned' | 'archived';
+
+interface MeetingMutationQueue {
+  acknowledgedValue: CurrentMeeting[MutableMeetingField];
+  latestRequestId: number;
+  pendingCount: number;
+  lastSuccessRevision: number;
+  tail: Promise<void>;
+}
+
 interface SidebarContextType {
   currentMeeting: CurrentMeeting | null;
   setCurrentMeeting: (meeting: CurrentMeeting | null) => void;
@@ -131,8 +141,10 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
   const catalogRequestRef = React.useRef(0);
   const catalogLoadedRef = React.useRef(false);
   const searchRequestRef = React.useRef(0);
-  const mutationRequestRef = React.useRef(new Map<string, number>());
+  const mutationQueuesRef = React.useRef(new Map<string, MeetingMutationQueue>());
   const nextMutationRequestRef = React.useRef(0);
+  const mutationSuccessRevisionRef = React.useRef(0);
+  const navigationRequestRef = React.useRef(0);
 
   // Use recording state from RecordingStateContext (single source of truth)
   const { isRecording } = useRecordingState();
@@ -140,8 +152,49 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
 
-  const replaceMeetings = React.useCallback((nextMeetings: CurrentMeeting[]) => {
+  const replaceMeetings = React.useCallback((
+    nextMeetings: CurrentMeeting[],
+    preserveSuccessesAfter = Number.POSITIVE_INFINITY,
+  ) => {
+    const currentById = new Map(meetingsRef.current.map((meeting) => [meeting.id, meeting]));
     const merged = mergeMeetingCatalog(meetingsRef.current, nextMeetings);
+    const protectedMeetingIds = new Set<string>();
+
+    for (const meeting of merged) {
+      const current = currentById.get(meeting.id);
+      if (!current) continue;
+      for (const [field, kind] of [
+        ['title', 'rename'],
+        ['pinned', 'pin'],
+        ['archived', 'archive'],
+      ] as const) {
+        const queue = mutationQueuesRef.current.get(`${meeting.id}:${kind}`);
+        if (!queue) continue;
+        if (queue.pendingCount > 0 || queue.lastSuccessRevision > preserveSuccessesAfter) {
+          meeting[field] = current[field] as never;
+          protectedMeetingIds.add(meeting.id);
+        } else {
+          queue.acknowledgedValue = meeting[field];
+        }
+      }
+    }
+
+    for (const meeting of meetingsRef.current) {
+      if (!merged.some(({ id }) => id === meeting.id)) {
+        const hasProtectedMutation = [...mutationQueuesRef.current.entries()].some(([key, queue]) => (
+          key.startsWith(`${meeting.id}:`)
+          && (queue.pendingCount > 0 || queue.lastSuccessRevision > preserveSuccessesAfter)
+        ));
+        if (hasProtectedMutation) protectedMeetingIds.add(meeting.id);
+      }
+    }
+    for (const meetingId of protectedMeetingIds) {
+      if (!merged.some(({ id }) => id === meetingId)) {
+        const current = currentById.get(meetingId);
+        if (current) merged.push(current);
+      }
+    }
+
     meetingsRef.current = merged;
     setMeetings(merged);
   }, []);
@@ -154,12 +207,13 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
 
   const fetchMeetings = React.useCallback(async () => {
     const requestId = ++catalogRequestRef.current;
+    const mutationSuccessAtStart = mutationSuccessRevisionRef.current;
     setCatalogStatus(catalogLoadedRef.current ? 'refreshing' : 'loading');
     setCatalogError(null);
     try {
       const response = await invoke<CurrentMeeting[]>('api_get_meetings');
       if (requestId !== catalogRequestRef.current) return;
-      replaceMeetings(response);
+      replaceMeetings(response, mutationSuccessAtStart);
       catalogLoadedRef.current = true;
       setCatalogStatus('ready');
       Analytics.trackBackendConnection(true);
@@ -212,11 +266,14 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
   // away from it, this brings the split screen back instead of starting another
   // recording or showing the idle home page.
   const navigateAfterFlush = React.useCallback(async (navigate: () => void) => {
+    const requestId = ++navigationRequestRef.current;
     setNavigationError(null);
     try {
       await flushNotes();
+      if (requestId !== navigationRequestRef.current) return;
       navigate();
     } catch (error) {
+      if (requestId !== navigationRequestRef.current) return;
       setNavigationError(errorMessage(error));
     }
   }, []);
@@ -305,51 +362,64 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
     });
   }, []);
 
-  const mutateMeeting = React.useCallback(async <K extends 'title' | 'pinned' | 'archived'>(
+  const mutateMeeting = React.useCallback(<K extends MutableMeetingField>(
     meetingId: string,
     field: K,
     value: CurrentMeeting[K],
     kind: MeetingMutationKind,
     command: string,
     args: Record<string, unknown>,
-  ) => {
+  ): Promise<void> => {
     const meeting = meetingsRef.current.find((candidate) => candidate.id === meetingId);
-    if (!meeting) throw new Error(`Meeting ${meetingId} is not in the catalog.`);
+    if (!meeting) return Promise.reject(new Error(`Meeting ${meetingId} is not in the catalog.`));
 
-    const previousValue = meeting[field];
     const mutationKey = `${meetingId}:${kind}`;
     const requestId = ++nextMutationRequestRef.current;
-    mutationRequestRef.current.set(mutationKey, requestId);
+    let queue = mutationQueuesRef.current.get(mutationKey);
+    if (!queue) {
+      queue = {
+        acknowledgedValue: meeting[field],
+        latestRequestId: requestId,
+        pendingCount: 0,
+        lastSuccessRevision: 0,
+        tail: Promise.resolve(),
+      };
+      mutationQueuesRef.current.set(mutationKey, queue);
+    }
+    queue.latestRequestId = requestId;
+    queue.pendingCount += 1;
     updateMeetings((current) => patchMeeting(current, meetingId, { [field]: value }));
     if (field === 'title') {
       setCurrentMeeting((current) => current?.id === meetingId ? { ...current, title: String(value) } : current);
     }
     setMutationStatus(meetingId, kind, { status: 'pending', error: null });
 
-    try {
-      await invoke(command, args);
-      if (mutationRequestRef.current.get(mutationKey) === requestId) {
-        mutationRequestRef.current.delete(mutationKey);
-        setMutationStatus(meetingId, kind);
-      }
-    } catch (error) {
-      if (mutationRequestRef.current.get(mutationKey) === requestId) {
-        mutationRequestRef.current.delete(mutationKey);
-        updateMeetings((current) => current.map((candidate) => {
-          if (candidate.id !== meetingId || candidate[field] !== value) return candidate;
-          return { ...candidate, [field]: previousValue };
-        }));
-        if (field === 'title') {
-          setCurrentMeeting((current) => (
-            current?.id === meetingId && current.title === value
-              ? { ...current, title: String(previousValue) }
-              : current
-          ));
+    const operation = queue.tail.then(async () => {
+      try {
+        await invoke(command, args);
+        queue.acknowledgedValue = value;
+        queue.lastSuccessRevision = ++mutationSuccessRevisionRef.current;
+        if (queue.latestRequestId === requestId) {
+          setMutationStatus(meetingId, kind);
         }
-        setMutationStatus(meetingId, kind, { status: 'error', error: errorMessage(error) });
+      } catch (error) {
+        if (queue.latestRequestId === requestId) {
+          const acknowledgedValue = queue.acknowledgedValue;
+          updateMeetings((current) => patchMeeting(current, meetingId, { [field]: acknowledgedValue }));
+          if (field === 'title') {
+            setCurrentMeeting((current) => current?.id === meetingId
+              ? { ...current, title: String(acknowledgedValue) }
+              : current);
+          }
+          setMutationStatus(meetingId, kind, { status: 'error', error: errorMessage(error) });
+        }
+        throw error;
+      } finally {
+        queue.pendingCount -= 1;
       }
-      throw error;
-    }
+    });
+    queue.tail = operation.catch(() => {});
+    return operation;
   }, [setMutationStatus, updateMeetings]);
 
   const renameMeeting = React.useCallback((meetingId: string, title: string) => (

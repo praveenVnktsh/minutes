@@ -16,7 +16,10 @@ const setCurrentMeeting = mock(() => {});
 let flush: () => Promise<void>;
 mock.module('next/navigation', () => ({ useRouter: () => ({ push }) }));
 mock.module('../../src/components/Sidebar/SidebarProvider', () => ({
-  useSidebar: () => ({ setCurrentMeeting }),
+  useSidebar: () => ({
+    meetings: [{ id: 'legacy / id', title: 'Catalog title', pinned: true }],
+    setCurrentMeeting,
+  }),
 }));
 mock.module('../../src/services/notePersistenceService', () => ({
   flushNotes: () => flush(),
@@ -53,6 +56,9 @@ describe('meeting navigation', () => {
 
     await act(async () => { await legacyNavigation(); });
     expect(order).toEqual(['flush', 'meeting', 'push']);
+    expect(setCurrentMeeting).toHaveBeenCalledWith({
+      id: 'legacy / id', title: 'Legacy', pinned: true,
+    });
     expect(push).toHaveBeenCalledWith('/meeting-details?id=legacy%20%2F%20id');
   });
 
@@ -73,4 +79,55 @@ describe('meeting navigation', () => {
     expect(navigation.navigationError?.message).toBe('notes not saved');
     expect(navigation.isNavigating).toBe(false);
   });
+
+  test('only the latest overlapping navigation can change meeting or route', async () => {
+    const first = deferred<void>();
+    const second = deferred<void>();
+    let flushCount = 0;
+    flush = () => (++flushCount === 1 ? first : second).promise;
+
+    let firstNavigation!: Promise<void>;
+    let secondNavigation!: Promise<void>;
+    await act(async () => {
+      firstNavigation = navigation.openMeeting({ id: 'first', title: 'First' });
+      secondNavigation = navigation.openMeeting({ id: 'second', title: 'Second' });
+    });
+    await act(async () => second.resolve());
+    expect(push).toHaveBeenCalledTimes(1);
+    expect(push).toHaveBeenCalledWith('/meeting-details?id=second');
+    expect(navigation.isNavigating).toBe(false);
+
+    await act(async () => first.resolve());
+    await Promise.all([firstNavigation, secondNavigation]);
+    expect(push).toHaveBeenCalledTimes(1);
+    expect(setCurrentMeeting).toHaveBeenCalledTimes(1);
+  });
+
+  test('a stale failed navigation cannot replace the latest navigation state', async () => {
+    const first = deferred<void>();
+    const second = deferred<void>();
+    let flushCount = 0;
+    flush = () => (++flushCount === 1 ? first : second).promise;
+
+    const staleNavigation = navigation.navigate('/first');
+    const latestNavigation = navigation.navigate('/second');
+    await act(async () => second.resolve());
+    await act(async () => first.reject(new Error('stale failure')));
+    await Promise.all([staleNavigation, latestNavigation]);
+
+    expect(push).toHaveBeenCalledTimes(1);
+    expect(push).toHaveBeenCalledWith('/second');
+    expect(navigation.navigationError).toBeNull();
+    expect(navigation.isNavigating).toBe(false);
+  });
 });
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
