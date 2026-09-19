@@ -7,12 +7,14 @@ import type { TranscriptionErrorPayload } from '../../src/services/transcriptSer
 const originalCore = { ...await import('@tauri-apps/api/core') };
 const originalEvent = { ...await import('@tauri-apps/api/event') };
 const originalPath = { ...await import('@tauri-apps/api/path') };
+const originalFs = { ...await import('@tauri-apps/plugin-fs') };
 const originalNavigation = { ...await import('next/navigation') };
 
 afterAll(() => {
   mock.module('@tauri-apps/api/core', () => originalCore);
   mock.module('@tauri-apps/api/event', () => originalEvent);
   mock.module('@tauri-apps/api/path', () => originalPath);
+  mock.module('@tauri-apps/plugin-fs', () => originalFs);
   mock.module('next/navigation', () => originalNavigation);
 });
 
@@ -67,6 +69,8 @@ let activitySnapshot: { revision: number; recording: TestRecordingActivity | nul
 }> } = { revision: 0, recording: activityRecording, activities: [] };
 let recordingDuration: number | null = null;
 let transcriptHistory: Array<Record<string, unknown>> = [];
+let nativeStopCompleted = false;
+let transcriptFileText: string | null = null;
 const rehydrate = mock(async () => {});
 const setStatus = mock(() => {});
 const push = mock(() => {});
@@ -76,6 +80,7 @@ const setIsMeetingActive = mock(() => {});
 const clearTranscripts = mock(() => {});
 const setMeetingTitle = mock(() => {});
 const markMeetingAsSaved = mock(async () => {});
+const markRecoveryMeetingSaved = mock(async (_meetingId: string) => {});
 const flushBuffer = mock(() => {});
 let flushNotesImpl: () => Promise<void> = async () => {};
 const flushNotes = mock(() => flushNotesImpl());
@@ -99,7 +104,7 @@ const startRecordingWithDevices = mock((
   _title: string,
   _requestId?: string,
 ) => startResult.promise);
-const stopRecording = mock(async () => {});
+const stopRecording = mock(async () => { nativeStopCompleted = true; });
 const pauseRecording = mock(async () => {});
 const resumeRecording = mock(async () => {});
 const createMeeting = mock(async () => ({ status: 'created', meeting_id: 'meeting-created' }));
@@ -134,7 +139,23 @@ const getRecordingState = mock(async () => ({
   active_meeting_id: activityRecording?.meeting_id ?? null,
 }));
 const getRecordingMeetingName = mock(async () => 'Recovered title');
-const getTranscriptHistory = mock(async () => transcriptHistory);
+const readTextFile = mock(async (_path: string) => {
+  if (!nativeStopCompleted) throw new Error('transcripts.json read before native stop completed');
+  if (transcriptFileText !== null) return transcriptFileText;
+  const segments = transcriptHistory.map((segment, index) => ({
+    id: `segment-${index}`,
+    text: '',
+    display_time: '',
+    sequence_id: index,
+    audio_start_time: 0,
+    audio_end_time: 0,
+    duration: 0,
+    confidence: 1,
+    speaker: null,
+    ...segment,
+  }));
+  return JSON.stringify({ version: '1.0', total_segments: segments.length, segments });
+});
 let requestCallback: ((request: RecordingStartRequest) => void) | null = null;
 let transcriptionErrorCallback: ((error: TranscriptionErrorPayload) => void) | null = null;
 let requestListener = Promise.resolve(mock(() => {}));
@@ -148,7 +169,7 @@ const onTranscriptionError = mock(async (callback: (error: TranscriptionErrorPay
   transcriptionErrorCallback = callback;
   return mock(() => {});
 });
-const getPendingRecordingRequest = mock(async () => null);
+const getPendingRecordingRequest = mock(async (): Promise<RecordingStartRequest | null> => null);
 
 const invoke = mock(async (command: string, _args?: Record<string, unknown>): Promise<unknown> => {
   switch (command) {
@@ -167,7 +188,12 @@ const listen = mock(async (
 
 mock.module('@tauri-apps/api/core', () => ({ ...originalCore, invoke }));
 mock.module('@tauri-apps/api/event', () => ({ ...originalEvent, listen }));
-mock.module('@tauri-apps/api/path', () => ({ ...originalPath, appDataDir: async () => '/data' }));
+mock.module('@tauri-apps/api/path', () => ({
+  ...originalPath,
+  appDataDir: async () => '/data',
+  join: async (...paths: string[]) => paths.join('/'),
+}));
+mock.module('@tauri-apps/plugin-fs', () => ({ ...originalFs, readTextFile }));
 mock.module('next/navigation', () => ({ useRouter: () => ({ push }) }));
 mock.module('../../src/contexts/ConfigContext', () => ({
   useConfig: () => ({
@@ -252,13 +278,16 @@ mock.module('../../src/services/storageService', () => ({ storageService: { crea
 mock.module('../../src/services/transcriptService', () => ({
   transcriptService: {
     onTranscriptionError,
-    getTranscriptHistory,
     onTranscriptionComplete: async () => mock(() => {}),
     getTranscriptionStatus: async () => ({ is_processing: false, chunks_in_queue: 0 }),
   },
 }));
 mock.module('../../src/services/indexedDBService', () => ({
-  indexedDBService: { deleteOldMeetings: async () => 0, deleteSavedMeetings: async () => 0 },
+  indexedDBService: {
+    deleteOldMeetings: async () => 0,
+    deleteSavedMeetings: async () => 0,
+    markMeetingSaved: markRecoveryMeetingSaved,
+  },
 }));
 const recovery = {
   recoverableMeetings: [], isLoading: false, isRecovering: false,
@@ -289,10 +318,13 @@ async function mount(children: ReactNode = <Probe />) {
 beforeEach(() => {
   storage.clear();
   storage.set('liveTranscriptEnabled', 'true');
+  storage.set('session:indexeddb_current_meeting_id', 'recovery-current');
   activityRecording = null;
   activitySnapshot = { revision: 0, recording: null, activities: [] };
   recordingDuration = null;
   transcriptHistory = [];
+  nativeStopCompleted = false;
+  transcriptFileText = null;
   notesMarkdown = '';
   notesLoadError = null;
   startResult = deferred();
@@ -308,7 +340,7 @@ beforeEach(() => {
     bindActiveRecordingMeeting, claimRecordingRequest, acknowledgeRecordingRequest,
     onRecordingStartRequested, onRecordingStopped, onChunkDropWarning,
     onTranscriptionError, getPendingRecordingRequest, getActivitySnapshot,
-    getRecordingState, getRecordingMeetingName, getTranscriptHistory, loadNotes,
+    getRecordingState, getRecordingMeetingName, readTextFile, markRecoveryMeetingSaved, loadNotes,
   ].forEach((fn) => fn.mockClear());
 });
 
@@ -381,7 +413,10 @@ describe('RecordingControllerProvider', () => {
       audio_start_time: 28, audio_end_time: 30, duration: 2,
     }];
     const stopped = deferred<void>();
-    stopRecording.mockImplementationOnce(() => stopped.promise);
+    stopRecording.mockImplementationOnce(async () => {
+      await stopped.promise;
+      nativeStopCompleted = true;
+    });
     await mount();
 
     let stop!: Promise<void>;
@@ -399,7 +434,7 @@ describe('RecordingControllerProvider', () => {
     expect(stopRecording).toHaveBeenCalledTimes(1);
   });
 
-  test('reads authoritative native history after stop before saving final segments', async () => {
+  test('reads and validates the exact persisted transcript file after native stop', async () => {
     activityRecording = {
       session_id: 'history-session', meeting_id: 'meeting-history', status: 'recording', error: null,
     };
@@ -412,7 +447,7 @@ describe('RecordingControllerProvider', () => {
 
     await act(async () => { await controller.stopRecording(); });
 
-    expect(getTranscriptHistory).toHaveBeenCalledTimes(1);
+    expect(readTextFile).toHaveBeenCalledWith('/recordings/live/transcripts.json');
     expect(saveMeeting.mock.calls[0]?.[1]).toEqual([expect.objectContaining({
       id: 'last-segment', text: 'captured after the UI buffer', sequence_id: 9, is_partial: false,
     })]);
@@ -432,7 +467,7 @@ describe('RecordingControllerProvider', () => {
     await act(async () => { await controller.retryFeedback(); });
 
     expect(stopRecording).toHaveBeenCalledTimes(1);
-    expect(getTranscriptHistory).toHaveBeenCalledTimes(1);
+    expect(readTextFile).toHaveBeenCalledTimes(1);
     expect(saveMeeting).toHaveBeenCalledTimes(2);
   });
 
@@ -451,7 +486,7 @@ describe('RecordingControllerProvider', () => {
 
     expect(stopRecording).toHaveBeenCalledTimes(1);
     expect(saveMeeting).toHaveBeenCalledTimes(1);
-    expect(markMeetingAsSaved).toHaveBeenCalledTimes(1);
+    expect(markRecoveryMeetingSaved).toHaveBeenCalledTimes(1);
   });
 
   test('finalizes after a rejected stop when native state confirms capture ended', async () => {
@@ -461,6 +496,7 @@ describe('RecordingControllerProvider', () => {
     recordingDuration = 30;
     transcriptHistory = [{ id: 'one', text: 'preserved', display_time: '00:01' }];
     stopRecording.mockImplementationOnce(async () => {
+      nativeStopCompleted = true;
       activityRecording = null;
       throw new Error('audio file was partial');
     });
@@ -474,6 +510,7 @@ describe('RecordingControllerProvider', () => {
   });
 
   test('does not classify unknown-duration tray completion as short and empty', async () => {
+    nativeStopCompleted = true;
     sessionStorage.setItem('active_recording_sessions', JSON.stringify([{
       sessionId: 'tray-session', meetingId: 'meeting-tray', title: 'Tray meeting',
       folderPath: '/recordings/tray', recordingSeconds: null,
@@ -524,6 +561,105 @@ describe('RecordingControllerProvider', () => {
       call[0] === 'api_discard_meeting'
       && (call[1] as { meetingId?: string } | undefined)?.meetingId === 'meeting-notes-error'
     ))).toBe(false);
+  });
+
+  test('fails safely when the persisted transcript file cannot be read', async () => {
+    activityRecording = {
+      session_id: 'file-error-session', meeting_id: 'meeting-file-error', status: 'recording', error: null,
+    };
+    recordingDuration = 30;
+    readTextFile.mockImplementationOnce(async () => { throw new Error('path not allowed'); });
+    await mount();
+
+    await act(async () => { await controller.stopRecording().catch(() => {}); });
+
+    expect(saveMeeting).not.toHaveBeenCalled();
+    expect(markRecoveryMeetingSaved).not.toHaveBeenCalled();
+    expect(controller.feedback?.title).toBe('Meeting needs attention');
+    expect(controller.canRetryFeedback).toBe(true);
+  });
+
+  test('rejects an incomplete persisted transcript file without replacing saved rows', async () => {
+    activityRecording = {
+      session_id: 'invalid-file-session', meeting_id: 'meeting-invalid-file', status: 'recording', error: null,
+    };
+    recordingDuration = 30;
+    transcriptFileText = JSON.stringify({
+      version: '1.0',
+      total_segments: 2,
+      segments: [{
+        id: 'only-segment', text: 'incomplete', display_time: '00:01', sequence_id: 0,
+        audio_start_time: 0, audio_end_time: 1, duration: 1, confidence: 1, speaker: null,
+      }],
+    });
+    await mount();
+
+    await act(async () => { await controller.stopRecording().catch(() => {}); });
+
+    expect(saveMeeting).not.toHaveBeenCalled();
+    expect(controller.feedback?.message).toContain('saved transcript file is incomplete');
+  });
+
+  test('restores finalization checkpoints after remount without saving twice', async () => {
+    activityRecording = {
+      session_id: 'remount-session', meeting_id: 'meeting-remount', status: 'recording', error: null,
+    };
+    recordingDuration = 30;
+    transcriptHistory = [{ id: 'one', text: 'durable', display_time: '00:01' }];
+    refetchMeetings.mockImplementationOnce(async () => { throw new Error('catalog unavailable'); });
+    await mount();
+    await act(async () => { await controller.stopRecording().catch(() => {}); });
+    expect(saveMeeting).toHaveBeenCalledTimes(1);
+    await act(async () => renderer!.unmount());
+    renderer = undefined;
+
+    activityRecording = null;
+    activitySnapshot = {
+      revision: 8,
+      recording: null,
+      activities: [{ task_id: 'remount-session', meeting_id: 'meeting-remount', kind: 'recording', status: 'ready' }],
+    };
+    await mount();
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+
+    expect(saveMeeting).toHaveBeenCalledTimes(1);
+    expect(refetchMeetings).toHaveBeenCalledTimes(2);
+  });
+
+  test('retains exact row mapping when IndexedDB completion rejects across remount', async () => {
+    activityRecording = {
+      session_id: 'idb-session', meeting_id: 'meeting-idb', status: 'recording', error: null,
+    };
+    recordingDuration = 30;
+    transcriptHistory = [{ id: 'one', text: 'durable', display_time: '00:01' }];
+    markRecoveryMeetingSaved.mockImplementationOnce(async () => { throw new Error('IndexedDB unavailable'); });
+    await mount();
+    await act(async () => { await controller.stopRecording().catch(() => {}); });
+
+    const persisted = JSON.parse(sessionStorage.getItem('active_recording_sessions')!) as Array<{
+      meetingId: string;
+      recoveryMeetingId: string;
+      finalization: { savedMeetingId: string; markedSaved: boolean };
+    }>;
+    expect(persisted[0]).toMatchObject({
+      meetingId: 'meeting-created',
+      recoveryMeetingId: 'recovery-current',
+      finalization: { savedMeetingId: 'meeting-created', markedSaved: false },
+    });
+
+    await act(async () => renderer!.unmount());
+    renderer = undefined;
+    activityRecording = null;
+    activitySnapshot = {
+      revision: 9,
+      recording: null,
+      activities: [{ task_id: 'idb-session', meeting_id: 'meeting-idb', kind: 'recording', status: 'ready' }],
+    };
+    await mount();
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+
+    expect(saveMeeting).toHaveBeenCalledTimes(1);
+    expect(markRecoveryMeetingSaved).toHaveBeenCalledTimes(2);
   });
 
   test('ignores an old terminal activity after a new session has started', async () => {
@@ -644,6 +780,25 @@ describe('RecordingControllerProvider', () => {
     await act(async () => { late.resolve(unlisten); await late.promise; });
 
     expect(unlisten).toHaveBeenCalledTimes(1);
+  });
+
+  test('hydrates pending requests only after the request listener is registered', async () => {
+    const registration = deferred<ReturnType<typeof mock>>();
+    requestListener = registration.promise;
+    getPendingRecordingRequest.mockImplementationOnce(async () => ({
+      request_id: 'during-registration', source: 'tray', status: 'starting' as const,
+      claimed_by: 'main-recording-controller', started_session_id: 'native-session',
+    }));
+    await mount();
+    expect(getPendingRecordingRequest).not.toHaveBeenCalled();
+
+    await act(async () => {
+      registration.resolve(mock(() => {}));
+      await registration.promise;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(getPendingRecordingRequest).toHaveBeenCalledTimes(1);
   });
 
   test('registers unrelated listeners when request listener setup fails', async () => {

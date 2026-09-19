@@ -11,7 +11,8 @@ import React, {
 } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import { appDataDir } from '@tauri-apps/api/path';
+import { appDataDir, join } from '@tauri-apps/api/path';
+import { readTextFile } from '@tauri-apps/plugin-fs';
 import { useRouter } from 'next/navigation';
 import { useConfig } from '@/contexts/ConfigContext';
 import { useMeetingActivity } from '@/contexts/MeetingActivityContext';
@@ -107,21 +108,26 @@ interface SessionRecord {
   title: string;
   folderPath: string | null;
   recordingSeconds: number | null;
+  recoveryMeetingId?: string | null;
+  finalization?: PersistedFinalizationRecord;
 }
 
-interface FinalizationRecord {
-  promise: Promise<void> | null;
+interface PersistedFinalizationRecord {
   completed: boolean;
   deferred: boolean | null;
-  transcripts: Transcript[] | null;
   savedMeetingId: string | null;
-  attachedNotesRead: boolean;
-  attachedNotes: LiveNotesDocument | null;
   notesAttached: boolean;
   postProcessingStarted: boolean;
   markedSaved: boolean;
   catalogRefreshed: boolean;
   discarded: boolean;
+}
+
+interface FinalizationRecord extends PersistedFinalizationRecord {
+  promise: Promise<void> | null;
+  transcripts: Transcript[] | null;
+  attachedNotesRead: boolean;
+  attachedNotes: LiveNotesDocument | null;
 }
 
 interface LifecycleOperation {
@@ -177,20 +183,92 @@ function persistSessions(sessions: Map<string, SessionRecord>): void {
   sessionStorage.setItem(ACTIVE_SESSIONS_KEY, JSON.stringify([...sessions.values()]));
 }
 
-function formatTranscriptHistory(history: Array<Record<string, unknown>>): Transcript[] {
-  return history.map((segment, index) => ({
-    id: String(segment.id ?? segment.sequence_id ?? index),
-    text: String(segment.text ?? ''),
-    timestamp: String(segment.display_time ?? segment.timestamp ?? ''),
-    speaker: typeof segment.speaker === 'string' ? segment.speaker : undefined,
-    sequence_id: typeof segment.sequence_id === 'number' ? segment.sequence_id : index,
-    chunk_start_time: typeof segment.audio_start_time === 'number' ? segment.audio_start_time : undefined,
-    is_partial: false,
-    confidence: typeof segment.confidence === 'number' ? segment.confidence : undefined,
-    audio_start_time: typeof segment.audio_start_time === 'number' ? segment.audio_start_time : undefined,
-    audio_end_time: typeof segment.audio_end_time === 'number' ? segment.audio_end_time : undefined,
-    duration: typeof segment.duration === 'number' ? segment.duration : undefined,
-  }));
+function persistedFinalization(state: FinalizationRecord): PersistedFinalizationRecord {
+  return {
+    completed: state.completed,
+    deferred: state.deferred,
+    savedMeetingId: state.savedMeetingId,
+    notesAttached: state.notesAttached,
+    postProcessingStarted: state.postProcessingStarted,
+    markedSaved: state.markedSaved,
+    catalogRefreshed: state.catalogRefreshed,
+    discarded: state.discarded,
+  };
+}
+
+function checkpointFinalization(
+  session: SessionRecord,
+  state: FinalizationRecord,
+  sessions: Map<string, SessionRecord>,
+): void {
+  session.finalization = persistedFinalization(state);
+  sessions.set(session.sessionId, session);
+  persistSessions(sessions);
+}
+
+function restoreFinalizations(sessions: Map<string, SessionRecord>): Map<string, FinalizationRecord> {
+  return new Map([...sessions.values()]
+    .filter((session) => session.finalization)
+    .map((session) => [session.sessionId, {
+      ...session.finalization!,
+      promise: null,
+      transcripts: null,
+      attachedNotesRead: false,
+      attachedNotes: null,
+    }]));
+}
+
+function isNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
+async function readPersistedTranscripts(folderPath: string): Promise<Transcript[]> {
+  const transcriptPath = await join(folderPath, 'transcripts.json');
+  const parsed = JSON.parse(await readTextFile(transcriptPath)) as {
+    version?: unknown;
+    total_segments?: unknown;
+    segments?: unknown;
+  };
+  if (parsed.version !== '1.0' || !Number.isInteger(parsed.total_segments) || !Array.isArray(parsed.segments)) {
+    throw new Error('The saved transcript file has an invalid structure.');
+  }
+  if (parsed.total_segments !== parsed.segments.length) {
+    throw new Error('The saved transcript file is incomplete.');
+  }
+  const sequences = new Set<number>();
+  return parsed.segments.map((value, index) => {
+    if (!value || typeof value !== 'object') throw new Error(`Transcript segment ${index} is invalid.`);
+    const segment = value as Record<string, unknown>;
+    if (
+      typeof segment.id !== 'string'
+      || typeof segment.text !== 'string'
+      || typeof segment.display_time !== 'string'
+      || !isNumber(segment.sequence_id)
+      || !Number.isInteger(segment.sequence_id)
+      || !isNumber(segment.audio_start_time)
+      || !isNumber(segment.audio_end_time)
+      || !isNumber(segment.duration)
+      || !isNumber(segment.confidence)
+      || !(segment.speaker === null || segment.speaker === undefined || typeof segment.speaker === 'string')
+      || sequences.has(segment.sequence_id)
+    ) {
+      throw new Error(`Transcript segment ${index} is invalid.`);
+    }
+    sequences.add(segment.sequence_id);
+    return {
+      id: segment.id,
+      text: segment.text,
+      timestamp: segment.display_time,
+      speaker: typeof segment.speaker === 'string' ? segment.speaker : undefined,
+      sequence_id: segment.sequence_id,
+      chunk_start_time: segment.audio_start_time,
+      is_partial: false,
+      confidence: segment.confidence,
+      audio_start_time: segment.audio_start_time,
+      audio_end_time: segment.audio_end_time,
+      duration: segment.duration,
+    };
+  }).sort((left, right) => (left.sequence_id ?? 0) - (right.sequence_id ?? 0));
 }
 
 const RecordingControllerContext = createContext<RecordingControllerValue | null>(null);
@@ -215,7 +293,6 @@ export function RecordingControllerProvider({ children }: { children: React.Reac
   const {
     clearTranscripts,
     setMeetingTitle,
-    markMeetingAsSaved,
   } = useTranscripts();
   const { setCurrentMeeting, setIsMeetingActive, refetchMeetings } = useSidebar();
   const recovery = useTranscriptRecovery();
@@ -224,8 +301,8 @@ export function RecordingControllerProvider({ children }: { children: React.Reac
   const [feedback, setFeedback] = useState<RecordingFeedbackState | null>(null);
   const [isRecoveryOpen, setIsRecoveryOpen] = useState(false);
   const lifecycleOperationRef = useRef<LifecycleOperation | null>(null);
-  const finalizationsRef = useRef(new Map<string, FinalizationRecord>());
   const sessionsRef = useRef(readPersistedSessions());
+  const finalizationsRef = useRef(restoreFinalizations(sessionsRef.current));
   const latestSessionIdRef = useRef<string | null>([...sessionsRef.current.keys()].at(-1) ?? null);
   const durationSessionIdRef = useRef<string | null>(null);
   const handledRequestsRef = useRef(new Set<string>());
@@ -251,6 +328,9 @@ export function RecordingControllerProvider({ children }: { children: React.Reac
       title: current?.title ?? 'New Meeting',
       folderPath: current?.folderPath ?? null,
       recordingSeconds: current?.recordingSeconds ?? null,
+      recoveryMeetingId: current?.recoveryMeetingId
+        ?? sessionStorage.getItem('indexeddb_current_meeting_id'),
+      finalization: current?.finalization,
     });
     persistSessions(sessionsRef.current);
   }, [recording]);
@@ -268,6 +348,7 @@ export function RecordingControllerProvider({ children }: { children: React.Reac
         title: 'New Meeting',
         folderPath: null,
         recordingSeconds: null,
+        recoveryMeetingId: sessionStorage.getItem('indexeddb_current_meeting_id'),
       };
       const [folderPath, title] = await Promise.all([
         current.folderPath ? Promise.resolve(current.folderPath) : recordingFolderPath(),
@@ -331,6 +412,7 @@ export function RecordingControllerProvider({ children }: { children: React.Reac
   const persistStartedSession = useCallback(async (session: SessionRecord) => {
     try {
       session.folderPath = await recordingFolderPath();
+      session.recoveryMeetingId ??= sessionStorage.getItem('indexeddb_current_meeting_id');
       sessionsRef.current.set(session.sessionId, session);
       persistSessions(sessionsRef.current);
       const created = await storageService.createMeeting(
@@ -408,6 +490,7 @@ export function RecordingControllerProvider({ children }: { children: React.Reac
         title,
         folderPath: null,
         recordingSeconds: null,
+        recoveryMeetingId: sessionStorage.getItem('indexeddb_current_meeting_id'),
       };
       latestSessionIdRef.current = result.session_id;
       sessionsRef.current.set(result.session_id, session);
@@ -476,23 +559,28 @@ export function RecordingControllerProvider({ children }: { children: React.Reac
   startHandlerRef.current = startRecording;
 
   const finalizeRecording = useCallback((sessionId: string, saveMeeting = true): Promise<void> => {
+    const session = sessionsRef.current.get(sessionId);
+    if (!session) {
+      return Promise.reject(new Error('The stopped recording could not be matched to its saved session.'));
+    }
     let state = finalizationsRef.current.get(sessionId);
     if (state?.completed) return Promise.resolve();
     if (state?.promise) return state.promise;
     if (!state) {
       state = {
+        ...session.finalization,
         promise: null,
-        completed: false,
-        deferred: null,
+        completed: session.finalization?.completed ?? false,
+        deferred: session.finalization?.deferred ?? null,
         transcripts: null,
-        savedMeetingId: null,
+        savedMeetingId: session.finalization?.savedMeetingId ?? null,
         attachedNotesRead: false,
         attachedNotes: null,
-        notesAttached: false,
-        postProcessingStarted: false,
-        markedSaved: false,
-        catalogRefreshed: false,
-        discarded: false,
+        notesAttached: session.finalization?.notesAttached ?? false,
+        postProcessingStarted: session.finalization?.postProcessingStarted ?? false,
+        markedSaved: session.finalization?.markedSaved ?? false,
+        catalogRefreshed: session.finalization?.catalogRefreshed ?? false,
+        discarded: session.finalization?.discarded ?? false,
       };
       finalizationsRef.current.set(sessionId, state);
     }
@@ -500,8 +588,6 @@ export function RecordingControllerProvider({ children }: { children: React.Reac
     const promise = (async () => {
       setCommand('finalize');
       recordingState.setStatus(RecordingStatus.PROCESSING_TRANSCRIPTS, 'Finishing transcription...');
-      const session = sessionsRef.current.get(sessionId);
-      if (!session) throw new Error('The stopped recording could not be matched to its saved session.');
 
       if (!saveMeeting) {
         finalization.completed = true;
@@ -520,14 +606,14 @@ export function RecordingControllerProvider({ children }: { children: React.Reac
             localStorage.getItem(LIVE_TRANSCRIPTION_STORAGE_KEY),
             betaFeatures.liveTranscription,
           );
+          checkpointFinalization(session, finalization, sessionsRef.current);
         }
         const deferred = finalization.deferred;
         if (!finalization.transcripts) {
-          finalization.transcripts = deferred
-            ? []
-            : formatTranscriptHistory(
-              await transcriptService.getTranscriptHistory() as unknown as Array<Record<string, unknown>>,
-            );
+          if (!deferred && !session.folderPath) {
+            throw new Error('The recording has no folder for its completed transcript file.');
+          }
+          finalization.transcripts = deferred ? [] : await readPersistedTranscripts(session.folderPath!);
         }
         recordingState.setStatus(RecordingStatus.SAVING, 'Saving meeting...');
         const freshTranscripts = finalization.transcripts;
@@ -542,7 +628,7 @@ export function RecordingControllerProvider({ children }: { children: React.Reac
           if (!saved.meeting_id) throw new Error('No meeting ID was returned while saving.');
           finalization.savedMeetingId = saved.meeting_id;
           session.meetingId = saved.meeting_id;
-          persistSessions(sessionsRef.current);
+          checkpointFinalization(session, finalization, sessionsRef.current);
         }
         const savedMeetingId = finalization.savedMeetingId;
 
@@ -572,6 +658,7 @@ export function RecordingControllerProvider({ children }: { children: React.Reac
             await flushNotes({ meetingId: savedMeetingId });
           }
           finalization.notesAttached = true;
+          checkpointFinalization(session, finalization, sessionsRef.current);
         }
 
         const notes = await notePersistenceService.loadNotes(notesTarget);
@@ -597,20 +684,29 @@ export function RecordingControllerProvider({ children }: { children: React.Reac
           if (!finalization.discarded) {
             await invoke('api_discard_meeting', { meetingId: savedMeetingId });
             finalization.discarded = true;
+            checkpointFinalization(session, finalization, sessionsRef.current);
           }
           const ownsCurrentSession = latestSessionIdRef.current === sessionId;
           if (ownsCurrentSession && !finalization.markedSaved) {
-            await markMeetingAsSaved();
+            const recoveryMeetingId = session.recoveryMeetingId
+              ?? sessionStorage.getItem('indexeddb_current_meeting_id');
+            if (!recoveryMeetingId) throw new Error('The recovery draft identity is unavailable.');
+            session.recoveryMeetingId = recoveryMeetingId;
+            checkpointFinalization(session, finalization, sessionsRef.current);
+            await indexedDBService.markMeetingSaved(recoveryMeetingId);
             finalization.markedSaved = true;
+            checkpointFinalization(session, finalization, sessionsRef.current);
           }
           if (ownsCurrentSession) {
             localStorage.removeItem(LIVE_NOTES_FALLBACK_KEY);
             localStorage.removeItem(LIVE_NOTES_FALLBACK_FOLDER_KEY);
             sessionStorage.removeItem(ACTIVE_MEETING_KEY);
+            sessionStorage.removeItem('indexeddb_current_meeting_id');
           }
           if (!finalization.catalogRefreshed) {
             await refetchMeetings();
             finalization.catalogRefreshed = true;
+            checkpointFinalization(session, finalization, sessionsRef.current);
           }
           if (ownsCurrentSession) {
             setIsMeetingActive(false);
@@ -634,6 +730,7 @@ export function RecordingControllerProvider({ children }: { children: React.Reac
           });
           markDeferredMeetingForAutoSummary(savedMeetingId);
           finalization.postProcessingStarted = true;
+          checkpointFinalization(session, finalization, sessionsRef.current);
         } else if (!finalization.postProcessingStarted) {
           const pinned = await applyPinnedSummaryLanguageToMeeting(savedMeetingId).catch(() => false);
           if (!pinned) {
@@ -650,22 +747,31 @@ export function RecordingControllerProvider({ children }: { children: React.Reac
             numSpeakers: null,
           }).catch((error) => console.warn('Automatic speaker identification skipped:', error));
           finalization.postProcessingStarted = true;
+          checkpointFinalization(session, finalization, sessionsRef.current);
         }
 
         const ownsCurrentSession = latestSessionIdRef.current === sessionId;
         if (ownsCurrentSession && !finalization.markedSaved) {
-          await markMeetingAsSaved();
+          const recoveryMeetingId = session.recoveryMeetingId
+            ?? sessionStorage.getItem('indexeddb_current_meeting_id');
+          if (!recoveryMeetingId) throw new Error('The recovery draft identity is unavailable.');
+          session.recoveryMeetingId = recoveryMeetingId;
+          checkpointFinalization(session, finalization, sessionsRef.current);
+          await indexedDBService.markMeetingSaved(recoveryMeetingId);
           finalization.markedSaved = true;
+          checkpointFinalization(session, finalization, sessionsRef.current);
         }
         if (ownsCurrentSession) {
           localStorage.removeItem(LIVE_NOTES_FALLBACK_KEY);
           localStorage.removeItem(LIVE_NOTES_FALLBACK_FOLDER_KEY);
           sessionStorage.removeItem(ACTIVE_MEETING_KEY);
+          sessionStorage.removeItem('indexeddb_current_meeting_id');
           setCurrentMeeting({ id: savedMeetingId, title: session.title });
         }
         if (!finalization.catalogRefreshed) {
           await refetchMeetings();
           finalization.catalogRefreshed = true;
+          checkpointFinalization(session, finalization, sessionsRef.current);
         }
         if (ownsCurrentSession) {
           setIsMeetingActive(false);
@@ -715,7 +821,6 @@ export function RecordingControllerProvider({ children }: { children: React.Reac
   }, [
     betaFeatures.liveTranscription,
     clearTranscripts,
-    markMeetingAsSaved,
     recordingState,
     refetchMeetings,
     reportError,
@@ -922,13 +1027,22 @@ export function RecordingControllerProvider({ children }: { children: React.Reac
       }
     };
 
-    void retain(
-      meetingActivityService.onRecordingStartRequested((request) => requestHandlerRef.current(request)),
-      (unlisten) => { unlistenRequest = unlisten; },
-    );
-    void meetingActivityService.getPendingRecordingRequest()
-      .then((pending) => { if (pending && !disposed) requestHandlerRef.current(pending); })
-      .catch((error) => { if (!disposed) reportError('capture', 'Recording controls could not initialize', error); });
+    void (async () => {
+      try {
+        const unlisten = await meetingActivityService.onRecordingStartRequested(
+          (request) => requestHandlerRef.current(request),
+        );
+        if (disposed) {
+          unlisten();
+          return;
+        }
+        unlistenRequest = unlisten;
+        const pending = await meetingActivityService.getPendingRecordingRequest();
+        if (pending && !disposed) requestHandlerRef.current(pending);
+      } catch (error) {
+        if (!disposed) reportError('capture', 'Recording controls could not initialize', error);
+      }
+    })();
     void retain(
       recordingService.onRecordingStopped(() => {
         // Legacy metadata is unscoped. Session identity is reconciled from activity state.
