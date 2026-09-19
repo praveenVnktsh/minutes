@@ -583,6 +583,30 @@ describe('BlockNoteSummaryView current document contract', () => {
     await act(async () => renderer.unmount());
   });
 
+  test('saves the first edit made immediately after the enhanced editor remounts', async () => {
+    const ref = createRef<BlockNoteSummaryViewRef>();
+    const save = mock(async () => {});
+    const block = (text: string) => [{ id: `block-${text}`, type: 'paragraph', content: [{ type: 'text', text, styles: {} }] }];
+    let renderer!: ReactTestRenderer;
+
+    await act(async () => {
+      renderer = create(<BlockNoteSummaryView ref={ref} summaryData={{ summary_json: block('BRAVO') }} onSave={save} />);
+    });
+    await act(async () => renderer.update(<span>Raw</span>));
+    await act(async () => {
+      renderer.update(<BlockNoteSummaryView ref={ref} summaryData={{ summary_json: block('BRAVO') }} onSave={save} />);
+    });
+    await act(async () => onEditorChange?.(block('DELTA')));
+
+    expect(ref.current?.isDirty).toBe(true);
+    await act(async () => ref.current?.saveSummary());
+    expect(save).toHaveBeenCalledWith(expect.objectContaining({
+      markdown: 'DELTA',
+      summary_json: block('DELTA'),
+    }));
+    await act(async () => renderer.unmount());
+  });
+
   test('autosaves the explicit cleared representation through the actual save owner', async () => {
     const ref = createRef<BlockNoteSummaryViewRef>();
     const meeting = { id: 'meeting-autosave', title: 'Planning', created_at: '2026-09-19', transcripts: [] };

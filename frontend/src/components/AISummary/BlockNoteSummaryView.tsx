@@ -100,7 +100,7 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
   const documentKey = summaryDocumentKey(format, data);
   const [renderDocumentKey, setRenderDocumentKey] = useState(documentKey);
   const [renderFormat, setRenderFormat] = useState(format);
-  const isContentLoaded = useRef(false);
+  const isApplyingParsedMarkdown = useRef(false);
   const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout>>();
   const structuredBlocks = data?.summary_json;
   const editRevisionRef = useRef(0);
@@ -115,6 +115,14 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
     initialContent: undefined
   });
 
+  const handleEditorChange = useCallback((blocks: Block[]) => {
+    editRevisionRef.current += 1;
+    isDirtyRef.current = true;
+    setCurrentBlocks(blocks);
+    setHasCurrentDocument(true);
+    setIsDirty(true);
+  }, []);
+
   // Replace acknowledged documents as one operation so stale drafts, timers and
   // parser completions cannot retain save authority across representations.
   useEffect(() => {
@@ -126,8 +134,8 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
     if (saved && editRevisionRef.current > saved.revision) return;
 
     const generation = ++documentGenerationRef.current;
+    const loadRevision = editRevisionRef.current;
     if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
-    isContentLoaded.current = false;
     isDirtyRef.current = false;
     setIsDirty(false);
     setCurrentBlocks([]);
@@ -135,23 +143,28 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
     setRenderDocumentKey(documentKey);
     setRenderFormat(format);
 
-    let loadTimer: ReturnType<typeof setTimeout> | undefined;
     let cancelled = false;
     if (format === 'markdown' && typeof data?.markdown === 'string' && editor) {
       const loadMarkdown = async () => {
         try {
           console.log('📝 Parsing markdown to BlockNote blocks...');
           const blocks = await editor.tryParseMarkdownToBlocks(data.markdown);
-          if (cancelled || documentGenerationRef.current !== generation) return;
-          editor.replaceBlocks(editor.document, blocks);
+          if (
+            cancelled
+            || documentGenerationRef.current !== generation
+            || editRevisionRef.current !== loadRevision
+          ) return;
+          // Suppress only this parser-owned transaction; the editable surface
+          // remains authoritative before and after it.
+          isApplyingParsedMarkdown.current = true;
+          try {
+            editor.replaceBlocks(editor.document, blocks);
+          } finally {
+            isApplyingParsedMarkdown.current = false;
+          }
           setCurrentBlocks(blocks);
           setHasCurrentDocument(true);
           console.log('✅ Markdown parsed successfully');
-          loadTimer = setTimeout(() => {
-            if (!cancelled && documentGenerationRef.current === generation) {
-              isContentLoaded.current = true;
-            }
-          }, 100);
         } catch (err) {
           if (!cancelled && documentGenerationRef.current === generation) {
             console.error('❌ Failed to parse markdown:', err);
@@ -159,29 +172,11 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
         }
       };
       void loadMarkdown();
-    } else if (format === 'blocknote') {
-      loadTimer = setTimeout(() => {
-        if (!cancelled && documentGenerationRef.current === generation) {
-          isContentLoaded.current = true;
-        }
-      }, 100);
     }
     return () => {
       cancelled = true;
-      if (loadTimer) clearTimeout(loadTimer);
     };
   }, [data?.markdown, documentKey, editor, format]);
-
-  const handleEditorChange = useCallback((blocks: Block[]) => {
-    // Only set dirty flag if content has finished loading
-    if (isContentLoaded.current) {
-      editRevisionRef.current += 1;
-      isDirtyRef.current = true;
-      setCurrentBlocks(blocks);
-      setHasCurrentDocument(true);
-      setIsDirty(true);
-    }
-  }, []);
 
   // Notify parent of dirty state changes
   useEffect(() => {
@@ -366,9 +361,7 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
             editor={editor}
             editable={true}
             onChange={() => {
-              if (isContentLoaded.current) {
-                handleEditorChange(editor.document);
-              }
+              if (!isApplyingParsedMarkdown.current) handleEditorChange(editor.document);
             }}
             theme="light"
           />
