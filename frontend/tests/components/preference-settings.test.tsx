@@ -31,9 +31,10 @@ const notifications: NotificationSettings = {
   },
 };
 const updateNotificationSettings = mock(async (_settings: NotificationSettings) => {});
+let saveShortcut = async (): Promise<unknown> => { throw new Error('shortcut registration failed'); };
 const invoke = mock(async (command: string) => {
   if (command === 'get_global_shortcuts') return { recording: 'CmdOrCtrl+Shift+KeyR', window: 'CmdOrCtrl+Shift+KeyM' };
-  if (command === 'set_global_shortcuts') throw new Error('shortcut registration failed');
+  if (command === 'set_global_shortcuts') return saveShortcut();
   return null;
 });
 mock.module('@tauri-apps/api/core', () => ({ ...originalCore, invoke }));
@@ -57,6 +58,7 @@ const text = () => JSON.stringify(renderer.toJSON());
 beforeEach(() => {
   updateNotificationSettings.mockReset();
   invoke.mockClear();
+  saveShortcut = async () => { throw new Error('shortcut registration failed'); };
 });
 afterEach(() => renderer?.unmount());
 
@@ -83,5 +85,19 @@ describe('preference autosave recovery', () => {
 
     expect(text()).toContain('⌘⇧R');
     expect(text()).toContain('Could not save shortcut; previous shortcut restored');
+  });
+
+  test('rejects a second whole-map shortcut mutation while the first is pending', async () => {
+    let finish!: () => void;
+    saveShortcut = () => new Promise<void>(resolve => { finish = resolve; });
+    await renderSettings();
+    const clearButtons = renderer.root.findAllByProps({ title: 'Disable this shortcut' });
+    expect(clearButtons[0].props['aria-label']).toBe('Disable shortcut for Start or stop recording');
+    act(() => { clearButtons[0].props.onClick(); clearButtons[1].props.onClick(); });
+
+    expect(invoke.mock.calls.filter(call => call[0] === 'set_global_shortcuts')).toHaveLength(1);
+    const currentClearButtons = renderer.root.findAllByType('button').filter(button => button.props.title === 'Disable this shortcut');
+    expect(currentClearButtons.every(button => button.props.disabled)).toBe(true);
+    await act(async () => finish());
   });
 });

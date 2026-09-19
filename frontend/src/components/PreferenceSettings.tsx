@@ -66,12 +66,15 @@ export function PreferenceSettings() {
   const [shortcutSaveState, setShortcutSaveState] = useState<SaveFeedbackState | null>(null);
   const [notificationSaveState, setNotificationSaveState] = useState<SaveFeedbackState | null>(null);
   const [folderError, setFolderError] = useState('');
+  const shortcutSavingRef = useRef(false);
 
   const saveShortcuts = useCallback(async (
     previous: { recording: string; window: string },
     next: { recording: string; window: string },
     successMessage: string,
   ) => {
+    if (shortcutSavingRef.current) return;
+    shortcutSavingRef.current = true;
     setShortcuts(next);
     setShortcutSaveState('saving');
     try {
@@ -81,6 +84,8 @@ export function PreferenceSettings() {
     } catch {
       setShortcuts(previous);
       setShortcutSaveState('error');
+    } finally {
+      shortcutSavingRef.current = false;
     }
   }, []);
 
@@ -100,7 +105,7 @@ export function PreferenceSettings() {
         return;
       }
       const value = eventToShortcut(event, isMac);
-      if (!value) return;
+      if (!value || shortcutSavingRef.current) return;
       const previous = shortcuts;
       const next = { ...previous, [recordingKey]: value };
       setRecordingKey(null);
@@ -277,6 +282,8 @@ export function PreferenceSettings() {
                 <button
                   type="button"
                   onClick={() => setRecordingKey(key)}
+                  disabled={shortcutSaveState === 'saving'}
+                  aria-label={`Change shortcut for ${label}`}
                   className={`rounded border px-2 py-1 text-xs font-medium ${
                     recordingKey === key
                       ? 'border-blue-400 text-blue-500'
@@ -290,6 +297,8 @@ export function PreferenceSettings() {
                     type="button"
                     onClick={() => clearShortcut(key)}
                     title="Disable this shortcut"
+                    aria-label={`Disable shortcut for ${label}`}
+                    disabled={shortcutSaveState === 'saving'}
                     className="rounded p-1 text-ink-subtle hover:bg-surface-2 hover:text-ink"
                   >
                     <X className="h-3.5 w-3.5" />

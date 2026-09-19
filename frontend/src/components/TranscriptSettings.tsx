@@ -201,17 +201,19 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
 
                     {uiProvider === 'localWhisper' && (
                         <div className="mt-6">
-                            <Label className="block text-sm font-medium text-ink mb-1">
+                            <Label htmlFor="transcription-vocabulary" className="block text-sm font-medium text-ink mb-1">
                                 Custom vocabulary
                             </Label>
                             <p className="text-xs text-ink-muted mb-2 mx-1">
                                 Names, acronyms, and product terms to bias Whisper. Separate with commas.
                             </p>
                             <Textarea
+                                id="transcription-vocabulary"
                                 className="mx-1 focus:ring-2 focus:ring-focus"
                                 rows={3}
                                 value={vocabulary}
                                 onChange={(e) => setVocabulary(e.target.value)}
+                                disabled={vocabularySaveState === 'saving'}
                                 placeholder="e.g. Minutes, OKR, Kubernetes, Acme Corp"
                             />
                             <div className="mx-1 mt-2 flex flex-wrap items-center gap-3">
@@ -285,7 +287,6 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
         </div >
     )
 }
-
 
 
 

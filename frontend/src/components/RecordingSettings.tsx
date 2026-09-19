@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Switch } from '@/components/ui/switch';
 import { FolderOpen } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
@@ -39,6 +39,9 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
   const [preferenceSaveState, setPreferenceSaveState] = useState<SaveFeedbackState | null>(null);
   const [preferenceMessage, setPreferenceMessage] = useState('Recording preference');
   const [notificationSaveState, setNotificationSaveState] = useState<SaveFeedbackState | null>(null);
+  const [notificationFailureMessage, setNotificationFailureMessage] = useState('Could not save participant reminder; previous setting restored');
+  const notificationRevision = useRef(0);
+  const notificationSaving = useRef(false);
   const { isRecording } = useRecordingState();
   const { setSelectedDevices } = useConfig();
 
@@ -68,11 +71,12 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
   // Load recording notification preference
   useEffect(() => {
     const loadNotificationPref = async () => {
+      const revision = notificationRevision.current;
       try {
         const { Store } = await import('@tauri-apps/plugin-store');
         const store = await Store.load('preferences.json');
         const show = await store.get<boolean>('show_recording_notification') ?? true;
-        setShowRecordingNotification(show);
+        if (revision === notificationRevision.current) setShowRecordingNotification(show);
       } catch (error) {
         console.error('Failed to load notification preference:', error);
       }
@@ -157,12 +161,17 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
   };
 
   const handleNotificationToggle = async (enabled: boolean) => {
+    if (notificationSaving.current) return;
+    notificationSaving.current = true;
+    notificationRevision.current += 1;
     const previous = showRecordingNotification;
     setShowRecordingNotification(enabled);
     setNotificationSaveState('saving');
+    setNotificationFailureMessage('Could not save participant reminder; previous setting restored');
+    let store: { set: (key: string, value: unknown) => Promise<void>; save: () => Promise<void> } | null = null;
     try {
       const { Store } = await import('@tauri-apps/plugin-store');
-      const store = await Store.load('preferences.json');
+      store = await Store.load('preferences.json');
       await store.set('show_recording_notification', enabled);
       await store.save();
       setNotificationSaveState('saved');
@@ -172,7 +181,18 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
     } catch (error) {
       console.error('Failed to save notification preference:', error);
       setShowRecordingNotification(previous);
+      if (store) {
+        try {
+          await store.set('show_recording_notification', previous);
+          await store.save();
+        } catch (restoreError) {
+          console.error('Failed to restore notification preference:', restoreError);
+          setNotificationFailureMessage('Could not save or restore the participant reminder; reopen settings to verify it');
+        }
+      }
       setNotificationSaveState('error');
+    } finally {
+      notificationSaving.current = false;
     }
   };
 
@@ -337,7 +357,7 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
           labels={{
             saving: 'Saving participant reminder',
             saved: 'Participant reminder saved',
-            error: 'Could not save participant reminder; previous setting restored',
+            error: notificationFailureMessage,
           }}
         />
       )}
