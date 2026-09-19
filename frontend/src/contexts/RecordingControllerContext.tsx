@@ -11,8 +11,7 @@ import React, {
 } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import { appDataDir, join } from '@tauri-apps/api/path';
-import { readTextFile } from '@tauri-apps/plugin-fs';
+import { appDataDir } from '@tauri-apps/api/path';
 import { useRouter } from 'next/navigation';
 import { useConfig } from '@/contexts/ConfigContext';
 import { useMeetingActivity } from '@/contexts/MeetingActivityContext';
@@ -222,23 +221,12 @@ function isNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value);
 }
 
-async function readPersistedTranscripts(folderPath: string): Promise<Transcript[]> {
-  const transcriptPath = await join(folderPath, 'transcripts.json');
-  const parsed = JSON.parse(await readTextFile(transcriptPath)) as {
-    version?: unknown;
-    total_segments?: unknown;
-    segments?: unknown;
-  };
-  if (parsed.version !== '1.0' || !Number.isInteger(parsed.total_segments) || !Array.isArray(parsed.segments)) {
-    throw new Error('The saved transcript file has an invalid structure.');
-  }
-  if (parsed.total_segments !== parsed.segments.length) {
-    throw new Error('The saved transcript file is incomplete.');
-  }
+async function readCompletedTranscripts(sessionId: string): Promise<Transcript[]> {
+  const segments = await transcriptService.getTranscriptHistory(sessionId);
   const sequences = new Set<number>();
-  return parsed.segments.map((value, index) => {
+  return segments.map((value, index) => {
     if (!value || typeof value !== 'object') throw new Error(`Transcript segment ${index} is invalid.`);
-    const segment = value as Record<string, unknown>;
+    const segment = value as unknown as Record<string, unknown>;
     if (
       typeof segment.id !== 'string'
       || typeof segment.text !== 'string'
@@ -610,10 +598,7 @@ export function RecordingControllerProvider({ children }: { children: React.Reac
         }
         const deferred = finalization.deferred;
         if (!finalization.transcripts) {
-          if (!deferred && !session.folderPath) {
-            throw new Error('The recording has no folder for its completed transcript file.');
-          }
-          finalization.transcripts = deferred ? [] : await readPersistedTranscripts(session.folderPath!);
+          finalization.transcripts = deferred ? [] : await readCompletedTranscripts(sessionId);
         }
         recordingState.setStatus(RecordingStatus.SAVING, 'Saving meeting...');
         const freshTranscripts = finalization.transcripts;
