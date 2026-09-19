@@ -5,7 +5,7 @@
  * Displays recoverable meetings, allows preview, and enables recovery or deletion.
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { formatDistanceToNow } from 'date-fns';
 import { AlertCircle, CheckCircle2, Clock, FileText, Trash2, XCircle } from 'lucide-react';
 import {
@@ -26,7 +26,7 @@ interface TranscriptRecoveryProps {
   isOpen: boolean;
   onClose: () => void;
   recoverableMeetings: MeetingMetadata[];
-  onRecover: (meetingId: string) => Promise<any>;
+  onRecover: (meetingId: string) => Promise<unknown>;
   onDelete: (meetingId: string) => Promise<void>;
   onLoadPreview: (meetingId: string) => Promise<StoredTranscript[]>;
 }
@@ -44,23 +44,18 @@ export function TranscriptRecovery({
   const [isLoadingPreview, setIsLoadingPreview] = useState(false);
   const [isRecovering, setIsRecovering] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [operationError, setOperationError] = useState<string | null>(null);
 
   // Reset selection when dialog opens
   useEffect(() => {
     if (isOpen) {
       setSelectedMeetingId(null);
       setPreviewTranscripts([]);
+      setOperationError(null);
     }
   }, [isOpen]);
 
-  // Auto-select first meeting if available
-  useEffect(() => {
-    if (isOpen && recoverableMeetings.length > 0 && !selectedMeetingId) {
-      handleMeetingSelect(recoverableMeetings[0].meetingId);
-    }
-  }, [isOpen, recoverableMeetings]);
-
-  const handleMeetingSelect = async (meetingId: string) => {
+  const handleMeetingSelect = useCallback(async (meetingId: string) => {
     setSelectedMeetingId(meetingId);
     setIsLoadingPreview(true);
 
@@ -74,19 +69,27 @@ export function TranscriptRecovery({
     } finally {
       setIsLoadingPreview(false);
     }
-  };
+  }, [onLoadPreview]);
+
+  // Auto-select first meeting if available
+  useEffect(() => {
+    if (isOpen && recoverableMeetings.length > 0 && !selectedMeetingId) {
+      void handleMeetingSelect(recoverableMeetings[0].meetingId);
+    }
+  }, [handleMeetingSelect, isOpen, recoverableMeetings, selectedMeetingId]);
 
   const handleRecover = async () => {
     if (!selectedMeetingId) return;
 
     setIsRecovering(true);
+    setOperationError(null);
     try {
       const result = await onRecover(selectedMeetingId);
       console.log('Recovery successful:', result);
       onClose();
     } catch (error) {
       console.error('Recovery failed:', error);
-      alert('Failed to recover meeting. Please try again.');
+      setOperationError(error instanceof Error ? error.message : 'Failed to recover meeting. Please try again.');
     } finally {
       setIsRecovering(false);
     }
@@ -100,13 +103,14 @@ export function TranscriptRecovery({
     }
 
     setIsDeleting(true);
+    setOperationError(null);
     try {
       await onDelete(selectedMeetingId);
       setSelectedMeetingId(null);
       setPreviewTranscripts([]);
     } catch (error) {
       console.error('Delete failed:', error);
-      alert('Failed to delete meeting. Please try again.');
+      setOperationError(error instanceof Error ? error.message : 'Failed to delete meeting. Please try again.');
     } finally {
       setIsDeleting(false);
     }
@@ -274,6 +278,12 @@ export function TranscriptRecovery({
           </div>
         </div>
 
+        {operationError ? (
+          <Alert variant="destructive" className="mx-6" role="alert">
+            <AlertCircle className="h-4 w-4" />
+            <AlertDescription>{operationError}</AlertDescription>
+          </Alert>
+        ) : null}
         <DialogFooter className="px-6 pb-6">
           <Button
             variant="outline"

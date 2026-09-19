@@ -12,7 +12,7 @@ import { storageService } from '@/services/storageService';
 import { applyPinnedSummaryLanguageToMeeting } from '@/lib/summary-language-preferences';
 import { toast } from 'sonner';
 
-interface AudioRecoveryStatus {
+export interface AudioRecoveryStatus {
   status: string; // "success" | "partial" | "failed" | "none"
   chunk_count: number;
   estimated_duration_seconds: number;
@@ -20,12 +20,19 @@ interface AudioRecoveryStatus {
   message: string;
 }
 
+export interface TranscriptRecoveryResult {
+  success: boolean;
+  audioRecoveryStatus?: AudioRecoveryStatus | null;
+  meetingId?: string;
+  transcriptCount: number;
+}
+
 export interface UseTranscriptRecoveryReturn {
   recoverableMeetings: MeetingMetadata[];
   isLoading: boolean;
   isRecovering: boolean;
   checkForRecoverableTranscripts: () => Promise<void>;
-  recoverMeeting: (meetingId: string) => Promise<{ success: boolean; audioRecoveryStatus?: AudioRecoveryStatus | null; meetingId?: string; transcriptCount: number }>;
+  recoverMeeting: (meetingId: string) => Promise<TranscriptRecoveryResult>;
   loadMeetingTranscripts: (meetingId: string) => Promise<StoredTranscript[]>;
   deleteRecoverableMeeting: (meetingId: string) => Promise<void>;
 }
@@ -113,7 +120,7 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
   /**
    * Recover a meeting from IndexedDB
    */
-  const recoverMeeting = useCallback(async (meetingId: string): Promise<{ success: boolean; audioRecoveryStatus?: AudioRecoveryStatus | null; meetingId?: string; transcriptCount: number }> => {
+  const recoverMeeting = useCallback(async (meetingId: string): Promise<TranscriptRecoveryResult> => {
     setIsRecovering(true);
     try {
       // 1. Load meeting metadata
@@ -134,7 +141,7 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
         // Try to get from backend (might exist if only app crashed, not system)
         try {
           folderPath = await invoke<string>('get_meeting_folder_path');
-        } catch (error) {
+        } catch {
           folderPath = undefined;
         }
       }
@@ -188,12 +195,12 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
         text: t.text,
         timestamp: t.timestamp,
         sequence_id: t.sequenceId || index,
-        chunk_start_time: (t as any).chunk_start_time,
-        is_partial: (t as any).is_partial || false,
+        chunk_start_time: t.chunk_start_time,
+        is_partial: t.is_partial || false,
         confidence: t.confidence,
-        audio_start_time: (t as any).audio_start_time,
-        audio_end_time: (t as any).audio_end_time,
-        duration: (t as any).duration,
+        audio_start_time: t.audio_start_time,
+        audio_end_time: t.audio_end_time,
+        duration: t.duration,
       }));
 
       // 6. Save to backend database using existing save utilities

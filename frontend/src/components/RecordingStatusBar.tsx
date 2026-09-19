@@ -2,6 +2,7 @@
 
 import { motion } from 'framer-motion';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
+import { useRecordingController } from '@/contexts/RecordingControllerContext';
 import { useEffect, useState } from 'react';
 
 interface RecordingStatusBarProps {
@@ -11,7 +12,9 @@ interface RecordingStatusBarProps {
 export const RecordingStatusBar: React.FC<RecordingStatusBarProps> = ({ isPaused = false }) => {
   // Get recording duration from backend-synced context (in seconds)
   // Backend polls every 500ms, providing smooth updates
-  const { activeDuration, isRecording } = useRecordingState();
+  const { activeDuration, isPaused: authoritativePaused } = useRecordingState();
+  const { returnToRecording } = useRecordingController();
+  const paused = authoritativePaused || isPaused;
 
   // Display state synced from backend
   const [displaySeconds, setDisplaySeconds] = useState(0);
@@ -38,10 +41,17 @@ export const RecordingStatusBar: React.FC<RecordingStatusBarProps> = ({ isPaused
       transition={{ duration: 0.2 }}
       className="flex items-center gap-2 px-3 py-2 bg-surface-2 rounded-lg mb-2"
     >
-      <div className={`w-2 h-2 rounded-full ${isPaused ? 'bg-orange-500' : 'bg-red-500 animate-pulse'}`} />
-      <span className={`text-sm ${isPaused ? 'text-orange-700' : 'text-ink'}`}>
-        {isPaused ? 'Paused' : 'Recording'} • {formatDuration(displaySeconds)}
+      <div className={`w-2 h-2 rounded-full ${paused ? 'bg-paused' : 'bg-recording animate-pulse'}`} />
+      <span className={`text-sm ${paused ? 'text-paused' : 'text-ink'}`}>
+        {paused ? 'Paused' : 'Recording'} - {formatDuration(displaySeconds)}
       </span>
+      <button
+        type="button"
+        className="ml-auto rounded px-2 py-1 text-xs font-semibold text-[var(--ink-muted)] hover:bg-[var(--surface-raised)]"
+        onClick={() => void returnToRecording()}
+      >
+        Return to recording
+      </button>
     </motion.div>
   );
 };
