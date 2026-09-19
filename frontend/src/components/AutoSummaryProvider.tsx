@@ -4,69 +4,67 @@ import { useEffect, useRef } from 'react';
 import { toast } from 'sonner';
 import { useConfig } from '@/contexts/ConfigContext';
 import {
-  consumeDeferredMeetingForAutoSummary,
+  claimAutoSummaryJob,
   generateAutomaticSummary,
+  releaseAutoSummaryJob,
 } from '@/lib/autoSummary';
-
-interface MeetingEventDetail {
-  meetingId: string;
-}
+import { useMeetingActivity } from '@/contexts/MeetingActivityContext';
 
 export function AutoSummaryProvider() {
   const { isAutoSummary, isModelConfigLoading, modelConfig } = useConfig();
+  const { snapshot: { activities } } = useMeetingActivity();
   const activeMeetingIds = useRef(new Set<string>());
-  const pendingMeetingIds = useRef(new Set<string>());
+  const pendingByMeeting = useRef(new Map<string, string>());
 
   useEffect(() => {
-    const startSummary = async (meetingId: string) => {
-      if (!isAutoSummary || isModelConfigLoading || activeMeetingIds.current.has(meetingId)) return;
-
-      pendingMeetingIds.current.delete(meetingId);
+    const startSummary = async (taskId: string, meetingId: string) => {
+      if (!isAutoSummary || isModelConfigLoading) return;
+      if (activeMeetingIds.current.has(meetingId)) {
+        pendingByMeeting.current.set(meetingId, taskId);
+        return;
+      }
+      if (!claimAutoSummaryJob(taskId, modelConfig)) return;
       activeMeetingIds.current.add(meetingId);
-      window.dispatchEvent(new CustomEvent('meetily:auto-summary-requested', {
-        detail: { meetingId },
-      }));
+      // Compatibility signal for the current workspace. c11 removes its
+      // route-owned auto-generation check and this event consumer.
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('meetily:auto-summary-requested', {
+          detail: { meetingId },
+        }));
+      }
 
       try {
         await generateAutomaticSummary(meetingId, modelConfig);
       } catch (error) {
+        releaseAutoSummaryJob(taskId, modelConfig);
         console.error('[AutoSummary] Failed to start summary:', error);
         toast.error('Automatic summary could not start', {
           description: error instanceof Error ? error.message : String(error),
         });
       } finally {
         activeMeetingIds.current.delete(meetingId);
+        const pendingTaskId = pendingByMeeting.current.get(meetingId);
+        if (pendingTaskId) {
+          pendingByMeeting.current.delete(meetingId);
+          void startSummary(pendingTaskId, meetingId);
+        }
       }
     };
 
-    const queueSummary = (meetingId: string) => {
-      if (!isAutoSummary) return;
-      pendingMeetingIds.current.add(meetingId);
-      if (!isModelConfigLoading) void startSummary(meetingId);
-    };
-
-    const handleMeetingReady = (event: Event) => {
-      const meetingId = (event as CustomEvent<MeetingEventDetail>).detail?.meetingId;
-      if (meetingId) queueSummary(meetingId);
-    };
-
-    const handleTranscriptionComplete = (event: Event) => {
-      const meetingId = (event as CustomEvent<MeetingEventDetail>).detail?.meetingId;
-      if (meetingId && consumeDeferredMeetingForAutoSummary(meetingId)) {
-        queueSummary(meetingId);
-      }
-    };
-
-    window.addEventListener('meetily:meeting-ready-for-summary', handleMeetingReady);
-    window.addEventListener('meetily:transcription-complete', handleTranscriptionComplete);
     if (isAutoSummary && !isModelConfigLoading) {
-      pendingMeetingIds.current.forEach((meetingId) => void startSummary(meetingId));
+      const latestReadyByMeeting = new Map<string, (typeof activities)[number]>();
+      for (const activity of activities) {
+        if (activity.status !== 'ready' || !activity.meeting_id) continue;
+        const current = latestReadyByMeeting.get(activity.meeting_id);
+        if (!current || activity.revision > current.revision) {
+          latestReadyByMeeting.set(activity.meeting_id, activity);
+        }
+      }
+      for (const activity of latestReadyByMeeting.values()) {
+        void startSummary(activity.task_id, activity.meeting_id!);
+      }
     }
-    return () => {
-      window.removeEventListener('meetily:meeting-ready-for-summary', handleMeetingReady);
-      window.removeEventListener('meetily:transcription-complete', handleTranscriptionComplete);
-    };
-  }, [isAutoSummary, isModelConfigLoading, modelConfig]);
+  }, [activities, isAutoSummary, isModelConfigLoading, modelConfig]);
 
   return null;
 }

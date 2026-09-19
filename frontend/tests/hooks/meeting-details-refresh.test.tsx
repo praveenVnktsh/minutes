@@ -55,6 +55,7 @@ const invoke = mock(async (command: string, args?: Record<string, unknown>): Pro
   if (command === 'api_get_summary') return { ...savedSummary, meeting_id: args!.meetingId };
   if (command === 'api_get_meeting_metadata') return readMetadata(args!.meetingId as string);
   if (command === 'api_get_meeting_transcripts') return readTranscripts(args!.meetingId as string);
+  if (command === 'get_meeting_live_notes') return null;
   if (command === 'api_process_transcript') return { process_id: 'attempt-b' };
   if (command === 'api_cancel_summary') return { cancelled: true };
   throw new Error(`Unexpected command: ${command}`);
@@ -62,6 +63,7 @@ const invoke = mock(async (command: string, args?: Record<string, unknown>): Pro
 mock.module('@tauri-apps/api/core', () => ({ ...originalCore, invoke }));
 const { SidebarProvider } = await import('../../src/components/Sidebar/SidebarProvider');
 const { useSummaryGeneration } = await import('../../src/hooks/meeting-details/useSummaryGeneration');
+const { meetingActivityStore } = await import('../../src/contexts/MeetingActivityContext');
 const { useMeetingData } = await import('../../src/hooks/meeting-details/useMeetingData');
 
 // Use a lightweight content view around the actual route, transcript loader, state hooks and polling provider.
@@ -100,6 +102,8 @@ beforeEach(() => {
 });
 afterEach(async () => {
   if (renderer) await act(async () => renderer!.unmount());
+  meetingActivityStore.stopSummaryPolling('meeting-a');
+  meetingActivityStore.stopSummaryPolling('meeting-b');
   renderer = undefined;
   globalThis.setInterval = realSetInterval;
   globalThis.clearInterval = realClearInterval;

@@ -1,7 +1,9 @@
 import { beforeEach, describe, expect, test } from 'bun:test';
 import {
+  claimAutoSummaryJob,
   consumeDeferredMeetingForAutoSummary,
   markDeferredMeetingForAutoSummary,
+  releaseAutoSummaryJob,
 } from './autoSummary';
 
 const values = new Map<string, string>();
@@ -29,5 +31,15 @@ describe('deferred auto-summary markers', () => {
 
     expect(consumeDeferredMeetingForAutoSummary('meeting-1')).toBe(true);
     expect(consumeDeferredMeetingForAutoSummary('meeting-2')).toBe(true);
+  });
+
+  test('claims a terminal task once per committed model configuration', () => {
+    const first = { provider: 'ollama' as const, model: 'model-a' };
+    const second = { provider: 'ollama' as const, model: 'model-b' };
+    expect(claimAutoSummaryJob('task-1', first)).toBe(true);
+    expect(claimAutoSummaryJob('task-1', first)).toBe(false);
+    expect(claimAutoSummaryJob('task-1', second)).toBe(true);
+    releaseAutoSummaryJob('task-1', first);
+    expect(claimAutoSummaryJob('task-1', first)).toBe(true);
   });
 });

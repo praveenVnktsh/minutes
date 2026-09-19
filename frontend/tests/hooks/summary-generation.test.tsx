@@ -39,6 +39,7 @@ let getSummary: (meetingId: string) => Promise<SummaryProcessResponse>;
 const invoke = mock(async (command: string, args?: Record<string, unknown>): Promise<unknown> => {
   if (command === 'api_get_meetings') return [];
   if (command === 'api_get_summary') return getSummary(args!.meetingId as string);
+  if (command === 'get_meeting_live_notes') return null;
   if (command === 'api_get_meeting_transcripts') return { transcripts: [{ text: 'Meeting transcript', timestamp: '00:00' }], total_count: 1 };
   if (command === 'get_ollama_models') return [{ name: 'test' }];
   if (command === 'api_process_transcript') return startProcess();
@@ -52,6 +53,7 @@ mock.module('../../src/lib/summary-language-preferences', () => ({
   readMeetingSummaryLanguage: async () => ({ language: 'en', storage: 'metadata' }),
 }));
 const { SidebarProvider, useSidebar } = await import('../../src/components/Sidebar/SidebarProvider');
+const { meetingActivityStore } = await import('../../src/contexts/MeetingActivityContext');
 const { useSummaryGeneration } = await import('../../src/hooks/meeting-details/useSummaryGeneration');
 
 const response = (overrides: Partial<SummaryProcessResponse> = {}): SummaryProcessResponse => ({
@@ -92,6 +94,8 @@ beforeEach(() => {
 });
 afterEach(async () => {
   if (renderer) await act(async () => renderer.unmount());
+  meetingActivityStore.stopSummaryPolling('meeting-a');
+  meetingActivityStore.stopSummaryPolling('meeting-b');
   globalThis.setInterval = realSetInterval;
   globalThis.clearInterval = realClearInterval;
 });
@@ -155,7 +159,7 @@ describe('summary state restored when returning to a meeting', () => {
     await show(response());
     expect(text()).toContain('processing');
     await show(null);
-    expect(timers.size).toBe(0);
+    expect(timers.size).toBe(1);
     await show(response());
     expect(text()).toContain('processing');
     getSummary = async () => response({ status: 'completed', data: { markdown: 'Finished summary' }, meetingName: 'New title' });

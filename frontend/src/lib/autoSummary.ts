@@ -6,7 +6,13 @@ import {
   readCachedDetectedSummaryLanguage,
   readMeetingSummaryLanguage,
 } from '@/lib/summary-language-preferences';
-import { buildLiveNotesSummaryContext, type LiveNotesDocument } from '@/lib/liveNotes';
+import { originalNotesMarkdown } from '@/lib/meetingExport';
+import {
+  flushNotes,
+  loadNotes,
+  meetingNotesTarget,
+  notePersistenceService,
+} from '@/services/notePersistenceService';
 
 const PENDING_DEFERRED_SUMMARIES_KEY = 'meetily:pending-deferred-auto-summaries';
 
@@ -34,6 +40,43 @@ export function consumeDeferredMeetingForAutoSummary(meetingId: string): boolean
   if (!ids.delete(meetingId)) return false;
   writePendingMeetingIds(ids);
   return true;
+}
+
+const claimedAutoSummaryJobs = new Set<string>();
+
+function autoSummaryJobKey(
+  taskId: string,
+  modelConfig: Pick<ModelConfig, 'provider' | 'model'>,
+): string {
+  return `${taskId}\u0000${modelConfig.provider}\u0000${modelConfig.model}`;
+}
+
+export function claimAutoSummaryJob(
+  taskId: string,
+  modelConfig: Pick<ModelConfig, 'provider' | 'model'>,
+): boolean {
+  const key = autoSummaryJobKey(taskId, modelConfig);
+  if (claimedAutoSummaryJobs.has(key)) return false;
+  claimedAutoSummaryJobs.add(key);
+  return true;
+}
+
+export function releaseAutoSummaryJob(
+  taskId: string,
+  modelConfig: Pick<ModelConfig, 'provider' | 'model'>,
+): void {
+  claimedAutoSummaryJobs.delete(autoSummaryJobKey(taskId, modelConfig));
+}
+
+export async function loadSummaryNotesContext(meetingId: string): Promise<string> {
+  const target = meetingNotesTarget(meetingId);
+  await flushNotes({ meetingId });
+  let snapshot = notePersistenceService.getSnapshot(target);
+  if (snapshot.loadState === 'idle') snapshot = await loadNotes(target);
+  if (snapshot.loadState === 'error') {
+    throw snapshot.loadError ?? new Error('Could not load the current meeting notes.');
+  }
+  return originalNotesMarkdown(snapshot.document);
 }
 
 async function fetchAllTranscripts(meetingId: string): Promise<Transcript[]> {
@@ -81,10 +124,7 @@ export async function generateAutomaticSummary(meetingId: string, modelConfig: M
     return { started: false, reason: 'empty-transcript' as const };
   }
 
-  // Anchor the enhanced notes on whatever the user typed during the meeting.
-  const liveNotes = await invoke<LiveNotesDocument | null>('get_meeting_live_notes', { meetingId })
-    .catch(() => null);
-  const notesContext = buildLiveNotesSummaryContext(liveNotes);
+  const notesContext = await loadSummaryNotesContext(meetingId);
 
   const summaryLanguage = await resolveSummaryLanguage(meetingId, transcriptTexts);
   await invoke('api_process_transcript', {

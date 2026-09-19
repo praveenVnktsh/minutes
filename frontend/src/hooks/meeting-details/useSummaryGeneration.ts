@@ -7,7 +7,7 @@ import {
   Transcript,
 } from '@/types';
 import { ModelConfig } from '@/components/ModelSettingsModal';
-import { useSidebar } from '@/components/Sidebar/SidebarProvider';
+import { useMeetingActivity } from '@/contexts/MeetingActivityContext';
 import { invoke as invokeTauri } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
 import Analytics from '@/lib/analytics';
@@ -18,7 +18,7 @@ import {
   readCachedDetectedSummaryLanguage,
 } from '@/lib/summary-language-preferences';
 import { parseSummaryContent, readSummaryMetadata } from '@/lib/summary-content';
-import { buildLiveNotesSummaryContext, type LiveNotesDocument } from '@/lib/liveNotes';
+import { loadSummaryNotesContext } from '@/lib/autoSummary';
 
 async function resolveSummaryLanguage(
   meetingId: string,
@@ -85,7 +85,7 @@ interface UseSummaryGenerationProps {
 export function useSummaryGeneration({
   initialSummary,
   meeting,
-  transcripts,
+  transcripts: _transcripts,
   modelConfig,
   isModelConfigLoading,
   selectedTemplate,
@@ -106,6 +106,7 @@ export function useSummaryGeneration({
   visibleMeetingIdRef.current = meeting.id;
   const generationIdRef = useRef(0);
   const activeProcessIdRef = useRef<string | null>(null);
+  const pollSubscriptionRef = useRef<(() => void) | null>(null);
   const trackedAttemptRef = useRef<{
     generationId: number;
     startedAt: number;
@@ -113,7 +114,7 @@ export function useSummaryGeneration({
     model: ModelConfig['model'];
     finished: boolean;
   } | null>(null);
-  const { startSummaryPolling, stopSummaryPolling } = useSidebar();
+  const { startSummaryPolling, stopSummaryPolling } = useMeetingActivity();
 
   const getSummaryStatusMessage = useCallback((status: SummaryStatus) => {
     switch (status) {
@@ -279,15 +280,27 @@ export function useSummaryGeneration({
   const pollingResultRef = useRef(handlePollingResult);
   pollingResultRef.current = handlePollingResult;
 
+  const subscribeToProcess = useCallback((
+    processId: string,
+    generationId: number,
+    isRegeneration: boolean,
+  ) => {
+    pollSubscriptionRef.current?.();
+    pollSubscriptionRef.current = startSummaryPolling(
+      meeting.id,
+      processId,
+      result => pollingResultRef.current(result, generationId, isRegeneration),
+    );
+  }, [meeting.id, startSummaryPolling]);
+
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
-      if (activeProcessIdRef.current) {
-        stopSummaryPolling(meeting.id, activeProcessIdRef.current);
-      }
+      pollSubscriptionRef.current?.();
+      pollSubscriptionRef.current = null;
     };
-  }, [meeting.id, stopSummaryPolling]);
+  }, [meeting.id]);
 
   useEffect(() => {
     if (!initialSummary || initialSummary.meeting_id !== meeting.id) return;
@@ -301,9 +314,8 @@ export function useSummaryGeneration({
     const generationId = ++generationIdRef.current;
     activeProcessIdRef.current = initialSummary.start;
     const isRegeneration = !!parseSummaryContent(initialSummary.data);
-    startSummaryPolling(meeting.id, initialSummary.start, result =>
-      pollingResultRef.current(result, generationId, isRegeneration));
-  }, [initialSummary, meeting.id, startSummaryPolling]);
+    subscribeToProcess(initialSummary.start, generationId, isRegeneration);
+  }, [initialSummary, meeting.id, subscribeToProcess]);
 
   const processSummary = useCallback(async ({
     transcriptText,
@@ -377,8 +389,7 @@ export function useSummaryGeneration({
       }
       activeProcessIdRef.current = processId;
 
-      startSummaryPolling(meeting.id, processId, result =>
-        pollingResultRef.current(result, generationId, isRegeneration));
+      subscribeToProcess(processId, generationId, isRegeneration);
     } catch (error) {
       await failGeneration(generationId, isRegeneration, error instanceof Error ? error.message : 'Summary generation failed.');
     }
@@ -388,11 +399,8 @@ export function useSummaryGeneration({
     meeting.created_at,
     meeting.id,
     modelConfig,
-    onMeetingUpdated,
     selectedTemplate,
-    setAiSummary,
-    startSummaryPolling,
-    updateMeetingTitle,
+    subscribeToProcess,
   ]);
 
   // Helper function to fetch ALL transcripts for summary generation
@@ -450,16 +458,8 @@ export function useSummaryGeneration({
   }, []);
 
   const withLiveNotesContext = useCallback(async (customPrompt: string): Promise<string> => {
-    try {
-      const notes = await invokeTauri<LiveNotesDocument | null>('get_meeting_live_notes', {
-        meetingId: meeting.id,
-      });
-      const notesContext = buildLiveNotesSummaryContext(notes);
-      return [customPrompt, notesContext].filter(Boolean).join('\n\n');
-    } catch (error) {
-      console.warn('Could not load live notes for summary generation:', error);
-      return customPrompt;
-    }
+    const notesContext = await loadSummaryNotesContext(meeting.id);
+    return [customPrompt, notesContext].filter(Boolean).join('\n\n');
   }, [meeting.id]);
 
   const showPreflightError = useCallback((message: string) => {
@@ -511,10 +511,14 @@ export function useSummaryGeneration({
       return;
     }
 
-    await processSummary({
-      ...buildSummaryTranscriptPayload(allTranscripts),
-      customPrompt: await withLiveNotesContext(customPrompt),
-    });
+    try {
+      await processSummary({
+        ...buildSummaryTranscriptPayload(allTranscripts),
+        customPrompt: await withLiveNotesContext(customPrompt),
+      });
+    } catch (error) {
+      showPreflightError(`Could not save current notes before summary generation: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }, [
     buildSummaryTranscriptPayload,
     fetchAllTranscripts,
@@ -537,12 +541,16 @@ export function useSummaryGeneration({
       return;
     }
 
-    await processSummary({
-      ...buildSummaryTranscriptPayload(allTranscripts),
-      customPrompt: await withLiveNotesContext(''),
-      isRegeneration: true
-    });
-  }, [meeting.id, fetchAllTranscripts, buildSummaryTranscriptPayload, processSummary, withLiveNotesContext]);
+    try {
+      await processSummary({
+        ...buildSummaryTranscriptPayload(allTranscripts),
+        customPrompt: await withLiveNotesContext(''),
+        isRegeneration: true
+      });
+    } catch (error) {
+      showPreflightError(`Could not save current notes before summary regeneration: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }, [meeting.id, fetchAllTranscripts, buildSummaryTranscriptPayload, processSummary, showPreflightError, withLiveNotesContext]);
 
   // Public API: Stop ongoing summary generation
   const handleStopGeneration = useCallback(async () => {
@@ -572,6 +580,8 @@ export function useSummaryGeneration({
       if (result.cancelled) {
         generationIdRef.current += 1;
         activeProcessIdRef.current = null;
+        pollSubscriptionRef.current?.();
+        pollSubscriptionRef.current = null;
         stopSummaryPolling(meeting.id, processId);
         setSummaryStatus('idle');
         setSummaryError(null);
