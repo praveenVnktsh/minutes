@@ -65,6 +65,7 @@ export function MeetingAssistantPanel({
   const historyRequestRef = useRef(0);
   const onNotesUpdatedRef = useRef(onNotesUpdated);
   const onTranscriptUpdatedRef = useRef(onTranscriptUpdated);
+  const restoredDraftRef = useRef<string | null>(null);
   onNotesUpdatedRef.current = onNotesUpdated;
   onTranscriptUpdatedRef.current = onTranscriptUpdated;
 
@@ -97,6 +98,8 @@ export function MeetingAssistantPanel({
     } else if (response.notesMarkdown) {
       toast.success('Enhanced notes updated');
     }
+    setInput((current) => current === restoredDraftRef.current ? '' : current);
+    restoredDraftRef.current = null;
     chatOperations.delete(meetingId);
     setIsSending(false);
   }, [loadHistory, meetingId]);
@@ -120,6 +123,7 @@ export function MeetingAssistantPanel({
     const operation = chatOperations.get(meetingId);
     if (operation?.status === 'pending') {
       setIsSending(true);
+      restoredDraftRef.current = operation.draft;
       setInput(operation.draft);
       void operation.promise.then((response) => applyResult(operation, response)).catch((error) => applyError(operation, error));
     } else if (operation?.status === 'result' && operation.result) {
@@ -127,6 +131,7 @@ export function MeetingAssistantPanel({
       void applyResult(operation, operation.result);
     } else if (operation?.status === 'error') {
       setSendError(operation.error ?? 'Unknown error');
+      restoredDraftRef.current = operation.draft;
       setInput(operation.draft);
     }
     return () => { mountedRef.current = false; };

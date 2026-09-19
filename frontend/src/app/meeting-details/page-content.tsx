@@ -285,6 +285,7 @@ export default function PageContent({
           hasTranscripts={meetingData.transcripts.length > 0}
           hasSummary={canShowEnhanced}
           isModelConfigLoading={isModelConfigLoading}
+          summaryReadUnavailable={Boolean(initialSummaryError)}
           languageSlot={<SummaryLanguagePill meetingId={meeting.id} />}
         />
         {canShowEnhanced && (

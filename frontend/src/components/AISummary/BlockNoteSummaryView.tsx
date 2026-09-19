@@ -69,6 +69,20 @@ function detectSummaryFormat(data: any): { format: SummaryFormat; data: any } {
   return { format: 'legacy', data: null };
 }
 
+function blankEditorDocument(): Block[] {
+  return [{ type: 'paragraph', content: [] }] as unknown as Block[];
+}
+
+function summaryDocumentKey(format: SummaryFormat, data: SummaryDataResponse | Summary | null): string {
+  if (format === 'blocknote') {
+    return `blocknote:${JSON.stringify(data && 'summary_json' in data ? data.summary_json ?? [] : [])}`;
+  }
+  if (format === 'markdown') {
+    return `markdown:${data && 'markdown' in data ? data.markdown ?? '' : ''}`;
+  }
+  return `legacy:${JSON.stringify(data ?? null)}`;
+}
+
 export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNoteSummaryViewProps>(({
   summaryData,
   onSave,
@@ -83,56 +97,83 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
   const [isDirty, setIsDirty] = useState(false);
   const [currentBlocks, setCurrentBlocks] = useState<Block[]>([]);
   const [hasCurrentDocument, setHasCurrentDocument] = useState(false);
+  const documentKey = summaryDocumentKey(format, data);
+  const [renderDocumentKey, setRenderDocumentKey] = useState(documentKey);
   const isContentLoaded = useRef(false);
   const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout>>();
-  const structuredDocumentKey = format === 'blocknote' ? JSON.stringify(data?.summary_json ?? []) : '';
   const structuredBlocks = data?.summary_json;
+  const editRevisionRef = useRef(0);
+  const documentGenerationRef = useRef(0);
+  const isDirtyRef = useRef(false);
+  const pendingSavesRef = useRef<Array<{ key: string; revision: number }>>([]);
+  const acknowledgedSaveRef = useRef<{ key: string; revision: number } | null>(null);
 
   // Create BlockNote editor for markdown parsing
   const editor = useCreateBlockNote({
     initialContent: undefined
   });
 
-  // Parse markdown to blocks when format is markdown
+  // Replace acknowledged documents as one operation so stale drafts, timers and
+  // parser completions cannot retain save authority across representations.
   useEffect(() => {
-    if (format === 'markdown' && data?.markdown && editor) {
+    const pendingSave = pendingSavesRef.current.find((save) => save.key === documentKey);
+    const saved = pendingSave
+      ?? (acknowledgedSaveRef.current?.key === documentKey
+        ? acknowledgedSaveRef.current
+        : null);
+    if (saved && editRevisionRef.current > saved.revision) return;
+
+    const generation = ++documentGenerationRef.current;
+    if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+    isContentLoaded.current = false;
+    isDirtyRef.current = false;
+    setIsDirty(false);
+    setCurrentBlocks([]);
+    setHasCurrentDocument(false);
+    setRenderDocumentKey(documentKey);
+
+    let loadTimer: ReturnType<typeof setTimeout> | undefined;
+    let cancelled = false;
+    if (format === 'markdown' && typeof data?.markdown === 'string' && editor) {
       const loadMarkdown = async () => {
         try {
           console.log('📝 Parsing markdown to BlockNote blocks...');
           const blocks = await editor.tryParseMarkdownToBlocks(data.markdown);
+          if (cancelled || documentGenerationRef.current !== generation) return;
           editor.replaceBlocks(editor.document, blocks);
+          setCurrentBlocks(blocks);
+          setHasCurrentDocument(true);
           console.log('✅ Markdown parsed successfully');
-
-          // Delay to ensure editor has finished rendering before allowing onChange
-          setTimeout(() => {
-            isContentLoaded.current = true;
+          loadTimer = setTimeout(() => {
+            if (!cancelled && documentGenerationRef.current === generation) {
+              isContentLoaded.current = true;
+            }
           }, 100);
         } catch (err) {
-          console.error('❌ Failed to parse markdown:', err);
+          if (!cancelled && documentGenerationRef.current === generation) {
+            console.error('❌ Failed to parse markdown:', err);
+          }
         }
       };
-      loadMarkdown();
-    }
-  }, [format, data?.markdown, editor]);
-
-  // Set content loaded flag for blocknote format
-  useEffect(() => {
-    if (format === 'blocknote' && structuredBlocks) {
-      isContentLoaded.current = false;
-      setCurrentBlocks([]);
-      setHasCurrentDocument(false);
-      setIsDirty(false);
-      // Delay to ensure editor has finished rendering
-      const timer = setTimeout(() => {
-        isContentLoaded.current = true;
+      void loadMarkdown();
+    } else if (format === 'blocknote') {
+      loadTimer = setTimeout(() => {
+        if (!cancelled && documentGenerationRef.current === generation) {
+          isContentLoaded.current = true;
+        }
       }, 100);
-      return () => clearTimeout(timer);
     }
-  }, [format, structuredBlocks, structuredDocumentKey]);
+    return () => {
+      cancelled = true;
+      if (loadTimer) clearTimeout(loadTimer);
+    };
+  }, [data?.markdown, documentKey, editor, format]);
 
   const handleEditorChange = useCallback((blocks: Block[]) => {
     // Only set dirty flag if content has finished loading
     if (isContentLoaded.current) {
+      editRevisionRef.current += 1;
+      isDirtyRef.current = true;
       setCurrentBlocks(blocks);
       setHasCurrentDocument(true);
       setIsDirty(true);
@@ -149,16 +190,20 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
   const handleSave = useCallback(async () => {
     if (!onSave || !isDirty) return;
 
+    const saveRevision = editRevisionRef.current;
+    const blocksToSave = currentBlocks;
+    const pendingSave = { key: '', revision: saveRevision };
+
     try {
       console.log('💾 Saving BlockNote content...');
 
       // Generate markdown from current blocks; preserve BlockNote JSON even if markdown conversion fails.
-      const markdownResult = await blocksToMarkdownSafely(editor, currentBlocks, {
+      const markdownResult = await blocksToMarkdownSafely(editor, blocksToSave, {
         source: 'BlockNoteSummaryView.handleSave',
       });
 
       const saveData: Pick<SummaryDataResponse, 'markdown' | 'summary_json' | 'manually_cleared'> = {
-        summary_json: currentBlocks as unknown as BlockNoteBlock[]
+        summary_json: blocksToSave as unknown as BlockNoteBlock[]
       };
 
       if (markdownResult.markdown !== undefined) {
@@ -169,12 +214,21 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
         saveData.manually_cleared = true;
       }
 
+      const saveKey = summaryDocumentKey('blocknote', saveData);
+      pendingSave.key = saveKey;
+      pendingSavesRef.current.push(pendingSave);
       await onSave(saveData);
-      setIsDirty(false);
+      acknowledgedSaveRef.current = { key: saveKey, revision: saveRevision };
+      if (editRevisionRef.current === saveRevision) {
+        isDirtyRef.current = false;
+        setIsDirty(false);
+      }
       console.log('✅ Save successful');
     } catch (error) {
       console.error('❌ Save failed:', error);
       throw error;
+    } finally {
+      pendingSavesRef.current = pendingSavesRef.current.filter((save) => save !== pendingSave);
     }
   }, [onSave, isDirty, currentBlocks, editor]);
 
@@ -197,7 +251,6 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
   // Keep the latest save handler reachable from the unmount cleanup so a pending
   // debounce is flushed when the meeting page goes away instead of being dropped.
   const handleSaveRef = useRef(handleSave);
-  const isDirtyRef = useRef(isDirty);
   useEffect(() => {
     handleSaveRef.current = handleSave;
     isDirtyRef.current = isDirty;
@@ -218,8 +271,12 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
         const markdown = storedSummaryMarkdown(summaryData as Summary);
         return { ok: true, markdown, empty: markdown.trim().length === 0 };
       }
+      if (format === 'markdown' && !hasCurrentDocument) {
+        const markdown = typeof data?.markdown === 'string' ? data.markdown : '';
+        return { ok: true, markdown, empty: markdown.trim().length === 0 };
+      }
       const blocks = format === 'markdown'
-        ? editor.document
+        ? currentBlocks
         : hasCurrentDocument
           ? currentBlocks
           : (data?.summary_json as unknown as Block[] | undefined) || [];
@@ -232,8 +289,9 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
       return { ok: true, markdown: result.markdown, empty: result.markdown.trim().length === 0 };
     },
     getMarkdown: async () => {
+      if (format === 'markdown' && !hasCurrentDocument) return typeof data?.markdown === 'string' ? data.markdown : '';
       const blocks = format === 'markdown'
-        ? editor.document
+        ? currentBlocks
         : hasCurrentDocument
           ? currentBlocks
           : (data?.summary_json as unknown as Block[] | undefined) || [];
@@ -242,7 +300,7 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
       if (!result.ok || result.markdown === undefined) throw new Error('Could not convert the current enhanced notes to Markdown');
       return result.markdown;
     },
-    getCurrentBlocks: () => (format === 'markdown' ? editor.document : hasCurrentDocument
+    getCurrentBlocks: () => (format === 'markdown' ? currentBlocks : hasCurrentDocument
       ? currentBlocks
       : (data?.summary_json as unknown as Block[] | undefined) || []) as unknown as BlockNoteBlock[],
     isDirty
@@ -270,8 +328,8 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
       <div className="flex flex-col w-full">
         <div className="w-full">
           <Editor
-            key={structuredDocumentKey}
-            initialContent={structuredBlocks}
+            key={renderDocumentKey}
+            initialContent={structuredBlocks?.length ? structuredBlocks : blankEditorDocument()}
             onChange={(blocks) => {
               console.log('📝 Editor blocks changed:', blocks.length);
               handleEditorChange(blocks);

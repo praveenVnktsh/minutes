@@ -96,6 +96,33 @@ describe('MeetingAssistantPanel operation recovery', () => {
     expect(newNotes).toHaveBeenCalledTimes(1);
     expect(newNotes).toHaveBeenCalledWith('Current notes');
     expect(newTranscript).toHaveBeenCalledTimes(1);
+    expect(renderer!.root.findByType('textarea').props.value).toBe('');
+  });
+
+  test('does not clear text typed after restoring a submitted draft', async () => {
+    let resolveChat!: (value: unknown) => void;
+    const chat = new Promise((resolve) => { resolveChat = resolve; });
+    handler = async (command) => {
+      if (command === 'get_meeting_chat') return [];
+      if (command === 'chat_with_meeting') return chat;
+      throw new Error(`Unexpected command: ${command}`);
+    };
+    await act(async () => {
+      renderer = create(<MeetingAssistantPanel meetingId="pending-new-draft" modelConfig={modelConfig} onNotesUpdated={() => {}} />);
+    });
+    await act(async () => renderer!.root.findByType('textarea').props.onChange({ target: { value: 'Submitted' } }));
+    await act(async () => { void renderer!.root.findByType('form').props.onSubmit({ preventDefault() {} }); });
+    await act(async () => renderer!.unmount());
+    renderer = undefined;
+    await act(async () => {
+      renderer = create(<MeetingAssistantPanel meetingId="pending-new-draft" modelConfig={modelConfig} onNotesUpdated={() => {}} />);
+    });
+    await act(async () => renderer!.root.findByType('textarea').props.onChange({ target: { value: 'Next question' } }));
+    await act(async () => resolveChat({
+      message: { id: 'answer', role: 'assistant', content: 'Done', createdAt: '2026-09-19' },
+      transcriptEditsApplied: 0,
+    }));
+    expect(renderer!.root.findByType('textarea').props.value).toBe('Next question');
   });
 
   test('keeps a failed pending draft when the panel remounts', async () => {

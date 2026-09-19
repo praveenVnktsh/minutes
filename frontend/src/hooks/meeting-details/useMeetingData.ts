@@ -18,15 +18,21 @@ export function useMeetingData({ meeting, summaryData, onMeetingUpdated }: UseMe
   const [aiSummary, setAiSummary] = useState<MeetingSummary | null>(summaryData);
   const [isSaving, setIsSaving] = useState(false);
   const [isSummaryDirty, setIsSummaryDirty] = useState(false);
+  const summaryDataKey = JSON.stringify(summaryData);
+  const summaryDataKeyRef = useRef(summaryDataKey);
+  const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const pendingSaveCountRef = useRef(0);
 
   // Ref for BlockNoteSummaryView
   const blockNoteSummaryRef = useRef<BlockNoteSummaryViewRef>(null);
 
   // Sync aiSummary state when summaryData prop changes (fixes display of fetched summaries)
   useEffect(() => {
+    if (summaryDataKeyRef.current === summaryDataKey) return;
+    summaryDataKeyRef.current = summaryDataKey;
     console.log('[useMeetingData] Syncing summary data from prop:', summaryData ? 'present' : 'null');
     setAiSummary(summaryData);
-  }, [summaryData]); // Only trigger when parent prop changes, not when aiSummary changes
+  }, [summaryData, summaryDataKey]);
 
   const handleSummaryChange = useCallback((newSummary: Summary) => {
     setAiSummary(newSummary);
@@ -42,10 +48,22 @@ export function useMeetingData({ meeting, summaryData, onMeetingUpdated }: UseMe
     const formattedSummary = 'markdown' in summary || 'summary_json' in summary
       ? summary
       : { MeetingName: meetingTitle, ...summary };
-    await invokeTauri('api_save_meeting_summary', {
-      meetingId: meeting.id,
-      summary: formattedSummary,
+    pendingSaveCountRef.current += 1;
+    setIsSaving(true);
+    const save = saveQueueRef.current.catch(() => {}).then(async () => {
+      await invokeTauri('api_save_meeting_summary', {
+        meetingId: meeting.id,
+        summary: formattedSummary,
+      });
+      setAiSummary(formattedSummary);
     });
+    saveQueueRef.current = save;
+    try {
+      await save;
+    } finally {
+      pendingSaveCountRef.current -= 1;
+      if (pendingSaveCountRef.current === 0) setIsSaving(false);
+    }
   }, [meeting.id, meetingTitle]);
 
   // Update meeting title from external source (e.g., AI summary)

@@ -148,6 +148,42 @@ describe('MeetingActivityStore', () => {
     expect(store.getState().summaries.at(-1)?.processId).toBe('process-a');
   });
 
+  test('publishes a cancellable queued attempt for the full pre-start read lifetime', async () => {
+    let resolveRead!: (value: SummaryProcessResponse) => void;
+    let resolveStart!: (value: { message: string; process_id: string }) => void;
+    let firstRead = true;
+    const cancelSummary = mock(async () => ({
+      cancelled: true, message: 'cancelled', meeting_id: 'meeting-a',
+    }));
+    const store = new MeetingActivityStore({
+      service: { subscribe: async () => () => {} },
+      readSummary: () => {
+        if (firstRead) {
+          firstRead = false;
+          return new Promise((resolve) => { resolveRead = resolve; });
+        }
+        return Promise.resolve(summary('meeting-a', 'new-process', 'cancelled'));
+      },
+      startSummary: () => new Promise((resolve) => { resolveStart = resolve; }),
+      cancelSummary,
+      setIntervalFn: (callback) => callback,
+      clearIntervalFn: () => {},
+    });
+
+    const starting = store.startSummary({ ...request(), replaceExisting: true });
+    expect(store.getState().summaries.at(-1)).toMatchObject({
+      meetingId: 'meeting-a', processId: null, status: 'queued',
+    });
+    const stopping = store.cancelPendingSummaryStart('meeting-a');
+    resolveRead(summary('meeting-a', 'old-process', 'completed'));
+    await Promise.resolve();
+    resolveStart({ message: 'started', process_id: 'new-process' });
+
+    expect((await starting).processId).toBe('new-process');
+    expect(await stopping).toBe(true);
+    expect(cancelSummary).toHaveBeenCalledWith('meeting-a', 'new-process');
+  });
+
   test('retains start errors for explicit retry and records authoritative cancellation', async () => {
     let starts = 0;
     let stored = summary('meeting-a', '', 'idle');

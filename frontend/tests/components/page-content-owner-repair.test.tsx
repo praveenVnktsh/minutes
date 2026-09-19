@@ -80,10 +80,11 @@ mock.module('../../src/components/ui/popover', () => ({
 
 let workspaceProps: any;
 let summaryProps: any;
+let generatorProps: any;
 mock.module('../../src/components/MeetingDetails/MeetingWorkspace', () => ({
   MeetingWorkspace: (props: any) => {
     workspaceProps = props;
-    return <>{props.summary}</>;
+    return <>{props.summary}{props.toolbarActions}</>;
   },
 }));
 mock.module('../../src/components/MeetingDetails/SummaryPanel', () => ({
@@ -93,7 +94,9 @@ mock.module('../../src/components/MeetingDetails/SummaryPanel', () => ({
   },
 }));
 mock.module('../../src/components/MeetingDetails/TranscriptPanel', () => ({ TranscriptPanel: () => null }));
-mock.module('../../src/components/MeetingDetails/SummaryGeneratorButtonGroup', () => ({ SummaryGeneratorButtonGroup: () => null }));
+mock.module('../../src/components/MeetingDetails/SummaryGeneratorButtonGroup', () => ({
+  SummaryGeneratorButtonGroup: (props: any) => { generatorProps = props; return null; },
+}));
 mock.module('../../src/components/MeetingDetails/SummaryUpdaterButtonGroup', () => ({ SummaryUpdaterButtonGroup: () => null }));
 mock.module('../../src/components/MeetingDetails/SummaryLanguagePill', () => ({ SummaryLanguagePill: () => null }));
 mock.module('../../src/components/MeetingDetails/MeetingAssistantPanel', () => ({ MeetingAssistantPanel: () => null }));
@@ -138,6 +141,7 @@ beforeEach(() => {
   invocations.length = 0;
   workspaceProps = null;
   summaryProps = null;
+  generatorProps = null;
   eventTarget = new EventTarget();
   Object.defineProperty(globalThis, 'window', {
     configurable: true,
@@ -151,7 +155,7 @@ afterEach(async () => {
   meetingActivityStore.dismissSummary('meeting-a');
 });
 
-async function show(onRefetchTranscripts = mock(async () => {})) {
+async function show(onRefetchTranscripts = mock(async () => {}), initialSummaryError?: string) {
   await act(async () => {
     renderer = create(
       <SidebarProvider>
@@ -160,6 +164,7 @@ async function show(onRefetchTranscripts = mock(async () => {})) {
           meeting={meeting}
           summaryData={{ markdown: 'Fresh saved B' }}
           initialSummary={nativeSummary}
+          initialSummaryError={initialSummaryError}
           onRefetchTranscripts={onRefetchTranscripts}
         />
       </SidebarProvider>,
@@ -186,6 +191,11 @@ describe('PageContent owner repair composition', () => {
     expect(refetch).toHaveBeenCalledTimes(1);
   });
 
+  test('disables the options generation action while the initial summary read is unavailable', async () => {
+    await show(undefined, 'database busy');
+    expect(generatorProps.summaryReadUnavailable).toBe(true);
+  });
+
   test('pre-start hydration cannot replace regeneration with completed or hide Stop', async () => {
     let resolveStart!: (value: { process_id: string }) => void;
     startPromise = new Promise((resolve) => { resolveStart = resolve; });
@@ -202,6 +212,37 @@ describe('PageContent owner repair composition', () => {
     await act(async () => resolveStart({ process_id: '2026-09-19T11:00:00.000000000Z' }));
     await act(async () => stop);
     expect(invocations.some(([command]) => command === 'api_cancel_summary')).toBe(true);
+  });
+
+  test('adopts an externally started c6 attempt and its fresh terminal document while mounted', async () => {
+    let resolveStart!: (value: { process_id: string }) => void;
+    startPromise = new Promise((resolve) => { resolveStart = resolve; });
+    await show();
+    const starting = meetingActivityStore.startSummary({
+      meetingId: meeting.id,
+      text: 'Transcript',
+      model: 'ollama',
+      modelName: 'test',
+      chunkSize: 40000,
+      overlap: 1000,
+      customPrompt: '',
+      templateId: 'standard_meeting',
+      summaryLanguage: 'en',
+      replaceExisting: true,
+    });
+    await act(async () => { await Promise.resolve(); });
+    expect(summaryProps.summaryStatus).toBe('regenerating');
+    expect(workspaceProps.isGenerating).toBe(true);
+
+    nativeSummary = response('Externally generated C');
+    nativeSummary.start = '2026-09-19T11:00:00.000000000Z';
+    await act(async () => {
+      resolveStart({ process_id: nativeSummary.start! });
+      await starting;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(summaryProps.summaryStatus).toBe('completed');
+    expect(summaryProps.aiSummary).toEqual({ markdown: 'Externally generated C' });
   });
 
   test('delayed title completion cannot restore an obsolete catalog or selection', async () => {

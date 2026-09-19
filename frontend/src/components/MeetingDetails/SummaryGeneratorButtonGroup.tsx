@@ -35,6 +35,7 @@ interface SummaryGeneratorButtonGroupProps {
   hasTranscripts?: boolean;
   hasSummary?: boolean;
   isModelConfigLoading?: boolean;
+  summaryReadUnavailable?: boolean;
   onOpenModelSettings?: (openFn: () => void) => void;
 }
 
@@ -51,6 +52,7 @@ export function SummaryGeneratorButtonGroup({
   hasTranscripts = true,
   hasSummary = false,
   isModelConfigLoading = false,
+  summaryReadUnavailable = false,
   onOpenModelSettings,
   languageSlot
 }: SummaryGeneratorButtonGroupProps) {
@@ -130,7 +132,7 @@ export function SummaryGeneratorButtonGroup({
       <Button
         size="sm"
         variant={isGenerating ? 'error' : 'default'}
-        disabled={!isGenerating && (isModelConfigLoading || !modelConfig.model)}
+        disabled={!isGenerating && (summaryReadUnavailable || isModelConfigLoading || !modelConfig.model)}
         onClick={() => isGenerating
           ? onStopGeneration()
           : void (hasSummary && onRegenerateSummary ? onRegenerateSummary() : onGenerateSummary(customPrompt))}
