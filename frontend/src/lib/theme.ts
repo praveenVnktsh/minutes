@@ -20,6 +20,13 @@ export function applyTheme(theme: AppTheme): void {
   document.documentElement.style.colorScheme = theme;
 }
 
+export async function syncNativeTheme(theme: AppTheme): Promise<void> {
+  const windows = await getAllWindows().catch(() => []);
+  await Promise.allSettled(
+    windows.map((window) => window.setTheme(theme as NativeTheme)),
+  );
+}
+
 export async function persistAndBroadcastTheme(theme: AppTheme): Promise<void> {
   try {
     localStorage.setItem(THEME_STORAGE_KEY, theme);
@@ -31,7 +38,7 @@ export async function persistAndBroadcastTheme(theme: AppTheme): Promise<void> {
   const nativeTheme: NativeTheme = theme;
   await Promise.allSettled([
     emit(THEME_CHANGED_EVENT, theme),
-    getAllWindows().then((windows) => Promise.all(windows.map((window) => window.setTheme(nativeTheme)))),
+    syncNativeTheme(nativeTheme),
   ]);
 }
 

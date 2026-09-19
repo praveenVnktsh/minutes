@@ -24,7 +24,6 @@ export function MeetingsLibrary() {
     catalogError,
     searchStatus,
     searchError,
-    searchTranscripts,
     selectMeetings,
     selectSearchResults,
     refetchMeetings,
@@ -39,19 +38,16 @@ export function MeetingsLibrary() {
     runImportAction,
     openMeeting,
     isNavigating,
-    navigationError,
+    meetingSearchQuery: query,
+    setMeetingSearchQuery: setQuery,
+    isMeetingSearchPending,
+    recordingActionDisabled,
   } = useShell()
   const { activeMeetingId, getMeetingActivities } = useMeetingActivity()
   const debugMode = useDebugMode()
-  const [query, setQuery] = useState('')
   const [filter, setFilter] = useState<LibraryFilter>('all')
   const [actionError, setActionError] = useState<string | null>(null)
   const searchRef = useRef<HTMLInputElement>(null)
-
-  useEffect(() => {
-    const timer = setTimeout(() => void searchTranscripts(query), 250)
-    return () => clearTimeout(timer)
-  }, [query, searchTranscripts])
 
   useEffect(() => {
     const focus = () => searchRef.current?.focus()
@@ -69,7 +65,7 @@ export function MeetingsLibrary() {
     ? meetings.filter((meeting) => meeting.archived)
     : meetings
   const loading = catalogStatus === 'loading'
-  const searching = query.trim() && searchStatus === 'searching'
+  const searching = query.trim() && isMeetingSearchPending
 
   const runMutation = async (action: () => Promise<void>) => {
     setActionError(null)
@@ -99,8 +95,8 @@ export function MeetingsLibrary() {
             <p className="mt-2 max-w-xl text-sm leading-6 text-ink-muted">Record a conversation, return to active work, or find notes from an earlier meeting.</p>
           </div>
           <div className="flex flex-wrap gap-2">
-            <Button variant="outline" onClick={() => void runMutation(runImportAction)}><Upload />{importActionLabel}</Button>
-            <Button variant={recordingActionLabel === 'Stop recording' ? 'recording' : 'default'} onClick={() => void runMutation(runRecordingAction)}>
+            <Button variant="outline" onClick={() => void runImportAction().catch(() => {})}><Upload />{importActionLabel}</Button>
+            <Button disabled={recordingActionDisabled} variant={recordingActionLabel === 'Stop recording' ? 'recording' : 'default'} onClick={() => void runRecordingAction()}>
               <Mic />{recordingActionLabel}
             </Button>
           </div>
@@ -144,7 +140,7 @@ export function MeetingsLibrary() {
             </StatusFeedback>
           )}
           {searchStatus === 'error' && <StatusFeedback tone="error">Search failed{searchError ? `: ${searchError}` : '.'}</StatusFeedback>}
-          {(actionError || navigationError) && <StatusFeedback tone="error">{actionError ?? navigationError?.message}</StatusFeedback>}
+          {actionError && <StatusFeedback tone="error">{actionError}</StatusFeedback>}
         </div>
 
         {(loading || searching) ? (
@@ -161,7 +157,7 @@ export function MeetingsLibrary() {
             <p className="mx-auto mt-2 max-w-md text-sm text-ink-muted">
               {query.trim() ? 'Try a different phrase or clear the search.' : 'Start a meeting to create a local recording, transcript, and notes workspace.'}
             </p>
-            {!query.trim() && filter === 'all' && <Button className="mt-5" onClick={() => void runMutation(runRecordingAction)}><Mic />{recordingActionLabel}</Button>}
+            {!query.trim() && filter === 'all' && <Button disabled={recordingActionDisabled} className="mt-5" onClick={() => void runRecordingAction()}><Mic />{recordingActionLabel}</Button>}
           </div>
         ) : (
           <ul className="mt-6 grid gap-3 md:grid-cols-2 xl:grid-cols-3" aria-busy={isNavigating}>

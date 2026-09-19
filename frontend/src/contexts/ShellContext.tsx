@@ -7,7 +7,7 @@ import { useMeetingNavigation } from '@/hooks/useNavigation';
 import { useImportDialog } from '@/contexts/ImportDialogContext';
 import { useConfig } from '@/contexts/ConfigContext';
 import { settingsHref } from '@/components/settings/settingsSections';
-import type { CurrentMeeting } from '@/components/Sidebar/SidebarProvider';
+import { useSidebar, type CurrentMeeting } from '@/components/Sidebar/SidebarProvider';
 import { applyTheme, persistAndBroadcastTheme, readTheme, type AppTheme } from '@/lib/theme';
 
 const COLLAPSED_KEY = 'meetily:sidebar-collapsed';
@@ -24,7 +24,8 @@ interface ShellContextValue {
   toggleTheme: () => void;
   /** True when the window is narrow; the sidebar auto-collapses and docks stack. */
   compact: boolean;
-  recordingActionLabel: 'New meeting' | 'Return to recording' | 'Stop recording';
+  recordingActionLabel: 'New meeting' | 'Return to recording' | 'Stop recording' | 'Starting meeting' | 'Finishing meeting';
+  recordingActionDisabled: boolean;
   runRecordingAction: () => Promise<void>;
   importActionLabel: 'Import recording' | 'Enable audio import';
   runImportAction: () => Promise<void>;
@@ -32,6 +33,10 @@ interface ShellContextValue {
   openMeeting: (meeting: CurrentMeeting) => Promise<void>;
   isNavigating: boolean;
   navigationError: Error | null;
+  retryNavigation: () => Promise<void>;
+  meetingSearchQuery: string;
+  setMeetingSearchQuery: (query: string) => void;
+  isMeetingSearchPending: boolean;
 }
 
 const ShellContext = createContext<ShellContextValue | null>(null);
@@ -43,14 +48,22 @@ export function ShellProvider({ children }: { children: React.ReactNode }) {
   const [collapsed, setCollapsedState] = useState(false);
   const [theme, setThemeState] = useState<AppTheme>(readTheme);
   const [compact, setCompact] = useState(false);
+  const [meetingSearchQuery, setMeetingSearchQuery] = useState('');
   // Remembers the user's own collapse choice so leaving compact mode restores it.
   const userCollapsedRef = useRef(false);
 
   const controller = useRecordingController();
   const recordingState = useRecordingState();
-  const meetingNavigation = useMeetingNavigation();
+  const {
+    navigate: navigateTo,
+    openMeeting: openMeetingRoute,
+    isNavigating,
+    navigationError,
+  } = useMeetingNavigation();
   const { openImportDialog } = useImportDialog();
   const { betaFeatures } = useConfig();
+  const { searchTranscripts, searchStatus } = useSidebar();
+  const retryNavigationRef = useRef<(() => Promise<void>) | null>(null);
 
   useLayoutEffect(() => {
     applyTheme(theme);
@@ -69,6 +82,11 @@ export function ShellProvider({ children }: { children: React.ReactNode }) {
     window.addEventListener('resize', applyViewport);
     return () => window.removeEventListener('resize', applyViewport);
   }, []);
+
+  useEffect(() => {
+    const timer = setTimeout(() => void searchTranscripts(meetingSearchQuery), 250);
+    return () => clearTimeout(timer);
+  }, [meetingSearchQuery, searchTranscripts]);
 
   const setCollapsed = useCallback((value: boolean) => {
     userCollapsedRef.current = value;
@@ -98,26 +116,50 @@ export function ShellProvider({ children }: { children: React.ReactNode }) {
     });
   }, []);
 
-  const hasNativeSession = recordingState.isRecording;
-  const recordingActionLabel = hasNativeSession
-    ? controller.activeMeetingId ? 'Return to recording' : 'Stop recording'
-    : 'New meeting';
+  const finalizing = controller.command === 'stop'
+    || controller.command === 'finalize'
+    || recordingState.isProcessing
+    || recordingState.isSaving;
+  const recordingActionDisabled = controller.isCommandPending || recordingState.isProcessing || recordingState.isSaving;
+  const recordingActionLabel = controller.command === 'start'
+    ? 'Starting meeting'
+    : finalizing
+      ? 'Finishing meeting'
+      : recordingState.isRecording
+        ? controller.activeMeetingId ? 'Return to recording' : 'Stop recording'
+        : 'New meeting';
   const runRecordingAction = useCallback(async () => {
+    if (recordingActionDisabled) return;
     if (recordingState.isRecording) {
-      if (controller.activeMeetingId) await controller.returnToRecording();
-      else await controller.stopRecording();
+      try {
+        if (controller.activeMeetingId) await controller.returnToRecording();
+        else await controller.stopRecording();
+      } catch {
+        // RecordingControllerFeedback is the single owner for command failures.
+      }
       return;
     }
-    await controller.startRecording({ source: 'app_shell' });
-  }, [controller, recordingState.isRecording]);
+    await controller.startRecording({ source: 'app_shell' }).catch(() => {});
+  }, [controller, recordingActionDisabled, recordingState.isRecording]);
   const importEnabled = betaFeatures.importAndRetranscribe;
+  const navigate = useCallback(async (href: string) => {
+    retryNavigationRef.current = () => navigateTo(href);
+    await navigateTo(href);
+  }, [navigateTo]);
+  const openMeeting = useCallback(async (meeting: CurrentMeeting) => {
+    retryNavigationRef.current = () => openMeetingRoute(meeting);
+    await openMeetingRoute(meeting);
+  }, [openMeetingRoute]);
+  const retryNavigation = useCallback(async () => {
+    await retryNavigationRef.current?.();
+  }, []);
   const runImportAction = useCallback(async () => {
     if (importEnabled) {
       openImportDialog();
       return;
     }
-    await meetingNavigation.navigate(settingsHref('beta'));
-  }, [importEnabled, meetingNavigation, openImportDialog]);
+    await navigate(settingsHref('beta'));
+  }, [importEnabled, navigate, openImportDialog]);
 
   const value = useMemo<ShellContextValue>(() => ({
     collapsed,
@@ -128,24 +170,33 @@ export function ShellProvider({ children }: { children: React.ReactNode }) {
     toggleTheme,
     compact,
     recordingActionLabel,
+    recordingActionDisabled,
     runRecordingAction,
     importActionLabel: importEnabled ? 'Import recording' : 'Enable audio import',
     runImportAction,
-    navigate: meetingNavigation.navigate,
-    openMeeting: meetingNavigation.openMeeting,
-    isNavigating: meetingNavigation.isNavigating,
-    navigationError: meetingNavigation.navigationError,
+    navigate,
+    openMeeting,
+    isNavigating,
+    navigationError,
+    retryNavigation,
+    meetingSearchQuery,
+    setMeetingSearchQuery,
+    isMeetingSearchPending: searchStatus === 'searching',
   }), [
     collapsed,
     compact,
     importEnabled,
-    meetingNavigation.isNavigating,
-    meetingNavigation.navigate,
-    meetingNavigation.navigationError,
-    meetingNavigation.openMeeting,
+    isNavigating,
+    navigationError,
+    meetingSearchQuery,
+    searchStatus,
+    navigate,
+    openMeeting,
     recordingActionLabel,
+    recordingActionDisabled,
     runImportAction,
     runRecordingAction,
+    retryNavigation,
     setCollapsed,
     setTheme,
     theme,

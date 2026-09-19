@@ -8,6 +8,9 @@ const handlers = new Map<string, EventHandler>()
 const hide = mock(async () => {})
 let requestNumber = 0
 let emitResultBeforeResolve = false
+let resolveResultListener: (() => void) | null = null
+let deferResultListener = false
+let resultListenFailures = 0
 
 const originalCore = { ...await import('@tauri-apps/api/core') }
 const originalEvent = { ...await import('@tauri-apps/api/event') }
@@ -25,12 +28,19 @@ mock.module('@tauri-apps/api/core', () => ({ ...originalCore, invoke }))
 mock.module('@tauri-apps/api/event', () => ({
   ...originalEvent,
   listen: async (event: string, handler: EventHandler) => {
+    if (event === 'meeting-prompt-start-result' && deferResultListener) {
+      await new Promise<void>((resolve) => { resolveResultListener = resolve })
+    }
+    if (event === 'meeting-prompt-start-result' && resultListenFailures > 0) {
+      resultListenFailures -= 1
+      throw new Error('event bridge unavailable')
+    }
     handlers.set(event, handler)
     return () => handlers.delete(event)
   },
 }))
 mock.module('@tauri-apps/api/window', () => ({ ...originalWindowApi, getCurrentWindow: () => ({ hide }) }))
-mock.module('@/lib/theme', () => ({ readTheme: () => 'dark', applyTheme: () => {}, listenForThemeChanges: async () => () => {} }))
+mock.module('@/lib/theme', () => ({ readTheme: () => 'dark', applyTheme: () => {}, syncNativeTheme: async () => {}, listenForThemeChanges: async () => () => {} }))
 
 const originalWindow = globalThis.window
 const { default: MeetingPromptPage } = await import('./page')
@@ -41,7 +51,11 @@ beforeEach(() => {
   invoke.mockClear()
   requestNumber = 0
   emitResultBeforeResolve = false
+  resolveResultListener = null
+  deferResultListener = false
+  resultListenFailures = 0
   Object.defineProperty(globalThis, 'window', { configurable: true, value: new EventTarget() })
+  Object.defineProperty(globalThis, 'document', { configurable: true, value: { body: { style: {} } } })
 })
 
 afterAll(() => {
@@ -77,6 +91,23 @@ describe('meeting prompt acknowledgement', () => {
     await act(async () => renderer!.unmount())
   })
 
+  test('disables Start until the acknowledgement listener is installed', async () => {
+    deferResultListener = true
+    emitResultBeforeResolve = true
+    let renderer: ReturnType<typeof create>
+    await act(async () => { renderer = create(<MeetingPromptPage />) })
+    let primary = renderer!.root.findAllByType('button').find((button) => button.children.some((child) => child === 'Preparing'))!
+    expect(primary.props.disabled).toBe(true)
+    expect(invoke).not.toHaveBeenCalledWith('start_recording_from_prompt')
+
+    await act(async () => { resolveResultListener?.(); await Promise.resolve() })
+    primary = renderer!.root.findAllByType('button').find((button) => button.children.some((child) => child === 'Start'))!
+    await act(async () => primary.props.onClick())
+    expect(JSON.stringify(renderer!.toJSON())).toContain('Microphone denied')
+    expect(hide).not.toHaveBeenCalled()
+    await act(async () => renderer!.unmount())
+  })
+
   test('hides only after the matching native success acknowledgement', async () => {
     let renderer: ReturnType<typeof create>
     await act(async () => { renderer = create(<MeetingPromptPage />) })
@@ -90,6 +121,20 @@ describe('meeting prompt acknowledgement', () => {
       handlers.get('meeting-prompt-start-result')?.({ payload: { request_id: 'request-1', accepted: true, error: null, session_id: 'session-1' } })
     })
     expect(hide).toHaveBeenCalledTimes(1)
+    await act(async () => renderer!.unmount())
+  })
+
+  test('offers listener retry without dispatching an unsafe start', async () => {
+    resultListenFailures = 1
+    let renderer: ReturnType<typeof create>
+    await act(async () => { renderer = create(<MeetingPromptPage />) })
+    await act(async () => { await Promise.resolve() })
+    const retry = renderer!.root.findAllByType('button').find((button) => button.children.some((child) => child === 'Retry'))!
+    expect(retry.props.disabled).toBe(false)
+    await act(async () => retry.props.onClick())
+    await act(async () => { await Promise.resolve() })
+    expect(invoke).not.toHaveBeenCalledWith('start_recording_from_prompt')
+    expect(JSON.stringify(renderer!.toJSON())).toContain('Start')
     await act(async () => renderer!.unmount())
   })
 })

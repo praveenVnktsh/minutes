@@ -56,11 +56,13 @@ export default function SimpleSidebar() {
     runImportAction,
     navigate,
     openMeeting,
+    meetingSearchQuery: query,
+    setMeetingSearchQuery: setQuery,
+    isMeetingSearchPending,
+    recordingActionDisabled,
   } = useShell();
   const {
     currentMeeting,
-    searchTranscripts,
-    isSearching,
     searchStatus,
     searchError,
     selectMeetings,
@@ -71,7 +73,6 @@ export default function SimpleSidebar() {
   } = useSidebar();
   const { activeMeetingId } = useMeetingActivity();
   const debugMode = useDebugMode();
-  const [query, setQuery] = useState('');
   const [showArchived, setShowArchived] = useState(false);
   const [showFeedback, setShowFeedback] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -85,11 +86,6 @@ export default function SimpleSidebar() {
       setActionError(error instanceof Error ? error.message : String(error));
     }
   };
-
-  useEffect(() => {
-    const timer = setTimeout(() => void searchTranscripts(query), 250);
-    return () => clearTimeout(timer);
-  }, [query, searchTranscripts]);
 
   // Focus the search box when the command palette (or another surface) requests it.
   useEffect(() => {
@@ -151,8 +147,8 @@ export default function SimpleSidebar() {
           title={meeting.title}
           className="flex min-w-0 flex-1 items-start gap-2.5 px-3 py-2.5 text-left"
         >
-          <span className={`relative mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center ${active ? 'text-[#6ea8fe]' : 'text-ink-subtle'}`}>
-            {active && <span className="absolute -left-3 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-full bg-[#6ea8fe]" />}
+          <span className={`relative mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center ${active ? 'text-info' : 'text-ink-subtle'}`}>
+            {active && <span className="absolute -left-3 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-full bg-info" />}
             <Video className="h-4 w-4" />
           </span>
           <span className="min-w-0 flex-1">
@@ -160,7 +156,7 @@ export default function SimpleSidebar() {
               <span className="truncate">{meeting.title}</span>
               {live && <span className="shrink-0 rounded bg-recording-subtle px-1 py-px text-[9px] font-semibold uppercase tracking-wide text-recording">live</span>}
               {meeting.debug && (
-                <span className="shrink-0 rounded bg-amber-400/20 px-1 py-px text-[9px] font-semibold uppercase tracking-wide text-amber-600">
+                <span className="shrink-0 rounded bg-warning-subtle px-1 py-px text-[9px] font-semibold uppercase tracking-wide text-warning">
                   debug
                 </span>
               )}
@@ -251,14 +247,16 @@ export default function SimpleSidebar() {
       <button
         type="button"
         onClick={() => void runShellAction(runRecordingAction)}
+        disabled={recordingActionDisabled}
         title={recordingActionLabel}
+        aria-disabled={recordingActionDisabled}
         className={`mt-5 flex h-10 items-center gap-2 rounded-xl text-sm font-semibold transition ${collapsed ? 'w-full justify-center px-0' : 'w-full px-3'
           } ${recordingActionLabel !== 'New meeting'
-            ? 'bg-[#3a2320] text-[#e6938a] hover:opacity-90'
+            ? 'bg-recording-subtle text-recording hover:opacity-90'
             : 'bg-brand text-brand-foreground hover:opacity-90'}`}
       >
         {recordingActionLabel !== 'New meeting' ? (
-          <span className="h-2 w-2 animate-pulse rounded-full bg-[#d74d3f]" />
+          <span className="h-2 w-2 animate-pulse rounded-full bg-recording" />
         ) : (
           <Mic className="h-4 w-4" />
         )}
@@ -305,6 +303,7 @@ export default function SimpleSidebar() {
             ref={searchInputRef}
             value={query}
             onChange={(event) => setQuery(event.target.value)}
+            aria-label="Search meetings"
             placeholder="Search"
             className="h-10 w-full rounded-xl border border-hairline bg-surface-0 pl-9 pr-9 text-sm text-ink outline-none placeholder:text-ink-subtle focus:border-ink-subtle"
           />
@@ -329,6 +328,7 @@ export default function SimpleSidebar() {
             type="button"
             onClick={onClick}
             title={label}
+            aria-current={active ? 'page' : undefined}
             className={`flex h-10 w-full items-center gap-3 rounded-xl text-sm transition ${collapsed ? 'justify-center px-0' : 'px-3'
               } ${active ? 'bg-surface-2 font-medium text-ink' : 'text-ink-muted hover:bg-surface-2 hover:text-ink'}`}
           >
@@ -343,7 +343,7 @@ export default function SimpleSidebar() {
         <>
           <div className="mb-2 mt-6 flex items-center justify-between px-2">
             <span className="text-[11px] font-semibold uppercase tracking-[0.12em] text-ink-subtle">Recent</span>
-            {isSearching && <span className="text-[11px] text-ink-subtle">Searching…</span>}
+            {isMeetingSearchPending && <span className="text-[11px] text-ink-subtle">Searching…</span>}
           </div>
           <nav className="custom-scrollbar min-h-0 flex-1 space-y-0.5 overflow-y-auto">
             {pinnedMeetings.length > 0 && (
@@ -361,7 +361,7 @@ export default function SimpleSidebar() {
             )}
             {searchStatus === 'error' && <StatusFeedback tone="error" className="mx-2 text-xs">{searchError ?? 'Search failed.'}</StatusFeedback>}
             {actionError && <StatusFeedback tone="error" className="mx-2 text-xs">{actionError}</StatusFeedback>}
-            {!isSearching && searchStatus !== 'error' && regularMeetings.length === 0 && pinnedMeetings.length === 0 && !(showArchived && archivedMeetings.length > 0) && (
+            {!isMeetingSearchPending && searchStatus !== 'error' && regularMeetings.length === 0 && pinnedMeetings.length === 0 && !(showArchived && archivedMeetings.length > 0) && (
               <p className="px-3 py-6 text-center text-xs leading-5 text-ink-subtle">{query.trim() ? 'No meetings match this search.' : 'Your meetings will appear here.'}</p>
             )}
           </nav>
@@ -388,7 +388,7 @@ export default function SimpleSidebar() {
               type="button"
               onClick={() => void setDebugMode(false)}
               title="Debug mode is on — click to turn it off"
-              className={`rounded-lg p-2 text-amber-500 hover:bg-amber-500/10 ${collapsed ? '' : 'flex items-center gap-1.5'}`}
+              className={`rounded-lg p-2 text-warning hover:bg-warning-subtle ${collapsed ? '' : 'flex items-center gap-1.5'}`}
             >
               <Bug className="h-4 w-4" />
               {!collapsed && <span className="text-xs font-medium">Debug on</span>}
@@ -399,6 +399,7 @@ export default function SimpleSidebar() {
             onClick={() => void navigate('/settings').catch(() => {})}
             className={`rounded-lg p-2 hover:bg-surface-2 hover:text-ink ${pathname === '/settings' ? 'text-ink' : 'text-ink-subtle'}`}
             title="Settings"
+            aria-label="Settings"
           >
             <Settings className="h-4 w-4" />
           </button>
@@ -407,6 +408,7 @@ export default function SimpleSidebar() {
             onClick={toggleTheme}
             className="rounded-lg p-2 text-ink-subtle hover:bg-surface-2 hover:text-ink"
             title={theme === 'dark' ? 'Light mode' : 'Dark mode'}
+            aria-label={theme === 'dark' ? 'Use light theme' : 'Use dark theme'}
           >
             {theme === 'dark' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
           </button>

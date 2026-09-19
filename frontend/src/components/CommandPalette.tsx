@@ -42,6 +42,7 @@ export function CommandPalette() {
     runImportAction,
     navigate,
     openMeeting,
+    recordingActionDisabled,
   } = useShell();
   const debugMode = useDebugMode();
   const meetings = selectMeetings({ debugMode });
@@ -87,7 +88,7 @@ export function CommandPalette() {
         <CommandEmpty>No results found.</CommandEmpty>
 
         <CommandGroup heading="Actions">
-          <CommandItem onSelect={() => runCommand(runRecordingAction)}>
+          <CommandItem disabled={recordingActionDisabled} onSelect={() => runCommand(runRecordingAction)}>
             <Mic />
             {recordingActionLabel}
           </CommandItem>

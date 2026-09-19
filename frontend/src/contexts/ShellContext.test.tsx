@@ -8,10 +8,15 @@ const returnToRecording = mock(async () => {})
 const openImportDialog = mock(() => {})
 const navigate = mock(async () => {})
 const openMeeting = mock(async () => {})
+const searchTranscripts = mock(async () => {})
 let sessionId: string | null = null
 let activeMeetingId: string | null = null
 let isRecording = false
 let importEnabled = false
+let command: string | null = null
+let isCommandPending = false
+let isProcessing = false
+let isSaving = false
 
 const originalController = { ...await import('@/contexts/RecordingControllerContext') }
 const originalRecording = { ...await import('@/contexts/RecordingStateContext') }
@@ -19,12 +24,16 @@ const originalNavigation = { ...await import('@/hooks/useNavigation') }
 const originalImport = { ...await import('@/contexts/ImportDialogContext') }
 const originalConfig = { ...await import('@/contexts/ConfigContext') }
 const originalTheme = { ...await import('@/lib/theme') }
+const originalSidebar = { ...await import('@/components/Sidebar/SidebarProvider') }
+const originalActivity = { ...await import('@/contexts/MeetingActivityContext') }
+const originalDebug = { ...await import('@/hooks/useDebugMode') }
+const originalNextNavigation = { ...await import('next/navigation') }
 
 mock.module('@/contexts/RecordingControllerContext', () => ({
   ...originalController,
-  useRecordingController: () => ({ sessionId, activeMeetingId, startRecording, stopRecording, returnToRecording }),
+  useRecordingController: () => ({ sessionId, activeMeetingId, command, isCommandPending, startRecording, stopRecording, returnToRecording }),
 }))
-mock.module('@/contexts/RecordingStateContext', () => ({ ...originalRecording, useRecordingState: () => ({ isRecording }) }))
+mock.module('@/contexts/RecordingStateContext', () => ({ ...originalRecording, useRecordingState: () => ({ isRecording, isProcessing, isSaving }) }))
 mock.module('@/hooks/useNavigation', () => ({
   ...originalNavigation,
   useMeetingNavigation: () => ({ navigate, openMeeting, isNavigating: false, navigationError: null }),
@@ -32,11 +41,33 @@ mock.module('@/hooks/useNavigation', () => ({
 mock.module('@/contexts/ImportDialogContext', () => ({ ...originalImport, useImportDialog: () => ({ openImportDialog }) }))
 mock.module('@/contexts/ConfigContext', () => ({ ...originalConfig, useConfig: () => ({ betaFeatures: { importAndRetranscribe: importEnabled } }) }))
 mock.module('@/lib/theme', () => ({ ...originalTheme, readTheme: () => 'dark', applyTheme: () => {}, persistAndBroadcastTheme: async () => {} }))
+mock.module('@/components/Sidebar/SidebarProvider', () => ({
+  ...originalSidebar,
+  useSidebar: () => ({
+    currentMeeting: null,
+    searchTranscripts,
+    searchStatus: 'idle',
+    searchError: null,
+    catalogStatus: 'ready',
+    catalogError: null,
+    selectMeetings: () => [],
+    selectSearchResults: () => [],
+    setMeetingPinned: async () => {},
+    setMeetingArchived: async () => {},
+    meetingMutations: {},
+    refetchMeetings: async () => {},
+  }),
+}))
+mock.module('@/contexts/MeetingActivityContext', () => ({ ...originalActivity, useMeetingActivity: () => ({ activeMeetingId: null, getMeetingActivities: () => [] }) }))
+mock.module('@/hooks/useDebugMode', () => ({ ...originalDebug, useDebugMode: () => false }))
+mock.module('next/navigation', () => ({ ...originalNextNavigation, usePathname: () => '/' }))
 
 const originalWindow = globalThis.window
 const originalDocument = globalThis.document
 const originalLocalStorage = globalThis.localStorage
 const { ShellProvider, useShell } = await import('./ShellContext')
+const { default: SimpleSidebar } = await import('@/components/SimpleSidebar')
+const { MeetingsLibrary } = await import('@/components/MeetingsLibrary')
 
 let current!: ReturnType<typeof useShell>
 function Probe() {
@@ -49,7 +80,11 @@ beforeEach(() => {
   activeMeetingId = null
   isRecording = false
   importEnabled = false
-  for (const fn of [startRecording, stopRecording, returnToRecording, openImportDialog, navigate, openMeeting]) fn.mockClear()
+  command = null
+  isCommandPending = false
+  isProcessing = false
+  isSaving = false
+  for (const fn of [startRecording, stopRecording, returnToRecording, openImportDialog, navigate, openMeeting, searchTranscripts]) fn.mockClear()
   const browserWindow = new EventTarget() as Window & typeof globalThis
   Object.assign(browserWindow, { innerWidth: 1440 })
   Object.defineProperty(globalThis, 'window', { configurable: true, value: browserWindow })
@@ -64,6 +99,10 @@ afterAll(() => {
   mock.module('@/contexts/ImportDialogContext', () => originalImport)
   mock.module('@/contexts/ConfigContext', () => originalConfig)
   mock.module('@/lib/theme', () => originalTheme)
+  mock.module('@/components/Sidebar/SidebarProvider', () => originalSidebar)
+  mock.module('@/contexts/MeetingActivityContext', () => originalActivity)
+  mock.module('@/hooks/useDebugMode', () => originalDebug)
+  mock.module('next/navigation', () => originalNextNavigation)
   if (originalWindow) Object.defineProperty(globalThis, 'window', { configurable: true, value: originalWindow })
   else Reflect.deleteProperty(globalThis, 'window')
   if (originalDocument) Object.defineProperty(globalThis, 'document', { configurable: true, value: originalDocument })
@@ -112,6 +151,52 @@ describe('ShellProvider shared actions', () => {
     expect(current.importActionLabel).toBe('Import recording')
     await act(async () => current.runImportAction())
     expect(openImportDialog).toHaveBeenCalledTimes(1)
+    await act(async () => renderer!.unmount())
+  })
+
+  test('shares one search owner and disables recording actions during finalization', async () => {
+    command = 'finalize'
+    isCommandPending = true
+    let renderer: ReturnType<typeof create>
+    await act(async () => { renderer = create(<ShellProvider><Probe /></ShellProvider>) })
+    expect(current.recordingActionLabel).toBe('Finishing meeting')
+    expect(current.recordingActionDisabled).toBe(true)
+    await act(async () => current.runRecordingAction())
+    expect(startRecording).not.toHaveBeenCalled()
+
+    await act(async () => current.setMeetingSearchQuery('roadmap'))
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 300)) })
+    expect(searchTranscripts).toHaveBeenLastCalledWith('roadmap')
+    await act(async () => renderer!.unmount())
+  })
+
+  test('keeps controller failures with the controller and retains navigation for retry', async () => {
+    startRecording.mockRejectedValueOnce(new Error('capture unavailable'))
+    let renderer: ReturnType<typeof create>
+    await act(async () => { renderer = create(<ShellProvider><Probe /></ShellProvider>) })
+    await expect(current.runRecordingAction()).resolves.toBeUndefined()
+
+    navigate.mockRejectedValueOnce(new Error('notes unsaved'))
+    await expect(current.navigate('/settings')).rejects.toThrow('notes unsaved')
+    await current.retryNavigation()
+    expect(navigate).toHaveBeenLastCalledWith('/settings')
+    await act(async () => renderer!.unmount())
+  })
+
+  test('keeps sidebar and library search inputs on one query', async () => {
+    let renderer: ReturnType<typeof create>
+    await act(async () => {
+      renderer = create(<ShellProvider><SimpleSidebar /><MeetingsLibrary /></ShellProvider>)
+    })
+    searchTranscripts.mockClear()
+    let inputs = renderer!.root.findAllByProps({ 'aria-label': 'Search meetings' })
+    expect(inputs).toHaveLength(2)
+    await act(async () => inputs[0].props.onChange({ target: { value: 'roadmap' } }))
+    inputs = renderer!.root.findAllByProps({ 'aria-label': 'Search meetings' })
+    expect(inputs.map((input) => input.props.value)).toEqual(['roadmap', 'roadmap'])
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 300)) })
+    expect(searchTranscripts).toHaveBeenCalledTimes(1)
+    expect(searchTranscripts).toHaveBeenCalledWith('roadmap')
     await act(async () => renderer!.unmount())
   })
 })
