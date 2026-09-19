@@ -126,7 +126,10 @@ export class MeetingActivityStore {
   private readonly clearIntervalFn: (timer: unknown) => void;
   private summaryPolls = new Map<string, SummaryPoll>();
   private summaryStarts = new Map<string, Promise<SummaryStartResult>>();
-  private summaryStartCancellations = new Map<string, Promise<boolean>>();
+  private summaryStartCancellations = new Map<string, {
+    start: Promise<SummaryStartResult>;
+    cancellation: Promise<boolean>;
+  }>();
   private summaryRequests = new Map<string, SummaryStartRequest>();
   private summaryRetries = new Map<string, () => Promise<SummaryStartResult>>();
   private nextSummaryAttempt = 0;
@@ -269,15 +272,17 @@ export class MeetingActivityStore {
     meetingId: string,
     startOperation: () => Promise<SummaryStartResult>,
   ): Promise<SummaryStartResult> {
-    const existingStart = this.summaryStarts.get(meetingId);
-    if (existingStart) {
-      const cancellation = this.summaryStartCancellations.get(meetingId);
-      if (!cancellation) return existingStart;
-      return cancellation.then(
-        (cancelled) => cancelled ? this.withSummaryStartLock(meetingId, startOperation) : existingStart,
-        () => existingStart,
+    const pendingCancellation = this.summaryStartCancellations.get(meetingId);
+    if (pendingCancellation) {
+      return pendingCancellation.cancellation.then(
+        (cancelled) => cancelled
+          ? this.withSummaryStartLock(meetingId, startOperation)
+          : pendingCancellation.start,
+        () => pendingCancellation.start,
       );
     }
+    const existingStart = this.summaryStarts.get(meetingId);
+    if (existingStart) return existingStart;
     const start = startOperation().finally(() => {
       if (this.summaryStarts.get(meetingId) === start) {
         this.summaryStarts.delete(meetingId);
@@ -331,17 +336,17 @@ export class MeetingActivityStore {
 
   cancelPendingSummaryStart = (meetingId: string): Promise<boolean> => {
     const existingCancellation = this.summaryStartCancellations.get(meetingId);
-    if (existingCancellation) return existingCancellation;
+    if (existingCancellation) return existingCancellation.cancellation;
     const pendingStart = this.summaryStarts.get(meetingId);
     if (!pendingStart) return Promise.resolve(false);
     const cancellation = pendingStart
       .then((result) => result.processId ? this.cancelSummary(meetingId, result.processId) : false)
       .finally(() => {
-        if (this.summaryStartCancellations.get(meetingId) === cancellation) {
+        if (this.summaryStartCancellations.get(meetingId)?.cancellation === cancellation) {
           this.summaryStartCancellations.delete(meetingId);
         }
       });
-    this.summaryStartCancellations.set(meetingId, cancellation);
+    this.summaryStartCancellations.set(meetingId, { start: pendingStart, cancellation });
     return cancellation;
   };
 

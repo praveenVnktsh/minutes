@@ -358,34 +358,40 @@ describe('MeetingActivityStore', () => {
     expect(timers.size).toBe(0);
   });
 
-  test('a start requested during pending cancellation waits for a distinct native process', async () => {
+  test('a start requested after start settles but before cancellation settles waits for a distinct process', async () => {
+    const firstProcess = '2026-09-18T10:00:00.123456700Z';
+    const secondProcess = '2026-09-18T10:00:00.123456789Z';
     const starts: Array<(value: { message: string; process_id: string }) => void> = [];
-    const cancellations: string[] = [];
+    let stored = summary('meeting-a', '', 'idle');
+    let resolveCancellation!: (value: { cancelled: boolean; message: string; meeting_id: string }) => void;
     const store = new MeetingActivityStore({
       service: { subscribe: async () => () => {} },
-      readSummary: async () => summary('meeting-a', '', 'idle'),
+      readSummary: async () => stored,
       startSummary: () => new Promise((resolve) => { starts.push(resolve); }),
-      cancelSummary: async (_meetingId, processId) => {
-        cancellations.push(processId);
-        return { cancelled: true, message: 'cancelled', meeting_id: 'meeting-a' };
-      },
+      cancelSummary: () => new Promise((resolve) => { resolveCancellation = resolve; }),
       setIntervalFn: (callback) => callback,
       clearIntervalFn: () => {},
     });
     const first = store.startSummary(request());
     await Promise.resolve();
     const cancellation = store.cancelPendingSummaryStart('meeting-a');
-    const second = store.startSummary({ ...request(), customPrompt: 'new request' });
+    stored = summary('meeting-a', firstProcess, 'processing');
+    starts[0]!({ message: 'started', process_id: firstProcess });
+    expect((await first).processId).toBe(firstProcess);
+    await Promise.resolve();
+    let secondSettled = false;
+    const second = store.startSummary({ ...request(), customPrompt: 'new request' })
+      .finally(() => { secondSettled = true; });
+    await Promise.resolve();
+    expect(secondSettled).toBe(false);
     expect(starts).toHaveLength(1);
 
-    starts[0]!({ message: 'started', process_id: 'process-a' });
-    await cancellation;
+    resolveCancellation({ cancelled: true, message: 'cancelled', meeting_id: 'meeting-a' });
+    expect(await cancellation).toBe(true);
     await Promise.resolve();
     expect(starts).toHaveLength(2);
-    starts[1]!({ message: 'started', process_id: 'process-b' });
+    starts[1]!({ message: 'started', process_id: secondProcess });
 
-    expect((await first).processId).toBe('process-a');
-    expect((await second).processId).toBe('process-b');
-    expect(cancellations).toEqual(['process-a']);
+    expect((await second).processId).toBe(secondProcess);
   });
 });
