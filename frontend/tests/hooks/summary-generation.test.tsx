@@ -46,6 +46,7 @@ mock.module('../../src/lib/analytics', () => ({ default: {
 } }));
 let startProcess: () => Promise<{ process_id: string }>;
 let getSummary: (meetingId: string) => Promise<SummaryProcessResponse>;
+let cancelProcess: () => Promise<{ cancelled: boolean }>;
 const invoke = mock(async (command: string, args?: Record<string, unknown>): Promise<unknown> => {
   if (command === 'api_get_meetings') return [];
   if (command === 'api_get_summary') return getSummary(args!.meetingId as string);
@@ -53,7 +54,7 @@ const invoke = mock(async (command: string, args?: Record<string, unknown>): Pro
   if (command === 'api_get_meeting_transcripts') return { transcripts: [{ text: 'Meeting transcript', timestamp: '00:00' }], total_count: 1 };
   if (command === 'get_ollama_models') return [{ name: 'test' }];
   if (command === 'api_process_transcript') return startProcess();
-  if (command === 'api_cancel_summary') return { cancelled: true };
+  if (command === 'api_cancel_summary') return cancelProcess();
   throw new Error(`Unexpected command: ${command}`);
 });
 mock.module('@tauri-apps/api/core', () => ({ invoke }));
@@ -101,6 +102,7 @@ beforeEach(() => {
   timers.clear(); notify.mockClear(); trackCompletion.mockClear(); invoke.mockClear();
   getSummary = async () => response();
   startProcess = async () => ({ process_id: 'attempt-a' });
+  cancelProcess = async () => ({ cancelled: true });
   globalThis.setInterval = ((callback: () => Promise<void>) => {
     const id = ++nextTimer; timers.set(id, callback); return id;
   }) as typeof setInterval;
@@ -288,7 +290,7 @@ describe('summary state restored when returning to a meeting', () => {
     await act(async () => { generation = state.handleGenerateSummary(); });
     let stopping!: Promise<void>;
     await act(async () => { stopping = state.handleStopGeneration(); });
-    expect(state.summaryStatus).toBe('idle');
+    expect(state.summaryStatus).toBe('processing');
 
     await act(async () => {
       resolve({ process_id: processId });
@@ -299,6 +301,32 @@ describe('summary state restored when returning to a meeting', () => {
       { meetingId: 'meeting-a', processId },
     ]);
     expect(timers.size).toBe(0);
+  });
+
+  test.each(['false', 'error'])('keeps observing when pending-start cancellation returns %s', async (outcome) => {
+    const processId = '2026-09-18T10:00:00.123456789Z';
+    let resolve!: (value: { process_id: string }) => void;
+    startProcess = () => new Promise(done => { resolve = done; });
+    cancelProcess = outcome === 'false'
+      ? async () => ({ cancelled: false })
+      : async () => { throw new Error('cancel unavailable'); };
+    getSummary = async () => response({ status: 'idle', start: null });
+    await show(response({ status: 'idle', start: null }));
+    let generation!: Promise<void>;
+    await act(async () => { generation = state.handleGenerateSummary(); });
+    let stopping!: Promise<void>;
+    await act(async () => { stopping = state.handleStopGeneration(); });
+
+    await act(async () => {
+      resolve({ process_id: processId });
+      await Promise.all([generation, stopping]);
+    });
+    expect(state.summaryStatus).toBe('processing');
+    expect(timers.size).toBe(1);
+
+    getSummary = async () => response({ start: processId, status: 'completed', data: { markdown: 'Finished summary' } });
+    await tick();
+    expect(state.summaryStatus).toBe('completed');
   });
 
   test('an older initial response follows the newer owner process', async () => {

@@ -126,6 +126,7 @@ export class MeetingActivityStore {
   private readonly clearIntervalFn: (timer: unknown) => void;
   private summaryPolls = new Map<string, SummaryPoll>();
   private summaryStarts = new Map<string, Promise<SummaryStartResult>>();
+  private summaryStartCancellations = new Map<string, Promise<boolean>>();
   private summaryRequests = new Map<string, SummaryStartRequest>();
   private summaryRetries = new Map<string, () => Promise<SummaryStartResult>>();
   private nextSummaryAttempt = 0;
@@ -269,7 +270,14 @@ export class MeetingActivityStore {
     startOperation: () => Promise<SummaryStartResult>,
   ): Promise<SummaryStartResult> {
     const existingStart = this.summaryStarts.get(meetingId);
-    if (existingStart) return existingStart;
+    if (existingStart) {
+      const cancellation = this.summaryStartCancellations.get(meetingId);
+      if (!cancellation) return existingStart;
+      return cancellation.then(
+        (cancelled) => cancelled ? this.withSummaryStartLock(meetingId, startOperation) : existingStart,
+        () => existingStart,
+      );
+    }
     const start = startOperation().finally(() => {
       if (this.summaryStarts.get(meetingId) === start) {
         this.summaryStarts.delete(meetingId);
@@ -321,11 +329,20 @@ export class MeetingActivityStore {
     return true;
   };
 
-  cancelPendingSummaryStart = async (meetingId: string): Promise<boolean> => {
+  cancelPendingSummaryStart = (meetingId: string): Promise<boolean> => {
+    const existingCancellation = this.summaryStartCancellations.get(meetingId);
+    if (existingCancellation) return existingCancellation;
     const pendingStart = this.summaryStarts.get(meetingId);
-    if (!pendingStart) return false;
-    const result = await pendingStart;
-    return result.processId ? this.cancelSummary(meetingId, result.processId) : false;
+    if (!pendingStart) return Promise.resolve(false);
+    const cancellation = pendingStart
+      .then((result) => result.processId ? this.cancelSummary(meetingId, result.processId) : false)
+      .finally(() => {
+        if (this.summaryStartCancellations.get(meetingId) === cancellation) {
+          this.summaryStartCancellations.delete(meetingId);
+        }
+      });
+    this.summaryStartCancellations.set(meetingId, cancellation);
+    return cancellation;
   };
 
   dismissSummary = (meetingId: string, processId?: string): void => {
@@ -418,14 +435,12 @@ export class MeetingActivityStore {
       error: status === 'failed' ? response.error ?? 'Summary generation failed.' : null,
       reconciliationError: null,
     });
-    for (const listener of [...poll.listeners]) {
-      try {
-        await listener(response);
-      } catch (error) {
-        console.error('Failed to handle summary update:', error);
-      }
-    }
     if (isSummaryTerminal(status)) this.stopSummaryPolling(poll.meetingId, poll.processId);
+    for (const listener of [...poll.listeners]) {
+      void Promise.resolve().then(() => listener(response)).catch((error: unknown) => {
+        console.error('Failed to handle summary update:', error);
+      });
+    }
   }
 
   private supersedeSummaryPoll(poll: SummaryPoll, authoritative: SummaryProcessResponse): void {

@@ -111,6 +111,7 @@ export function useSummaryGeneration({
   visibleMeetingIdRef.current = meeting.id;
   const generationIdRef = useRef(0);
   const activeProcessIdRef = useRef<string | null>(null);
+  const pendingNativeStartGenerationRef = useRef<number | null>(null);
   const pollSubscriptionRef = useRef<(() => void) | null>(null);
   const trackedAttemptRef = useRef<{
     generationId: number;
@@ -385,18 +386,26 @@ export function useSummaryGeneration({
         return;
       }
 
-      const result = await startSummary({
-        text: transcriptText,
-        model: effectiveModelConfig.provider,
-        modelName: effectiveModelConfig.model,
-        meetingId: meeting.id,
-        chunkSize: 40000,
-        overlap: 1000,
-        customPrompt,
-        templateId: selectedTemplate,
-        summaryLanguage,
-        replaceExisting: isRegeneration,
-      });
+      pendingNativeStartGenerationRef.current = generationId;
+      let result: Awaited<ReturnType<typeof startSummary>>;
+      try {
+        result = await startSummary({
+          text: transcriptText,
+          model: effectiveModelConfig.provider,
+          modelName: effectiveModelConfig.model,
+          meetingId: meeting.id,
+          chunkSize: 40000,
+          overlap: 1000,
+          customPrompt,
+          templateId: selectedTemplate,
+          summaryLanguage,
+          replaceExisting: isRegeneration,
+        });
+      } finally {
+        if (pendingNativeStartGenerationRef.current === generationId) {
+          pendingNativeStartGenerationRef.current = null;
+        }
+      }
       const processId = result.processId;
       if (!processId) {
         if (result.response) await handlePollingResult(result.response, generationId, isRegeneration);
@@ -566,23 +575,48 @@ export function useSummaryGeneration({
     const generationId = generationIdRef.current;
     const processId = activeProcessIdRef.current;
     if (!processId) {
+      if (pendingNativeStartGenerationRef.current !== generationId) {
+        generationIdRef.current += 1;
+        activeProcessIdRef.current = null;
+        setSummaryStatus('idle');
+        setSummaryError(null);
+        await finishGeneration(generationId, 'cancelled');
+        toast.info('Summary generation stopped', {
+          description: 'You can generate a new summary anytime',
+          duration: 3000,
+        });
+        return;
+      }
       const cancellation = cancelPendingSummaryStart(meeting.id);
-      generationIdRef.current += 1;
-      activeProcessIdRef.current = null;
-      setSummaryStatus('idle');
-      setSummaryError(null);
-      await finishGeneration(generationId, 'cancelled');
-      toast.info('Summary generation stopped', {
-        description: 'You can generate a new summary anytime',
-        duration: 3000,
-      });
       try {
-        await cancellation;
+        const cancelled = await cancellation;
+        if (!mountedRef.current || visibleMeetingIdRef.current !== meeting.id) return;
+        if (cancelled && generationId === generationIdRef.current) {
+          generationIdRef.current += 1;
+          activeProcessIdRef.current = null;
+          pollSubscriptionRef.current?.();
+          pollSubscriptionRef.current = null;
+          setSummaryStatus('idle');
+          setSummaryError(null);
+          await finishGeneration(generationId, 'cancelled');
+          toast.info('Summary generation stopped', {
+            description: 'You can generate a new summary anytime',
+            duration: 3000,
+          });
+        } else if (!cancelled && generationId === generationIdRef.current) {
+          toast.info('Summary is already finishing', {
+            description: 'Waiting for the latest result.',
+          });
+        }
       } catch (error) {
         console.error('Failed to cancel summary generation after it started:', error);
-        if (mountedRef.current && visibleMeetingIdRef.current === meeting.id) {
+        if (
+          mountedRef.current
+          && visibleMeetingIdRef.current === meeting.id
+          && generationId === generationIdRef.current
+        ) {
           toast.error('Failed to stop summary generation', {
-            description: 'Generation may still be running in the background.',
+            description: 'Generation is still running; waiting for its latest status.',
           });
         }
       }
@@ -599,6 +633,9 @@ export function useSummaryGeneration({
         activeProcessIdRef.current = null;
         pollSubscriptionRef.current?.();
         pollSubscriptionRef.current = null;
+        setSummaryStatus('idle');
+        setSummaryError(null);
+        await finishGeneration(generationId, 'cancelled');
         toast.info('Summary generation stopped', {
           description: 'You can generate a new summary anytime',
           duration: 3000,
