@@ -9,7 +9,7 @@ export const THEMED_TOAST_VARIABLES = {
   '--normal-bg': 'var(--surface-raised)',
   '--normal-bg-hover': 'var(--surface-2)',
   '--normal-border': 'var(--hairline)',
-  '--normal-border-hover': 'var(--input)',
+  '--normal-border-hover': 'hsl(var(--input))',
   '--normal-text': 'var(--ink)',
   '--success-bg': 'var(--success-subtle)',
   '--success-border': 'var(--success)',
