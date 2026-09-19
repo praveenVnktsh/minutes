@@ -227,4 +227,50 @@ describe('useCopyOperations', () => {
     const save = invoke.mock.calls.find(([command]) => command === 'save_text_export');
     expect((save?.[1] as { contents: string }).contents).toContain('Unsaved live note');
   });
+
+  test('exports an intentionally cleared current enhanced document without restoring stale content', async () => {
+    const staleSummary: MeetingSummary = { markdown: 'Stale enhanced content' };
+    const saveSummary = mock(async () => {});
+    await act(async () => {
+      renderer!.update(<Probe
+        summary={staleSummary}
+        summaryRef={{
+          isDirty: true,
+          saveSummary,
+          getMarkdown: async () => { throw new Error('legacy API should not be called'); },
+          getMarkdownResult: async () => ({ ok: true, markdown: '', empty: true }),
+          getCurrentBlocks: () => [],
+        }}
+      />);
+    });
+
+    await act(async () => { await operations.handleExportMarkdown(); });
+    const save = invoke.mock.calls.find(([command]) => command === 'save_text_export');
+    expect(save).toBeDefined();
+    expect((save?.[1] as { contents: string }).contents).not.toContain('Stale enhanced content');
+    expect(saveSummary).not.toHaveBeenCalled();
+    expect(success).toHaveBeenCalledTimes(1);
+  });
+
+  test('aborts export when current enhanced document conversion fails', async () => {
+    const saveSummary = mock(async () => {});
+    await act(async () => {
+      renderer!.update(<Probe
+        summary={{ markdown: 'Stale enhanced content' }}
+        summaryRef={{
+          isDirty: false,
+          saveSummary,
+          getMarkdown: async () => 'stale',
+          getMarkdownResult: async () => ({ ok: false, error: new Error('conversion failed') }),
+          getCurrentBlocks: () => [],
+        }}
+      />);
+    });
+
+    await act(async () => { await operations.handleExportMarkdown(); });
+    expect(invoke.mock.calls.some(([command]) => command === 'save_text_export')).toBe(false);
+    expect(success).not.toHaveBeenCalled();
+    expect(saveSummary).not.toHaveBeenCalled();
+    expect(errorToast).toHaveBeenCalledWith('Failed to export meeting');
+  });
 });

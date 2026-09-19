@@ -58,18 +58,21 @@ export function useCopyOperations({
     const editor = blockNoteSummaryRef.current;
     const storedMarkdown = storedSummaryMarkdown(aiSummary);
     if (editor) {
-      const wasDirty = editor.isDirty;
-      if (wasDirty) await editor.saveSummary();
-      const editorMarkdown = (await editor.getMarkdown()).trim();
-      if (editorMarkdown) return editorMarkdown;
-      if (!storedMarkdown) return '';
+      if (editor.getMarkdownResult) {
+        const result = await editor.getMarkdownResult();
+        if (!result.ok) throw result.error;
+        if (editor.isDirty && !result.empty) await editor.saveSummary();
+        return result.markdown;
+      }
+      if (editor.isDirty) await editor.saveSummary();
+      const markdown = (await editor.getMarkdown()).trim();
+      if (markdown) return markdown;
       const isLegacySummary = aiSummary !== null
         && !('markdown' in aiSummary)
         && !('summary_json' in aiSummary);
       if (isLegacySummary) return storedMarkdown;
-      throw new Error(wasDirty
-        ? 'Could not read the saved enhanced notes from the editor'
-        : 'Could not convert the enhanced notes from the editor');
+      if (!storedMarkdown) return '';
+      throw new Error('Could not convert the enhanced notes from the editor');
     }
     return storedMarkdown;
   }, [aiSummary, blockNoteSummaryRef]);

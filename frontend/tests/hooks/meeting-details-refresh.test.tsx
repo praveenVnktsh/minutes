@@ -26,9 +26,12 @@ afterAll(() => {
 });
 
 let selectedMeeting = 'meeting-a';
+let includeFakeRecordingFlags = false;
 mock.module('next/navigation', () => ({
   usePathname: () => '/meeting-details', useRouter: () => ({}),
-  useSearchParams: () => new URLSearchParams({ id: selectedMeeting }),
+  useSearchParams: () => new URLSearchParams(includeFakeRecordingFlags
+    ? { id: selectedMeeting, recording: '1', source: 'recording', transcribing: '1' }
+    : { id: selectedMeeting }),
 }));
 mock.module('../../src/contexts/RecordingStateContext', () => ({ useRecordingState: () => ({ isRecording: false }) }));
 mock.module('../../src/contexts/ConfigContext', () => ({ useConfig: () => ({
@@ -77,7 +80,9 @@ const { useMeetingData } = await import('../../src/hooks/meeting-details/useMeet
 let summaryState: ReturnType<typeof useSummaryGeneration>;
 let refresh: () => Promise<void>;
 let mounts = 0;
+let latestPageProps: Record<string, unknown> = {};
 function SummaryView(props: any) {
+  latestPageProps = props;
   const data = useMeetingData(props);
   summaryState = useSummaryGeneration({
     meeting: props.meeting, initialSummary: props.initialSummary, transcripts: data.transcripts,
@@ -98,6 +103,7 @@ const realSetInterval = globalThis.setInterval;
 const realClearInterval = globalThis.clearInterval;
 beforeEach(() => {
   selectedMeeting = 'meeting-a';
+  includeFakeRecordingFlags = false;
   readMetadata = async id => metadata(id);
   readTranscripts = async () => transcriptPage;
   savedSummary = { meeting_id: selectedMeeting, status: 'pending', start: 'attempt-a', end: null, data: null, error: null, meetingName: 'Meeting A' };
@@ -138,6 +144,14 @@ function deferMetadata() {
 }
 
 describe('meeting route transcript refresh', () => {
+  test('does not pass URL recording hints into workspace state', async () => {
+    includeFakeRecordingFlags = true;
+    await show();
+    expect(latestPageProps.arrivedRecording).toBeUndefined();
+    expect(latestPageProps.arrivedTranscribing).toBeUndefined();
+    expect(latestPageProps.expectSummary).toBeUndefined();
+  });
+
   test('navigation waits for the new meeting first transcript page before mounting its view', async () => {
     await show();
     await complete('Summary A', 'attempt-a');

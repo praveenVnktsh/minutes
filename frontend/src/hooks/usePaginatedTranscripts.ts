@@ -44,7 +44,7 @@ function convertTranscriptsToSegments(transcripts: Transcript[]): TranscriptSegm
 
 export function usePaginatedTranscripts({
     meetingId,
-    initialTimestamp,
+    initialTimestamp: _initialTimestamp,
 }: UsePaginatedTranscriptsProps): UsePaginatedTranscriptsReturn {
     const [metadata, setMetadata] = useState<MeetingMetadata | null>(null);
     const [transcripts, setTranscripts] = useState<Transcript[]>([]);
@@ -148,9 +148,8 @@ export function usePaginatedTranscripts({
         }
     }, [meetingId, isCurrentRequest]);
 
-    // Load the entire transcript in one pass so the scrollbar reflects the full
-    // meeting instead of growing as you scroll. The query is cheap and the list
-    // is virtualized, so this is safe even for long meetings.
+    // Load every bounded page. Besides avoiding oversized native reads, this keeps
+    // search truthful for matches beyond the first 100 rows.
     const loadAllTranscripts = useCallback(async (requestId: number): Promise<void> => {
         if (!meetingId || !isCurrentRequest(requestId)) return;
 
@@ -162,16 +161,24 @@ export function usePaginatedTranscripts({
             if (!isCurrentRequest(requestId)) return;
 
             const total = first.total_count;
-            let all = first.transcripts;
-
-            // Fetch the remainder in a single call rather than paging on scroll.
-            if (total > all.length) {
-                const full = await invoke<PaginatedTranscriptsResponse>(
+            const all = [...first.transcripts];
+            let offset = first.transcripts.length;
+            if (offset < total && !first.has_more) {
+                throw new Error('Transcript pagination ended before all rows were loaded');
+            }
+            while (offset < total) {
+                const page = await invoke<PaginatedTranscriptsResponse>(
                     'api_get_meeting_transcripts',
-                    { meetingId, limit: total, offset: 0 }
+                    { meetingId, limit: DEFAULT_PAGE_SIZE, offset }
                 );
                 if (!isCurrentRequest(requestId)) return;
-                all = full.transcripts;
+                if (page.transcripts.length === 0) throw new Error('Transcript pagination ended before all rows were loaded');
+                const known = new Set(all.map((item) => item.id));
+                const unique = page.transcripts.filter((item) => !known.has(item.id));
+                if (unique.length !== page.transcripts.length) throw new Error('Transcript pagination returned duplicate rows');
+                all.push(...unique);
+                offset += page.transcripts.length;
+                if (!page.has_more && offset < total) throw new Error('Transcript pagination ended before all rows were loaded');
             }
 
             const sorted = [...all].sort(

@@ -9,6 +9,7 @@ import { toast } from 'sonner';
 import { ModelConfig, ModelSettingsModal } from '@/components/ModelSettingsModal';
 import { Dialog, DialogContent, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { VisuallyHidden } from '@/components/ui/visually-hidden';
+import { useConfig } from '@/contexts/ConfigContext';
 
 interface ChatMessage {
   id: string;
@@ -23,6 +24,10 @@ interface AssistantResponse {
   transcriptEditsApplied: number;
 }
 
+const pendingChats = new Map<string, Promise<AssistantResponse>>();
+const pendingChatInputs = new Map<string, string>();
+const chatErrors = new Map<string, string>();
+
 const STARTERS = [
   'What decisions did we make?',
   'Turn this into clear action items',
@@ -32,22 +37,20 @@ const STARTERS = [
 export function MeetingAssistantPanel({
   meetingId,
   modelConfig,
-  setModelConfig,
-  onSaveModelConfig,
   onNotesUpdated,
   onTranscriptUpdated,
 }: {
   meetingId: string;
   modelConfig: ModelConfig;
-  setModelConfig: (config: ModelConfig | ((previous: ModelConfig) => ModelConfig)) => void;
-  onSaveModelConfig: (config?: ModelConfig) => Promise<void>;
   onNotesUpdated: (markdown: string) => void;
   onTranscriptUpdated?: () => Promise<void>;
 }) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [isSending, setIsSending] = useState(false);
+  const [sendError, setSendError] = useState<string | null>(() => chatErrors.get(meetingId) ?? null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const { isModelConfigSaving } = useConfig();
   const endRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -55,6 +58,21 @@ export function MeetingAssistantPanel({
     invoke<ChatMessage[]>('get_meeting_chat', { meetingId })
       .then((result) => { if (!cancelled) setMessages(result); })
       .catch((error) => console.warn('Could not load meeting chat:', error));
+    const pending = pendingChats.get(meetingId);
+    if (pending) {
+      setIsSending(true);
+      void pending.then(async () => {
+        const result = await invoke<ChatMessage[]>('get_meeting_chat', { meetingId });
+        if (!cancelled) setMessages(result);
+      }).catch((error) => {
+        if (!cancelled) {
+          setSendError(String(error));
+          setInput(pendingChatInputs.get(meetingId) ?? '');
+        }
+      }).finally(() => {
+        if (!cancelled) setIsSending(false);
+      });
+    }
     return () => { cancelled = true; };
   }, [meetingId]);
 
@@ -75,8 +93,13 @@ export function MeetingAssistantPanel({
     setMessages((current) => [...current, optimistic]);
     setInput('');
     setIsSending(true);
+    setSendError(null);
+    chatErrors.delete(meetingId);
     try {
-      const response = await invoke<AssistantResponse>('chat_with_meeting', { meetingId, message: content });
+      const request = invoke<AssistantResponse>('chat_with_meeting', { meetingId, message: content });
+      pendingChats.set(meetingId, request);
+      pendingChatInputs.set(meetingId, content);
+      const response = await request;
       setMessages((current) => [...current.filter((item) => item.id !== optimistic.id), optimistic, response.message]);
       if (response.notesMarkdown) onNotesUpdated(response.notesMarkdown);
       if (response.transcriptEditsApplied > 0) {
@@ -86,10 +109,14 @@ export function MeetingAssistantPanel({
         toast.success('Enhanced notes updated');
       }
     } catch (error) {
+      chatErrors.set(meetingId, String(error));
+      setSendError(String(error));
       setMessages((current) => current.filter((item) => item.id !== optimistic.id));
       setInput(content);
       toast.error('The meeting assistant could not respond', { description: String(error) });
     } finally {
+      pendingChats.delete(meetingId);
+      pendingChatInputs.delete(meetingId);
       setIsSending(false);
     }
   };
@@ -108,7 +135,7 @@ export function MeetingAssistantPanel({
           <h2 className="text-sm font-semibold text-ink">AI chat</h2>
           <p className="mt-0.5 text-[11px] text-[var(--ink-subtle)]">Works across notes and transcript</p>
         </div>
-        <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
+        <Dialog open={settingsOpen} onOpenChange={(open) => { if (!isModelConfigSaving) setSettingsOpen(open); }}>
           <DialogTrigger asChild>
             <button type="button" className="flex h-8 max-w-[180px] items-center gap-1 rounded-full bg-surface-2 px-3 text-[11px] text-ink-muted hover:bg-surface-raised" title="Choose AI model">
               <span className="truncate">{modelConfig.model || 'Choose model'}</span>
@@ -118,13 +145,8 @@ export function MeetingAssistantPanel({
           <DialogContent aria-describedby={undefined}>
             <VisuallyHidden><DialogTitle>AI model settings</DialogTitle></VisuallyHidden>
             <ModelSettingsModal
-              onSave={async (config) => {
-                await onSaveModelConfig(config);
-                setSettingsOpen(false);
-              }}
-              modelConfig={modelConfig}
-              setModelConfig={setModelConfig}
-              skipInitialFetch={true}
+              onCommitted={() => setSettingsOpen(false)}
+              onCancel={() => setSettingsOpen(false)}
               layout="dialog"
             />
           </DialogContent>
@@ -163,6 +185,7 @@ export function MeetingAssistantPanel({
               <Sparkles className="h-4 w-4 animate-pulse" /> Working across the meeting…
             </div>
           )}
+          {sendError && <p role="alert" className="text-xs text-error">The meeting assistant could not respond: {sendError}</p>}
           <div ref={endRef} />
         </div>
       </div>

@@ -128,12 +128,38 @@ describe('paginated transcript request ownership', () => {
 
     expect(state.hasMore).toBe(false);
     expect(state.isLoading).toBe(false);
-    expect(state.transcripts.map(t => t.text)).toEqual(['A second']);
+    expect(state.transcripts.map(t => t.text)).toEqual(['A first', 'A second']);
 
     // Nothing left to page in, so scrolling must not trigger another IPC call.
     const calls = requests.length;
     await act(async () => { void state.loadMore(); });
     expect(requests.length).toBe(calls);
+  });
+
+  test('loads and retains matches beyond the first 100 rows without duplicates', async () => {
+    await show('long');
+    await resolve(request('metadata', 'long'), metadata('long'));
+    const firstPage: PaginatedTranscriptsResponse = {
+      transcripts: Array.from({ length: 100 }, (_, index) => ({
+        id: `row-${index}`,
+        text: `Row ${index}`,
+        timestamp: '00:00',
+        audio_start_time: index,
+      })),
+      total_count: 101,
+      has_more: true,
+    };
+    await resolve(request('transcripts', 'long', 0), firstPage);
+    expect(request('transcripts', 'long', 1).args.offset).toBe(100);
+    await resolve(request('transcripts', 'long', 1), {
+      transcripts: [{ id: 'row-100', text: 'Needle after page one', timestamp: '01:40', audio_start_time: 100 }],
+      total_count: 101,
+      has_more: false,
+    });
+
+    expect(state.transcripts).toHaveLength(101);
+    expect(state.transcripts[100].text).toBe('Needle after page one');
+    expect(new Set(state.transcripts.map((item) => item.id)).size).toBe(101);
   });
 
   test('a stale full load cannot replace the current meeting transcripts', async () => {

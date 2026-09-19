@@ -32,6 +32,8 @@ interface BlockNoteSummaryViewProps {
 export interface BlockNoteSummaryViewRef {
   saveSummary: () => Promise<void>;
   getMarkdown: () => Promise<string>;
+  getMarkdownResult?: () => Promise<{ ok: true; markdown: string; empty: boolean } | { ok: false; error: unknown }>;
+  getCurrentBlocks?: () => BlockNoteBlock[];
   isDirty: boolean;
 }
 
@@ -79,7 +81,7 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
   const { format, data } = detectSummaryFormat(summaryData);
   const [isDirty, setIsDirty] = useState(false);
   const [currentBlocks, setCurrentBlocks] = useState<Block[]>([]);
-  const [isSaving, setIsSaving] = useState(false);
+  const [hasCurrentDocument, setHasCurrentDocument] = useState(false);
   const isContentLoaded = useRef(false);
   const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout>>();
 
@@ -124,6 +126,7 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
     // Only set dirty flag if content has finished loading
     if (isContentLoaded.current) {
       setCurrentBlocks(blocks);
+      setHasCurrentDocument(true);
       setIsDirty(true);
     }
   }, []);
@@ -138,7 +141,6 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
   const handleSave = useCallback(async () => {
     if (!onSave || !isDirty) return;
 
-    setIsSaving(true);
     try {
       console.log('💾 Saving BlockNote content...');
 
@@ -161,8 +163,6 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
     } catch (error) {
       console.error('❌ Save failed:', error);
       throw error;
-    } finally {
-      setIsSaving(false);
     }
   }, [onSave, isDirty, currentBlocks, editor]);
 
@@ -201,55 +201,37 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
   // Expose methods to parent via ref
   useImperativeHandle(ref, () => ({
     saveSummary: handleSave,
-    getMarkdown: async () => {
-      try {
-        console.log('🔍 getMarkdown called, format:', format);
-        console.log('🔍 currentBlocks length:', currentBlocks.length);
-        console.log('🔍 data:', data);
-
-        // For markdown format - use the main editor
-        if (format === 'markdown' && editor) {
-          console.log('📝 Using markdown editor, blocks:', editor.document.length);
-          const markdownResult = await blocksToMarkdownSafely(editor, editor.document, {
-            source: 'BlockNoteSummaryView.getMarkdown.markdown',
-            fallbackMarkdown: data?.markdown,
-          });
-          console.log('📝 Generated markdown length:', markdownResult.markdown?.length || 0);
-          return markdownResult.markdown || '';
-        }
-
-        // For blocknote format - use currentBlocks state
-        if (format === 'blocknote') {
-          console.log('📝 BlockNote format, currentBlocks:', currentBlocks.length);
-          const blocks = currentBlocks.length > 0
-            ? currentBlocks
-            : (data?.summary_json as unknown as Block[] | undefined) || [];
-
-          if (blocks.length > 0 && editor) {
-            const markdownResult = await blocksToMarkdownSafely(editor, blocks, {
-              source: 'BlockNoteSummaryView.getMarkdown.blocknote',
-              fallbackMarkdown: data?.markdown,
-            });
-            console.log('📝 Generated markdown from blocks, length:', markdownResult.markdown?.length || 0);
-            return markdownResult.markdown || '';
-          }
-          // Fallback: if we have the original data with markdown
-          if (data?.markdown) {
-            console.log('📝 Using fallback markdown from data');
-            return data.markdown;
-          }
-        }
-
-        // For legacy format - return empty (handled by parent)
-        console.warn('⚠️ Cannot generate markdown for legacy format, returning empty');
-        return '';
-      } catch (err) {
-        console.error('❌ Failed to generate markdown:', err);
-        return '';
+    getMarkdownResult: async () => {
+      if (format === 'legacy') return { ok: true, markdown: '', empty: true };
+      const blocks = format === 'markdown'
+        ? editor.document
+        : hasCurrentDocument
+          ? currentBlocks
+          : (data?.summary_json as unknown as Block[] | undefined) || [];
+      const result = await blocksToMarkdownSafely(editor, blocks, {
+        source: 'BlockNoteSummaryView.getMarkdownResult',
+      });
+      if (!result.ok || result.markdown === undefined) {
+        return { ok: false, error: new Error('Could not convert the current enhanced notes to Markdown') };
       }
+      return { ok: true, markdown: result.markdown, empty: result.markdown.trim().length === 0 };
     },
+    getMarkdown: async () => {
+      const blocks = format === 'markdown'
+        ? editor.document
+        : hasCurrentDocument
+          ? currentBlocks
+          : (data?.summary_json as unknown as Block[] | undefined) || [];
+      if (format === 'legacy') return '';
+      const result = await blocksToMarkdownSafely(editor, blocks, { source: 'BlockNoteSummaryView.getMarkdown' });
+      if (!result.ok || result.markdown === undefined) throw new Error('Could not convert the current enhanced notes to Markdown');
+      return result.markdown;
+    },
+    getCurrentBlocks: () => (format === 'markdown' ? editor.document : hasCurrentDocument
+      ? currentBlocks
+      : (data?.summary_json as unknown as Block[] | undefined) || []) as unknown as BlockNoteBlock[],
     isDirty
-  }), [handleSave, isDirty, editor, format, currentBlocks, data]);
+  }), [handleSave, isDirty, editor, format, currentBlocks, data, hasCurrentDocument]);
 
   // Render legacy format
   if (format === 'legacy') {
