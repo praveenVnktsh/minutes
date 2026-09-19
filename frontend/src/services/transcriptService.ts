@@ -45,7 +45,7 @@ export interface TranscriptHistorySegment {
 export class TranscriptService {
   /**
    * Get transcript history from backend (for reload sync)
-   * @returns Promise<Transcript[]>
+   * @returns Native transcript segments for the active or requested completed session
    */
   async getTranscriptHistory(sessionId?: string): Promise<TranscriptHistorySegment[]> {
     return invoke<TranscriptHistorySegment[]>(

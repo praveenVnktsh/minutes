@@ -128,8 +128,8 @@ impl StoppingGuard {
 #[cfg(test)]
 mod lifecycle_tests {
     use super::{
-        CompletedTranscriptHistory, StoppingGuard, COMPLETED_TRANSCRIPT_HISTORY_LIMIT,
-        IS_RECORDING_STOPPING,
+        completed_snapshot_after_success, CompletedTranscriptHistory, StoppingGuard,
+        COMPLETED_TRANSCRIPT_HISTORY_LIMIT, IS_RECORDING_STOPPING,
     };
     use std::sync::atomic::Ordering;
 
@@ -203,6 +203,21 @@ mod lifecycle_tests {
                 .unwrap()[0]
                 .sequence_id,
             COMPLETED_TRANSCRIPT_HISTORY_LIMIT as u64
+        );
+    }
+
+    #[test]
+    fn failed_native_completion_cannot_publish_transcript_history() {
+        assert!(completed_snapshot_after_success(
+            &Some("save failed".to_string()),
+            Some(vec![segment(4)]),
+        )
+        .is_none());
+        assert_eq!(
+            completed_snapshot_after_success(&None, Some(vec![segment(4)]))
+                .unwrap()[0]
+                .sequence_id,
+            4
         );
     }
 }
@@ -327,6 +342,13 @@ fn store_transcript_segment(segment: crate::audio::recording_saver::TranscriptSe
             }
         }
     }
+}
+
+fn completed_snapshot_after_success(
+    terminal_error: &Option<String>,
+    segments: Option<Vec<crate::audio::recording_saver::TranscriptSegment>>,
+) -> Option<Vec<crate::audio::recording_saver::TranscriptSegment>> {
+    terminal_error.is_none().then_some(segments).flatten()
 }
 
 // Listener ID for proper cleanup - prevents microphone from staying active after recording stops
@@ -1411,37 +1433,36 @@ async fn stop_recording_session<R: Runtime>(
             let meeting_folder = manager.get_meeting_folder();
             let meeting_name = manager.get_meeting_name();
 
-            let save_error = match tokio::time::timeout(
+            let (save_error, completed_transcripts) = match tokio::time::timeout(
                 tokio::time::Duration::from_secs(300), // 5 minutes max for file I/O
                 manager.save_recording_only(&app),
             )
             .await
             {
-                Ok(Ok(_)) => {
+                Ok(Ok(completed_transcripts)) => {
                     info!("✅ Recording data saved successfully during cleanup");
-                    None
+                    (None, Some(completed_transcripts))
                 }
                 Ok(Err(e)) => {
                     warn!(
                         "⚠️ Error during recording cleanup (transcripts preserved): {}",
                         e
                     );
-                    Some(format!("Failed to save recording: {e}"))
+                    (Some(format!("Failed to save recording: {e}")), None)
                 }
                 Err(_) => {
                     warn!(
                         "⏱️ File I/O timeout (5 minutes) reached during save, continuing shutdown"
                     );
-                    Some("Timed out while saving recording".to_string())
+                    (Some("Timed out while saving recording".to_string()), None)
                 }
             };
 
-            let completed_transcripts = manager.get_transcript_segments();
             (
                 meeting_folder,
                 meeting_name,
                 save_error,
-                Some(completed_transcripts),
+                completed_transcripts,
             )
         } else {
             info!("ℹ️ No recording manager available for cleanup");
@@ -1463,13 +1484,11 @@ async fn stop_recording_session<R: Runtime>(
         .or(transcription_error)
         .or(save_error)
         .or(capture_error);
-    if terminal_error.is_none() {
-        if let Some(segments) = completed_transcripts {
-            COMPLETED_TRANSCRIPT_HISTORY
-                .lock()
-                .unwrap()
-                .publish(session_id.clone(), segments);
-        }
+    if let Some(segments) = completed_snapshot_after_success(&terminal_error, completed_transcripts) {
+        COMPLETED_TRANSCRIPT_HISTORY
+            .lock()
+            .unwrap()
+            .publish(session_id.clone(), segments);
     }
     crate::meeting_activity::finish_recording(&app, &session_id, terminal_error.clone());
     // IS_RECORDING_STOPPING is cleared by _stopping_guard on scope exit.

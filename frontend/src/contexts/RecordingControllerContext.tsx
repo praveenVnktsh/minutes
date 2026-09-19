@@ -678,7 +678,7 @@ export function RecordingControllerProvider({ children }: { children: React.Reac
             if (!recoveryMeetingId) throw new Error('The recovery draft identity is unavailable.');
             session.recoveryMeetingId = recoveryMeetingId;
             checkpointFinalization(session, finalization, sessionsRef.current);
-            await indexedDBService.markMeetingSaved(recoveryMeetingId);
+            await indexedDBService.markMeetingSavedStrict(recoveryMeetingId);
             finalization.markedSaved = true;
             checkpointFinalization(session, finalization, sessionsRef.current);
           }
@@ -742,7 +742,7 @@ export function RecordingControllerProvider({ children }: { children: React.Reac
           if (!recoveryMeetingId) throw new Error('The recovery draft identity is unavailable.');
           session.recoveryMeetingId = recoveryMeetingId;
           checkpointFinalization(session, finalization, sessionsRef.current);
-          await indexedDBService.markMeetingSaved(recoveryMeetingId);
+          await indexedDBService.markMeetingSavedStrict(recoveryMeetingId);
           finalization.markedSaved = true;
           checkpointFinalization(session, finalization, sessionsRef.current);
         }

@@ -45,7 +45,8 @@ const indexedDBService = {
   getAllMeetings: mock(async () => allMeetings),
   getMeetingMetadata: mock(async () => meetingMetadata),
   getTranscripts: mock(async () => meetingTranscripts),
-  markMeetingSaved: mock(async () => {}),
+  getTranscriptsStrict: mock(async () => meetingTranscripts),
+  markMeetingSavedStrict: mock(async () => {}),
 };
 const saveMeeting = mock(async (
   _title: string,
@@ -96,7 +97,8 @@ beforeEach(() => {
   indexedDBService.getAllMeetings.mockClear();
   indexedDBService.getMeetingMetadata.mockClear();
   indexedDBService.getTranscripts.mockClear();
-  indexedDBService.markMeetingSaved.mockClear();
+  indexedDBService.getTranscriptsStrict.mockClear();
+  indexedDBService.markMeetingSavedStrict.mockClear();
   applyPinnedSummaryLanguageToMeeting.mockClear();
   toast.success.mockClear();
   meetingMetadata = null;
@@ -180,7 +182,7 @@ describe('recoverMeeting for an audio-only meeting', () => {
     expect((error as Error).message).toContain('Audio recovery failed');
     expect(saveMeeting).not.toHaveBeenCalled();
     expect(commands()).not.toContain('cleanup_checkpoints');
-    expect(indexedDBService.markMeetingSaved).not.toHaveBeenCalled();
+    expect(indexedDBService.markMeetingSavedStrict).not.toHaveBeenCalled();
     expect(state.recoverableMeetings.map(m => m.meetingId)).toEqual(['meeting-audio']);
   });
 
@@ -222,7 +224,7 @@ describe('recoverMeeting integrity', () => {
     audioRecoveryResult = {
       status: 'success', chunk_count: 2, estimated_duration_seconds: 60, message: 'recovered',
     };
-    indexedDBService.getTranscripts.mockImplementationOnce(async () => {
+    indexedDBService.getTranscriptsStrict.mockImplementationOnce(async () => {
       throw new Error('IndexedDB temporarily unavailable');
     });
     await mount();
@@ -230,7 +232,7 @@ describe('recoverMeeting integrity', () => {
     await act(async () => { await state.recoverMeeting('meeting-transcript').catch(() => {}); });
 
     expect(saveMeeting).not.toHaveBeenCalled();
-    expect(indexedDBService.markMeetingSaved).not.toHaveBeenCalled();
+    expect(indexedDBService.markMeetingSavedStrict).not.toHaveBeenCalled();
     expect(commands()).not.toContain('cleanup_checkpoints');
   });
 
@@ -253,7 +255,7 @@ describe('recoverMeeting integrity', () => {
       expect(saveMeeting).toHaveBeenCalledWith(
         'Transcript and audio', expect.any(Array), '/recordings/transcript', false, null,
       );
-      expect(indexedDBService.markMeetingSaved).not.toHaveBeenCalled();
+      expect(indexedDBService.markMeetingSavedStrict).not.toHaveBeenCalled();
       expect(commands()).not.toContain('cleanup_checkpoints');
       expect(state.recoverableMeetings.map((meeting) => meeting.meetingId)).toEqual(['meeting-transcript']);
     });
@@ -276,7 +278,7 @@ describe('recoverMeeting integrity', () => {
     expect(saveMeeting.mock.calls[0]?.[4]).toBe('bound-sqlite-row');
   });
 
-  test('reuses the first saved row when retrying a partial audio recovery', async () => {
+  test('reuses the first saved row after remounting a partial audio recovery', async () => {
     meetingMetadata = transcriptMeeting;
     meetingTranscripts = [transcript];
     audioRecoveryResult = {
@@ -284,13 +286,20 @@ describe('recoverMeeting integrity', () => {
     };
     await mount();
     await act(async () => { await state.recoverMeeting('meeting-transcript'); });
+    expect(JSON.parse(sessionStorage.getItem('transcript_recovery_row_ids')!)).toEqual({
+      'meeting-transcript': 'saved-meeting',
+    });
+    await act(async () => renderer!.unmount());
+    renderer = undefined;
     audioRecoveryResult = {
       status: 'success', chunk_count: 2, estimated_duration_seconds: 60, message: 'recovered',
     };
+    await mount();
     await act(async () => { await state.recoverMeeting('meeting-transcript'); });
 
     expect(saveMeeting.mock.calls[0]?.[4]).toBeNull();
     expect(saveMeeting.mock.calls[1]?.[4]).toBe('saved-meeting');
-    expect(indexedDBService.markMeetingSaved).toHaveBeenCalledTimes(1);
+    expect(indexedDBService.markMeetingSavedStrict).toHaveBeenCalledTimes(1);
+    expect(sessionStorage.getItem('transcript_recovery_row_ids')).toBe('{}');
   });
 });

@@ -5,7 +5,7 @@
  * Provides functionality to detect, preview, and recover meetings from IndexedDB.
  */
 
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { indexedDBService, MeetingMetadata, StoredTranscript } from '@/services/indexedDBService';
 import { storageService } from '@/services/storageService';
@@ -42,6 +42,25 @@ interface PersistedRecordingSession {
   folderPath: string | null;
 }
 
+const RECOVERY_ROW_IDS_KEY = 'transcript_recovery_row_ids';
+
+function recoveryRowIds(): Record<string, string> {
+  if (typeof sessionStorage === 'undefined') return {};
+  try {
+    return JSON.parse(sessionStorage.getItem(RECOVERY_ROW_IDS_KEY) ?? '{}') as Record<string, string>;
+  } catch {
+    return {};
+  }
+}
+
+function persistRecoveryRowId(recoveryId: string, meetingId: string | null): void {
+  if (typeof sessionStorage === 'undefined') return;
+  const ids = recoveryRowIds();
+  if (meetingId) ids[recoveryId] = meetingId;
+  else delete ids[recoveryId];
+  sessionStorage.setItem(RECOVERY_ROW_IDS_KEY, JSON.stringify(ids));
+}
+
 function boundMeetingId(folderPath?: string): string | null {
   if (!folderPath || typeof sessionStorage === 'undefined') return null;
   try {
@@ -58,7 +77,6 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
   const [recoverableMeetings, setRecoverableMeetings] = useState<MeetingMetadata[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [isRecovering, setIsRecovering] = useState(false);
-  const recoveredMeetingIdsRef = useRef(new Map<string, string>());
 
   /**
    * Check for recoverable meetings in IndexedDB
@@ -149,7 +167,7 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
 
       // 2. Load all transcripts. This can legitimately be empty when
       // transcription was unavailable; the audio can still be recovered.
-      const transcripts = await indexedDBService.getTranscripts(meetingId);
+      const transcripts = await indexedDBService.getTranscriptsStrict(meetingId);
       transcripts.sort((a, b) => (a.sequenceId || 0) - (b.sequenceId || 0));
 
       // 3. Check for folder path
@@ -215,11 +233,11 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
         formattedTranscripts,
         folderPath ?? null,
         false,
-        recoveredMeetingIdsRef.current.get(meetingId) ?? boundMeetingId(folderPath),
+        recoveryRowIds()[meetingId] ?? boundMeetingId(folderPath),
       );
 
       const savedMeetingId = saveResponse.meeting_id;
-      recoveredMeetingIdsRef.current.set(meetingId, savedMeetingId);
+      persistRecoveryRowId(meetingId, savedMeetingId);
 
       if (folderPath) {
         try {
@@ -248,7 +266,7 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
       }
 
       // 7. Mark as saved in IndexedDB
-      await indexedDBService.markMeetingSaved(meetingId);
+      await indexedDBService.markMeetingSavedStrict(meetingId);
 
 
       // 8. Clean up checkpoint files, but only after they have been merged into
@@ -264,7 +282,7 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
 
       // 9. Remove from recoverable list
       setRecoverableMeetings(prev => prev.filter(m => m.meetingId !== meetingId));
-      recoveredMeetingIdsRef.current.delete(meetingId);
+      persistRecoveryRowId(meetingId, null);
 
       return {
         success: true,
@@ -286,6 +304,7 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
   const deleteRecoverableMeeting = useCallback(async (meetingId: string): Promise<void> => {
     try {
       await indexedDBService.deleteMeeting(meetingId);
+      persistRecoveryRowId(meetingId, null);
       setRecoverableMeetings(prev => prev.filter(m => m.meetingId !== meetingId));
     } catch (error) {
       console.error('Failed to delete meeting:', error);

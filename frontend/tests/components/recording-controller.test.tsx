@@ -282,7 +282,7 @@ mock.module('../../src/services/indexedDBService', () => ({
   indexedDBService: {
     deleteOldMeetings: async () => 0,
     deleteSavedMeetings: async () => 0,
-    markMeetingSaved: markRecoveryMeetingSaved,
+    markMeetingSavedStrict: markRecoveryMeetingSaved,
   },
 }));
 const recovery = {
