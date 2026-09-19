@@ -1,3 +1,6 @@
+'use client';
+
+import { useState } from 'react';
 import { StatusFeedback } from '@/components/ui/status-feedback';
 import { useMeetingActivity } from '@/contexts/MeetingActivityContext';
 import type { MeetingActivity } from '@/types/meetingActivity';
@@ -46,9 +49,11 @@ export function MeetingActivityFeedback({
   onRetry,
 }: {
   activity: MeetingActivity;
-  onRetry?: () => void;
+  onRetry?: () => void | Promise<void>;
 }) {
   const { cancelTranscription, pauseTranscription, resumeTranscription } = useMeetingActivity();
+  const [commandError, setCommandError] = useState<string | null>(null);
+  const [pendingAction, setPendingAction] = useState<string | null>(null);
   const pending = activity.status === 'starting'
     || activity.status === 'queued'
     || activity.status === 'saving'
@@ -64,15 +69,29 @@ export function MeetingActivityFeedback({
           : activity.status === 'recording'
             ? 'recording'
         : 'info';
-  const action = activity.status === 'failed' && onRetry
-    ? { label: 'Retry', run: onRetry }
-    : activity.controls_available && activity.status === 'paused'
-      ? { label: 'Resume', run: () => void resumeTranscription(activity.task_id) }
-      : activity.controls_available && activity.status === 'transcribing'
-        ? { label: 'Pause', run: () => void pauseTranscription(activity.task_id) }
-        : activity.controls_available && activity.status === 'queued'
-          ? { label: 'Cancel', run: () => void cancelTranscription(activity.task_id) }
-          : null;
+  const runAction = async (label: string, action: () => boolean | void | Promise<boolean | void>) => {
+    setPendingAction(label);
+    setCommandError(null);
+    try {
+      const accepted = await action();
+      if (accepted === false) throw new Error(`${label} is no longer available for this task.`);
+    } catch (error) {
+      setCommandError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setPendingAction(null);
+    }
+  };
+  const actions: Array<{ label: string; run: () => boolean | void | Promise<boolean | void> }> = [];
+  if (activity.status === 'failed' && onRetry) actions.push({ label: 'Retry', run: onRetry });
+  if (activity.controls_available && activity.status === 'paused') {
+    actions.push({ label: 'Resume', run: () => resumeTranscription(activity.task_id) });
+  }
+  if (activity.controls_available && activity.status === 'transcribing') {
+    actions.push({ label: 'Pause', run: () => pauseTranscription(activity.task_id) });
+  }
+  if (activity.controls_available && ['queued', 'transcribing', 'paused'].includes(activity.status)) {
+    actions.push({ label: 'Cancel', run: () => cancelTranscription(activity.task_id) });
+  }
   const message = activity.error
     ?? activity.warning
     ?? activity.message
@@ -80,14 +99,27 @@ export function MeetingActivityFeedback({
     ?? (activity.status === 'queued' ? 'Waiting to transcribe' : activity.status);
 
   return (
-    <StatusFeedback
-      tone={tone}
-      pending={pending}
-      actionLabel={action?.label}
-      onAction={action?.run}
-    >
-      {message}
-    </StatusFeedback>
+    <div className="flex flex-col gap-1">
+      <StatusFeedback tone={tone} pending={pending || pendingAction !== null}>
+        {message}
+      </StatusFeedback>
+      {actions.length > 0 && (
+        <div className="flex gap-2" aria-label="Task actions">
+          {actions.map((action) => (
+            <button
+              key={action.label}
+              type="button"
+              disabled={pendingAction !== null}
+              className="text-xs font-semibold text-info underline underline-offset-2 disabled:opacity-50"
+              onClick={() => void runAction(action.label, action.run)}
+            >
+              {pendingAction === action.label ? `${action.label}…` : action.label}
+            </button>
+          ))}
+        </div>
+      )}
+      {commandError && <StatusFeedback tone="error">{commandError}</StatusFeedback>}
+    </div>
   );
 }
 
@@ -97,10 +129,8 @@ export function StatusOverlays({
   isSaving: legacySaving,
   sidebarCollapsed
 }: StatusOverlaysProps) {
-  const { recording, snapshot } = useMeetingActivity();
-  const isProcessing = Boolean(legacyProcessing) || snapshot.activities.some((activity) => (
-    activity.status === 'queued' || activity.status === 'transcribing'
-  ));
+  const { recording } = useMeetingActivity();
+  const isProcessing = Boolean(legacyProcessing);
   const isSaving = Boolean(legacySaving) || recording?.status === 'saving';
   return (
     <>

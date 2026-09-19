@@ -6,24 +6,30 @@ import { useConfig } from '@/contexts/ConfigContext';
 import {
   claimAutoSummaryJob,
   generateAutomaticSummary,
-  releaseAutoSummaryJob,
 } from '@/lib/autoSummary';
 import { useMeetingActivity } from '@/contexts/MeetingActivityContext';
+import type { ModelConfig } from '@/services/configService';
 
 export function AutoSummaryProvider() {
-  const { isAutoSummary, isModelConfigLoading, modelConfig } = useConfig();
+  const {
+    isAutoSummary,
+    isModelConfigLoading,
+    isModelConfigSaving,
+    modelConfigSaveError,
+    modelConfig,
+  } = useConfig();
   const { snapshot: { activities } } = useMeetingActivity();
   const activeMeetingIds = useRef(new Set<string>());
-  const pendingByMeeting = useRef(new Map<string, string>());
+  const pendingByMeeting = useRef(new Map<string, { taskId: string; config: ModelConfig }>());
 
   useEffect(() => {
-    const startSummary = async (taskId: string, meetingId: string) => {
-      if (!isAutoSummary || isModelConfigLoading) return;
+    const startSummary = async (taskId: string, meetingId: string, config: ModelConfig) => {
+      if (!isAutoSummary || isModelConfigLoading || isModelConfigSaving || modelConfigSaveError) return;
       if (activeMeetingIds.current.has(meetingId)) {
-        pendingByMeeting.current.set(meetingId, taskId);
+        pendingByMeeting.current.set(meetingId, { taskId, config });
         return;
       }
-      if (!claimAutoSummaryJob(taskId, modelConfig)) return;
+      if (!claimAutoSummaryJob(taskId, config)) return;
       activeMeetingIds.current.add(meetingId);
       // Compatibility signal for the current workspace. c11 removes its
       // route-owned auto-generation check and this event consumer.
@@ -34,24 +40,23 @@ export function AutoSummaryProvider() {
       }
 
       try {
-        await generateAutomaticSummary(meetingId, modelConfig);
+        await generateAutomaticSummary(meetingId, config);
       } catch (error) {
-        releaseAutoSummaryJob(taskId, modelConfig);
         console.error('[AutoSummary] Failed to start summary:', error);
         toast.error('Automatic summary could not start', {
           description: error instanceof Error ? error.message : String(error),
         });
       } finally {
         activeMeetingIds.current.delete(meetingId);
-        const pendingTaskId = pendingByMeeting.current.get(meetingId);
-        if (pendingTaskId) {
+        const pending = pendingByMeeting.current.get(meetingId);
+        if (pending) {
           pendingByMeeting.current.delete(meetingId);
-          void startSummary(pendingTaskId, meetingId);
+          void startSummary(pending.taskId, meetingId, pending.config);
         }
       }
     };
 
-    if (isAutoSummary && !isModelConfigLoading) {
+    if (isAutoSummary && !isModelConfigLoading && !isModelConfigSaving && !modelConfigSaveError) {
       const latestReadyByMeeting = new Map<string, (typeof activities)[number]>();
       for (const activity of activities) {
         if (activity.status !== 'ready' || !activity.meeting_id) continue;
@@ -61,10 +66,10 @@ export function AutoSummaryProvider() {
         }
       }
       for (const activity of latestReadyByMeeting.values()) {
-        void startSummary(activity.task_id, activity.meeting_id!);
+        void startSummary(activity.task_id, activity.meeting_id!, modelConfig);
       }
     }
-  }, [activities, isAutoSummary, isModelConfigLoading, modelConfig]);
+  }, [activities, isAutoSummary, isModelConfigLoading, isModelConfigSaving, modelConfig, modelConfigSaveError]);
 
   return null;
 }

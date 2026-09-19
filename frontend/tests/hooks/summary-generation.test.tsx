@@ -16,6 +16,7 @@ const originalPreferences = { ...await import('../../src/lib/summary-language-pr
 const originalToast = { ...await import('sonner') };
 const originalNavigation = { ...await import('next/navigation') };
 const originalRecordingState = { ...await import('../../src/contexts/RecordingStateContext') };
+const originalConfig = { ...await import('../../src/contexts/ConfigContext') };
 afterAll(() => {
   mock.module('@tauri-apps/api/core', () => originalCore);
   mock.module('../../src/lib/analytics', () => originalAnalytics);
@@ -23,10 +24,19 @@ afterAll(() => {
   mock.module('sonner', () => originalToast);
   mock.module('next/navigation', () => originalNavigation);
   mock.module('../../src/contexts/RecordingStateContext', () => originalRecordingState);
+  mock.module('../../src/contexts/ConfigContext', () => originalConfig);
 });
 
 mock.module('next/navigation', () => ({ usePathname: () => '/meeting-details', useRouter: () => ({}) }));
 mock.module('../../src/contexts/RecordingStateContext', () => ({ useRecordingState: () => ({ isRecording: false }) }));
+mock.module('../../src/contexts/ConfigContext', () => ({
+  useConfig: () => ({
+    modelConfig: { provider: 'ollama', model: configuredModel, whisperModel: 'base' },
+    isModelConfigLoading: false,
+    isModelConfigSaving: configSaving,
+    modelConfigSaveError: configError,
+  }),
+}));
 const notify = mock(() => {});
 mock.module('sonner', () => ({ toast: { info: notify, error: notify, success: notify, warning: notify } }));
 const trackCompletion = mock(async (..._args: Parameters<typeof originalAnalytics.default.trackSummaryGenerationCompleted>) => {});
@@ -61,6 +71,8 @@ const response = (overrides: Partial<SummaryProcessResponse> = {}): SummaryProce
   data: null, error: null, meetingName: 'Meeting A', ...overrides,
 });
 let configuredModel = 'test';
+let configSaving = false;
+let configError: Error | null = null;
 let state: ReturnType<typeof useSummaryGeneration>;
 function Status({ initialSummary, meetingId = 'meeting-a' }: {
   initialSummary: SummaryProcessResponse; meetingId?: string;
@@ -84,6 +96,8 @@ const realClearInterval = globalThis.clearInterval;
 beforeEach(() => {
   renderer = undefined as unknown as ReactTestRenderer;
   configuredModel = 'test';
+  configSaving = false;
+  configError = null;
   timers.clear(); notify.mockClear(); trackCompletion.mockClear(); invoke.mockClear();
   getSummary = async () => response();
   startProcess = async () => ({ process_id: 'attempt-a' });
@@ -96,6 +110,8 @@ afterEach(async () => {
   if (renderer) await act(async () => renderer.unmount());
   meetingActivityStore.stopSummaryPolling('meeting-a');
   meetingActivityStore.stopSummaryPolling('meeting-b');
+  meetingActivityStore.dismissSummary('meeting-a');
+  meetingActivityStore.dismissSummary('meeting-b');
   globalThis.setInterval = realSetInterval;
   globalThis.clearInterval = realClearInterval;
 });
@@ -115,10 +131,10 @@ describe('summary state restored when returning to a meeting', () => {
     await show(response({ data: { markdown: 'Previous summary' } }));
     getSummary = async () => { throw new Error('Database unavailable'); };
     await tick();
-    expect(state.summaryStatus).toBe('error');
-    expect(state.summaryError).toContain('Database unavailable');
+    expect(state.summaryStatus).toBe('processing');
+    expect(meetingActivityStore.getState().summaries[0]?.reconciliationError).toContain('Database unavailable');
     expect(text()).toContain('Previous summary');
-    expect(timers.size).toBe(0);
+    expect(timers.size).toBe(1);
   });
 
   test('failed cancellation recovery ends loading without discarding visible notes', async () => {
@@ -134,7 +150,7 @@ describe('summary state restored when returning to a meeting', () => {
     expect(timers.size).toBe(0);
   });
 
-  test.each(['read', 'callback'])('polling stops when %s fails and its error callback also rejects', async (failure) => {
+  test.each(['read', 'callback'])('polling safely handles a %s failure and a rejecting consumer', async (failure) => {
     function RejectingConsumer() {
       const { startSummaryPolling } = useSidebar();
       useEffect(() => {
@@ -152,7 +168,7 @@ describe('summary state restored when returning to a meeting', () => {
       return response({ status: 'completed', data: { markdown: 'Finished summary' } });
     };
     await tick();
-    expect(timers.size).toBe(0);
+    expect(timers.size).toBe(failure === 'read' ? 1 : 0);
   });
 
   test('resumes pending generation after leaving and returning, then displays completion', async () => {
@@ -247,13 +263,14 @@ describe('summary state restored when returning to a meeting', () => {
   test('leaving before the start response arrives keeps the backend job running for a later visit', async () => {
     let resolve!: (value: { process_id: string }) => void;
     startProcess = () => new Promise(done => { resolve = done; });
+    getSummary = async () => response({ status: 'idle', start: null });
     await show(response({ status: 'idle', start: null }));
     let generation!: Promise<void>;
     await act(async () => { generation = state.handleGenerateSummary(); });
     await show(null);
     await act(async () => { resolve({ process_id: 'attempt-a' }); await generation; });
     expect(invoke.mock.calls.filter(([command]) => command === 'api_cancel_summary')).toEqual([]);
-    expect(timers.size).toBe(0);
+    expect(timers.size).toBe(1);
     await show(response());
     expect(state.summaryStatus).toBe('processing');
     getSummary = async () => response({ status: 'completed', data: { markdown: 'Finished summary' } });
@@ -284,5 +301,20 @@ describe('summary state restored when returning to a meeting', () => {
     await tick();
     expect(state.summaryStatus).toBe('completed');
     expect(text()).toContain('Finished summary');
+  });
+
+  test('does not generate while committed model configuration is saving or failed', async () => {
+    const initial = response({ status: 'idle', start: null });
+    configSaving = true;
+    await show(initial);
+    await act(async () => state.handleGenerateSummary());
+    expect(invoke.mock.calls.some(([command]) => command === 'api_process_transcript')).toBe(false);
+
+    configSaving = false;
+    configError = new Error('save failed');
+    await show(initial);
+    await act(async () => state.handleRegenerateSummary());
+    expect(invoke.mock.calls.some(([command]) => command === 'api_process_transcript')).toBe(false);
+    expect(state.summaryStatus).toBe('error');
   });
 });

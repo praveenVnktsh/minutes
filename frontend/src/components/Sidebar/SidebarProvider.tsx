@@ -52,6 +52,11 @@ export type MeetingMutationStates = Record<
 
 type MutableMeetingField = 'title' | 'pinned' | 'archived';
 
+interface SummarySubscription {
+  processId: string;
+  unsubscribe: () => void;
+}
+
 interface MeetingMutationQueue {
   acknowledgedValue: CurrentMeeting[MutableMeetingField];
   latestRequestId: number;
@@ -131,6 +136,7 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
   const [navigationError, setNavigationError] = useState<string | null>(null);
   const [serverAddress, setServerAddress] = useState('');
   const [transcriptServerAddress, setTranscriptServerAddress] = useState('');
+  const summarySubscriptionsRef = React.useRef(new Map<string, SummarySubscription>());
   const meetingsRef = React.useRef<CurrentMeeting[]>([]);
   const catalogRequestRef = React.useRef(0);
   const catalogLoadedRef = React.useRef(false);
@@ -440,7 +446,10 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
   // Compatibility facade. The process-wide activity registry owns polling so
   // route unmounts and multiple consumers cannot create competing timers.
   const stopSummaryPolling = React.useCallback((meetingId: string, processId?: string) => {
-    meetingActivityStore.stopSummaryPolling(meetingId, processId);
+    const subscription = summarySubscriptionsRef.current.get(meetingId);
+    if (!subscription || (processId && subscription.processId !== processId)) return;
+    subscription.unsubscribe();
+    summarySubscriptionsRef.current.delete(meetingId);
   }, []);
 
   const startSummaryPolling = React.useCallback((
@@ -448,7 +457,14 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
     processId: string,
     onUpdate: (result: SummaryProcessResponse) => void | Promise<void>
   ) => {
-    meetingActivityStore.startSummaryPolling(meetingId, processId, onUpdate);
+    stopSummaryPolling(meetingId);
+    const unsubscribe = meetingActivityStore.startSummaryPolling(meetingId, processId, onUpdate);
+    summarySubscriptionsRef.current.set(meetingId, { processId, unsubscribe });
+  }, [stopSummaryPolling]);
+
+  useEffect(() => () => {
+    summarySubscriptionsRef.current.forEach(({ unsubscribe }) => unsubscribe());
+    summarySubscriptionsRef.current.clear();
   }, []);
 
 

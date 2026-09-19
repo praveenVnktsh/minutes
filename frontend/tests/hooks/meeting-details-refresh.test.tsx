@@ -31,7 +31,13 @@ mock.module('next/navigation', () => ({
   useSearchParams: () => new URLSearchParams({ id: selectedMeeting }),
 }));
 mock.module('../../src/contexts/RecordingStateContext', () => ({ useRecordingState: () => ({ isRecording: false }) }));
-mock.module('../../src/contexts/ConfigContext', () => ({ useConfig: () => ({ isAutoSummary: false }) }));
+mock.module('../../src/contexts/ConfigContext', () => ({ useConfig: () => ({
+  isAutoSummary: false,
+  modelConfig: { provider: 'ollama', model: 'test', whisperModel: 'base' },
+  isModelConfigLoading: false,
+  isModelConfigSaving: false,
+  modelConfigSaveError: null,
+}) }));
 const notify = mock(() => {});
 mock.module('sonner', () => ({ toast: { info: notify, error: notify, success: notify, warning: notify } }));
 mock.module('../../src/lib/analytics', () => ({ default: {
@@ -56,6 +62,7 @@ const invoke = mock(async (command: string, args?: Record<string, unknown>): Pro
   if (command === 'api_get_meeting_metadata') return readMetadata(args!.meetingId as string);
   if (command === 'api_get_meeting_transcripts') return readTranscripts(args!.meetingId as string);
   if (command === 'get_meeting_live_notes') return null;
+  if (command === 'get_ollama_models') return [{ name: 'test' }];
   if (command === 'api_process_transcript') return { process_id: 'attempt-b' };
   if (command === 'api_cancel_summary') return { cancelled: true };
   throw new Error(`Unexpected command: ${command}`);
@@ -104,6 +111,8 @@ afterEach(async () => {
   if (renderer) await act(async () => renderer!.unmount());
   meetingActivityStore.stopSummaryPolling('meeting-a');
   meetingActivityStore.stopSummaryPolling('meeting-b');
+  meetingActivityStore.dismissSummary('meeting-a');
+  meetingActivityStore.dismissSummary('meeting-b');
   renderer = undefined;
   globalThis.setInterval = realSetInterval;
   globalThis.clearInterval = realClearInterval;
