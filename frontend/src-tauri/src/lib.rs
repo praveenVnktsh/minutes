@@ -53,6 +53,7 @@ pub mod groq;
 pub mod live_notes;
 pub mod meeting_assistant;
 pub mod meeting_detection;
+pub mod meeting_activity;
 pub mod meeting_prompt;
 pub mod openrouter;
 pub mod parakeet_engine;
@@ -146,13 +147,30 @@ struct TranscriptionStatus {
     last_activity_ms: u64,
 }
 
+#[derive(Debug, Serialize, Clone)]
+struct RecordingStarted {
+    session_id: String,
+}
+
+fn begin_recording_request(request_id: Option<String>) -> Result<Option<String>, String> {
+    match request_id {
+        Some(request_id) => {
+            meeting_prompt::begin_recording_request(&request_id)?;
+            Ok(Some(request_id))
+        }
+        None => meeting_prompt::claim_legacy_recording_request(),
+    }
+}
+
 #[tauri::command]
 async fn start_recording<R: Runtime>(
     app: AppHandle<R>,
     mic_device_name: Option<String>,
     system_device_name: Option<String>,
     meeting_name: Option<String>,
-) -> Result<(), String> {
+    request_id: Option<String>,
+) -> Result<RecordingStarted, String> {
+    let request_id = begin_recording_request(request_id)?;
     log_info!("🔥 CALLED start_recording with meeting: {:?}", meeting_name);
     log_info!(
         "📋 Backend received parameters - mic: {:?}, system: {:?}, meeting: {:?}",
@@ -162,7 +180,16 @@ async fn start_recording<R: Runtime>(
     );
 
     if is_recording().await {
-        return Err("Recording already in progress".to_string());
+        let error = "Recording already in progress".to_string();
+        if let Some(request_id) = request_id {
+            let _ = meeting_prompt::acknowledge_recording_request(
+                app,
+                request_id,
+                false,
+                Some(error.clone()),
+            );
+        }
+        return Err(error);
     }
 
     // Call the actual audio recording system with meeting name
@@ -174,7 +201,7 @@ async fn start_recording<R: Runtime>(
     )
     .await
     {
-        Ok(_) => {
+        Ok(session_id) => {
             RECORDING_FLAG.store(true, Ordering::SeqCst);
             tray::update_tray_menu(&app);
 
@@ -198,11 +225,30 @@ async fn start_recording<R: Runtime>(
                 log_info!("Successfully showed recording started notification");
             }
 
-            Ok(())
+            if let Some(request_id) = request_id {
+                if let Err(error) = meeting_prompt::acknowledge_recording_request(
+                    app.clone(),
+                    request_id,
+                    true,
+                    None,
+                ) {
+                    log_error!("Failed to acknowledge recording request: {}", error);
+                }
+            }
+            Ok(RecordingStarted { session_id })
         }
         Err(e) => {
             log_error!("Failed to start audio recording: {}", e);
-            Err(format!("Failed to start recording: {}", e))
+            let error = format!("Failed to start recording: {}", e);
+            if let Some(request_id) = request_id {
+                let _ = meeting_prompt::acknowledge_recording_request(
+                    app,
+                    request_id,
+                    false,
+                    Some(error.clone()),
+                );
+            }
+            Err(error)
         }
     }
 }
@@ -212,7 +258,7 @@ async fn stop_recording<R: Runtime>(app: AppHandle<R>, args: RecordingArgs) -> R
     log_info!("Attempting to stop recording...");
 
     // Check the actual audio recording system state instead of the flag
-    if !audio::recording_commands::is_recording().await {
+    if !audio::recording_commands::has_recording_session() {
         log_info!("Recording is already stopped");
         return Ok(());
     }
@@ -365,8 +411,15 @@ async fn start_recording_with_devices<R: Runtime>(
     app: AppHandle<R>,
     mic_device_name: Option<String>,
     system_device_name: Option<String>,
-) -> Result<(), String> {
-    start_recording_with_devices_and_meeting(app, mic_device_name, system_device_name, None).await
+) -> Result<RecordingStarted, String> {
+    start_recording_with_devices_and_meeting(
+        app,
+        mic_device_name,
+        system_device_name,
+        None,
+        None,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -375,7 +428,9 @@ async fn start_recording_with_devices_and_meeting<R: Runtime>(
     mic_device_name: Option<String>,
     system_device_name: Option<String>,
     meeting_name: Option<String>,
-) -> Result<(), String> {
+    request_id: Option<String>,
+) -> Result<RecordingStarted, String> {
+    let request_id = begin_recording_request(request_id)?;
     log_info!("🚀 CALLED start_recording_with_devices_and_meeting - Mic: {:?}, System: {:?}, Meeting: {:?}",
              mic_device_name, system_device_name, meeting_name);
 
@@ -410,7 +465,7 @@ async fn start_recording_with_devices_and_meeting<R: Runtime>(
     };
 
     match recording_result {
-        Ok(_) => {
+        Ok(session_id) => {
             log_info!("Recording started successfully via tauri command");
 
             // Show recording started notification through NotificationManager
@@ -429,10 +484,28 @@ async fn start_recording_with_devices_and_meeting<R: Runtime>(
                 );
             }
 
-            Ok(())
+            if let Some(request_id) = request_id {
+                if let Err(error) = meeting_prompt::acknowledge_recording_request(
+                    app.clone(),
+                    request_id,
+                    true,
+                    None,
+                ) {
+                    log_error!("Failed to acknowledge recording request: {}", error);
+                }
+            }
+            Ok(RecordingStarted { session_id })
         }
         Err(e) => {
             log_error!("Failed to start recording via tauri command: {}", e);
+            if let Some(request_id) = request_id {
+                let _ = meeting_prompt::acknowledge_recording_request(
+                    app,
+                    request_id,
+                    false,
+                    Some(e.clone()),
+                );
+            }
             Err(e)
         }
     }
@@ -709,6 +782,11 @@ pub fn run() {
             debug_mode::delete_debug_meetings,
             meeting_prompt::dismiss_meeting_prompt,
             meeting_prompt::start_recording_from_prompt,
+            meeting_prompt::get_pending_recording_request,
+            meeting_prompt::claim_recording_request,
+            meeting_prompt::acknowledge_recording_request,
+            meeting_activity::get_meeting_activity_snapshot,
+            meeting_activity::bind_active_recording_meeting,
             start_recording,
             stop_recording,
             is_recording,

@@ -68,6 +68,7 @@ pub struct RetranscriptionResult {
     pub segments_count: usize,
     pub duration_seconds: f64,
     pub language: Option<String>,
+    pub warning: Option<String>,
 }
 
 /// Error during retranscription
@@ -494,11 +495,18 @@ async fn run_retranscription<R: Runtime>(
         warn!("Failed to update metadata.json: {}", e);
     }
 
-    // Diarization enriches the completed transcript in place. It is deliberately
-    // best-effort so a model/network failure never discards a valid transcript.
-    if let Err(error) = super::diarization::run_for_meeting(&app, &meeting_id, None).await {
-        warn!("Speaker diarization skipped for {}: {}", meeting_id, error);
-    }
+    // The diarizer cannot currently pause or cancel safely once model inference starts.
+    super::transcription_queue::set_active_task_controls_available(false);
+    emit_progress(&app, &meeting_id, "diarizing", 95, "Identifying speakers...");
+    let warning = super::diarization::run_for_meeting(&app, &meeting_id, None)
+        .await
+        .err()
+        .map(|error| {
+            let warning = format!("Speaker identification unavailable: {error}");
+            warn!("{}", warning);
+            emit_progress(&app, &meeting_id, "diarization_warning", 95, &warning);
+            warning
+        });
 
     emit_progress(&app, &meeting_id, "complete", 100, "Retranscription complete");
 
@@ -507,6 +515,7 @@ async fn run_retranscription<R: Runtime>(
         segments_count: segments.len(),
         duration_seconds,
         language,
+        warning,
     })
 }
 
@@ -797,6 +806,7 @@ fn write_retranscription_metadata(
 /// Response when retranscription is started
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetranscriptionStarted {
+    pub task_id: Option<String>,
     pub meeting_id: String,
     pub message: String,
 }
@@ -805,7 +815,7 @@ pub struct RetranscriptionStarted {
 // Now enqueues to the transcription queue instead of running directly
 #[tauri::command]
 pub async fn start_retranscription_command<R: Runtime>(
-    _app: AppHandle<R>,
+    app: AppHandle<R>,
     meeting_id: String,
     meeting_folder_path: String,
     language: Option<String>,
@@ -828,10 +838,11 @@ pub async fn start_retranscription_command<R: Runtime>(
         provider,
     };
 
-    let task_id = get_queue().enqueue(task).await;
+    let task_id = get_queue().enqueue(&app, task).await;
     info!("Retranscription enqueued as task: {}", task_id);
 
     Ok(RetranscriptionStarted {
+        task_id: Some(task_id.clone()),
         meeting_id,
         message: format!("Retranscription queued (task: {})", task_id),
     })

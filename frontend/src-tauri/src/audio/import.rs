@@ -104,6 +104,7 @@ pub struct ImportWarning {
 /// Response when import is started
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImportStarted {
+    pub task_id: Option<String>,
     pub message: String,
 }
 
@@ -274,6 +275,7 @@ pub async fn start_import<R: Runtime>(
         language,
         model,
         provider,
+        None,
     )
     .await;
 
@@ -316,6 +318,7 @@ async fn run_import<R: Runtime>(
     language: Option<String>,
     model: Option<String>,
     provider: Option<String>,
+    activity_task_id: Option<String>,
 ) -> Result<ImportResult> {
     let source = PathBuf::from(&source_path);
 
@@ -651,6 +654,18 @@ async fn run_import<R: Runtime>(
         meeting_folder.to_string_lossy().to_string(),
     )
     .await?;
+    if let Some(task_id) = activity_task_id.as_deref() {
+        crate::meeting_activity::update_task(
+            &app,
+            task_id,
+            crate::meeting_activity::ActivityStatus::Saving,
+            Some(meeting_id.clone()),
+            Some("saving".to_string()),
+            Some(90),
+            Some("Writing transcript files".to_string()),
+            None,
+        );
+    }
 
     // Write transcripts.json and metadata.json to the meeting folder
     emit_progress(&app, "saving", 90, "Writing transcript files...");
@@ -690,8 +705,18 @@ pub async fn run_import_for_queue<R: Runtime>(
     language: Option<String>,
     model: Option<String>,
     provider: Option<String>,
+    task_id: String,
 ) -> Result<ImportResult> {
-    run_import(app, source_path, title, language, model, provider).await
+    run_import(
+        app,
+        source_path,
+        title,
+        language,
+        model,
+        provider,
+        Some(task_id),
+    )
+    .await
 }
 
 /// Emit progress event
@@ -984,7 +1009,7 @@ pub async fn validate_audio_file_command(path: String) -> Result<AudioFileInfo, 
 /// Now enqueues to the transcription queue instead of running directly
 #[tauri::command]
 pub async fn start_import_audio_command<R: Runtime>(
-    _app: AppHandle<R>,
+    app: AppHandle<R>,
     source_path: String,
     title: String,
     language: Option<String>,
@@ -1006,10 +1031,11 @@ pub async fn start_import_audio_command<R: Runtime>(
         provider,
     };
 
-    let task_id = get_queue().enqueue(task).await;
+    let task_id = get_queue().enqueue(&app, task).await;
     info!("Import enqueued as task: {}", task_id);
 
     Ok(ImportStarted {
+        task_id: Some(task_id.clone()),
         message: format!("Import queued (task: {})", task_id),
     })
 }
