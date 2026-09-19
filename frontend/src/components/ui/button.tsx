@@ -5,7 +5,7 @@ import { cva, type VariantProps } from "class-variance-authority"
 import { cn } from "@/lib/utils"
 
 const buttonVariants = cva(
-  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0",
+  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0",
   {
     variants: {
       variant: {
@@ -19,9 +19,16 @@ const buttonVariants = cva(
           "bg-secondary text-secondary-foreground shadow-sm hover:bg-secondary/80",
         ghost: "hover:bg-accent hover:text-accent-foreground",
         link: "text-primary underline-offset-4 hover:underline",
-        green: "bg-green-600 text-white hover:bg-green-600",
-        blue: "bg-blue-500 text-white hover:bg-blue-600",
-        red: "bg-red-500 text-white hover:bg-red-600",
+        selected: "bg-selected text-selected-foreground hover:brightness-95",
+        info: "bg-info text-white hover:brightness-90 dark:bg-info-subtle dark:text-info",
+        success: "bg-success text-white hover:brightness-90 dark:bg-success-subtle dark:text-success",
+        warning: "bg-warning text-white hover:brightness-90 dark:bg-warning-subtle dark:text-warning",
+        error: "bg-error text-white hover:brightness-90 dark:bg-error-subtle dark:text-error",
+        recording: "bg-recording text-white hover:brightness-90 dark:bg-recording-subtle dark:text-recording",
+        paused: "bg-paused text-white hover:brightness-90 dark:bg-paused-subtle dark:text-paused",
+        green: "bg-success text-white hover:brightness-90",
+        blue: "bg-info text-white hover:brightness-90",
+        red: "bg-error text-white hover:brightness-90",
         gray: "border bg-surface-2 border-input shadow-sm hover:bg-surface-2 hover:text-accent-foreground",
       },
       size: {

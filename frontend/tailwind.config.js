@@ -31,10 +31,39 @@ module.exports = {
   				subtle: 'var(--ink-subtle)'
   			},
   			hairline: 'var(--hairline)',
-  			brand: {
+			brand: {
   				DEFAULT: 'var(--brand)',
   				foreground: 'var(--brand-foreground)'
-  			},
+			},
+			selected: {
+				DEFAULT: 'var(--selected)',
+				foreground: 'var(--selected-foreground)'
+			},
+			focus: 'var(--focus)',
+			info: {
+				DEFAULT: 'var(--info)',
+				subtle: 'var(--info-subtle)'
+			},
+			success: {
+				DEFAULT: 'var(--success)',
+				subtle: 'var(--success-subtle)'
+			},
+			warning: {
+				DEFAULT: 'var(--warning)',
+				subtle: 'var(--warning-subtle)'
+			},
+			error: {
+				DEFAULT: 'var(--error)',
+				subtle: 'var(--error-subtle)'
+			},
+			recording: {
+				DEFAULT: 'var(--recording)',
+				subtle: 'var(--recording-subtle)'
+			},
+			paused: {
+				DEFAULT: 'var(--paused)',
+				subtle: 'var(--paused-subtle)'
+			},
   			border: 'hsl(var(--border))',
   			input: 'hsl(var(--input))',
   			ring: 'hsl(var(--ring))',
