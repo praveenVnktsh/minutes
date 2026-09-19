@@ -81,7 +81,7 @@ export function DebugSettings() {
             logging.
           </div>
         </div>
-        <Switch checked={enabled} onCheckedChange={toggle} />
+        <Switch aria-label="Enable debug mode" checked={enabled} onCheckedChange={toggle} />
       </div>
 
       {enabled && (

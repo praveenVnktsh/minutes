@@ -7,6 +7,7 @@ import Analytics from '@/lib/analytics';
 import { toast } from 'sonner';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
 import { useConfig } from '@/contexts/ConfigContext';
+import { SaveFeedback, type SaveFeedbackState } from '@/components/ui/status-feedback';
 
 export interface RecordingPreferences {
   save_folder: string;
@@ -35,6 +36,9 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [showRecordingNotification, setShowRecordingNotification] = useState(true);
+  const [preferenceSaveState, setPreferenceSaveState] = useState<SaveFeedbackState | null>(null);
+  const [preferenceMessage, setPreferenceMessage] = useState('Recording preference');
+  const [notificationSaveState, setNotificationSaveState] = useState<SaveFeedbackState | null>(null);
   const { isRecording } = useRecordingState();
   const { setSelectedDevices } = useConfig();
 
@@ -77,9 +81,13 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
   }, []);
 
   const handleAutoSaveToggle = async (enabled: boolean) => {
+    const previous = preferences;
     const newPreferences = { ...preferences, auto_save: enabled };
     setPreferences(newPreferences);
-    await savePreferences(newPreferences);
+    if (!await savePreferences(newPreferences, 'Audio recording preference')) {
+      setPreferences(previous);
+      return;
+    }
 
     // Track auto-save setting change
     await Analytics.track('auto_save_recording_toggled', {
@@ -88,9 +96,13 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
   };
 
   const handleAutomaticPromptToggle = async (enabled: boolean) => {
+    const previous = preferences;
     const newPreferences = { ...preferences, automatic_record_prompt: enabled };
     setPreferences(newPreferences);
-    await savePreferences(newPreferences);
+    if (!await savePreferences(newPreferences, 'Meeting detection preference')) {
+      setPreferences(previous);
+      return;
+    }
 
     await Analytics.track('automatic_record_prompt_toggled', {
       enabled: enabled.toString()
@@ -98,13 +110,15 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
   };
 
   const handleMinDurationChange = async (value: string) => {
+    const previous = preferences;
     const seconds = Math.max(0, Math.min(3600, Math.round(Number(value) || 0)));
     const newPreferences = { ...preferences, min_meeting_duration_seconds: seconds };
     setPreferences(newPreferences);
-    await savePreferences(newPreferences);
+    if (!await savePreferences(newPreferences, 'Short recording policy')) setPreferences(previous);
   };
 
   const handleDeviceChange = async (devices: SelectedDevices) => {
+    const previous = preferences;
     const newPreferences = {
       ...preferences,
       preferred_mic_device: devices.micDevice,
@@ -116,7 +130,14 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
     // app mount), so a newly-chosen mic isn't honored until the next launch —
     // start keeps sending the stale launch-time device.
     setSelectedDevices(devices);
-    await savePreferences(newPreferences);
+    if (!await savePreferences(newPreferences, 'Default audio devices')) {
+      setPreferences(previous);
+      setSelectedDevices({
+        micDevice: previous.preferred_mic_device,
+        systemDevice: previous.preferred_system_device,
+      });
+      return;
+    }
 
     // Track default device preference changes
     // Note: Individual device selection analytics are tracked in DeviceSelection component
@@ -131,28 +152,34 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
       await invoke('open_recordings_folder');
     } catch (error) {
       console.error('Failed to open recordings folder:', error);
+      toast.error('Could not open recordings folder', { description: String(error) });
     }
   };
 
   const handleNotificationToggle = async (enabled: boolean) => {
+    const previous = showRecordingNotification;
+    setShowRecordingNotification(enabled);
+    setNotificationSaveState('saving');
     try {
-      setShowRecordingNotification(enabled);
       const { Store } = await import('@tauri-apps/plugin-store');
       const store = await Store.load('preferences.json');
       await store.set('show_recording_notification', enabled);
       await store.save();
-      toast.success('Preference saved');
+      setNotificationSaveState('saved');
       await Analytics.track('recording_notification_preference_changed', {
         enabled: enabled.toString()
       });
     } catch (error) {
       console.error('Failed to save notification preference:', error);
-      toast.error('Failed to save preference');
+      setShowRecordingNotification(previous);
+      setNotificationSaveState('error');
     }
   };
 
-  const savePreferences = async (prefs: RecordingPreferences) => {
+  const savePreferences = async (prefs: RecordingPreferences, operation: string): Promise<boolean> => {
     setSaving(true);
+    setPreferenceMessage(operation);
+    setPreferenceSaveState('saving');
     try {
       await invoke('set_recording_preferences', { preferences: prefs });
       onSave?.(prefs);
@@ -160,17 +187,12 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
         detail: prefs.automatic_record_prompt
       }));
 
-      // Show success toast with device details
-      const micDevice = prefs.preferred_mic_device || 'Default';
-      const systemDevice = prefs.preferred_system_device || 'Default';
-      toast.success("Device preferences saved", {
-        description: `Microphone: ${micDevice}, System Audio: ${systemDevice}`
-      });
+      setPreferenceSaveState('saved');
+      return true;
     } catch (error) {
       console.error('Failed to save recording preferences:', error);
-      toast.error("Failed to save device preferences", {
-        description: error instanceof Error ? error.message : String(error)
-      });
+      setPreferenceSaveState('error');
+      return false;
     } finally {
       setSaving(false);
     }
@@ -192,6 +214,16 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
         <p className="text-sm text-ink-muted mb-6">
           Configure how your audio recordings are saved during meetings.
         </p>
+        {preferenceSaveState && (
+          <SaveFeedback
+            state={preferenceSaveState}
+            labels={{
+              saving: `Saving ${preferenceMessage.toLowerCase()}`,
+              saved: `${preferenceMessage} saved`,
+              error: `Could not save ${preferenceMessage.toLowerCase()}; previous setting restored`,
+            }}
+          />
+        )}
       </div>
 
       {/* Auto Save Toggle */}
@@ -203,6 +235,7 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
           </div>
         </div>
         <Switch
+          aria-label="Save audio recordings"
           checked={preferences.auto_save}
           onCheckedChange={handleAutoSaveToggle}
           disabled={saving}
@@ -217,6 +250,7 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
           </div>
         </div>
         <Switch
+          aria-label="Show meeting detection prompt"
           checked={preferences.automatic_record_prompt}
           onCheckedChange={handleAutomaticPromptToggle}
           disabled={saving}
@@ -237,6 +271,8 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
             max={3600}
             value={preferences.min_meeting_duration_seconds}
             onChange={(event) => void handleMinDurationChange(event.target.value)}
+            aria-label="Minimum meeting duration in seconds"
+            disabled={saving}
             className="h-9 w-20 rounded-md border border-hairline bg-surface-2 px-2 text-sm text-ink"
           />
           <span className="text-sm text-ink-muted">seconds</span>
@@ -260,11 +296,11 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
             </button>
           </div>
 
-          <div className="p-4 border rounded-lg bg-blue-50">
-            <div className="text-sm text-blue-800">
+          <div className="rounded-lg border border-info bg-info-subtle p-4">
+            <div className="text-sm text-info">
               <strong>File Format:</strong> {preferences.file_format.toUpperCase()} files
             </div>
-            <div className="text-xs text-blue-600 mt-1">
+            <div className="mt-1 text-xs text-info">
               Recordings are saved with timestamp: recording_YYYYMMDD_HHMMSS.{preferences.file_format}
             </div>
           </div>
@@ -273,9 +309,9 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
 
       {/* Info when auto_save is disabled */}
       {!preferences.auto_save && (
-        <div className="p-4 border rounded-lg bg-yellow-50">
-          <div className="text-sm text-yellow-800">
-            Audio recording is disabled. Enable "Save Audio Recordings" to automatically save your meeting audio.
+        <div className="rounded-lg border border-warning bg-warning-subtle p-4">
+          <div className="text-sm text-warning">
+            Audio recording is disabled. Enable Save Audio Recordings to automatically save your meeting audio.
           </div>
         </div>
       )}
@@ -289,10 +325,22 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
           </div>
         </div>
         <Switch
+          aria-label="Remind me to inform participants when recording starts"
           checked={showRecordingNotification}
           onCheckedChange={handleNotificationToggle}
+          disabled={notificationSaveState === 'saving'}
         />
       </div>
+      {notificationSaveState && (
+        <SaveFeedback
+          state={notificationSaveState}
+          labels={{
+            saving: 'Saving participant reminder',
+            saved: 'Participant reminder saved',
+            error: 'Could not save participant reminder; previous setting restored',
+          }}
+        />
+      )}
 
       {/* Device Preferences */}
       <div className="space-y-4">
@@ -306,7 +354,7 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
             <p
               role="status"
               aria-live="polite"
-              className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-md p-2 mb-4"
+              className="mb-4 rounded-md border border-warning bg-warning-subtle p-2 text-sm text-warning"
             >
               Device selection is locked while a recording is in progress. Connecting a new device mid-recording will not switch to it. Stop the current meeting to change devices.
             </p>
