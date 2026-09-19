@@ -27,11 +27,12 @@ const invoke = mock(async (command: string) => {
 });
 let storeMemory = true;
 let storeDisk = true;
+let storeSetCalls = 0;
 let getStored = async () => storeMemory;
 let saveStored = async () => { storeDisk = storeMemory; };
 const store = {
   get: async () => getStored(),
-  set: async (_key: string, value: unknown) => { storeMemory = Boolean(value); },
+  set: async (_key: string, value: unknown) => { storeSetCalls += 1; storeMemory = Boolean(value); },
   save: async () => saveStored(),
 };
 mock.module('@tauri-apps/api/core', () => ({ ...originalCore, invoke }));
@@ -47,6 +48,7 @@ describe('recording preference feedback', () => {
   beforeEach(() => {
     storeMemory = true;
     storeDisk = true;
+    storeSetCalls = 0;
     getStored = async () => storeMemory;
     saveStored = async () => { storeDisk = storeMemory; };
   });
@@ -83,16 +85,30 @@ describe('recording preference feedback', () => {
     renderer!.unmount();
   });
 
-  test('ignores a delayed initial reminder read after the user changes the setting', async () => {
+  test('blocks reminder writes until stored false is authoritative and preserves it after failure', async () => {
     let resolveGet!: (value: boolean) => void;
+    storeMemory = false;
+    storeDisk = false;
     getStored = () => new Promise<boolean>(resolve => { resolveGet = resolve; });
     let renderer: ReturnType<typeof create>;
     await act(async () => { renderer = create(<RecordingSettings />); await Promise.resolve(); });
     const toggle = renderer!.root.findByProps({ 'aria-label': 'Remind me to inform participants when recording starts' });
-    await act(async () => { await toggle.props.onCheckedChange(false); });
-    await act(async () => resolveGet(true));
+    expect(toggle.props.disabled).toBe(true);
+    await act(async () => { await toggle.props.onCheckedChange(true); });
+    expect(storeSetCalls).toBe(0);
+    await act(async () => resolveGet(false));
+    expect(toggle.props.checked).toBe(false);
+
+    let saves = 0;
+    saveStored = async () => {
+      saves += 1;
+      if (saves === 1) throw new Error('store unavailable');
+      storeDisk = storeMemory;
+    };
+    await act(async () => { await toggle.props.onCheckedChange(true); });
 
     expect(toggle.props.checked).toBe(false);
+    expect(storeMemory).toBe(false);
     expect(storeDisk).toBe(false);
     renderer!.unmount();
   });

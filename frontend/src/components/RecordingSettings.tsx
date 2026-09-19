@@ -7,7 +7,7 @@ import Analytics from '@/lib/analytics';
 import { toast } from 'sonner';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
 import { useConfig } from '@/contexts/ConfigContext';
-import { SaveFeedback, type SaveFeedbackState } from '@/components/ui/status-feedback';
+import { SaveFeedback, StatusFeedback, type SaveFeedbackState } from '@/components/ui/status-feedback';
 
 export interface RecordingPreferences {
   save_folder: string;
@@ -40,6 +40,7 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
   const [preferenceMessage, setPreferenceMessage] = useState('Recording preference');
   const [notificationSaveState, setNotificationSaveState] = useState<SaveFeedbackState | null>(null);
   const [notificationFailureMessage, setNotificationFailureMessage] = useState('Could not save participant reminder; previous setting restored');
+  const [notificationHydration, setNotificationHydration] = useState<'loading' | 'ready' | 'error'>('loading');
   const notificationRevision = useRef(0);
   const notificationSaving = useRef(false);
   const { isRecording } = useRecordingState();
@@ -76,9 +77,13 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
         const { Store } = await import('@tauri-apps/plugin-store');
         const store = await Store.load('preferences.json');
         const show = await store.get<boolean>('show_recording_notification') ?? true;
-        if (revision === notificationRevision.current) setShowRecordingNotification(show);
+        if (revision === notificationRevision.current) {
+          setShowRecordingNotification(show);
+          setNotificationHydration('ready');
+        }
       } catch (error) {
         console.error('Failed to load notification preference:', error);
+        if (revision === notificationRevision.current) setNotificationHydration('error');
       }
     };
     loadNotificationPref();
@@ -161,7 +166,7 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
   };
 
   const handleNotificationToggle = async (enabled: boolean) => {
-    if (notificationSaving.current) return;
+    if (notificationSaving.current || notificationHydration !== 'ready') return;
     notificationSaving.current = true;
     notificationRevision.current += 1;
     const previous = showRecordingNotification;
@@ -348,9 +353,11 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
           aria-label="Remind me to inform participants when recording starts"
           checked={showRecordingNotification}
           onCheckedChange={handleNotificationToggle}
-          disabled={notificationSaveState === 'saving'}
+          disabled={notificationHydration !== 'ready' || notificationSaveState === 'saving'}
         />
       </div>
+      {notificationHydration === 'loading' && <StatusFeedback pending>Loading participant reminder preference</StatusFeedback>}
+      {notificationHydration === 'error' && <StatusFeedback tone="error">Could not load participant reminder preference</StatusFeedback>}
       {notificationSaveState && (
         <SaveFeedback
           state={notificationSaveState}

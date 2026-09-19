@@ -62,6 +62,7 @@ beforeEach(() => {
   invokeImplementation = async () => [];
   context.modelConfig = committed;
   context.providerApiKeys = { claude: 'claude-key', groq: 'groq-key', openai: 'openai-key', openrouter: 'router-key' };
+  context.modelOptions.ollama = ['llama3'];
   downloadState.downloadingModels = new Set();
 });
 afterEach(() => renderer?.unmount());
@@ -286,6 +287,105 @@ describe('transactional model configuration form', () => {
     downloadState.downloadingModels = new Set();
     await act(async () => { renderer.update(<ModelConfigForm showCancel />); await Promise.resolve(); });
     expect(invoke.mock.calls.filter(call => call[0] === 'get_ollama_models').length).toBeGreaterThan(readsBeforeCompletion);
+  });
+
+  test('does not start a stale follow-on read after a pull completes on another provider', async () => {
+    const pull = deferred<null>();
+    let modelReads = 0;
+    context.modelOptions.ollama = [];
+    invokeImplementation = async command => {
+      if (command === 'get_ollama_models') { modelReads += 1; return []; }
+      if (command === 'pull_ollama_model') return pull.promise;
+      return null;
+    };
+    context.modelConfig = { ...committed, provider: 'ollama', model: '', apiKey: undefined };
+    await renderForm();
+    act(() => buttonContaining('Download gemma3:1b').props.onClick());
+    act(() => renderer.root.findAllByType('select')[0].props.onChange({ target: { value: 'openai' } }));
+    const readsBeforeCompletion = modelReads;
+    await act(async () => pull.resolve(null));
+
+    expect(modelReads).toBe(readsBeforeCompletion);
+    expect(renderer.root.findAllByType('select')[0].props.value).toBe('openai');
+  });
+
+  test('does not publish a stale pull failure after the endpoint changes', async () => {
+    const pull = deferred<null>();
+    context.modelOptions.ollama = [];
+    invokeImplementation = async command => {
+      if (command === 'get_ollama_models') return [];
+      if (command === 'pull_ollama_model') return pull.promise;
+      return null;
+    };
+    context.modelConfig = { ...committed, provider: 'ollama', model: '', apiKey: undefined };
+    await renderForm();
+    act(() => buttonContaining('Download gemma3:1b').props.onClick());
+    const endpoint = renderer.root.findAllByType('input').find(input => String(input.props.id).includes('ollama-endpoint'))!;
+    act(() => endpoint.props.onChange({ target: { value: 'http://new-endpoint:11434' } }));
+    await act(async () => pull.reject(new Error('old endpoint unavailable')));
+    expect(text()).not.toContain('old endpoint unavailable');
+  });
+
+  test('preserves a newer model selection when deletion finishes', async () => {
+    const deletion = deferred<null>();
+    invokeImplementation = async command => {
+      if (command === 'get_ollama_models') return [{ name: 'llama3' }, { name: 'other-model' }];
+      if (command === 'delete_ollama_model') return deletion.promise;
+      return null;
+    };
+    context.modelConfig = { ...committed, provider: 'ollama', model: 'llama3', apiKey: undefined };
+    await renderForm();
+    act(() => renderer.root.findByProps({ 'aria-label': 'Delete llama3 from Ollama' }).props.onClick());
+    act(() => modelSelect().props.onChange({ target: { value: 'other-model' } }));
+    await act(async () => deletion.resolve(null));
+    expect(modelSelect().props.value).toBe('other-model');
+  });
+
+  test('does not publish a stale deletion failure after the endpoint changes', async () => {
+    const deletion = deferred<null>();
+    invokeImplementation = async command => {
+      if (command === 'get_ollama_models') return [{ name: 'llama3' }];
+      if (command === 'delete_ollama_model') return deletion.promise;
+      return null;
+    };
+    context.modelConfig = { ...committed, provider: 'ollama', model: 'llama3', apiKey: undefined };
+    await renderForm();
+    act(() => renderer.root.findByProps({ 'aria-label': 'Delete llama3 from Ollama' }).props.onClick());
+    const endpoint = renderer.root.findAllByType('input').find(input => String(input.props.id).includes('ollama-endpoint'))!;
+    act(() => endpoint.props.onChange({ target: { value: 'http://new-endpoint:11434' } }));
+    await act(async () => deletion.reject(new Error('old delete failed')));
+    expect(text()).not.toContain('old delete failed');
+  });
+
+  test('invalidates model loading when clean committed config changes provider', async () => {
+    const oldRead = deferred<Array<{ name: string }>>();
+    invokeImplementation = async command => command === 'get_ollama_models' ? oldRead.promise : [];
+    context.modelConfig = { ...committed, provider: 'ollama', model: 'llama3', apiKey: undefined };
+    await renderForm();
+    context.modelConfig = committed;
+    await act(async () => renderer.update(<ModelConfigForm showCancel />));
+    await act(async () => oldRead.resolve([{ name: 'stale-model' }]));
+
+    expect(renderer.root.findAllByType('select')[0].props.value).toBe('openai');
+    expect(optionValues()).not.toContain('stale-model');
+    expect(modelSelect().props.disabled).toBe(false);
+  });
+
+  test('loads the new endpoint after clean committed endpoint changes', async () => {
+    const oldRead = deferred<Array<{ name: string }>>();
+    const newRead = deferred<Array<{ name: string }>>();
+    invokeImplementation = async (command, args) => {
+      if (command !== 'get_ollama_models') return null;
+      return args?.endpoint === 'http://new-endpoint:11434' ? newRead.promise : oldRead.promise;
+    };
+    context.modelConfig = { ...committed, provider: 'ollama', model: 'llama3', apiKey: undefined, ollamaEndpoint: null };
+    await renderForm();
+    context.modelConfig = { ...context.modelConfig, ollamaEndpoint: 'http://new-endpoint:11434' };
+    await act(async () => renderer.update(<ModelConfigForm showCancel />));
+    await act(async () => newRead.resolve([{ name: 'new-endpoint-model' }]));
+    await act(async () => oldRead.resolve([{ name: 'old-endpoint-model' }]));
+    expect(optionValues()).toContain('new-endpoint-model');
+    expect(optionValues()).not.toContain('old-endpoint-model');
   });
 
   test('preserves every custom provider field in the one owner commit', async () => {

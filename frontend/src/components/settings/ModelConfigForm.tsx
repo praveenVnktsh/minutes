@@ -128,6 +128,13 @@ export function ModelConfigForm({
     if (!initialized.current || !draft || !baseline || JSON.stringify(draft) !== JSON.stringify(baseline)) return;
     const next = { ...modelConfig };
     if (JSON.stringify(next) !== JSON.stringify(baseline)) {
+      modelRequest.current += 1;
+      connectionRequest.current += 1;
+      setIsLoadingModels(false);
+      setModelLoadError('');
+      setTesting(false);
+      setConnectionFeedback(null);
+      setLibraryFeedback('');
       if (KEY_PROVIDERS.has(next.provider)) {
         const provider = next.provider as keyof ProviderApiKeys;
         draftKeys.current[provider] = next.apiKey ?? null;
@@ -162,15 +169,17 @@ export function ModelConfigForm({
   };
 
   const loadModels = async (provider: ModelProvider, apiKey?: string | null, endpoint?: string | null) => {
-    const request = ++modelRequest.current;
     const identity = provider === 'ollama' ? endpoint?.trim() || '' : apiKey?.trim() || '';
-    const isCurrentRequest = () => {
+    const hasCurrentIdentity = () => {
       const current = draftRef.current;
-      if (request !== modelRequest.current || current?.provider !== provider) return false;
+      if (current?.provider !== provider) return false;
       return provider === 'ollama'
         ? (current.ollamaEndpoint?.trim() || '') === identity
         : !KEY_PROVIDERS.has(provider) || (current.apiKey?.trim() || '') === identity;
     };
+    if (!hasCurrentIdentity()) return;
+    const request = ++modelRequest.current;
+    const isCurrentRequest = () => request === modelRequest.current && hasCurrentIdentity();
     setIsLoadingModels(true);
     setModelLoadError('');
     try {
@@ -209,7 +218,7 @@ export function ModelConfigForm({
     }
   // The draft is initialized only once; subsequent edits must never be reset by async model loading.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [draft?.provider]);
+  }, [draft?.provider, baseline?.ollamaEndpoint]);
 
   useEffect(() => {
     const completed = [...previousDownloads.current].some(model => !downloadingModels.has(model));
@@ -323,15 +332,20 @@ export function ModelConfigForm({
   const downloadRecommendedOllamaModel = async () => {
     const model = 'gemma3:1b';
     if (isDownloading(model) || submitting.current || isModelConfigSaving) return;
+    const endpoint = draft.ollamaEndpoint?.trim() || '';
+    const hasCurrentIdentity = () => {
+      const current = draftRef.current;
+      return current?.provider === 'ollama' && (current.ollamaEndpoint?.trim() || '') === endpoint;
+    };
     setModelLoadError('');
     try {
       await invoke('pull_ollama_model', {
         modelName: model,
-        endpoint: draft.ollamaEndpoint?.trim() || null,
+        endpoint: endpoint || null,
       });
-      await loadModels('ollama', undefined, draft.ollamaEndpoint);
+      if (hasCurrentIdentity()) await loadModels('ollama', undefined, endpoint);
     } catch (error) {
-      setModelLoadError(`Could not download ${model}: ${messageFrom(error)}`);
+      if (hasCurrentIdentity()) setModelLoadError(`Could not download ${model}: ${messageFrom(error)}`);
     }
   };
 
@@ -346,10 +360,13 @@ export function ModelConfigForm({
       if (current?.provider !== 'ollama' || (current.ollamaEndpoint?.trim() || '') !== endpoint) return;
       const remaining = models.filter(item => item !== model);
       setModels(remaining);
-      if (draft.model === model) updateDraft({ model: remaining[0] ?? '' });
+      if (current.model === model) updateDraft({ model: remaining[0] ?? '' });
       setLibraryFeedback(`${model} deleted from Ollama`);
     } catch (error) {
-      setLibraryFeedback(`Could not delete ${model}: ${messageFrom(error)}`);
+      const current = draftRef.current;
+      if (current?.provider === 'ollama' && (current.ollamaEndpoint?.trim() || '') === endpoint) {
+        setLibraryFeedback(`Could not delete ${model}: ${messageFrom(error)}`);
+      }
     } finally {
       setLibraryOperation(null);
     }
