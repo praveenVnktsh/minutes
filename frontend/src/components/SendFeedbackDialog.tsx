@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent, type RefObject } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { Loader2, Send } from 'lucide-react';
 import {
@@ -19,9 +19,10 @@ import { buildFeedbackIssueUrl, collectFeedbackContext } from '@/lib/feedback';
 interface SendFeedbackDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  returnFocusRef?: RefObject<HTMLElement>;
 }
 
-export function SendFeedbackDialog({ open, onOpenChange }: SendFeedbackDialogProps) {
+export function SendFeedbackDialog({ open, onOpenChange, returnFocusRef }: SendFeedbackDialogProps) {
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -53,7 +54,13 @@ export function SendFeedbackDialog({ open, onOpenChange }: SendFeedbackDialogPro
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-lg">
+      <DialogContent
+        className="max-w-lg"
+        onCloseAutoFocus={(event) => {
+          event.preventDefault();
+          if (returnFocusRef?.current?.isConnected) returnFocusRef.current.focus();
+        }}
+      >
         <DialogHeader>
           <DialogTitle>Send feedback</DialogTitle>
           <DialogDescription>

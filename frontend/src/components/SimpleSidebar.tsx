@@ -77,6 +77,7 @@ export default function SimpleSidebar() {
   const [showFeedback, setShowFeedback] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const feedbackTriggerRef = useRef<HTMLButtonElement>(null);
 
   const runShellAction = async (action: () => Promise<void>) => {
     setActionError(null);
@@ -416,6 +417,7 @@ export default function SimpleSidebar() {
           </button>
           {collapsed && (
             <button
+              ref={feedbackTriggerRef}
               type="button"
               onClick={() => setShowFeedback(true)}
               title="Send feedback"
@@ -427,6 +429,7 @@ export default function SimpleSidebar() {
         </div>
         {!collapsed && (
           <button
+            ref={feedbackTriggerRef}
             type="button"
             onClick={() => setShowFeedback(true)}
             className="flex h-9 w-full items-center gap-2 rounded-xl px-3 text-xs text-ink-subtle transition hover:bg-surface-2 hover:text-ink"
@@ -436,7 +439,7 @@ export default function SimpleSidebar() {
         )}
       </div>
 
-      <SendFeedbackDialog open={showFeedback} onOpenChange={setShowFeedback} />
+      <SendFeedbackDialog open={showFeedback} onOpenChange={setShowFeedback} returnFocusRef={feedbackTriggerRef} />
     </aside>
   );
 }
