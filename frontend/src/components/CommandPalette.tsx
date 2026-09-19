@@ -22,7 +22,7 @@ import {
   CommandShortcut,
 } from '@/components/ui/command';
 import { useSidebar } from '@/components/Sidebar/SidebarProvider';
-import { useShell } from '@/contexts/ShellContext';
+import { handleShellActionError, useShell } from '@/contexts/ShellContext';
 import { useDebugMode } from '@/hooks/useDebugMode';
 import { copyMeetingLink } from '@/lib/clipboard';
 
@@ -77,7 +77,7 @@ export function CommandPalette() {
     setOpen(false);
     // Let the dialog close before navigating or opening another dialog.
     setTimeout(() => void Promise.resolve(action()).catch((error) => {
-      toast.error('Action failed', { description: error instanceof Error ? error.message : String(error) });
+      handleShellActionError(error, (description) => toast.error('Action failed', { description }));
     }), 0);
   };
 

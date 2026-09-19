@@ -21,7 +21,7 @@ export function ShellActivitySurface() {
   const workspaceMeetingId = pathname === '/meeting-details' ? currentMeeting?.id : null
   const activityCandidates = snapshot.activities.filter((activity) => (
     activity.kind !== 'recording'
-    && activity.meeting_id !== workspaceMeetingId
+    && (!workspaceMeetingId || activity.meeting_id !== workspaceMeetingId)
     && (['starting', 'queued', 'transcribing', 'paused', 'saving', 'failed'].includes(activity.status)
       || (activity.status === 'ready' && Boolean(activity.warning)))
   )).sort((left, right) => {
@@ -30,7 +30,7 @@ export function ShellActivitySurface() {
     return Number(leftTerminal) - Number(rightTerminal) || right.revision - left.revision
   })
   const summaryCandidates = summaries.filter((summary) => (
-    summary.meetingId !== workspaceMeetingId
+    (!workspaceMeetingId || summary.meetingId !== workspaceMeetingId)
     && ['queued', 'processing', 'failed'].includes(summary.status)
   )).sort((left, right) => Number(left.status === 'failed') - Number(right.status === 'failed') || right.revision - left.revision)
   const allWork = [

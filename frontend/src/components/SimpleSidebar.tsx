@@ -24,7 +24,7 @@ import {
 import { useSidebar, type CurrentMeeting } from '@/components/Sidebar/SidebarProvider';
 import { useDebugMode } from '@/hooks/useDebugMode';
 import { setDebugMode } from '@/lib/debugMode';
-import { useShell } from '@/contexts/ShellContext';
+import { handleShellActionError, useShell } from '@/contexts/ShellContext';
 import { SendFeedbackDialog } from '@/components/SendFeedbackDialog';
 import { useMeetingActivity } from '@/contexts/MeetingActivityContext';
 import { StatusFeedback } from '@/components/ui/status-feedback';
@@ -83,9 +83,11 @@ export default function SimpleSidebar() {
     try {
       await action();
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : String(error));
+      handleShellActionError(error, setActionError);
     }
   };
+
+  const catchNavigation = (error: unknown) => handleShellActionError(error, setActionError);
 
   // Focus the search box when the command palette (or another surface) requests it.
   useEffect(() => {
@@ -143,7 +145,7 @@ export default function SimpleSidebar() {
       >
         <button
           type="button"
-          onClick={() => void openMeeting(meeting).catch(() => {})}
+          onClick={() => void openMeeting(meeting).catch(catchNavigation)}
           title={meeting.title}
           className="flex min-w-0 flex-1 items-start gap-2.5 px-3 py-2.5 text-left"
         >
@@ -194,7 +196,7 @@ export default function SimpleSidebar() {
     label: 'Meetings',
     icon: Video,
     active: pathname === '/' || Boolean(pathname?.includes('/meeting-details')),
-    onClick: () => void navigate('/').catch(() => {}),
+    onClick: () => void navigate('/').catch(catchNavigation),
   }];
 
   return (
@@ -209,7 +211,7 @@ export default function SimpleSidebar() {
         <div className="mt-8 flex flex-col items-center gap-3">
           <button
             type="button"
-            onClick={() => void navigate('/').catch(() => {})}
+            onClick={() => void navigate('/').catch(catchNavigation)}
             className="no-drag flex h-7 w-7 items-center justify-center rounded-[10px] bg-brand text-brand-foreground"
             title="minutes"
           >
@@ -226,7 +228,7 @@ export default function SimpleSidebar() {
         </div>
       ) : (
         <div className="mt-8 flex items-center justify-between px-1">
-          <button type="button" onClick={() => void navigate('/').catch(() => {})} className="no-drag flex items-center gap-2 text-left" title="minutes">
+          <button type="button" onClick={() => void navigate('/').catch(catchNavigation)} className="no-drag flex items-center gap-2 text-left" title="minutes">
             <span className="flex h-7 w-7 items-center justify-center rounded-[10px] bg-brand text-brand-foreground">
               <AudioLines className="h-4 w-4" />
             </span>
@@ -396,7 +398,7 @@ export default function SimpleSidebar() {
           )}
           <button
             type="button"
-            onClick={() => void navigate('/settings').catch(() => {})}
+            onClick={() => void navigate('/settings').catch(catchNavigation)}
             className={`rounded-lg p-2 hover:bg-surface-2 hover:text-ink ${pathname === '/settings' ? 'text-ink' : 'text-ink-subtle'}`}
             title="Settings"
             aria-label="Settings"

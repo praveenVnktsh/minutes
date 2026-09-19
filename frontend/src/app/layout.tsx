@@ -190,7 +190,7 @@ function ReadyApplication({ children }: { children: React.ReactNode }) {
   }, [handleOpenImport])
 
   return (
-    <RecordingControllerProvider>
+    <RecordingControllerProvider feedbackManagedGlobally>
       <ImportDialogProvider onOpen={handleOpenImport}>
         <ShellProvider>
           <DownloadProgressToastProvider />

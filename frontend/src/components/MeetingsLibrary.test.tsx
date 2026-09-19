@@ -88,4 +88,20 @@ describe('MeetingsLibrary', () => {
     expect(rendered).not.toContain('Debug capture')
     await act(async () => renderer!.unmount())
   })
+
+  test('defers navigation failures to global feedback while retaining mutation errors', async () => {
+    runImportAction.mockRejectedValueOnce(new originalShell.ShellNavigationError(new Error('notes unsaved')))
+    setMeetingPinned.mockRejectedValueOnce(new Error('pin failed'))
+    let renderer: ReturnType<typeof create>
+    await act(async () => { renderer = create(<MeetingsLibrary />) })
+
+    const importButton = renderer!.root.findAllByType('button').find((button) => button.children.includes('Enable audio import'))!
+    await act(async () => importButton.props.onClick())
+    expect(JSON.stringify(renderer!.toJSON())).not.toContain('notes unsaved')
+
+    const pinButton = renderer!.root.findByProps({ 'aria-label': 'Unpin Active planning' })
+    await act(async () => pinButton.props.onClick({ stopPropagation: () => {} }))
+    expect(JSON.stringify(renderer!.toJSON())).toContain('pin failed')
+    await act(async () => renderer!.unmount())
+  })
 })

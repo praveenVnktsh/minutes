@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
 import { Archive, ArchiveRestore, CalendarDays, Mic, Pin, PinOff, Search, Upload, X } from 'lucide-react'
 import { useSidebar, type CurrentMeeting } from '@/components/Sidebar/SidebarProvider'
-import { useShell } from '@/contexts/ShellContext'
+import { handleShellActionError, useShell } from '@/contexts/ShellContext'
 import { useDebugMode } from '@/hooks/useDebugMode'
 import { useMeetingActivity } from '@/contexts/MeetingActivityContext'
 import { Button } from '@/components/ui/button'
@@ -75,6 +75,14 @@ export function MeetingsLibrary() {
       setActionError(error instanceof Error ? error.message : String(error))
     }
   }
+  const runShellAction = async (action: () => Promise<void>) => {
+    setActionError(null)
+    try {
+      await action()
+    } catch (error) {
+      handleShellActionError(error, setActionError)
+    }
+  }
 
   const togglePin = (event: MouseEvent, meeting: CurrentMeeting) => {
     event.stopPropagation()
@@ -95,7 +103,7 @@ export function MeetingsLibrary() {
             <p className="mt-2 max-w-xl text-sm leading-6 text-ink-muted">Record a conversation, return to active work, or find notes from an earlier meeting.</p>
           </div>
           <div className="flex flex-wrap gap-2">
-            <Button variant="outline" onClick={() => void runImportAction().catch(() => {})}><Upload />{importActionLabel}</Button>
+            <Button variant="outline" onClick={() => void runShellAction(runImportAction)}><Upload />{importActionLabel}</Button>
             <Button disabled={recordingActionDisabled} variant={recordingActionLabel === 'Stop recording' ? 'recording' : 'default'} onClick={() => void runRecordingAction()}>
               <Mic />{recordingActionLabel}
             </Button>
@@ -169,7 +177,7 @@ export function MeetingsLibrary() {
               return (
                 <li key={meeting.id}>
                   <article className={`group h-full rounded-2xl border bg-surface-raised p-4 transition hover:-translate-y-0.5 hover:shadow-md ${active ? 'border-recording/60' : 'border-hairline'}`}>
-                    <button type="button" className="w-full text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus" onClick={() => void openMeeting(meeting)}>
+                    <button type="button" className="w-full text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus" onClick={() => void runShellAction(() => openMeeting(meeting))}>
                       <div className="flex items-start justify-between gap-3">
                         <h2 className="line-clamp-2 text-base font-semibold leading-6 text-ink">{meeting.title || 'Untitled meeting'}</h2>
                         {active && <span className="shrink-0 rounded-full bg-recording-subtle px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-recording">Live</span>}

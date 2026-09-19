@@ -12,6 +12,18 @@ import { applyTheme, persistAndBroadcastTheme, readTheme, type AppTheme } from '
 
 const COLLAPSED_KEY = 'meetily:sidebar-collapsed';
 
+export class ShellNavigationError extends Error {
+  constructor(error: unknown) {
+    super(error instanceof Error ? error.message : String(error));
+    this.name = 'ShellNavigationError';
+  }
+}
+
+export function handleShellActionError(error: unknown, report: (message: string) => void): void {
+  if (error instanceof ShellNavigationError) return;
+  report(error instanceof Error ? error.message : String(error));
+}
+
 /** Below this viewport width the app switches to a compact, collapsed layout. */
 export const COMPACT_BREAKPOINT = 1280;
 
@@ -144,11 +156,19 @@ export function ShellProvider({ children }: { children: React.ReactNode }) {
   const importEnabled = betaFeatures.importAndRetranscribe;
   const navigate = useCallback(async (href: string) => {
     retryNavigationRef.current = () => navigateTo(href);
-    await navigateTo(href);
+    try {
+      await navigateTo(href);
+    } catch (error) {
+      throw new ShellNavigationError(error);
+    }
   }, [navigateTo]);
   const openMeeting = useCallback(async (meeting: CurrentMeeting) => {
     retryNavigationRef.current = () => openMeetingRoute(meeting);
-    await openMeetingRoute(meeting);
+    try {
+      await openMeetingRoute(meeting);
+    } catch (error) {
+      throw new ShellNavigationError(error);
+    }
   }, [openMeetingRoute]);
   const retryNavigation = useCallback(async () => {
     await retryNavigationRef.current?.();

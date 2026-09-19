@@ -21,6 +21,7 @@ mock.module('@/contexts/MeetingActivityContext', () => ({
       recording: null,
       activities: [
         ...failedActivities,
+        { task_id: 'starting-import', meeting_id: null, kind: 'import', status: 'starting', title: 'Preparing early import', stage: 'starting', progress_percentage: null, message: null, error: null, warning: null, controls_available: false, revision: 21 },
         { task_id: 'recording-failed', meeting_id: 'recording-meeting', kind: 'recording', status: 'failed', title: 'Duplicate recording failure', stage: null, progress_percentage: null, message: null, error: 'capture failed', warning: null, controls_available: false, revision: 10 },
         { task_id: 'active-job', meeting_id: 'active-meeting', kind: 'import', status: 'transcribing', title: 'Active transcription', stage: 'transcribing', progress_percentage: 42, message: null, error: null, warning: null, controls_available: true, revision: 19 },
       ],
@@ -58,6 +59,7 @@ describe('ShellActivitySurface', () => {
     const rendered = JSON.stringify(renderer.toJSON())
     expect(rendered).toContain('Saving meeting')
     expect(rendered).toContain('Active transcription')
+    expect(rendered).toContain('Preparing early import')
     expect(rendered).toContain('Quarterly review')
     expect(rendered).toContain('more activities')
     expect(rendered).not.toContain('Duplicate recording failure')

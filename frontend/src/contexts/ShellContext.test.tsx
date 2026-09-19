@@ -65,7 +65,7 @@ mock.module('next/navigation', () => ({ ...originalNextNavigation, usePathname: 
 const originalWindow = globalThis.window
 const originalDocument = globalThis.document
 const originalLocalStorage = globalThis.localStorage
-const { ShellProvider, useShell } = await import('./ShellContext')
+const { ShellNavigationError, ShellProvider, handleShellActionError, useShell } = await import('./ShellContext')
 const { default: SimpleSidebar } = await import('@/components/SimpleSidebar')
 const { MeetingsLibrary } = await import('@/components/MeetingsLibrary')
 
@@ -177,10 +177,17 @@ describe('ShellProvider shared actions', () => {
     await expect(current.runRecordingAction()).resolves.toBeUndefined()
 
     navigate.mockRejectedValueOnce(new Error('notes unsaved'))
-    await expect(current.navigate('/settings')).rejects.toThrow('notes unsaved')
+    await expect(current.navigate('/settings')).rejects.toBeInstanceOf(ShellNavigationError)
     await current.retryNavigation()
     expect(navigate).toHaveBeenLastCalledWith('/settings')
     await act(async () => renderer!.unmount())
+  })
+
+  test('reserves navigation failures for global feedback while reporting other action errors', () => {
+    const reported: string[] = []
+    handleShellActionError(new ShellNavigationError(new Error('notes unsaved')), (message) => reported.push(message))
+    handleShellActionError(new Error('archive failed'), (message) => reported.push(message))
+    expect(reported).toEqual(['archive failed'])
   })
 
   test('keeps sidebar and library search inputs on one query', async () => {
