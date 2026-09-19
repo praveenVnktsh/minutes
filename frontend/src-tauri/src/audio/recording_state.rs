@@ -1,11 +1,11 @@
+use anyhow::Result;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::sync::mpsc;
-use anyhow::Result;
 
-use super::devices::AudioDevice;
 use super::buffer_pool::AudioBufferPool;
+use super::devices::AudioDevice;
 
 /// Device type for audio chunks
 #[derive(Debug, Clone, PartialEq)]
@@ -194,7 +194,10 @@ impl RecordingState {
         if let Some(pause_start) = self.pause_start.lock().unwrap().take() {
             let pause_duration = pause_start.elapsed();
             *self.total_pause_duration.lock().unwrap() += pause_duration;
-            log::info!("Recording resumed after pause of {:.2}s", pause_duration.as_secs_f64());
+            log::info!(
+                "Recording resumed after pause of {:.2}s",
+                pause_duration.as_secs_f64()
+            );
         }
 
         self.is_paused.store(false, Ordering::SeqCst);
@@ -242,7 +245,9 @@ impl RecordingState {
         }
 
         if let Some(sender) = self.audio_sender.lock().unwrap().as_ref() {
-            sender.send(chunk).map_err(|_| anyhow::anyhow!("Failed to send audio chunk"))?;
+            sender
+                .send(chunk)
+                .map_err(|_| anyhow::anyhow!("Failed to send audio chunk"))?;
 
             // Update statistics
             let mut stats = self.stats.lock().unwrap();
@@ -251,7 +256,9 @@ impl RecordingState {
             Ok(())
         } else {
             // Return an error when no sender is available (pipeline not ready)
-            Err(anyhow::anyhow!("Audio pipeline not ready - no sender available"))
+            Err(anyhow::anyhow!(
+                "Audio pipeline not ready - no sender available"
+            ))
         }
     }
 
@@ -265,20 +272,37 @@ impl RecordingState {
 
     pub fn report_error(&self, error: AudioError) {
         let count = self.error_count.fetch_add(1, Ordering::SeqCst) + 1;
+        let mut capture_stopped = !error.is_recoverable();
 
         // Track recoverable vs non-recoverable errors separately
         if error.is_recoverable() {
             let recoverable_count = self.recoverable_error_count.fetch_add(1, Ordering::SeqCst) + 1;
-            log::warn!("Recoverable audio error ({}): {:?}", recoverable_count, error);
+            log::warn!(
+                "Recoverable audio error ({}): {:?}",
+                recoverable_count,
+                error
+            );
 
             // Allow more recoverable errors before stopping
             if recoverable_count >= 10 {
-                log::error!("Too many recoverable errors ({}), stopping recording", recoverable_count);
-                self.stop_recording();
+                log::error!(
+                    "Too many recoverable errors ({}), stopping recording",
+                    recoverable_count
+                );
+                capture_stopped = true;
             }
         } else {
             log::error!("Non-recoverable audio error: {:?}", error);
-            // Stop immediately for non-recoverable errors
+        }
+
+        if count >= 15 {
+            log::error!(
+                "Too many total audio errors ({}), stopping recording",
+                count
+            );
+            capture_stopped = true;
+        }
+        if capture_stopped {
             self.stop_recording();
         }
 
@@ -287,12 +311,6 @@ impl RecordingState {
         // Call error callback if set
         if let Some(callback) = self.error_callback.lock().unwrap().as_ref() {
             callback(&error);
-        }
-
-        // Fallback: stop recording after too many total errors
-        if count >= 15 {
-            log::error!("Too many total audio errors ({}), stopping recording", count);
-            self.stop_recording();
         }
     }
 
@@ -414,5 +432,31 @@ impl Clone for RecordingStats {
             total_duration: self.total_duration,
             last_activity: self.last_activity,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AudioError, RecordingState};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    #[test]
+    fn recoverable_error_threshold_stops_before_notifying_callback() {
+        let state = RecordingState::new();
+        state.start_recording().unwrap();
+        let callback_observed_stop = Arc::new(AtomicBool::new(false));
+        let observed = callback_observed_stop.clone();
+        let callback_state = state.clone();
+        state.set_error_callback(move |_| {
+            observed.store(!callback_state.is_recording(), Ordering::SeqCst);
+        });
+
+        for _ in 0..10 {
+            state.report_error(AudioError::StreamFailed);
+        }
+
+        assert!(!state.is_recording());
+        assert!(callback_observed_stop.load(Ordering::SeqCst));
     }
 }

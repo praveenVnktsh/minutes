@@ -5,7 +5,7 @@
  * Displays recoverable meetings, allows preview, and enables recovery or deletion.
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { formatDistanceToNow } from 'date-fns';
 import { AlertCircle, CheckCircle2, Clock, FileText, Trash2, XCircle } from 'lucide-react';
 import {
@@ -26,7 +26,7 @@ interface TranscriptRecoveryProps {
   isOpen: boolean;
   onClose: () => void;
   recoverableMeetings: MeetingMetadata[];
-  onRecover: (meetingId: string) => Promise<any>;
+  onRecover: (meetingId: string) => Promise<unknown>;
   onDelete: (meetingId: string) => Promise<void>;
   onLoadPreview: (meetingId: string) => Promise<StoredTranscript[]>;
 }
@@ -44,49 +44,69 @@ export function TranscriptRecovery({
   const [isLoadingPreview, setIsLoadingPreview] = useState(false);
   const [isRecovering, setIsRecovering] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [operationError, setOperationError] = useState<string | null>(null);
+  const previewRequestRef = useRef(0);
 
   // Reset selection when dialog opens
   useEffect(() => {
     if (isOpen) {
       setSelectedMeetingId(null);
       setPreviewTranscripts([]);
+      setOperationError(null);
+    } else {
+      previewRequestRef.current += 1;
+      setIsLoadingPreview(false);
     }
   }, [isOpen]);
+
+  const handleMeetingSelect = useCallback(async (meetingId: string) => {
+    const request = ++previewRequestRef.current;
+    setSelectedMeetingId(meetingId);
+    setIsLoadingPreview(true);
+    setOperationError(null);
+
+    try {
+      const transcripts = await onLoadPreview(meetingId);
+      if (request !== previewRequestRef.current) return;
+      // Limit to first 10 for preview
+      setPreviewTranscripts(transcripts.slice(0, 10));
+    } catch (error) {
+      if (request !== previewRequestRef.current) return;
+      console.error('Failed to load preview:', error);
+      setPreviewTranscripts([]);
+    } finally {
+      if (request === previewRequestRef.current) setIsLoadingPreview(false);
+    }
+  }, [onLoadPreview]);
 
   // Auto-select first meeting if available
   useEffect(() => {
     if (isOpen && recoverableMeetings.length > 0 && !selectedMeetingId) {
-      handleMeetingSelect(recoverableMeetings[0].meetingId);
+      void handleMeetingSelect(recoverableMeetings[0].meetingId);
     }
-  }, [isOpen, recoverableMeetings]);
-
-  const handleMeetingSelect = async (meetingId: string) => {
-    setSelectedMeetingId(meetingId);
-    setIsLoadingPreview(true);
-
-    try {
-      const transcripts = await onLoadPreview(meetingId);
-      // Limit to first 10 for preview
-      setPreviewTranscripts(transcripts.slice(0, 10));
-    } catch (error) {
-      console.error('Failed to load preview:', error);
-      setPreviewTranscripts([]);
-    } finally {
-      setIsLoadingPreview(false);
-    }
-  };
+  }, [handleMeetingSelect, isOpen, recoverableMeetings, selectedMeetingId]);
 
   const handleRecover = async () => {
     if (!selectedMeetingId) return;
 
     setIsRecovering(true);
+    setOperationError(null);
     try {
       const result = await onRecover(selectedMeetingId);
-      console.log('Recovery successful:', result);
-      onClose();
+      const outcome = result as { success?: boolean; audioRecoveryStatus?: { message?: string } } | undefined;
+      if (outcome?.success !== false) {
+        console.log('Recovery successful:', result);
+        onClose();
+      } else {
+        setOperationError(
+          outcome.audioRecoveryStatus?.message
+            ? `Transcript saved, but audio recovery needs another attempt: ${outcome.audioRecoveryStatus.message}`
+            : 'Transcript saved, but audio recovery needs another attempt.',
+        );
+      }
     } catch (error) {
       console.error('Recovery failed:', error);
-      alert('Failed to recover meeting. Please try again.');
+      setOperationError(error instanceof Error ? error.message : 'Failed to recover meeting. Please try again.');
     } finally {
       setIsRecovering(false);
     }
@@ -100,13 +120,14 @@ export function TranscriptRecovery({
     }
 
     setIsDeleting(true);
+    setOperationError(null);
     try {
       await onDelete(selectedMeetingId);
       setSelectedMeetingId(null);
       setPreviewTranscripts([]);
     } catch (error) {
       console.error('Delete failed:', error);
-      alert('Failed to delete meeting. Please try again.');
+      setOperationError(error instanceof Error ? error.message : 'Failed to delete meeting. Please try again.');
     } finally {
       setIsDeleting(false);
     }
@@ -274,6 +295,12 @@ export function TranscriptRecovery({
           </div>
         </div>
 
+        {operationError ? (
+          <Alert variant="destructive" className="mx-6" role="alert">
+            <AlertCircle className="h-4 w-4" />
+            <AlertDescription>{operationError}</AlertDescription>
+          </Alert>
+        ) : null}
         <DialogFooter className="px-6 pb-6">
           <Button
             variant="outline"

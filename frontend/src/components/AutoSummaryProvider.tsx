@@ -4,31 +4,44 @@ import { useEffect, useRef } from 'react';
 import { toast } from 'sonner';
 import { useConfig } from '@/contexts/ConfigContext';
 import {
-  consumeDeferredMeetingForAutoSummary,
+  claimAutoSummaryJob,
   generateAutomaticSummary,
 } from '@/lib/autoSummary';
-
-interface MeetingEventDetail {
-  meetingId: string;
-}
+import { useMeetingActivity } from '@/contexts/MeetingActivityContext';
+import type { ModelConfig } from '@/services/configService';
 
 export function AutoSummaryProvider() {
-  const { isAutoSummary, isModelConfigLoading, modelConfig } = useConfig();
+  const {
+    isAutoSummary,
+    isModelConfigLoading,
+    isModelConfigSaving,
+    modelConfigSaveError,
+    modelConfig,
+  } = useConfig();
+  const { snapshot: { activities } } = useMeetingActivity();
   const activeMeetingIds = useRef(new Set<string>());
-  const pendingMeetingIds = useRef(new Set<string>());
+  const pendingByMeeting = useRef(new Map<string, { taskId: string; config: ModelConfig }>());
+  const persistedRecordingIds = useRef(new Set<string>());
 
   useEffect(() => {
-    const startSummary = async (meetingId: string) => {
-      if (!isAutoSummary || isModelConfigLoading || activeMeetingIds.current.has(meetingId)) return;
-
-      pendingMeetingIds.current.delete(meetingId);
+    const startSummary = async (taskId: string, meetingId: string, config: ModelConfig) => {
+      if (!isAutoSummary || isModelConfigLoading || isModelConfigSaving || modelConfigSaveError) return;
+      if (activeMeetingIds.current.has(meetingId)) {
+        pendingByMeeting.current.set(meetingId, { taskId, config });
+        return;
+      }
+      if (!claimAutoSummaryJob(taskId, config)) return;
       activeMeetingIds.current.add(meetingId);
-      window.dispatchEvent(new CustomEvent('meetily:auto-summary-requested', {
-        detail: { meetingId },
-      }));
+      // Compatibility signal for the current workspace. c11 removes its
+      // route-owned auto-generation check and this event consumer.
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('meetily:auto-summary-requested', {
+          detail: { meetingId },
+        }));
+      }
 
       try {
-        await generateAutomaticSummary(meetingId, modelConfig);
+        await generateAutomaticSummary(meetingId, config);
       } catch (error) {
         console.error('[AutoSummary] Failed to start summary:', error);
         toast.error('Automatic summary could not start', {
@@ -36,37 +49,43 @@ export function AutoSummaryProvider() {
         });
       } finally {
         activeMeetingIds.current.delete(meetingId);
+        const pending = pendingByMeeting.current.get(meetingId);
+        if (pending) {
+          pendingByMeeting.current.delete(meetingId);
+          void startSummary(pending.taskId, meetingId, pending.config);
+        }
       }
     };
 
-    const queueSummary = (meetingId: string) => {
-      if (!isAutoSummary) return;
-      pendingMeetingIds.current.add(meetingId);
-      if (!isModelConfigLoading) void startSummary(meetingId);
-    };
+    if (isAutoSummary && !isModelConfigLoading && !isModelConfigSaving && !modelConfigSaveError) {
+      const latestReadyByMeeting = new Map<string, (typeof activities)[number]>();
+      for (const activity of activities) {
+        // Native recording readiness precedes the frontend transcript save.
+        // The persistence-ready event below is authoritative for live recordings.
+        if (activity.status !== 'ready' || activity.kind === 'recording' || !activity.meeting_id) continue;
+        const current = latestReadyByMeeting.get(activity.meeting_id);
+        if (!current || activity.revision > current.revision) {
+          latestReadyByMeeting.set(activity.meeting_id, activity);
+        }
+      }
+      for (const activity of latestReadyByMeeting.values()) {
+        void startSummary(activity.task_id, activity.meeting_id!, modelConfig);
+      }
+      for (const meetingId of persistedRecordingIds.current) {
+        void startSummary(`persisted-recording:${meetingId}`, meetingId, modelConfig);
+      }
+    }
 
     const handleMeetingReady = (event: Event) => {
-      const meetingId = (event as CustomEvent<MeetingEventDetail>).detail?.meetingId;
-      if (meetingId) queueSummary(meetingId);
+      const meetingId = (event as CustomEvent<{ meetingId?: string }>).detail?.meetingId;
+      if (!meetingId) return;
+      persistedRecordingIds.current.add(meetingId);
+      void startSummary(`persisted-recording:${meetingId}`, meetingId, modelConfig);
     };
-
-    const handleTranscriptionComplete = (event: Event) => {
-      const meetingId = (event as CustomEvent<MeetingEventDetail>).detail?.meetingId;
-      if (meetingId && consumeDeferredMeetingForAutoSummary(meetingId)) {
-        queueSummary(meetingId);
-      }
-    };
-
+    if (typeof window === 'undefined') return undefined;
     window.addEventListener('meetily:meeting-ready-for-summary', handleMeetingReady);
-    window.addEventListener('meetily:transcription-complete', handleTranscriptionComplete);
-    if (isAutoSummary && !isModelConfigLoading) {
-      pendingMeetingIds.current.forEach((meetingId) => void startSummary(meetingId));
-    }
-    return () => {
-      window.removeEventListener('meetily:meeting-ready-for-summary', handleMeetingReady);
-      window.removeEventListener('meetily:transcription-complete', handleTranscriptionComplete);
-    };
-  }, [isAutoSummary, isModelConfigLoading, modelConfig]);
+    return () => window.removeEventListener('meetily:meeting-ready-for-summary', handleMeetingReady);
+  }, [activities, isAutoSummary, isModelConfigLoading, isModelConfigSaving, modelConfig, modelConfigSaveError]);
 
   return null;
 }

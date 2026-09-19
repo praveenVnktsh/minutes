@@ -1,6 +1,6 @@
 'use client';
 
-import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from 'react';
+import { FormEvent, KeyboardEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { ArrowUp, Bot, ChevronDown, Sparkles } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
@@ -9,6 +9,7 @@ import { toast } from 'sonner';
 import { ModelConfig, ModelSettingsModal } from '@/components/ModelSettingsModal';
 import { Dialog, DialogContent, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { VisuallyHidden } from '@/components/ui/visually-hidden';
+import { useConfig } from '@/contexts/ConfigContext';
 
 interface ChatMessage {
   id: string;
@@ -23,6 +24,17 @@ interface AssistantResponse {
   transcriptEditsApplied: number;
 }
 
+interface ChatOperation {
+  status: 'pending' | 'result' | 'error';
+  draft: string;
+  promise: Promise<AssistantResponse>;
+  result?: AssistantResponse;
+  error?: string;
+  optimisticId?: string;
+}
+
+const chatOperations = new Map<string, ChatOperation>();
+
 const STARTERS = [
   'What decisions did we make?',
   'Turn this into clear action items',
@@ -32,31 +44,98 @@ const STARTERS = [
 export function MeetingAssistantPanel({
   meetingId,
   modelConfig,
-  setModelConfig,
-  onSaveModelConfig,
   onNotesUpdated,
   onTranscriptUpdated,
 }: {
   meetingId: string;
   modelConfig: ModelConfig;
-  setModelConfig: (config: ModelConfig | ((previous: ModelConfig) => ModelConfig)) => void;
-  onSaveModelConfig: (config?: ModelConfig) => Promise<void>;
   onNotesUpdated: (markdown: string) => void;
   onTranscriptUpdated?: () => Promise<void>;
 }) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [isSending, setIsSending] = useState(false);
+  const [sendError, setSendError] = useState<string | null>(() => chatOperations.get(meetingId)?.error ?? null);
+  const [historyState, setHistoryState] = useState<'loading' | 'ready' | 'error'>('loading');
+  const [historyError, setHistoryError] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const { isModelConfigSaving } = useConfig();
   const endRef = useRef<HTMLDivElement>(null);
+  const mountedRef = useRef(true);
+  const historyRequestRef = useRef(0);
+  const onNotesUpdatedRef = useRef(onNotesUpdated);
+  const onTranscriptUpdatedRef = useRef(onTranscriptUpdated);
+  const restoredDraftRef = useRef<string | null>(null);
+  onNotesUpdatedRef.current = onNotesUpdated;
+  onTranscriptUpdatedRef.current = onTranscriptUpdated;
+
+  const loadHistory = useCallback(async () => {
+    const requestId = ++historyRequestRef.current;
+    setHistoryState('loading');
+    setHistoryError(null);
+    try {
+      const result = await invoke<ChatMessage[]>('get_meeting_chat', { meetingId });
+      if (!mountedRef.current || historyRequestRef.current !== requestId) return;
+      setMessages(result);
+      setHistoryState('ready');
+    } catch (error) {
+      if (!mountedRef.current || historyRequestRef.current !== requestId) return;
+      console.warn('Could not load meeting chat:', error);
+      setHistoryError(String(error));
+      setHistoryState('error');
+    }
+  }, [meetingId]);
+
+  const applyResult = useCallback(async (operation: ChatOperation, response: AssistantResponse) => {
+    if (!mountedRef.current || chatOperations.get(meetingId) !== operation) return;
+    await loadHistory();
+    if (!mountedRef.current || chatOperations.get(meetingId) !== operation) return;
+    if (response.notesMarkdown) onNotesUpdatedRef.current(response.notesMarkdown);
+    if (response.transcriptEditsApplied > 0) {
+      await onTranscriptUpdatedRef.current?.();
+      if (!mountedRef.current || chatOperations.get(meetingId) !== operation) return;
+      toast.success(`Updated ${response.transcriptEditsApplied} transcript segment${response.transcriptEditsApplied === 1 ? '' : 's'}`);
+    } else if (response.notesMarkdown) {
+      toast.success('Enhanced notes updated');
+    }
+    setInput((current) => current === restoredDraftRef.current ? '' : current);
+    restoredDraftRef.current = null;
+    chatOperations.delete(meetingId);
+    setIsSending(false);
+  }, [loadHistory, meetingId]);
+
+  const applyError = useCallback((operation: ChatOperation, error: unknown) => {
+    if (!mountedRef.current || chatOperations.get(meetingId) !== operation) return;
+    const message = String(error);
+    operation.status = 'error';
+    operation.error = message;
+    setSendError(message);
+    setInput(operation.draft);
+    if (operation.optimisticId) {
+      setMessages((current) => current.filter((message) => message.id !== operation.optimisticId));
+    }
+    setIsSending(false);
+  }, [meetingId]);
 
   useEffect(() => {
-    let cancelled = false;
-    invoke<ChatMessage[]>('get_meeting_chat', { meetingId })
-      .then((result) => { if (!cancelled) setMessages(result); })
-      .catch((error) => console.warn('Could not load meeting chat:', error));
-    return () => { cancelled = true; };
-  }, [meetingId]);
+    mountedRef.current = true;
+    void loadHistory();
+    const operation = chatOperations.get(meetingId);
+    if (operation?.status === 'pending') {
+      setIsSending(true);
+      restoredDraftRef.current = operation.draft;
+      setInput(operation.draft);
+      void operation.promise.then((response) => applyResult(operation, response)).catch((error) => applyError(operation, error));
+    } else if (operation?.status === 'result' && operation.result) {
+      setIsSending(true);
+      void applyResult(operation, operation.result);
+    } else if (operation?.status === 'error') {
+      setSendError(operation.error ?? 'Unknown error');
+      restoredDraftRef.current = operation.draft;
+      setInput(operation.draft);
+    }
+    return () => { mountedRef.current = false; };
+  }, [applyError, applyResult, loadHistory, meetingId]);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -75,22 +154,18 @@ export function MeetingAssistantPanel({
     setMessages((current) => [...current, optimistic]);
     setInput('');
     setIsSending(true);
+    setSendError(null);
+    const request = invoke<AssistantResponse>('chat_with_meeting', { meetingId, message: content });
+    const operation: ChatOperation = { status: 'pending', draft: content, promise: request, optimisticId: optimistic.id };
+    chatOperations.set(meetingId, operation);
     try {
-      const response = await invoke<AssistantResponse>('chat_with_meeting', { meetingId, message: content });
-      setMessages((current) => [...current.filter((item) => item.id !== optimistic.id), optimistic, response.message]);
-      if (response.notesMarkdown) onNotesUpdated(response.notesMarkdown);
-      if (response.transcriptEditsApplied > 0) {
-        await onTranscriptUpdated?.();
-        toast.success(`Updated ${response.transcriptEditsApplied} transcript segment${response.transcriptEditsApplied === 1 ? '' : 's'}`);
-      } else if (response.notesMarkdown) {
-        toast.success('Enhanced notes updated');
-      }
+      const response = await request;
+      operation.status = 'result';
+      operation.result = response;
+      await applyResult(operation, response);
     } catch (error) {
-      setMessages((current) => current.filter((item) => item.id !== optimistic.id));
-      setInput(content);
+      applyError(operation, error);
       toast.error('The meeting assistant could not respond', { description: String(error) });
-    } finally {
-      setIsSending(false);
     }
   };
 
@@ -108,7 +183,7 @@ export function MeetingAssistantPanel({
           <h2 className="text-sm font-semibold text-ink">AI chat</h2>
           <p className="mt-0.5 text-[11px] text-[var(--ink-subtle)]">Works across notes and transcript</p>
         </div>
-        <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
+        <Dialog open={settingsOpen} onOpenChange={(open) => { if (!isModelConfigSaving) setSettingsOpen(open); }}>
           <DialogTrigger asChild>
             <button type="button" className="flex h-8 max-w-[180px] items-center gap-1 rounded-full bg-surface-2 px-3 text-[11px] text-ink-muted hover:bg-surface-raised" title="Choose AI model">
               <span className="truncate">{modelConfig.model || 'Choose model'}</span>
@@ -118,13 +193,8 @@ export function MeetingAssistantPanel({
           <DialogContent aria-describedby={undefined}>
             <VisuallyHidden><DialogTitle>AI model settings</DialogTitle></VisuallyHidden>
             <ModelSettingsModal
-              onSave={async (config) => {
-                await onSaveModelConfig(config);
-                setSettingsOpen(false);
-              }}
-              modelConfig={modelConfig}
-              setModelConfig={setModelConfig}
-              skipInitialFetch={true}
+              onCommitted={() => setSettingsOpen(false)}
+              onCancel={() => setSettingsOpen(false)}
               layout="dialog"
             />
           </DialogContent>
@@ -133,7 +203,16 @@ export function MeetingAssistantPanel({
 
       <div className="min-h-0 flex-1 overflow-y-auto px-5 py-3">
         <div className="space-y-5">
-          {messages.length === 0 && (
+          {historyState === 'loading' && (
+            <p role="status" className="py-8 text-xs text-ink-muted">Loading conversation…</p>
+          )}
+          {historyState === 'error' && (
+            <div className="space-y-3 py-8" role="alert">
+              <p className="text-xs text-error">Could not load conversation: {historyError}</p>
+              <button type="button" onClick={() => void loadHistory()} className="rounded-full border border-hairline px-3 py-1.5 text-xs text-ink">Retry</button>
+            </div>
+          )}
+          {historyState === 'ready' && messages.length === 0 && (
             <div className="py-8">
               <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#e2e9df] text-[#55735c]">
                 <Bot className="h-5 w-5" />
@@ -163,6 +242,7 @@ export function MeetingAssistantPanel({
               <Sparkles className="h-4 w-4 animate-pulse" /> Working across the meeting…
             </div>
           )}
+          {sendError && <p role="alert" className="text-xs text-error">The meeting assistant could not respond: {sendError}</p>}
           <div ref={endRef} />
         </div>
       </div>

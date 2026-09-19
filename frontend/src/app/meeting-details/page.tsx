@@ -1,13 +1,12 @@
 "use client"
 import { useSidebar } from "@/components/Sidebar/SidebarProvider";
-import { useState, useEffect, useCallback, Suspense } from "react";
+import { useState, useEffect, Suspense } from "react";
 import { MeetingSummary, SummaryProcessResponse, Transcript } from "@/types";
 import PageContent from "./page-content";
 import { useRouter, useSearchParams } from "next/navigation";
 import Analytics from "@/lib/analytics";
 import { invoke } from "@tauri-apps/api/core";
 import { LoaderIcon } from "lucide-react";
-import { useConfig } from "@/contexts/ConfigContext";
 import { usePaginatedTranscripts } from "@/hooks/usePaginatedTranscripts";
 import { parseSummaryContent } from "@/lib/summary-content";
 
@@ -23,20 +22,15 @@ interface MeetingDetailsResponse {
 function MeetingDetailsContent() {
   const searchParams = useSearchParams();
   const meetingId = searchParams.get('id');
-  const source = searchParams.get('source'); // Check if navigated from recording
-  const recording = searchParams.get('recording'); // Recording started in this workspace
-  const transcribing = searchParams.get('transcribing'); // Background transcription still running
-  const isRecordingFlow = source === 'recording' || recording === '1';
   const { setCurrentMeeting, refetchMeetings } = useSidebar();
-  const { isAutoSummary } = useConfig(); // Get auto-summary toggle state
   const router = useRouter();
   const [meetingDetails, setMeetingDetails] = useState<MeetingDetailsResponse | null>(null);
   const [summaryResponse, setSummaryResponse] = useState<SummaryProcessResponse | null>(null);
   const [meetingSummary, setMeetingSummary] = useState<MeetingSummary | null>(null);
+  const [summaryLoadError, setSummaryLoadError] = useState<string | null>(null);
+  const [summaryReadRevision, setSummaryReadRevision] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
-  const [shouldAutoGenerate, setShouldAutoGenerate] = useState<boolean>(false);
-  const [hasCheckedAutoGen, setHasCheckedAutoGen] = useState<boolean>(false);
 
   // Use pagination hook for efficient transcript loading
   const {
@@ -52,74 +46,6 @@ function MeetingDetailsContent() {
     refetch,
     error: transcriptError,
   } = usePaginatedTranscripts({ meetingId: meetingId || '' });
-
-  // Check if gemma3:1b model is available in Ollama
-  const checkForGemmaModel = useCallback(async (): Promise<boolean> => {
-    try {
-      const models = await invoke('get_ollama_models', { endpoint: null }) as any[];
-      const hasGemma = models.some((m: any) => m.name === 'gemma3:1b');
-      console.log('🔍 Checked for gemma3:1b:', hasGemma);
-      return hasGemma;
-    } catch (error) {
-      console.error('❌ Failed to check Ollama models:', error);
-      return false;
-    }
-  }, []);
-
-  // Set up auto-generation - respects DB as source of truth
-  const setupAutoGeneration = useCallback(async () => {
-    if (hasCheckedAutoGen) return; // Only check once
-
-    // Only auto-generate if navigated from recording
-    if (source !== 'recording') {
-      console.log('Not from recording navigation, skipping auto-generation');
-      setHasCheckedAutoGen(true);
-      return;
-    }
-
-    // Respect user's auto-summary toggle preference
-    if (!isAutoSummary) {
-      console.log('Auto-summary is disabled in settings');
-      setHasCheckedAutoGen(true);
-      return;
-    }
-
-    try {
-      // Check what's currently in database
-      const currentConfig = await invoke('api_get_model_config') as any;
-
-      // If DB already has a model, use it (never override!)
-      if (currentConfig && currentConfig.model) {
-        console.log('Using existing model from DB:', currentConfig.model);
-        setShouldAutoGenerate(true);
-        setHasCheckedAutoGen(true);
-        return;
-      }
-
-      // DB is empty - check if gemma3:1b exists as fallback
-      const hasGemma = await checkForGemmaModel();
-
-      if (hasGemma) {
-        console.log('💾 DB empty, using gemma3:1b as initial default');
-
-        await invoke('api_save_model_config', {
-          provider: 'ollama',
-          model: 'gemma3:1b',
-          whisperModel: 'large-v3',
-          apiKey: null,
-          ollamaEndpoint: null,
-        });
-
-        setShouldAutoGenerate(true);
-      } else {
-        console.log('⚠️ No model configured and gemma3:1b not found');
-      }
-    } catch (error) {
-      console.error('❌ Failed to setup auto-generation:', error);
-    }
-
-    setHasCheckedAutoGen(true);
-  }, [hasCheckedAutoGen, checkForGemmaModel, source, isAutoSummary]);
 
   // Sync meeting metadata from pagination hook to meeting details state
   useEffect(() => {
@@ -154,57 +80,14 @@ function MeetingDetailsContent() {
     }
   }, [transcriptError]);
 
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-
-    const handleDeferredTranscriptionComplete = (event: Event) => {
-      const completedMeetingId = (event as CustomEvent<{ meetingId: string }>).detail?.meetingId;
-      if (completedMeetingId === meetingId) {
-        void refetch();
-      }
-    };
-
-    window.addEventListener('meetily:transcription-complete', handleDeferredTranscriptionComplete);
-    return () => {
-      window.removeEventListener('meetily:transcription-complete', handleDeferredTranscriptionComplete);
-    };
-  }, [meetingId, refetch]);
-
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-
-    const handleAutoSummaryRequested = (event: Event) => {
-      const requestedMeetingId = (event as CustomEvent<{ meetingId: string }>).detail?.meetingId;
-      if (requestedMeetingId === meetingId) {
-        setHasCheckedAutoGen(true);
-      }
-    };
-
-    window.addEventListener('meetily:auto-summary-requested', handleAutoSummaryRequested);
-    return () => window.removeEventListener('meetily:auto-summary-requested', handleAutoSummaryRequested);
-  }, [meetingId]);
-
-  // Extract fetchMeetingDetails for use in child components (now refetches via hook)
-  const fetchMeetingDetails = useCallback(async () => {
-    if (!meetingId || meetingId === 'intro-call') {
-      return;
-    }
-
-    // The usePaginatedTranscripts hook automatically refetches when meetingId changes
-    // This function is kept for compatibility with onMeetingUpdated callback
-    console.log('fetchMeetingDetails called - pagination hook will handle refetch');
-  }, [meetingId]);
-
   // Reset states when meetingId changes (prevent race conditions)
   useEffect(() => {
     setMeetingDetails(null);
     setMeetingSummary(null);
     setSummaryResponse(null);
+    setSummaryLoadError(null);
     setError(null);
     setIsLoading(true);
-    // Reset auto-generation state to allow new meeting to be checked
-    setHasCheckedAutoGen(false);
-    setShouldAutoGenerate(false);
   }, [meetingId]);
 
   useEffect(() => {
@@ -220,12 +103,6 @@ function MeetingDetailsContent() {
 
     console.log('Valid meeting ID found, fetching details for:', meetingId);
 
-    setMeetingDetails(null);
-    setMeetingSummary(null);
-    setSummaryResponse(null);
-    setError(null);
-    setIsLoading(true);
-
     let cancelled = false;
     const fetchMeetingSummary = async () => {
       try {
@@ -233,6 +110,7 @@ function MeetingDetailsContent() {
           meetingId,
         });
         if (cancelled) return;
+        setSummaryLoadError(null);
         setSummaryResponse(response);
         const summary = parseSummaryContent(response.data);
         setMeetingSummary(response.status === 'idle' ? null : summary);
@@ -240,6 +118,8 @@ function MeetingDetailsContent() {
         if (cancelled) return;
         console.error('FETCH SUMMARY: Error fetching meeting summary:', error);
         setMeetingSummary(null);
+        setSummaryResponse(null);
+        setSummaryLoadError(error instanceof Error ? error.message : String(error));
       }
     };
 
@@ -253,70 +133,7 @@ function MeetingDetailsContent() {
 
     loadData();
     return () => { cancelled = true; };
-  }, [meetingId]);
-
-  // Keep the summary fresh after recording. The global auto-summary provider can
-  // start (and finish) generation after this page has already mounted, and long
-  // generations can outlive the child watcher's window — so the workspace could
-  // stay stuck on "Generating summary…" until a reload. Poll until it settles.
-  useEffect(() => {
-    if (!meetingId || meetingId === 'intro-call') return;
-
-    const status = summaryResponse?.status;
-    const settled = status === 'completed' || status === 'error' || status === 'failed' || status === 'cancelled';
-    const expecting = (isRecordingFlow && isAutoSummary) || status === 'processing' || status === 'pending';
-    if (settled || !expecting) return;
-
-    let cancelled = false;
-    let attempts = 0;
-    const maxAttempts = 600; // ~30 min at 3s
-    const refresh = async () => {
-      if (cancelled || attempts++ >= maxAttempts) return;
-      try {
-        const response = await invoke<SummaryProcessResponse>('api_get_summary', { meetingId });
-        if (cancelled) return;
-        setSummaryResponse(response);
-        if (response.status === 'completed') {
-          const summary = parseSummaryContent(response.data);
-          if (summary) setMeetingSummary(summary);
-        }
-      } catch (error) {
-        console.warn('Could not refresh summary status:', error);
-      }
-    };
-
-    void refresh();
-    const timer = setInterval(refresh, 3000);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, [meetingId, isRecordingFlow, isAutoSummary, summaryResponse?.status]);
-
-  // Auto-generation check: runs when meeting is loaded with no summary
-  useEffect(() => {
-    const checkAutoGen = async () => {
-      // Only auto-generate if:
-      // 1. We have meeting details
-      // 2. No summary exists
-      // 3. Meeting has transcripts
-      // 4. Haven't checked yet
-      if (
-        meetingDetails &&
-        !isLoading &&
-        summaryResponse?.status === 'idle' &&
-        meetingSummary === null &&
-        meetingDetails.transcripts &&
-        meetingDetails.transcripts.length > 0 &&
-        !hasCheckedAutoGen
-      ) {
-        console.log('No summary found, checking for auto-generation...');
-        await setupAutoGeneration();
-      }
-    };
-
-    checkAutoGen();
-  }, [meetingDetails, meetingSummary, summaryResponse, isLoading, hasCheckedAutoGen, setupAutoGeneration]);
+  }, [meetingId, summaryReadRevision]);
 
   if (error) {
     return (
@@ -344,17 +161,11 @@ function MeetingDetailsContent() {
   return <PageContent
     key={meetingId}
     initialSummary={summaryResponse}
+    initialSummaryError={summaryLoadError}
+    onRetryInitialSummary={() => setSummaryReadRevision((revision) => revision + 1)}
     meeting={meetingDetails}
     summaryData={meetingSummary}
-    arrivedRecording={recording === '1'}
-    arrivedTranscribing={transcribing === '1'}
-    expectSummary={isRecordingFlow && isAutoSummary}
-    shouldAutoGenerate={shouldAutoGenerate}
-    onAutoGenerateComplete={() => setShouldAutoGenerate(false)}
     onMeetingUpdated={async () => {
-      // Refetch meeting details to get updated title from backend
-      await fetchMeetingDetails();
-      // Refetch meetings list to update sidebar
       await refetchMeetings();
     }}
     onRefetchTranscripts={refetch}

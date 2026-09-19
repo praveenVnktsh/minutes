@@ -1,7 +1,7 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { useMemo } from 'react';
+import { useMeetingActivity } from '@/contexts/MeetingActivityContext';
 
 /**
  * Combined transcription progress for a single meeting.
@@ -20,20 +20,6 @@ export interface TranscriptionProgress {
   /** The backend's own description of the phase, when it sends one. */
   message: string | null;
 }
-
-interface StageProgressEvent {
-  meeting_id?: string | null;
-  stage?: string | null;
-  progress_percentage?: number | null;
-  message?: string | null;
-}
-
-// Retranscription is split decode -> vad -> transcribe -> save and diarization
-// is the short tail that runs once the transcript is written. Weighting the
-// stages keeps one percentage moving forward instead of resetting when
-// diarization restarts its own count at zero.
-const RETRANSCRIPTION_SHARE = 85;
-const DIARIZATION_SHARE = 100 - RETRANSCRIPTION_SHARE;
 
 const RETRANSCRIPTION_STAGES: Record<string, string> = {
   copying: 'Preparing audio',
@@ -65,68 +51,28 @@ function labelFor(stage: string, labels: Record<string, string>): string {
   return labels[stage] ?? stage.replace(/_/g, ' ');
 }
 
-function overallPercent(stage: string, raw: number, isDiarization: boolean): number {
+function overallPercent(stage: string, raw: number): number {
   if (stage === 'complete' || stage === 'speakers_complete') return 100;
-  return isDiarization
-    ? RETRANSCRIPTION_SHARE + Math.round((raw / 100) * DIARIZATION_SHARE)
-    : Math.round((raw / 100) * RETRANSCRIPTION_SHARE);
+  return raw;
 }
 
 export function useTranscriptionProgress(
   meetingId?: string | null,
 ): TranscriptionProgress | null {
-  const [progress, setProgress] = useState<TranscriptionProgress | null>(null);
-
-  useEffect(() => {
-    setProgress(null);
-    if (!meetingId) return;
-
-    let disposed = false;
-    const unlisteners: UnlistenFn[] = [];
-
-    const apply = (event: StageProgressEvent, isDiarization: boolean) => {
-      // Every emitter tags its events with the meeting. Events without a tag
-      // are accepted because they can only come from a single active task.
-      if (event.meeting_id && event.meeting_id !== meetingId) return;
-      const stage = event.stage;
-      if (!stage) return;
-      const raw = clampPercent(event.progress_percentage ?? 0);
-      setProgress({
-        percent: overallPercent(stage, raw, isDiarization),
-        stageLabel: labelFor(stage, isDiarization ? DIARIZATION_STAGES : RETRANSCRIPTION_STAGES),
-        message: event.message ?? null,
-      });
+  const { snapshot } = useMeetingActivity();
+  return useMemo(() => {
+    if (!meetingId) return null;
+    const activity = snapshot.activities
+      .filter((candidate) => candidate.meeting_id === meetingId)
+      .sort((left, right) => right.revision - left.revision)
+      .find((candidate) => candidate.status === 'queued' || candidate.status === 'transcribing');
+    if (!activity?.stage || activity.progress_percentage === null) return null;
+    const isDiarization = activity.stage.includes('speaker') || activity.stage === 'diarizing';
+    const raw = clampPercent(activity.progress_percentage);
+    return {
+      percent: overallPercent(activity.stage, raw),
+      stageLabel: labelFor(activity.stage, isDiarization ? DIARIZATION_STAGES : RETRANSCRIPTION_STAGES),
+      message: activity.message,
     };
-
-    const subscribe = async () => {
-      const retranscription = await listen<StageProgressEvent>(
-        'retranscription-progress',
-        (event) => apply(event.payload, false),
-      );
-      if (disposed) {
-        retranscription();
-        return;
-      }
-      unlisteners.push(retranscription);
-
-      const diarization = await listen<StageProgressEvent>(
-        'diarization-progress',
-        (event) => apply(event.payload, true),
-      );
-      if (disposed) {
-        unlisteners.forEach((unlisten) => unlisten());
-        return;
-      }
-      unlisteners.push(diarization);
-    };
-
-    void subscribe();
-
-    return () => {
-      disposed = true;
-      unlisteners.forEach((unlisten) => unlisten());
-    };
-  }, [meetingId]);
-
-  return progress;
+  }, [meetingId, snapshot.activities]);
 }

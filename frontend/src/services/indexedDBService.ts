@@ -29,11 +29,23 @@ export interface StoredTranscript {
   [key: string]: any;         // Allow additional fields from TranscriptUpdate
 }
 
-class IndexedDBService {
+export class IndexedDBService {
   private db: IDBDatabase | null = null;
   private readonly DB_NAME = 'MinutesRecoveryDB';
   private readonly DB_VERSION = 1;
   private initPromise: Promise<void> | null = null;
+
+  constructor(database?: IDBDatabase) {
+    this.db = database ?? null;
+  }
+
+  private waitForTransaction(transaction: IDBTransaction): Promise<void> {
+    return new Promise((resolve, reject) => {
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error ?? new Error('IndexedDB transaction failed'));
+      transaction.onabort = () => reject(transaction.error ?? new Error('IndexedDB transaction was aborted'));
+    });
+  }
 
   /**
    * Initialize database connection
@@ -170,30 +182,36 @@ class IndexedDBService {
    */
   async markMeetingSaved(meetingId: string): Promise<void> {
     try {
-      if (!this.db) await this.init();
-
-      const transaction = this.db!.transaction(['meetings'], 'readwrite');
-      const store = transaction.objectStore('meetings');
-
-      return new Promise((resolve, reject) => {
-        const getRequest = store.get(meetingId);
-        getRequest.onsuccess = () => {
-          const meeting = getRequest.result;
-          if (meeting) {
-            meeting.savedToSQLite = true;
-            meeting.lastUpdated = Date.now();
-            const putRequest = store.put(meeting);
-            putRequest.onsuccess = () => resolve();
-            putRequest.onerror = () => reject(putRequest.error);
-          } else {
-            resolve();
-          }
-        };
-        getRequest.onerror = () => reject(getRequest.error);
-      });
+      await this.markMeetingSavedStrict(meetingId);
     } catch (error) {
       console.warn('Failed to mark meeting as saved:', error);
     }
+  }
+
+  async markMeetingSavedStrict(meetingId: string): Promise<void> {
+    if (!this.db) await this.init();
+
+    const transaction = this.db!.transaction(['meetings'], 'readwrite');
+    const completed = this.waitForTransaction(transaction);
+    const store = transaction.objectStore('meetings');
+    const operation = new Promise<void>((resolve, reject) => {
+      const getRequest = store.get(meetingId);
+      getRequest.onsuccess = () => {
+        const meeting = getRequest.result as MeetingMetadata | undefined;
+        if (!meeting) {
+          reject(new Error(`Recovery meeting ${meetingId} was not found in IndexedDB`));
+          return;
+        }
+        meeting.savedToSQLite = true;
+        meeting.lastUpdated = Date.now();
+        const putRequest = store.put(meeting);
+        putRequest.onsuccess = () => resolve();
+        putRequest.onerror = () => reject(putRequest.error ?? new Error('IndexedDB put failed'));
+      };
+      getRequest.onerror = () => reject(getRequest.error ?? new Error('IndexedDB get failed'));
+    });
+
+    await Promise.all([operation, completed]);
   }
 
   /**
@@ -275,26 +293,28 @@ class IndexedDBService {
    */
   async getTranscripts(meetingId: string): Promise<StoredTranscript[]> {
     try {
-      if (!this.db) await this.init();
-
-      const transaction = this.db!.transaction(['transcripts'], 'readonly');
-      const store = transaction.objectStore('transcripts');
-      const index = store.index('meetingId');
-
-      return new Promise((resolve, reject) => {
-        const request = index.getAll(meetingId);
-        request.onsuccess = () => {
-          const transcripts = request.result as StoredTranscript[];
-          // Sort by sequence ID
-          transcripts.sort((a, b) => a.sequenceId - b.sequenceId);
-          resolve(transcripts);
-        };
-        request.onerror = () => reject(request.error);
-      });
+      return await this.getTranscriptsStrict(meetingId);
     } catch (error) {
       console.error('Failed to get transcripts from IndexedDB:', error);
       return [];
     }
+  }
+
+  async getTranscriptsStrict(meetingId: string): Promise<StoredTranscript[]> {
+    if (!this.db) await this.init();
+
+    const transaction = this.db!.transaction(['transcripts'], 'readonly');
+    const completed = this.waitForTransaction(transaction);
+    const store = transaction.objectStore('transcripts');
+    const index = store.index('meetingId');
+    const requested = new Promise<StoredTranscript[]>((resolve, reject) => {
+      const request = index.getAll(meetingId);
+      request.onsuccess = () => resolve(request.result as StoredTranscript[]);
+      request.onerror = () => reject(request.error ?? new Error('IndexedDB transcript read failed'));
+    });
+    const [transcripts] = await Promise.all([requested, completed]);
+    transcripts.sort((a, b) => a.sequenceId - b.sequenceId);
+    return transcripts;
   }
 
   /**

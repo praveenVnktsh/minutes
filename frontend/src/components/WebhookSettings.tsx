@@ -6,6 +6,7 @@ import { Copy, RefreshCw, Send } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Switch } from '@/components/ui/switch';
+import { SaveFeedback, type SaveFeedbackState } from '@/components/ui/status-feedback';
 
 interface WebhookConfig {
   enabled: boolean;
@@ -24,10 +25,12 @@ export function WebhookSettings() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
+  const [savedConfig, setSavedConfig] = useState<WebhookConfig>(EMPTY_CONFIG);
+  const [saveState, setSaveState] = useState<SaveFeedbackState>('saved');
 
   useEffect(() => {
     invoke<WebhookConfig>('get_webhook_config')
-      .then(setConfig)
+      .then(value => { setConfig(value); setSavedConfig(value); })
       .catch((error) => toast.error('Could not load webhook settings', {
         description: String(error),
       }))
@@ -36,11 +39,15 @@ export function WebhookSettings() {
 
   const save = async (showToast = true) => {
     setSaving(true);
+    setSaveState('saving');
     try {
       await invoke('set_webhook_config', { config });
+      setSavedConfig(config);
+      setSaveState('saved');
       if (showToast) toast.success('Webhook settings saved');
       return true;
     } catch (error) {
+      setSaveState('error');
       toast.error('Could not save webhook settings', { description: String(error) });
       return false;
     } finally {
@@ -68,8 +75,12 @@ export function WebhookSettings() {
   };
 
   const copySecret = async () => {
-    await navigator.clipboard.writeText(config.signing_secret);
-    toast.success('Signing secret copied');
+    try {
+      await navigator.clipboard.writeText(config.signing_secret);
+      toast.success('Signing secret copied');
+    } catch (error) {
+      toast.error('Could not copy signing secret', { description: String(error) });
+    }
   };
 
   if (loading) {
@@ -94,6 +105,7 @@ export function WebhookSettings() {
           </div>
         </div>
         <Switch
+          aria-label="Enable transcription completion webhook"
           checked={config.enabled}
           onCheckedChange={enabled => setConfig(current => ({ ...current, enabled }))}
         />
@@ -107,7 +119,7 @@ export function WebhookSettings() {
           value={config.endpoint}
           onChange={event => setConfig(current => ({ ...current, endpoint: event.target.value }))}
           placeholder="https://hooks.example.com/minutes"
-          className="w-full rounded-md border border-hairline bg-surface-raised px-3 py-2 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+          className="w-full rounded-md border border-hairline bg-surface-raised px-3 py-2 text-sm outline-none focus:border-focus focus:ring-2 focus:ring-focus/30"
         />
         <p className="text-xs text-ink-muted">HTTPS is required, except for localhost development.</p>
       </div>
@@ -121,7 +133,7 @@ export function WebhookSettings() {
             value={config.signing_secret}
             onChange={event => setConfig(current => ({ ...current, signing_secret: event.target.value }))}
             placeholder="At least 16 characters"
-            className="min-w-0 flex-1 rounded-md border border-hairline bg-surface-raised px-3 py-2 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+            className="min-w-0 flex-1 rounded-md border border-hairline bg-surface-raised px-3 py-2 text-sm outline-none focus:border-focus focus:ring-2 focus:ring-focus/30"
           />
           <Button variant="outline" onClick={generateSecret} title="Generate secret">
             <RefreshCw className="h-4 w-4" />
@@ -154,6 +166,10 @@ export function WebhookSettings() {
           {testing ? 'Sending…' : 'Send test webhook'}
         </Button>
       </div>
+      <SaveFeedback
+        state={saving ? 'saving' : saveState === 'error' ? 'error' : JSON.stringify(config) === JSON.stringify(savedConfig) ? 'saved' : 'unsaved'}
+        labels={{ saving: 'Saving webhook settings', saved: 'Webhook settings saved', error: 'Could not save webhook settings', unsaved: 'Webhook changes not saved' }}
+      />
     </div>
   );
 }

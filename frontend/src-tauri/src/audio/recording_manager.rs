@@ -28,6 +28,28 @@ pub(crate) enum RecordingStartError {
     Other(#[from] anyhow::Error),
 }
 
+fn combine_shutdown_results(stream_result: Result<()>, pipeline_result: Result<()>) -> Result<()> {
+    match (stream_result, pipeline_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(stream), Err(pipeline)) => Err(anyhow::anyhow!(
+            "Failed to stop audio streams: {stream}; failed to flush audio pipeline: {pipeline}"
+        )),
+        (Err(stream), Ok(())) => Err(anyhow::anyhow!("Failed to stop audio streams: {stream}")),
+        (Ok(()), Err(pipeline)) => {
+            Err(anyhow::anyhow!("Failed to flush audio pipeline: {pipeline}"))
+        }
+    }
+}
+
+fn propagate_save_result(
+    result: std::result::Result<
+        (Option<String>, Vec<super::recording_saver::TranscriptSegment>),
+        String,
+    >,
+) -> Result<(Option<String>, Vec<super::recording_saver::TranscriptSegment>)> {
+    result.map_err(anyhow::Error::msg)
+}
+
 // ============================================================================
 // macOS Core Audio "pre-wake" — ported from feat/audio-device-handling
 // (commit 8bf6af8b, with refinements from d266feac + 7107adc7 + a10f8e55).
@@ -352,26 +374,32 @@ impl RecordingManager {
         self.state.stop_recording();
 
         // Stop audio streams immediately
-        if let Err(e) = self.stream_manager.stop_streams() {
-            error!("Error stopping audio streams: {}", e);
+        let stream_result = self.stream_manager.stop_streams();
+        if let Err(error) = &stream_result {
+            error!("Error stopping audio streams: {}", error);
         }
 
         // CRITICAL: Force pipeline to flush ALL accumulated audio before stopping
         debug!("💨 Forcing pipeline to flush accumulated audio immediately");
-        if let Err(e) = self.pipeline_manager.force_flush_and_stop().await {
-            error!("Error during force flush: {}", e);
+        let pipeline_result = self.pipeline_manager.force_flush_and_stop().await;
+        if let Err(error) = &pipeline_result {
+            error!("Error during force flush: {}", error);
         }
 
         // CRITICAL: Full cleanup to release all Arc references and resources
         // This ensures microphone is released even if Drop is delayed
         self.state.cleanup();
 
+        combine_shutdown_results(stream_result, pipeline_result)?;
         info!("✅ Recording streams stopped with immediate flush completed");
         Ok(())
     }
 
     /// Save recording after transcription is complete
-    pub async fn save_recording_only<R: tauri::Runtime>(&mut self, app: &tauri::AppHandle<R>) -> Result<()> {
+    pub async fn save_recording_only<R: tauri::Runtime>(
+        &mut self,
+        app: &tauri::AppHandle<R>,
+    ) -> Result<Vec<super::recording_saver::TranscriptSegment>> {
         debug!("Saving recording with transcript chunks");
 
         // Get actual recording duration from state
@@ -379,21 +407,22 @@ impl RecordingManager {
         info!("Recording duration from state: {:?}s", recording_duration);
 
         // Save the recording with actual duration
-        match self.recording_saver.stop_and_save(app, recording_duration).await {
-            Ok(Some(file_path)) => {
+        let (file_path, completed_transcripts) = propagate_save_result(
+            self.recording_saver
+                .stop_and_save(app, recording_duration)
+                .await,
+        )?;
+        match file_path {
+            Some(file_path) => {
                 info!("Recording saved successfully to: {}", file_path);
             }
-            Ok(None) => {
+            None => {
                 debug!("Recording not saved (auto-save disabled or no audio data)");
-            }
-            Err(e) => {
-                error!("Failed to save recording: {}", e);
-                // Don't fail the stop operation if saving fails
             }
         }
 
         debug!("Recording save operation completed");
-        Ok(())
+        Ok(completed_transcripts)
     }
 
     /// Stop recording and save audio (legacy method)
@@ -419,10 +448,10 @@ impl RecordingManager {
 
         // Save the recording with actual duration
         match self.recording_saver.stop_and_save(app, recording_duration).await {
-            Ok(Some(file_path)) => {
+            Ok((Some(file_path), _)) => {
                 info!("Recording saved successfully to: {}", file_path);
             }
-            Ok(None) => {
+            Ok((None, _)) => {
                 info!("Recording not saved (auto-save disabled or no audio data)");
             }
             Err(e) => {
@@ -607,6 +636,43 @@ impl RecordingManager {
     /// Get reference to recording state for external access
     pub fn get_state(&self) -> &Arc<RecordingState> {
         &self.state
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{combine_shutdown_results, propagate_save_result};
+
+    #[test]
+    fn force_flush_failure_propagates_to_the_stop_gate() {
+        let result = combine_shutdown_results(
+            Ok(()),
+            Err(anyhow::anyhow!("pipeline flush failed")),
+        );
+
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Failed to flush audio pipeline: pipeline flush failed"
+        );
+    }
+
+    #[test]
+    fn stream_and_force_flush_failures_are_both_preserved() {
+        let result = combine_shutdown_results(
+            Err(anyhow::anyhow!("stream stop failed")),
+            Err(anyhow::anyhow!("pipeline flush failed")),
+        );
+
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("stream stop failed"));
+        assert!(error.contains("pipeline flush failed"));
+    }
+
+    #[test]
+    fn recording_save_failure_propagates_to_the_terminal_gate() {
+        let result = propagate_save_result(Err("transcript write failed".to_string()));
+
+        assert_eq!(result.unwrap_err().to_string(), "transcript write failed");
     }
 }
 

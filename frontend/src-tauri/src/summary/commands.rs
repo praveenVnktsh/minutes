@@ -301,6 +301,20 @@ fn summary_is_renderable(value: &serde_json::Value) -> bool {
     if summary_contains_reasoning_marker(value) {
         return false;
     }
+    if object
+        .get("manually_cleared")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        return object
+            .keys()
+            .all(|key| matches!(key.as_str(), "markdown" | "summary_json" | "manually_cleared"))
+            && object.get("markdown").and_then(serde_json::Value::as_str) == Some("")
+            && object
+                .get("summary_json")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|blocks| !blocks.iter().any(blocknote_has_visible_text));
+    }
     if let Some(markdown) = object.get("markdown") {
         return markdown
             .as_str()
@@ -642,6 +656,27 @@ mod tests {
         })));
         assert!(summary_is_renderable(&json!({
             "summary_json": [{"content": [{"type": "text", "text": "Visible"}]}]
+        })));
+        assert!(summary_is_renderable(&json!({
+            "markdown": "",
+            "summary_json": [],
+            "manually_cleared": true
+        })));
+        assert!(!summary_is_renderable(&json!({
+            "markdown": "",
+            "summary_json": [],
+            "manually_cleared": false
+        })));
+        assert!(!summary_is_renderable(&json!({
+            "markdown": "<think>private</think>",
+            "summary_json": [],
+            "manually_cleared": true
+        })));
+        assert!(!summary_is_renderable(&json!({
+            "markdown": "",
+            "summary_json": [],
+            "manually_cleared": true,
+            "Decisions": {"blocks": [{"content": "hidden"}]}
         })));
     }
 
