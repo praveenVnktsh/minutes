@@ -6,9 +6,10 @@ use tauri_plugin_store::StoreExt;
 
 use crate::{
     database::{
-        models::MeetingModel,
+        models::{MeetingModel, Setting},
         repositories::{
-            meeting::MeetingsRepository, setting::SettingsRepository,
+            meeting::MeetingsRepository,
+            setting::{ApiKeyUpdate, SettingsRepository},
             transcript::TranscriptsRepository,
         },
     },
@@ -84,6 +85,21 @@ pub struct ModelConfig {
     pub api_key: Option<String>,
     #[serde(rename = "ollamaEndpoint")]
     pub ollama_endpoint: Option<String>,
+    #[serde(
+        rename = "customOpenAIEndpoint",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub custom_openai_endpoint: Option<String>,
+    #[serde(rename = "customOpenAIModel", skip_serializing_if = "Option::is_none")]
+    pub custom_openai_model: Option<String>,
+    #[serde(rename = "customOpenAIApiKey", skip_serializing_if = "Option::is_none")]
+    pub custom_openai_api_key: Option<String>,
+    #[serde(rename = "maxTokens", skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+    #[serde(rename = "topP", skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f32>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -96,6 +112,34 @@ pub struct SaveModelConfigRequest {
     pub api_key: Option<String>,
     #[serde(rename = "ollamaEndpoint")]
     pub ollama_endpoint: Option<String>,
+}
+
+fn model_config_from_setting(setting: Setting) -> ModelConfig {
+    let custom = setting.get_custom_openai_config();
+    let api_key = match setting.provider.as_str() {
+        "openai" => setting.openai_api_key,
+        "claude" => setting.anthropic_api_key,
+        "ollama" => setting.ollama_api_key,
+        "groq" => setting.groq_api_key,
+        "openrouter" => setting.open_router_api_key,
+        _ => None,
+    };
+
+    ModelConfig {
+        provider: setting.provider,
+        model: setting.model,
+        whisper_model: setting.whisper_model,
+        api_key,
+        ollama_endpoint: setting.ollama_endpoint,
+        custom_openai_endpoint: custom.as_ref().map(|value| value.endpoint.clone()),
+        custom_openai_model: custom.as_ref().map(|value| value.model.clone()),
+        custom_openai_api_key: custom
+            .as_ref()
+            .and_then(|value| value.api_key.clone()),
+        max_tokens: custom.as_ref().and_then(|value| value.max_tokens),
+        temperature: custom.as_ref().and_then(|value| value.temperature),
+        top_p: custom.as_ref().and_then(|value| value.top_p),
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -647,26 +691,7 @@ pub async fn api_get_model_config<R: Runtime>(
                 &config.whisper_model,
                 &config.ollama_endpoint
             );
-            match SettingsRepository::get_api_key(pool, &config.provider).await {
-                Ok(api_key) => {
-                    log_info!("Successfully retrieved model config and API key.");
-                    Ok(Some(ModelConfig {
-                        provider: config.provider,
-                        model: config.model,
-                        whisper_model: config.whisper_model,
-                        api_key,
-                        ollama_endpoint: config.ollama_endpoint,
-                    }))
-                }
-                Err(e) => {
-                    log_error!(
-                        "Failed to get API key for provider {}: {}",
-                        &config.provider,
-                        e
-                    );
-                    Err(e.to_string())
-                }
-            }
+            Ok(Some(model_config_from_setting(config)))
         }
         Ok(None) => {
             log_warn!("⚠️ No model config found in database - database may be empty or settings table not initialized");
@@ -688,8 +713,10 @@ pub async fn api_save_model_config<R: Runtime>(
     whisper_model: String,
     api_key: Option<String>,
     ollama_endpoint: Option<String>,
+    api_key_action: Option<String>,
+    custom_openai_config: Option<CustomOpenAIConfig>,
     _auth_token: Option<String>,
-) -> Result<serde_json::Value, String> {
+) -> Result<ModelConfig, String> {
     log_info!(
         "💾 api_save_model_config called (native): provider='{}', model='{}', whisperModel='{}', ollamaEndpoint={:?}",
         &provider,
@@ -699,29 +726,54 @@ pub async fn api_save_model_config<R: Runtime>(
     );
     let pool = state.db_manager.pool();
 
-    if let Err(e) = SettingsRepository::save_model_config(
+    let api_key_update = match api_key_action.as_deref() {
+        None => api_key
+            .filter(|key| !key.is_empty())
+            .map(ApiKeyUpdate::Set)
+            .unwrap_or(ApiKeyUpdate::Preserve),
+        Some("preserve") => ApiKeyUpdate::Preserve,
+        Some("set") => ApiKeyUpdate::Set(
+            api_key
+                .filter(|key| !key.trim().is_empty())
+                .ok_or_else(|| "API key is required when apiKeyAction is set".to_string())?,
+        ),
+        Some("clear") => ApiKeyUpdate::Clear,
+        Some(action) => return Err(format!("Invalid apiKeyAction: {}", action)),
+    };
+    let api_key_update = if provider == "custom-openai" {
+        ApiKeyUpdate::Preserve
+    } else {
+        api_key_update
+    };
+
+    let custom_openai_config = custom_openai_config
+        .map(normalize_custom_openai_config)
+        .transpose()?;
+    if provider != "custom-openai" && custom_openai_config.is_some() {
+        return Err("customOpenAIConfig is only valid for the custom-openai provider".to_string());
+    }
+    let committed_model = custom_openai_config
+        .as_ref()
+        .map(|config| config.model.as_str())
+        .unwrap_or(&model);
+
+    let committed = SettingsRepository::save_model_config_transaction(
         pool,
         &provider,
-        &model,
+        committed_model,
         &whisper_model,
         ollama_endpoint.as_deref(),
+        api_key_update,
+        custom_openai_config.as_ref(),
     )
     .await
-    {
-        log_error!("❌ Failed to save model config to database: {}", e);
-        return Err(e.to_string());
-    }
-
-    // Skip API key saving for custom-openai provider (it uses customOpenAIConfig JSON instead)
-    if let Some(key) = api_key {
-        if !key.is_empty() && provider != "custom-openai" {
-            log_info!("🔑 API key provided, saving...");
-            if let Err(e) = SettingsRepository::save_api_key(pool, &provider, &key).await {
-                log_error!("❌ Failed to save API key: {}", e);
-                return Err(e.to_string());
-            }
-        }
-    }
+    .map_err(|error| {
+        log_error!(
+            "❌ Failed to save model configuration transaction: {}",
+            error
+        );
+        error.to_string()
+    })?;
 
     // Trigger graceful shutdown of built-in AI sidecar if it's running
     // This ensures that if the user switched models/providers, the old one is cleaned up
@@ -731,9 +783,45 @@ pub async fn api_save_model_config<R: Runtime>(
     }
 
     log_info!("✅ Successfully saved model configuration to database");
-    Ok(
-        serde_json::json!({ "status": "success", "message": "Model configuration saved successfully" }),
-    )
+    Ok(model_config_from_setting(committed))
+}
+
+fn normalize_custom_openai_config(
+    mut config: CustomOpenAIConfig,
+) -> Result<CustomOpenAIConfig, String> {
+    config.endpoint = config.endpoint.trim().to_string();
+    config.model = config.model.trim().to_string();
+    config.api_key = config.api_key.and_then(|key| {
+        let key = key.trim().to_string();
+        (!key.is_empty()).then_some(key)
+    });
+
+    if config.endpoint.is_empty() {
+        return Err("Endpoint URL is required".to_string());
+    }
+    if !config.endpoint.starts_with("http://") && !config.endpoint.starts_with("https://") {
+        return Err("Endpoint must start with http:// or https://".to_string());
+    }
+    if config.model.is_empty() {
+        return Err("Model name is required".to_string());
+    }
+    if config.max_tokens.is_some_and(|tokens| tokens < 1) {
+        return Err("Max tokens must be at least 1".to_string());
+    }
+    if config
+        .temperature
+        .is_some_and(|temperature| !temperature.is_finite() || !(0.0..=2.0).contains(&temperature))
+    {
+        return Err("Temperature must be between 0.0 and 2.0".to_string());
+    }
+    if config
+        .top_p
+        .is_some_and(|top_p| !top_p.is_finite() || !(0.0..=1.0).contains(&top_p))
+    {
+        return Err("Top P must be between 0.0 and 1.0".to_string());
+    }
+
+    Ok(config)
 }
 
 #[tauri::command]
@@ -1687,7 +1775,29 @@ pub async fn api_test_custom_openai_connection<R: Runtime>(
 
 #[cfg(test)]
 mod tests {
-    use super::is_browser_url_allowed;
+    use super::{is_browser_url_allowed, model_config_from_setting};
+    use crate::database::models::Setting;
+
+    #[test]
+    fn model_config_uses_one_setting_snapshot_and_tolerates_invalid_custom_json() {
+        let config = model_config_from_setting(Setting {
+            id: "1".to_string(),
+            provider: "openai".to_string(),
+            model: "gpt-4.1".to_string(),
+            whisper_model: "large-v3".to_string(),
+            groq_api_key: None,
+            openai_api_key: Some("same-snapshot-key".to_string()),
+            anthropic_api_key: None,
+            ollama_api_key: None,
+            open_router_api_key: None,
+            ollama_endpoint: None,
+            custom_openai_config: Some("not-json".to_string()),
+        });
+
+        assert_eq!(config.model, "gpt-4.1");
+        assert_eq!(config.api_key.as_deref(), Some("same-snapshot-key"));
+        assert_eq!(config.custom_openai_endpoint, None);
+    }
 
     #[test]
     fn allows_http_and_https_urls() {
