@@ -306,7 +306,10 @@ fn summary_is_renderable(value: &serde_json::Value) -> bool {
         .and_then(serde_json::Value::as_bool)
         == Some(true)
     {
-        return object.get("markdown").and_then(serde_json::Value::as_str) == Some("")
+        return object
+            .keys()
+            .all(|key| matches!(key.as_str(), "markdown" | "summary_json" | "manually_cleared"))
+            && object.get("markdown").and_then(serde_json::Value::as_str) == Some("")
             && object
                 .get("summary_json")
                 .and_then(serde_json::Value::as_array)
