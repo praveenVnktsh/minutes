@@ -7,6 +7,7 @@ import { CalendarDays, RefreshCw, Search } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Switch } from '@/components/ui/switch';
+import { SaveFeedback, type SaveFeedbackState } from '@/components/ui/status-feedback';
 
 interface CalendarConfig {
   enabled: boolean;
@@ -59,10 +60,12 @@ export function CalendarSettings() {
   const [testing, setTesting] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [preview, setPreview] = useState<CalendarEvent[] | null>(null);
+  const [savedConfig, setSavedConfig] = useState<CalendarConfig>(DEFAULT_CONFIG);
+  const [saveState, setSaveState] = useState<SaveFeedbackState>('saved');
 
   useEffect(() => {
     invoke<CalendarConfig>('get_calendar_config')
-      .then(setConfig)
+      .then(value => { setConfig(value); setSavedConfig(value); })
       .catch((error) => toast.error('Could not load calendar settings', {
         description: String(error),
       }))
@@ -83,11 +86,15 @@ export function CalendarSettings() {
 
   const save = useCallback(async (showToast = true) => {
     setSaving(true);
+    setSaveState('saving');
     try {
       await invoke('set_calendar_config', { config });
+      setSavedConfig(config);
+      setSaveState('saved');
       if (showToast) toast.success('Calendar settings saved');
       return true;
     } catch (error) {
+      setSaveState('error');
       toast.error('Could not save calendar settings', { description: String(error) });
       return false;
     } finally {
@@ -147,6 +154,7 @@ export function CalendarSettings() {
           </div>
         </div>
         <Switch
+          aria-label="Enable calendar sync"
           checked={config.enabled}
           onCheckedChange={enabled => setConfig(current => ({ ...current, enabled }))}
         />
@@ -160,7 +168,7 @@ export function CalendarSettings() {
           value={config.url}
           onChange={event => setConfig(current => ({ ...current, url: event.target.value }))}
           placeholder="https://calendar.google.com/calendar/ical/.../basic.ics"
-          className="w-full rounded-md border border-hairline bg-surface-raised px-3 py-2 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+          className="w-full rounded-md border border-hairline bg-surface-raised px-3 py-2 text-sm outline-none focus:border-focus focus:ring-2 focus:ring-focus/30"
         />
         <p className="text-xs text-ink-muted">
           Google Calendar: Settings → your calendar → <em>Integrate calendar</em> → “Secret address
@@ -181,7 +189,7 @@ export function CalendarSettings() {
               ...current,
               refresh_minutes: Number(event.target.value) || 0,
             }))}
-            className="w-full rounded-md border border-hairline bg-surface-raised px-3 py-2 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+            className="w-full rounded-md border border-hairline bg-surface-raised px-3 py-2 text-sm outline-none focus:border-focus focus:ring-2 focus:ring-focus/30"
           />
         </div>
         <div className="space-y-2">
@@ -196,7 +204,7 @@ export function CalendarSettings() {
               ...current,
               lookahead_days: Number(event.target.value) || 0,
             }))}
-            className="w-full rounded-md border border-hairline bg-surface-raised px-3 py-2 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+            className="w-full rounded-md border border-hairline bg-surface-raised px-3 py-2 text-sm outline-none focus:border-focus focus:ring-2 focus:ring-focus/30"
           />
         </div>
       </div>
@@ -209,6 +217,7 @@ export function CalendarSettings() {
           </div>
         </div>
         <Switch
+          aria-label="Enable calendar meeting reminders"
           checked={config.remind}
           onCheckedChange={remind => setConfig(current => ({ ...current, remind }))}
         />
@@ -227,6 +236,10 @@ export function CalendarSettings() {
           {refreshing ? 'Syncing…' : 'Sync now'}
         </Button>
       </div>
+      <SaveFeedback
+        state={saving ? 'saving' : saveState === 'error' ? 'error' : JSON.stringify(config) === JSON.stringify(savedConfig) ? 'saved' : 'unsaved'}
+        labels={{ saving: 'Saving calendar settings', saved: 'Calendar settings saved', error: 'Could not save calendar settings', unsaved: 'Calendar changes not saved' }}
+      />
 
       {preview && (
         <div className="rounded-lg border bg-surface-raised p-4">
