@@ -444,6 +444,95 @@ describe('BlockNoteSummaryView current document contract', () => {
     await act(async () => renderer.unmount());
   });
 
+  test('copy reacquires the live imperative ref instead of saving retained B after C', async () => {
+    const ref = createRef<BlockNoteSummaryViewRef>();
+    const block = (text: string) => [{ id: `block-${text}`, type: 'paragraph', content: [{ type: 'text', text, styles: {} }] }];
+    let resolveCopyB!: (markdown: string) => void;
+    let heldB = false;
+    convertBlocks = (blocks) => {
+      const text = blocks[0]?.content?.[0]?.text ?? '';
+      if (text === 'B' && !heldB) {
+        heldB = true;
+        return new Promise((resolve) => { resolveCopyB = resolve; });
+      }
+      return Promise.resolve(text);
+    };
+    const writeText = mock(async (_text: string) => {});
+    Object.defineProperty(globalThis, 'navigator', {
+      configurable: true,
+      value: { clipboard: { writeText } },
+    });
+    let copySummary!: () => Promise<void>;
+    let currentSummary: unknown;
+    const meeting = { id: 'meeting-copy-authority', title: 'Planning', created_at: '2026-09-19', transcripts: [] };
+    function Owner() {
+      const data = useMeetingData({ meeting, summaryData: { summary_json: block('A') } });
+      currentSummary = data.aiSummary;
+      copySummary = useCopyOperations({
+        meeting,
+        transcripts: [],
+        meetingTitle: meeting.title,
+        aiSummary: data.aiSummary,
+        blockNoteSummaryRef: ref,
+      }).handleCopySummary;
+      return <BlockNoteSummaryView ref={ref} summaryData={data.aiSummary} onSave={data.handleSaveSummary} />;
+    }
+    let renderer!: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(<Owner />);
+      await new Promise((resolve) => setTimeout(resolve, 110));
+    });
+
+    await act(async () => onEditorChange?.(block('B')));
+    let copying!: Promise<void>;
+    await act(async () => { copying = copySummary(); await Promise.resolve(); });
+    await act(async () => onEditorChange?.(block('C')));
+    await act(async () => ref.current!.saveSummary());
+    await act(async () => { resolveCopyB('B'); await copying; });
+
+    const writes = invoke.mock.calls
+      .filter(([command]) => command === 'api_save_meeting_summary')
+      .map(([, args]) => (args?.summary as { markdown: string }).markdown);
+    expect(writes).toEqual(['C']);
+    expect(currentSummary).toMatchObject({ markdown: 'C', summary_json: block('C') });
+    expect(ref.current?.getCurrentBlocks?.()).toEqual(block('C'));
+    expect(ref.current?.isDirty).toBe(false);
+    expect(writeText).toHaveBeenCalledTimes(1);
+    expect(writeText.mock.calls[0][0]).toContain('\n\nC\n');
+    expect(writeText.mock.calls[0][0]).not.toContain('\n\nB\n');
+    await act(async () => renderer.unmount());
+  });
+
+  test('an obsolete imperative save callback cannot acquire replacement authority', async () => {
+    const ref = createRef<BlockNoteSummaryViewRef>();
+    const block = (text: string) => [{ id: `block-${text}`, type: 'paragraph', content: [{ type: 'text', text, styles: {} }] }];
+    parseMarkdown = async (markdown) => block(markdown);
+    let replaceDocument!: (summary: { markdown: string }) => void;
+    const meeting = { id: 'meeting-old-callback', title: 'Planning', created_at: '2026-09-19', transcripts: [] };
+    function Owner() {
+      const data = useMeetingData({ meeting, summaryData: { summary_json: block('A') } });
+      replaceDocument = data.setAiSummary;
+      return <BlockNoteSummaryView ref={ref} summaryData={data.aiSummary} onSave={data.handleSaveSummary} />;
+    }
+    let renderer!: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(<Owner />);
+      await new Promise((resolve) => setTimeout(resolve, 110));
+    });
+    await act(async () => onEditorChange?.(block('Obsolete B')));
+    const obsoleteSave = ref.current!.saveSummary;
+    await act(async () => {
+      replaceDocument({ markdown: 'Acknowledged D' });
+      await new Promise((resolve) => setTimeout(resolve, 110));
+    });
+    await act(async () => obsoleteSave());
+
+    expect(invoke.mock.calls.filter(([command]) => command === 'api_save_meeting_summary')).toEqual([]);
+    expect(await ref.current?.getMarkdown()).toBe('Acknowledged D');
+    expect(ref.current?.isDirty).toBe(false);
+    await act(async () => renderer.unmount());
+  });
+
   test('uses the acknowledged document after the actual workspace unmounts and remounts the editor', async () => {
     const meeting = { id: 'meeting-workspace', title: 'Planning', created_at: '2026-09-19', transcripts: [] };
     const block = (text: string) => [{ id: `block-${text}`, type: 'paragraph', content: [{ type: 'text', text, styles: {} }] }];

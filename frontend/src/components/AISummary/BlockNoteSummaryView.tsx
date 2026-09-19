@@ -190,11 +190,17 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
     }
   }, [isDirty, onDirtyChange]);
 
+  const renderedRevision = editRevisionRef.current;
+  const renderedGeneration = documentGenerationRef.current;
   const handleSave = useCallback(async () => {
     if (!onSave || !isDirty) return;
+    if (
+      editRevisionRef.current !== renderedRevision
+      || documentGenerationRef.current !== renderedGeneration
+    ) return;
 
-    const saveRevision = editRevisionRef.current;
-    const saveGeneration = documentGenerationRef.current;
+    const saveRevision = renderedRevision;
+    const saveGeneration = renderedGeneration;
     const saveIntent = ++latestSaveIntentRef.current;
     const blocksToSave = currentBlocks;
     const pendingSave = { key: '', revision: saveRevision };
@@ -239,7 +245,7 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
     } finally {
       pendingSavesRef.current = pendingSavesRef.current.filter((save) => save !== pendingSave);
     }
-  }, [onSave, isDirty, currentBlocks, editor]);
+  }, [onSave, isDirty, currentBlocks, editor, renderedGeneration, renderedRevision]);
 
   // Enhanced notes behave like a normal notes surface: edits are persisted
   // after a short idle period, with no explicit Save action required.
