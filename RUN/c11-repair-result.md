@@ -2,7 +2,7 @@
 
 ## Reviewed implementation
 
-- Repair implementation commit: `14dda40` (`fix: repair meeting workspace state seams`)
+- Repair implementation commits: `14dda40` (`fix: repair meeting workspace state seams`) and `01de90a` (`fix: validate cleared summary envelope`)
 - Required integration merge commit: `6492bdb` (merged `origin/integration/ux-consolidation` at `e851fb74e521c3c37d9f116511942b124756b227` normally into c11)
 - Pull request: PR37, `enhance/ux-c11-workspace` -> `integration/ux-consolidation`
 - No PR merge, force push, main/integration push, root-worktree edit, or additional agent was used.
