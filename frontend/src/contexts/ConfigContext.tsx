@@ -1,12 +1,13 @@
 'use client';
 
 import React, { createContext, useContext, useState, useEffect, useCallback, useMemo, ReactNode, useRef } from 'react';
-import { TranscriptModelProps } from '@/components/TranscriptSettings';
-import { SelectedDevices } from '@/components/DeviceSelection';
-import { configService, ModelConfig } from '@/services/configService';
+import type { TranscriptModelProps } from '@/components/TranscriptSettings';
+import type { SelectedDevices } from '@/components/DeviceSelection';
+import { ConfigSaveInProgressError, LatestRequestGuard, configService } from '@/services/configService';
 import { invoke } from '@tauri-apps/api/core';
 import Analytics from '@/lib/analytics';
 import { BetaFeatures, BetaFeatureKey, loadBetaFeatures, saveBetaFeatures } from '@/types/betaFeatures';
+import { DEFAULT_MODEL_CONFIG, mergeProviderKeyHydration, ModelConfig, ProviderApiKeys } from '@/types/modelConfig';
 
 export interface OllamaModel {
   name: string;
@@ -46,7 +47,10 @@ interface ConfigContextType {
   // Model configuration
   modelConfig: ModelConfig;
   setModelConfig: (config: ModelConfig | ((prev: ModelConfig) => ModelConfig)) => void;
+  commitModelConfig: (config: ModelConfig) => Promise<ModelConfig>;
   isModelConfigLoading: boolean;
+  isModelConfigSaving: boolean;
+  modelConfigSaveError: Error | null;
 
   // Transcript model configuration
   transcriptModelConfig: TranscriptModelProps;
@@ -78,12 +82,7 @@ interface ConfigContextType {
   toggleIsAutoSummary: (checked: boolean) => void;
 
   // Provider-specific API keys
-  providerApiKeys: {
-    claude: string | null;
-    groq: string | null;
-    openai: string | null;
-    openrouter: string | null;
-  };
+  providerApiKeys: ProviderApiKeys;
   updateProviderApiKey: (provider: string, apiKey: string | null) => void;
 
   // Preference settings (lazy loaded)
@@ -96,16 +95,32 @@ interface ConfigContextType {
 
 const ConfigContext = createContext<ConfigContextType | undefined>(undefined);
 
+function isProviderWithApiKey(provider: string): provider is keyof ProviderApiKeys {
+  return ['claude', 'groq', 'openai', 'openrouter'].includes(provider);
+}
 
 export function ConfigProvider({ children }: { children: ReactNode }) {
   // Model configuration state
-  const [modelConfig, setModelConfig] = useState<ModelConfig>({
-    provider: 'builtin-ai',
-    model: 'qwen3.5:4b',
-    whisperModel: 'large-v3',
-    ollamaEndpoint: null
-  });
+  const [modelConfig, setModelConfigState] = useState<ModelConfig>(DEFAULT_MODEL_CONFIG);
   const [isModelConfigLoading, setIsModelConfigLoading] = useState(true);
+  const [isModelConfigSaving, setIsModelConfigSaving] = useState(false);
+  const [modelConfigSaveError, setModelConfigSaveError] = useState<Error | null>(null);
+  const configRequestRef = useRef(new LatestRequestGuard());
+  const keyRevisionRef = useRef<Record<keyof ProviderApiKeys, number>>({
+    claude: 0,
+    groq: 0,
+    openai: 0,
+    openrouter: 0,
+  });
+  const saveInProgressRef = useRef(false);
+  const reconciliationPendingRef = useRef(false);
+
+  // Compatibility setter for existing forms. New forms should keep local drafts
+  // and call commitModelConfig instead of publishing edits through this setter.
+  const setModelConfig = useCallback<ConfigContextType['setModelConfig']>((next) => {
+    configRequestRef.current.invalidate();
+    setModelConfigState(next);
+  }, []);
 
 
   // Transcript model configuration state
@@ -117,12 +132,7 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
 
   // Provider-specific API keys (loaded once at startup)
   // Note: Gemini omitted for now - add when UI support is added
-  const [providerApiKeys, setProviderApiKeys] = useState<{
-    claude: string | null;
-    groq: string | null;
-    openai: string | null;
-    openrouter: string | null;
-  }>({
+  const [providerApiKeys, setProviderApiKeys] = useState<ProviderApiKeys>({
     claude: null,
     groq: null,
     openai: null,
@@ -200,7 +210,6 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
       try {
         const config = await configService.getTranscriptConfig();
         if (config) {
-          console.log('[ConfigContext] Loaded saved transcript config:', config);
           setTranscriptModelConfig({
             provider: config.provider || 'parakeet',
             model: config.model || 'parakeet-tdt-0.6b-v3-int8',
@@ -227,125 +236,134 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     }
   }, []); 
 
-  // Load model configuration on mount
-  useEffect(() => {
-    const fetchModelConfig = async () => {
-      try {
-        const data = await configService.getModelConfig();
-        if (data && data.provider) {
-          // If provider is custom-openai, fetch the additional config
-          if (data.provider === 'custom-openai') {
-            try {
-              const customConfig = await configService.getCustomOpenAIConfig();
-              if (customConfig) {
-                // Merge custom config fields into modelConfig
-                console.log('[ConfigContext] Loading custom OpenAI config:', {
-                  endpoint: customConfig.endpoint,
-                  model: customConfig.model,
-                });
-                const resolvedModel = customConfig.model || data.model || '';
-                setModelConfig(prev => ({
-                  ...prev,
-                  provider: data.provider,
-                  model: resolvedModel || prev.model,
-                  whisperModel: data.whisperModel || prev.whisperModel,
-                  customOpenAIEndpoint: customConfig.endpoint,
-                  customOpenAIModel: customConfig.model,
-                  customOpenAIApiKey: customConfig.apiKey,
-                  maxTokens: customConfig.maxTokens,
-                  temperature: customConfig.temperature,
-                  topP: customConfig.topP,
-                }));
-
-                // Seed per-provider model cache from DB
-                if (resolvedModel) {
-                  const map = JSON.parse(localStorage.getItem('providerModelMap') || '{}');
-                  map[data.provider] = resolvedModel;
-                  localStorage.setItem('providerModelMap', JSON.stringify(map));
-                }
-
-                return; // Early return
-              }
-            } catch (err) {
-              console.error('[ConfigContext] Failed to fetch custom OpenAI config:', err);
-            }
-          }
-
-          // For non-custom-openai providers, just set base config
-          setModelConfig(prev => ({
-            ...prev,
-            provider: data.provider,
-            model: data.model || prev.model,
-            whisperModel: data.whisperModel || prev.whisperModel,
-            ollamaEndpoint: data.ollamaEndpoint,
-          }));
-
-          // Seed per-provider model cache from DB
-          if (data.model) {
-            const map = JSON.parse(localStorage.getItem('providerModelMap') || '{}');
-            map[data.provider] = data.model;
-            localStorage.setItem('providerModelMap', JSON.stringify(map));
-          }
-        }
-      } catch (error) {
-        console.error('Failed to fetch saved model config in ConfigContext:', error);
-      } finally {
-        setIsModelConfigLoading(false);
-      }
-    };
-    fetchModelConfig();
+  const cacheProviderModel = useCallback((config: ModelConfig) => {
+    if (typeof window === 'undefined' || !config.model) return;
+    try {
+      const map = JSON.parse(localStorage.getItem('providerModelMap') || '{}');
+      map[config.provider] = config.model;
+      localStorage.setItem('providerModelMap', JSON.stringify(map));
+    } catch {
+      // This cache is advisory; native persistence remains authoritative.
+    }
   }, []);
 
-  // Load all provider API keys on mount
-  useEffect(() => {
-    const loadAllApiKeys = async () => {
-      try {
-        const providers = ['claude', 'groq', 'openai', 'openrouter'];
-        const keys = await Promise.all(
-          providers.map(p =>
-            invoke<string>('api_get_api_key', { provider: p })
-              .catch(() => null) // Gracefully handle missing keys
-          )
-        );
-
-        setProviderApiKeys({
-          claude: keys[0],
-          groq: keys[1],
-          openai: keys[2],
-          openrouter: keys[3],
-        });
-        console.log('[ConfigContext] Loaded provider API keys');
-      } catch (error) {
-        console.error('[ConfigContext] Failed to load provider API keys:', error);
+  const reconcileModelConfig = useCallback(async () => {
+    const request = configRequestRef.current.begin();
+    try {
+      const data = await configService.loadModelConfig();
+      if (!configRequestRef.current.isCurrent(request) || saveInProgressRef.current) return;
+      if (data?.provider) {
+        const loadedConfig = { ...DEFAULT_MODEL_CONFIG, ...data };
+        setModelConfigState(loadedConfig);
+        cacheProviderModel(loadedConfig);
       }
-    };
+    } finally {
+      if (configRequestRef.current.isCurrent(request)) setIsModelConfigLoading(false);
+    }
+  }, [cacheProviderModel]);
 
-    loadAllApiKeys();
+  const hydrateProviderApiKeys = useCallback(async () => {
+    const providers: Array<keyof ProviderApiKeys> = ['claude', 'groq', 'openai', 'openrouter'];
+    for (const provider of providers) keyRevisionRef.current[provider] += 1;
+    const revisions = { ...keyRevisionRef.current };
+    const results = await Promise.all(providers.map(async (provider) => {
+      try {
+        return { provider, apiKey: await configService.getProviderApiKey(provider), succeeded: true };
+      } catch {
+        return { provider, apiKey: null, succeeded: false };
+      }
+    }));
+
+    setProviderApiKeys(previous => mergeProviderKeyHydration(
+      previous,
+      results,
+      revisions,
+      keyRevisionRef.current,
+    ));
   }, []);
+
+  const requestReconciliation = useCallback(() => {
+    if (saveInProgressRef.current) {
+      reconciliationPendingRef.current = true;
+      return;
+    }
+    void reconcileModelConfig().catch(error => {
+      console.error('[ConfigContext] Failed to reconcile model config:', error);
+    });
+    void hydrateProviderApiKeys();
+  }, [hydrateProviderApiKeys, reconcileModelConfig]);
+
+  useEffect(() => {
+    void reconcileModelConfig().catch(error => {
+      console.error('[ConfigContext] Failed to load model config:', error);
+    });
+    void hydrateProviderApiKeys();
+  }, [hydrateProviderApiKeys, reconcileModelConfig]);
 
   // Listen for model config updates from other components
   useEffect(() => {
-    const setupListener = async () => {
-      const { listen } = await import('@tauri-apps/api/event');
-      const unlisten = await listen<ModelConfig>('model-config-updated', (event) => {
-        console.log('[ConfigContext] Received model-config-updated event:', event.payload);
-        setModelConfig(event.payload);
-
-        // Update provider-specific key when config changes
-        if (event.payload.apiKey && event.payload.provider !== 'custom-openai') {
-          updateProviderApiKey(event.payload.provider, event.payload.apiKey);
+    let disposed = false;
+    const registered: Array<() => void> = [];
+    void (async () => {
+      try {
+        const { listen } = await import('@tauri-apps/api/event');
+        for (const eventName of ['model-config-invalidated', 'model-config-updated']) {
+          const unlisten = await listen(eventName, requestReconciliation);
+          if (disposed) unlisten();
+          else registered.push(unlisten);
         }
-      });
-      return unlisten;
-    };
-
-    let cleanup: (() => void) | undefined;
-    setupListener().then(fn => cleanup = fn);
+      } catch (error) {
+        registered.splice(0).forEach(unlisten => unlisten());
+        if (!disposed) console.error('[ConfigContext] Failed to listen for model config changes:', error);
+      }
+    })();
 
     return () => {
-      cleanup?.();
+      disposed = true;
+      registered.splice(0).forEach(unlisten => unlisten());
     };
-  }, []);
+  }, [requestReconciliation]);
+
+  const commitModelConfig = useCallback(async (draft: ModelConfig): Promise<ModelConfig> => {
+    if (saveInProgressRef.current) throw new ConfigSaveInProgressError();
+
+    saveInProgressRef.current = true;
+    configRequestRef.current.invalidate();
+    reconciliationPendingRef.current = true;
+    setIsModelConfigSaving(true);
+    setModelConfigSaveError(null);
+    try {
+      const committed = await configService.commitModelConfig(draft);
+      setModelConfigState(committed);
+
+      if (
+        isProviderWithApiKey(committed.provider)
+        && committed.apiKey !== undefined
+      ) {
+        const provider = committed.provider;
+        keyRevisionRef.current[provider] += 1;
+        setProviderApiKeys(previous => ({
+          ...previous,
+          [provider]: committed.apiKey ?? null,
+        }));
+      }
+
+      cacheProviderModel(committed);
+
+      return committed;
+    } catch (error) {
+      const saveError = error instanceof Error ? error : new Error(String(error));
+      setModelConfigSaveError(saveError);
+      throw saveError;
+    } finally {
+      saveInProgressRef.current = false;
+      setIsModelConfigSaving(false);
+      if (reconciliationPendingRef.current) {
+        reconciliationPendingRef.current = false;
+        requestReconciliation();
+      }
+    }
+  }, [cacheProviderModel, requestReconciliation]);
 
   // Load device preferences on mount
   useEffect(() => {
@@ -412,6 +430,8 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
 
   // Update individual provider API key
   const updateProviderApiKey = useCallback((provider: string, apiKey: string | null) => {
+    if (!isProviderWithApiKey(provider)) return;
+    keyRevisionRef.current[provider] += 1;
     setProviderApiKeys(prev => ({ ...prev, [provider]: apiKey }));
   }, []);
 
@@ -490,7 +510,10 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
   const value: ConfigContextType = useMemo(() => ({
     modelConfig,
     setModelConfig,
+    commitModelConfig,
     isModelConfigLoading,
+    isModelConfigSaving,
+    modelConfigSaveError,
     isAutoSummary,
     toggleIsAutoSummary,
     providerApiKeys,
@@ -515,7 +538,11 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     updateNotificationSettings,
   }), [
     modelConfig,
+    setModelConfig,
+    commitModelConfig,
     isModelConfigLoading,
+    isModelConfigSaving,
+    modelConfigSaveError,
     isAutoSummary,
     toggleIsAutoSummary,
     providerApiKeys,
