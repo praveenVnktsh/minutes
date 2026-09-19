@@ -174,6 +174,8 @@ export function ShellProvider({ children }: { children: React.ReactNode }) {
   }, [controller, recordingActionDisabled, recordingState.isRecording]);
   const importEnabled = betaFeatures.importAndRetranscribe;
   const navigate = useCallback(async (href: string) => {
+    // A newer request can supersede navigation before pathname changes.
+    setMeetingSearchFocusIntent(null);
     retryNavigationRef.current = () => navigateTo(href);
     try {
       await navigateTo(href);
@@ -182,6 +184,7 @@ export function ShellProvider({ children }: { children: React.ReactNode }) {
     }
   }, [navigateTo]);
   const openMeeting = useCallback(async (meeting: CurrentMeeting) => {
+    setMeetingSearchFocusIntent(null);
     retryNavigationRef.current = () => openMeetingRoute(meeting);
     try {
       await openMeetingRoute(meeting);
@@ -197,13 +200,14 @@ export function ShellProvider({ children }: { children: React.ReactNode }) {
     setMeetingSearchFocusIntent({ requestId, sourcePath: pathname });
     if (pathname === '/') return;
 
+    retryNavigationRef.current = () => navigateTo('/');
     try {
-      await navigate('/');
+      await navigateTo('/');
     } catch (error) {
       setMeetingSearchFocusIntent((current) => current?.requestId === requestId ? null : current);
-      throw error;
+      throw new ShellNavigationError(error);
     }
-  }, [navigate, pathname]);
+  }, [navigateTo, pathname]);
   const consumeMeetingSearchFocus = useCallback((requestId: number) => {
     setMeetingSearchFocusIntent((current) => current?.requestId === requestId ? null : current);
   }, []);

@@ -87,6 +87,8 @@ beforeEach(() => {
   isSaving = false
   pathname = '/'
   for (const fn of [startRecording, stopRecording, returnToRecording, openImportDialog, navigate, openMeeting, searchTranscripts]) fn.mockClear()
+  navigate.mockImplementation(async () => {})
+  openMeeting.mockImplementation(async () => {})
   const browserWindow = new EventTarget() as Window & typeof globalThis
   Object.assign(browserWindow, { innerWidth: 1440 })
   Object.defineProperty(globalThis, 'window', { configurable: true, value: browserWindow })
@@ -243,6 +245,91 @@ describe('ShellProvider shared actions', () => {
     pathname = '/meeting-details'
     await act(async () => renderer!.update(<ShellProvider><Probe /></ShellProvider>))
     expect(current.meetingSearchFocusRequest).toBeNull()
+    await act(async () => renderer!.unmount())
+  })
+
+  test('cancels focus intent when same-source or meeting navigation supersedes it before commit', async () => {
+    pathname = '/settings'
+    const focus = mock(() => {})
+    let renderer: ReturnType<typeof create>
+    await act(async () => {
+      renderer = create(<ShellProvider><Probe /></ShellProvider>, {
+        createNodeMock: (element) => element.type === 'input' && element.props['aria-label'] === 'Search meetings'
+          ? { focus }
+          : {},
+      })
+    })
+
+    await act(async () => current.focusMeetingsSearch())
+    expect(current.meetingSearchFocusRequest).not.toBeNull()
+    await act(async () => current.navigate('/settings?section=beta'))
+    expect(current.meetingSearchFocusRequest).toBeNull()
+
+    await act(async () => current.focusMeetingsSearch())
+    expect(current.meetingSearchFocusRequest).not.toBeNull()
+    await act(async () => current.openMeeting({ id: 'meeting-b', title: 'Meeting B' }))
+    expect(current.meetingSearchFocusRequest).toBeNull()
+
+    pathname = '/'
+    await act(async () => renderer!.update(<ShellProvider><Probe /><MeetingsLibrary /></ShellProvider>))
+    expect(focus).not.toHaveBeenCalled()
+    await act(async () => renderer!.unmount())
+  })
+
+  test('clears failed focus navigation without affecting a newer focus request', async () => {
+    pathname = '/settings'
+    const focus = mock(() => {})
+    let rejectFirstNavigation!: (error: Error) => void
+    navigate
+      .mockImplementationOnce(() => new Promise<void>((_resolve, reject) => { rejectFirstNavigation = reject }))
+      .mockImplementationOnce(async () => {})
+    let renderer: ReturnType<typeof create>
+    await act(async () => {
+      renderer = create(<ShellProvider><Probe /></ShellProvider>, {
+        createNodeMock: (element) => element.type === 'input' && element.props['aria-label'] === 'Search meetings'
+          ? { focus }
+          : {},
+      })
+    })
+
+    let firstRequest!: Promise<void>
+    await act(async () => {
+      firstRequest = current.focusMeetingsSearch()
+      await Promise.resolve()
+    })
+    const firstFailure = firstRequest.catch((error) => error)
+    await act(async () => current.focusMeetingsSearch())
+    const newerRequestId = current.meetingSearchFocusRequest
+
+    await act(async () => rejectFirstNavigation(new Error('superseded')))
+    expect(await firstFailure).toBeInstanceOf(ShellNavigationError)
+    expect(current.meetingSearchFocusRequest).toBe(newerRequestId)
+
+    pathname = '/'
+    await act(async () => renderer!.update(<ShellProvider><Probe /><MeetingsLibrary /></ShellProvider>))
+    expect(focus).toHaveBeenCalledTimes(1)
+    expect(current.meetingSearchFocusRequest).toBeNull()
+    await act(async () => renderer!.unmount())
+  })
+
+  test('does not focus on a later ordinary library mount after focus navigation fails', async () => {
+    pathname = '/settings'
+    const focus = mock(() => {})
+    navigate.mockRejectedValueOnce(new Error('notes unsaved'))
+    let renderer: ReturnType<typeof create>
+    await act(async () => {
+      renderer = create(<ShellProvider><Probe /></ShellProvider>, {
+        createNodeMock: (element) => element.type === 'input' && element.props['aria-label'] === 'Search meetings'
+          ? { focus }
+          : {},
+      })
+    })
+
+    await expect(current.focusMeetingsSearch()).rejects.toBeInstanceOf(ShellNavigationError)
+    expect(current.meetingSearchFocusRequest).toBeNull()
+    pathname = '/'
+    await act(async () => renderer!.update(<ShellProvider><Probe /><MeetingsLibrary /></ShellProvider>))
+    expect(focus).not.toHaveBeenCalled()
     await act(async () => renderer!.unmount())
   })
 })
