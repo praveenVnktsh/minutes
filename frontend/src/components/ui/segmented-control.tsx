@@ -29,6 +29,8 @@ export function SegmentedControl<T extends string>({
   className,
 }: SegmentedControlProps<T>) {
   const refs = React.useRef<Array<HTMLButtonElement | null>>([])
+  const selectedIndex = options.findIndex((option) => option.value === value && !option.disabled)
+  const tabStopIndex = selectedIndex >= 0 ? selectedIndex : options.findIndex((option) => !option.disabled)
 
   function selectAdjacent(index: number, direction: 1 | -1) {
     for (let offset = 1; offset <= options.length; offset += 1) {
@@ -58,7 +60,7 @@ export function SegmentedControl<T extends string>({
             aria-label={option.ariaLabel}
             aria-pressed={selected}
             disabled={disabled || option.disabled}
-            tabIndex={selected ? 0 : -1}
+            tabIndex={!disabled && index === tabStopIndex ? 0 : -1}
             className={cn(
               "rounded-md px-3 py-1.5 text-sm font-medium text-ink-muted transition-colors hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50",
               selected && "bg-selected text-selected-foreground shadow-sm",

@@ -50,7 +50,6 @@ export function StatusFeedback({
       role={role}
       aria-live={tone === "error" ? "assertive" : "polite"}
       aria-atomic="true"
-      aria-busy={pending || undefined}
       className={cn("inline-flex min-h-5 items-center gap-1.5 text-xs font-medium", toneClasses[tone], className)}
     >
       <Icon className={cn("h-3.5 w-3.5 shrink-0", pending && "animate-spin")} />

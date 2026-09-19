@@ -15,7 +15,7 @@ export interface ResizeSeparatorProps extends Omit<React.HTMLAttributes<HTMLDivE
 }
 
 export const ResizeSeparator = React.forwardRef<HTMLDivElement, ResizeSeparatorProps>(
-  ({ value, min, max, onValueChange, step = 10, orientation = "vertical", label, className, onKeyDown, ...props }, ref) => {
+  ({ value, min, max, onValueChange, step = 10, orientation = "vertical", label, className, tabIndex = 0, onKeyDown, ...props }, ref) => {
     const clamp = (next: number) => Math.min(max, Math.max(min, next))
 
     return (
@@ -23,7 +23,7 @@ export const ResizeSeparator = React.forwardRef<HTMLDivElement, ResizeSeparatorP
         ref={ref}
         {...props}
         role="separator"
-        tabIndex={0}
+        tabIndex={tabIndex}
         aria-label={label}
         aria-orientation={orientation}
         aria-valuemin={min}

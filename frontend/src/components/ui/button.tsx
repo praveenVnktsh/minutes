@@ -26,9 +26,9 @@ const buttonVariants = cva(
         error: "bg-error text-white hover:brightness-90 dark:bg-error-subtle dark:text-error",
         recording: "bg-recording text-white hover:brightness-90 dark:bg-recording-subtle dark:text-recording",
         paused: "bg-paused text-white hover:brightness-90 dark:bg-paused-subtle dark:text-paused",
-        green: "bg-success text-white hover:brightness-90",
-        blue: "bg-info text-white hover:brightness-90",
-        red: "bg-error text-white hover:brightness-90",
+        green: "bg-success text-white hover:brightness-90 dark:bg-success-subtle dark:text-success",
+        blue: "bg-info text-white hover:brightness-90 dark:bg-info-subtle dark:text-info",
+        red: "bg-error text-white hover:brightness-90 dark:bg-error-subtle dark:text-error",
         gray: "border bg-surface-2 border-input shadow-sm hover:bg-surface-2 hover:text-accent-foreground",
       },
       size: {
