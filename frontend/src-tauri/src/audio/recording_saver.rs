@@ -356,7 +356,7 @@ impl RecordingSaver {
         &mut self,
         app: &AppHandle<R>,
         recording_duration: Option<f64>
-    ) -> Result<Option<String>, String> {
+    ) -> Result<(Option<String>, Vec<TranscriptSegment>), String> {
         info!("Stopping recording saver");
 
         // Stop accumulation
@@ -373,7 +373,7 @@ impl RecordingSaver {
         if !should_save_audio {
             info!("⚠️  No audio saver initialized (auto-save was disabled) - skipping audio finalization");
             info!("✅ Transcripts and metadata already saved incrementally");
-            return Ok(None);
+            return Ok((None, self.get_transcript_segments()));
         }
 
         // Finalize incremental saver (merge checkpoints into final audio.mp4)
@@ -447,12 +447,14 @@ impl RecordingSaver {
             warn!("Failed to emit recording-saved event: {}", e);
         }
 
-        // Clean up transcript segments
-        if let Ok(mut segments) = self.transcript_segments.lock() {
-            segments.clear();
-        }
+        // Move the exact saved segments out so the caller can retain immutable
+        // completed-session history without reading the now-cleared saver.
+        let completed_transcripts = self.take_transcript_segments();
 
-        Ok(Some(final_audio_path.to_string_lossy().to_string()))
+        Ok((
+            Some(final_audio_path.to_string_lossy().to_string()),
+            completed_transcripts,
+        ))
     }
 
     /// Get the meeting folder path (for passing to backend)
@@ -469,6 +471,13 @@ impl RecordingSaver {
         }
     }
 
+    fn take_transcript_segments(&self) -> Vec<TranscriptSegment> {
+        self.transcript_segments
+            .lock()
+            .map(|mut segments| std::mem::take(&mut *segments))
+            .unwrap_or_default()
+    }
+
     /// Get meeting name (for reload sync)
     pub fn get_meeting_name(&self) -> Option<String> {
         self.meeting_name.clone()
@@ -478,5 +487,35 @@ impl RecordingSaver {
 impl Default for RecordingSaver {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RecordingSaver, TranscriptSegment};
+
+    #[test]
+    fn successful_autosave_cleanup_keeps_the_captured_transcript_snapshot() {
+        let saver = RecordingSaver::new();
+        saver.add_transcript_segment(TranscriptSegment {
+            id: "segment-7".to_string(),
+            text: "final words".to_string(),
+            audio_start_time: 7.0,
+            audio_end_time: 8.5,
+            duration: 1.5,
+            display_time: "00:07".to_string(),
+            confidence: 0.9,
+            sequence_id: 7,
+            speaker: Some("microphone".to_string()),
+        });
+
+        let completed = saver.take_transcript_segments();
+
+        assert!(saver.get_transcript_segments().is_empty());
+        assert_eq!(completed.len(), 1);
+        assert_eq!(completed[0].sequence_id, 7);
+        assert_eq!(completed[0].speaker.as_deref(), Some("microphone"));
+        assert_eq!(completed[0].audio_start_time, 7.0);
+        assert_eq!(completed[0].audio_end_time, 8.5);
     }
 }

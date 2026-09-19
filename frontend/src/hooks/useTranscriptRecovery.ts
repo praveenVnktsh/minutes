@@ -12,7 +12,7 @@ import { storageService } from '@/services/storageService';
 import { applyPinnedSummaryLanguageToMeeting } from '@/lib/summary-language-preferences';
 import { toast } from 'sonner';
 
-interface AudioRecoveryStatus {
+export interface AudioRecoveryStatus {
   status: string; // "success" | "partial" | "failed" | "none"
   chunk_count: number;
   estimated_duration_seconds: number;
@@ -20,14 +20,57 @@ interface AudioRecoveryStatus {
   message: string;
 }
 
+export interface TranscriptRecoveryResult {
+  success: boolean;
+  audioRecoveryStatus?: AudioRecoveryStatus | null;
+  meetingId?: string;
+  transcriptCount: number;
+}
+
 export interface UseTranscriptRecoveryReturn {
   recoverableMeetings: MeetingMetadata[];
   isLoading: boolean;
   isRecovering: boolean;
   checkForRecoverableTranscripts: () => Promise<void>;
-  recoverMeeting: (meetingId: string) => Promise<{ success: boolean; audioRecoveryStatus?: AudioRecoveryStatus | null; meetingId?: string; transcriptCount: number }>;
+  recoverMeeting: (meetingId: string) => Promise<TranscriptRecoveryResult>;
   loadMeetingTranscripts: (meetingId: string) => Promise<StoredTranscript[]>;
   deleteRecoverableMeeting: (meetingId: string) => Promise<void>;
+}
+
+interface PersistedRecordingSession {
+  meetingId: string | null;
+  folderPath: string | null;
+}
+
+const RECOVERY_ROW_IDS_KEY = 'transcript_recovery_row_ids';
+
+function recoveryRowIds(): Record<string, string> {
+  if (typeof sessionStorage === 'undefined') return {};
+  try {
+    return JSON.parse(sessionStorage.getItem(RECOVERY_ROW_IDS_KEY) ?? '{}') as Record<string, string>;
+  } catch {
+    return {};
+  }
+}
+
+function persistRecoveryRowId(recoveryId: string, meetingId: string | null): void {
+  if (typeof sessionStorage === 'undefined') return;
+  const ids = recoveryRowIds();
+  if (meetingId) ids[recoveryId] = meetingId;
+  else delete ids[recoveryId];
+  sessionStorage.setItem(RECOVERY_ROW_IDS_KEY, JSON.stringify(ids));
+}
+
+function boundMeetingId(folderPath?: string): string | null {
+  if (!folderPath || typeof sessionStorage === 'undefined') return null;
+  try {
+    const value = sessionStorage.getItem('active_recording_sessions');
+    if (!value) return null;
+    const sessions = JSON.parse(value) as PersistedRecordingSession[];
+    return sessions.find((session) => session.folderPath === folderPath)?.meetingId ?? null;
+  } catch {
+    return null;
+  }
 }
 
 export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
@@ -113,7 +156,7 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
   /**
    * Recover a meeting from IndexedDB
    */
-  const recoverMeeting = useCallback(async (meetingId: string): Promise<{ success: boolean; audioRecoveryStatus?: AudioRecoveryStatus | null; meetingId?: string; transcriptCount: number }> => {
+  const recoverMeeting = useCallback(async (meetingId: string): Promise<TranscriptRecoveryResult> => {
     setIsRecovering(true);
     try {
       // 1. Load meeting metadata
@@ -124,20 +167,11 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
 
       // 2. Load all transcripts. This can legitimately be empty when
       // transcription was unavailable; the audio can still be recovered.
-      const transcripts = await loadMeetingTranscripts(meetingId);
+      const transcripts = await indexedDBService.getTranscriptsStrict(meetingId);
+      transcripts.sort((a, b) => (a.sequenceId || 0) - (b.sequenceId || 0));
 
       // 3. Check for folder path
-      let folderPath = metadata.folderPath;
-
-
-      if (!folderPath) {
-        // Try to get from backend (might exist if only app crashed, not system)
-        try {
-          folderPath = await invoke<string>('get_meeting_folder_path');
-        } catch (error) {
-          folderPath = undefined;
-        }
-      }
+      const folderPath = metadata.folderPath;
 
       // A meeting needs at least one of transcripts or audio to be recoverable.
       if (transcripts.length === 0 && !folderPath) {
@@ -170,10 +204,7 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
         };
       }
 
-      // An audio-only meeting is recoverable only once its audio has actually
-      // been merged into audio.mp4. If the merge failed there is nothing to
-      // save, and saving would mark the meeting recovered while leaving the
-      // checkpoints to be deleted below - the only copy of the recording.
+      // Audio-only recovery cannot create a useful meeting until merge succeeds.
       if (transcripts.length === 0 && audioRecoveryStatus?.status !== 'success') {
         throw new Error(
           audioRecoveryStatus?.message
@@ -188,22 +219,25 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
         text: t.text,
         timestamp: t.timestamp,
         sequence_id: t.sequenceId || index,
-        chunk_start_time: (t as any).chunk_start_time,
-        is_partial: (t as any).is_partial || false,
+        chunk_start_time: t.chunk_start_time,
+        is_partial: t.is_partial || false,
         confidence: t.confidence,
-        audio_start_time: (t as any).audio_start_time,
-        audio_end_time: (t as any).audio_end_time,
-        duration: (t as any).duration,
+        audio_start_time: t.audio_start_time,
+        audio_end_time: t.audio_end_time,
+        duration: t.duration,
       }));
 
       // 6. Save to backend database using existing save utilities
       const saveResponse = await storageService.saveMeeting(
         metadata.title,
         formattedTranscripts,
-        folderPath ?? null
+        folderPath ?? null,
+        false,
+        recoveryRowIds()[meetingId] ?? boundMeetingId(folderPath),
       );
 
       const savedMeetingId = saveResponse.meeting_id;
+      persistRecoveryRowId(meetingId, savedMeetingId);
 
       if (folderPath) {
         try {
@@ -222,8 +256,17 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
         });
       }
 
+      if (audioRecoveryStatus?.status === 'failed' || audioRecoveryStatus?.status === 'partial') {
+        return {
+          success: false,
+          audioRecoveryStatus,
+          meetingId: savedMeetingId,
+          transcriptCount: transcripts.length,
+        };
+      }
+
       // 7. Mark as saved in IndexedDB
-      await indexedDBService.markMeetingSaved(meetingId);
+      await indexedDBService.markMeetingSavedStrict(meetingId);
 
 
       // 8. Clean up checkpoint files, but only after they have been merged into
@@ -239,6 +282,7 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
 
       // 9. Remove from recoverable list
       setRecoverableMeetings(prev => prev.filter(m => m.meetingId !== meetingId));
+      persistRecoveryRowId(meetingId, null);
 
       return {
         success: true,
@@ -252,7 +296,7 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
     } finally {
       setIsRecovering(false);
     }
-  }, [loadMeetingTranscripts]);
+  }, []);
 
   /**
    * Delete a recoverable meeting
@@ -260,6 +304,7 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
   const deleteRecoverableMeeting = useCallback(async (meetingId: string): Promise<void> => {
     try {
       await indexedDBService.deleteMeeting(meetingId);
+      persistRecoveryRowId(meetingId, null);
       setRecoverableMeetings(prev => prev.filter(m => m.meetingId !== meetingId));
     } catch (error) {
       console.error('Failed to delete meeting:', error);
