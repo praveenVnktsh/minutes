@@ -243,7 +243,7 @@ export class MeetingActivityStore {
     this.summaryRequests.set(request.meetingId, request);
     const retry = () => this.withSummaryStartLock(
       request.meetingId,
-      () => this.startSummaryLocked(request),
+      (attemptId) => this.startSummaryLocked(request, attemptId),
     );
     this.summaryRetries.set(request.meetingId, retry);
     return retry();
@@ -253,16 +253,16 @@ export class MeetingActivityStore {
     meetingId: string,
     prepare: () => Promise<SummaryStartRequest>,
   ): Promise<SummaryStartResult> => {
-    const retry = () => this.withSummaryStartLock(meetingId, async () => {
+    const retry = () => this.withSummaryStartLock(meetingId, async (attemptId) => {
       let request: SummaryStartRequest;
       try {
         request = await prepare();
       } catch (error) {
-        this.retainSummaryStartFailure(meetingId, error);
+        this.retainSummaryStartFailure(meetingId, error, attemptId);
         throw error;
       }
       this.summaryRequests.set(meetingId, request);
-      return this.startSummaryLocked(request);
+      return this.startSummaryLocked(request, attemptId);
     });
     this.summaryRetries.set(meetingId, retry);
     return retry();
@@ -270,7 +270,7 @@ export class MeetingActivityStore {
 
   private withSummaryStartLock(
     meetingId: string,
-    startOperation: () => Promise<SummaryStartResult>,
+    startOperation: (attemptId: string) => Promise<SummaryStartResult>,
   ): Promise<SummaryStartResult> {
     const pendingCancellation = this.summaryStartCancellations.get(meetingId);
     if (pendingCancellation) {
@@ -283,7 +283,12 @@ export class MeetingActivityStore {
     }
     const existingStart = this.summaryStarts.get(meetingId);
     if (existingStart) return existingStart;
-    const start = startOperation().finally(() => {
+    const attemptId = `summary-start:${meetingId}:${++this.nextSummaryAttempt}`;
+    this.setSummary({
+      activityId: attemptId, revision: 0, meetingId, processId: null,
+      status: 'queued', response: null, error: null, reconciliationError: null,
+    });
+    const start = startOperation(attemptId).finally(() => {
       if (this.summaryStarts.get(meetingId) === start) {
         this.summaryStarts.delete(meetingId);
       }
@@ -515,28 +520,31 @@ export class MeetingActivityStore {
     };
   }
 
-  private async startSummaryLocked(request: SummaryStartRequest): Promise<SummaryStartResult> {
+  private async startSummaryLocked(request: SummaryStartRequest, attemptId: string): Promise<SummaryStartResult> {
     this.summaryRequests.set(request.meetingId, request);
     let stored: SummaryProcessResponse;
     try {
       stored = await this.readSummary(request.meetingId);
     } catch (error) {
-      this.retainSummaryStartFailure(request.meetingId, error);
+      this.retainSummaryStartFailure(request.meetingId, error, attemptId);
       throw error;
     }
-    const authoritative = this.hydrateSummary(stored) ?? stored;
+    // A retryable terminal record is history while this start lock is active.
+    // Only active native work or a completed no-op may replace the queued attempt.
+    const shouldHydrateStored = stored.status === 'pending'
+      || stored.status === 'processing'
+      || (stored.status === 'completed' && !request.replaceExisting);
+    const authoritative = shouldHydrateStored
+      ? this.hydrateSummary(stored) ?? stored
+      : stored;
     if (authoritative.start && (authoritative.status === 'pending' || authoritative.status === 'processing')) {
+      this.removeSummary(attemptId);
       return { started: false, processId: authoritative.start, response: authoritative };
     }
     if (authoritative.status === 'completed' && !request.replaceExisting) {
+      this.removeSummary(attemptId);
       return { started: false, processId: authoritative.start, response: authoritative };
     }
-
-    const attemptId = `summary-start:${request.meetingId}:${++this.nextSummaryAttempt}`;
-    this.setSummary({
-      activityId: attemptId, revision: 0, meetingId: request.meetingId, processId: null,
-      status: 'queued', response: null, error: null, reconciliationError: null,
-    });
     try {
       const result = await this.invokeSummaryStart(request);
       this.removeSummary(attemptId);
@@ -551,9 +559,9 @@ export class MeetingActivityStore {
     }
   }
 
-  private retainSummaryStartFailure(meetingId: string, error: unknown): void {
+  private retainSummaryStartFailure(meetingId: string, error: unknown, activityId?: string): void {
     this.setSummary({
-      activityId: `summary-start:${meetingId}:${++this.nextSummaryAttempt}`, revision: 0,
+      activityId: activityId ?? `summary-start:${meetingId}:${++this.nextSummaryAttempt}`, revision: 0,
       meetingId,
       processId: null,
       status: 'failed',

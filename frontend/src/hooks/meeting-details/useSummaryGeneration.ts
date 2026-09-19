@@ -99,10 +99,16 @@ export function useSummaryGeneration({
   const modelConfigurationLoading = isModelConfigLoading || committedConfig.isModelConfigLoading;
   const modelConfigurationSaving = isModelConfigSaving || committedConfig.isModelConfigSaving;
   const modelConfigurationError = modelConfigSaveError ?? committedConfig.modelConfigSaveError;
+  const meetingActivity = useMeetingActivity();
+  const initialOwnerSummary = meetingActivity.getSummaryActivity(meeting.id);
   const restored = initialSummary?.meeting_id === meeting.id ? initialSummary : null;
-  const [summaryStatus, setSummaryStatus] = useState<SummaryStatus>(() => restoredSummaryStatus(restored));
+  const initialOwnerPending = initialOwnerSummary?.status === 'queued' || initialOwnerSummary?.status === 'processing';
+  const initialStatus = initialOwnerPending
+    ? (parseSummaryContent(restored?.data) ? 'regenerating' : 'processing')
+    : restoredSummaryStatus(restored);
+  const [summaryStatus, setSummaryStatus] = useState<SummaryStatus>(() => initialStatus);
   const [summaryError, setSummaryError] = useState<string | null>(() =>
-    restoredSummaryStatus(restored) === 'error'
+    initialStatus === 'error'
       ? restored?.error || 'Summary generation failed. Please retry.'
       : null,
   );
@@ -113,6 +119,11 @@ export function useSummaryGeneration({
   const activeProcessIdRef = useRef<string | null>(null);
   const pendingNativeStartGenerationRef = useRef<number | null>(null);
   const pollSubscriptionRef = useRef<(() => void) | null>(null);
+  const initializedResponseRef = useRef<SummaryProcessResponse | null>(null);
+  const adoptOwnerUpdatesRef = useRef(false);
+  const adoptedRegenerationRef = useRef(Boolean(parseSummaryContent(restored?.data)));
+  const handledTerminalRef = useRef<string | null>(null);
+  const hasSummaryRef = useRef(Boolean(parseSummaryContent(restored?.data)));
   const trackedAttemptRef = useRef<{
     generationId: number;
     startedAt: number;
@@ -126,7 +137,9 @@ export function useSummaryGeneration({
     hydrateSummary,
     startSummary,
     startSummaryPolling,
-  } = useMeetingActivity();
+    getSummaryActivity,
+  } = meetingActivity;
+  const ownerSummaryActivity = getSummaryActivity(meeting.id);
 
   const getSummaryStatusMessage = useCallback((status: SummaryStatus) => {
     switch (status) {
@@ -189,6 +202,11 @@ export function useSummaryGeneration({
     if (!mountedRef.current || visibleMeetingIdRef.current !== meeting.id || generationId !== generationIdRef.current) {
       return;
     }
+    if (['completed', 'failed', 'error', 'cancelled'].includes(pollingResult.status)) {
+      const terminalKey = `${pollingResult.start ?? ''}:${pollingResult.status}:${pollingResult.end ?? ''}`;
+      if (handledTerminalRef.current === terminalKey) return;
+      handledTerminalRef.current = terminalKey;
+    }
     if (pollingResult.start) activeProcessIdRef.current = pollingResult.start;
     if (pollingResult.status === 'cancelled') {
       let existing: SummaryProcessResponse;
@@ -206,6 +224,7 @@ export function useSummaryGeneration({
         return;
       }
       const restoredSummary = parseSummaryContent(existing.data);
+      hasSummaryRef.current = Boolean(restoredSummary);
       setAiSummary(restoredSummary);
       setSummaryStatus(restoredSummary ? 'completed' : 'idle');
       setSummaryError(null);
@@ -234,6 +253,7 @@ export function useSummaryGeneration({
         }
         const restoredSummary = parseSummaryContent(existing.data);
         if (restoredSummary) {
+          hasSummaryRef.current = true;
           setAiSummary(restoredSummary);
           setSummaryStatus('completed');
           setSummaryError(null);
@@ -263,6 +283,7 @@ export function useSummaryGeneration({
       if (meetingName) {
         updateMeetingTitle(meetingName);
       }
+      hasSummaryRef.current = true;
       setAiSummary(summary);
       setSummaryStatus('completed');
       activeProcessIdRef.current = null;
@@ -317,6 +338,26 @@ export function useSummaryGeneration({
 
   useEffect(() => {
     if (!initialSummary || initialSummary.meeting_id !== meeting.id) return;
+    if (initializedResponseRef.current === initialSummary) return;
+    initializedResponseRef.current = initialSummary;
+    const existingOwner = getSummaryActivity(meeting.id);
+    if (existingOwner && (existingOwner.status === 'queued' || existingOwner.status === 'processing')) {
+      const generationId = ++generationIdRef.current;
+      adoptOwnerUpdatesRef.current = true;
+      const restoredDocument = parseSummaryContent(initialSummary.data);
+      hasSummaryRef.current = Boolean(restoredDocument);
+      adoptedRegenerationRef.current = Boolean(restoredDocument);
+      setAiSummary(restoredDocument);
+      setSummaryStatus(restoredDocument ? 'regenerating' : 'processing');
+      setSummaryError(null);
+      if (existingOwner.processId) {
+        activeProcessIdRef.current = existingOwner.processId;
+        subscribeToProcess(existingOwner.processId, generationId, Boolean(parseSummaryContent(initialSummary.data)));
+      } else {
+        pendingNativeStartGenerationRef.current = generationId;
+      }
+      return;
+    }
     const authoritative = hydrateSummary(initialSummary);
     if (!authoritative) return;
     const status = restoredSummaryStatus(authoritative);
@@ -324,14 +365,61 @@ export function useSummaryGeneration({
     setSummaryError(status === 'error'
       ? authoritative.error || 'Summary generation failed. Please retry.'
       : null);
-    setAiSummary(parseSummaryContent(authoritative.data));
+    const restoredDocument = parseSummaryContent(authoritative.data);
+    hasSummaryRef.current = Boolean(restoredDocument);
+    setAiSummary(restoredDocument);
     if (status !== 'processing' || !authoritative.start) return;
 
     const generationId = ++generationIdRef.current;
     activeProcessIdRef.current = authoritative.start;
     const isRegeneration = !!parseSummaryContent(authoritative.data);
     subscribeToProcess(authoritative.start, generationId, isRegeneration);
-  }, [hydrateSummary, initialSummary, meeting.id, setAiSummary, subscribeToProcess]);
+  }, [getSummaryActivity, hydrateSummary, initialSummary, meeting.id, setAiSummary, subscribeToProcess]);
+
+  useEffect(() => {
+    if (!ownerSummaryActivity) return;
+    const active = ownerSummaryActivity.status === 'queued' || ownerSummaryActivity.status === 'processing';
+    if (active && !adoptOwnerUpdatesRef.current) {
+      const localGeneration = pendingNativeStartGenerationRef.current;
+      const generationId = localGeneration ?? ++generationIdRef.current;
+      adoptOwnerUpdatesRef.current = true;
+      adoptedRegenerationRef.current = hasSummaryRef.current;
+      handledTerminalRef.current = null;
+      setSummaryStatus(hasSummaryRef.current ? 'regenerating' : 'processing');
+      setSummaryError(null);
+      if (!ownerSummaryActivity.processId) {
+        pendingNativeStartGenerationRef.current = generationId;
+      }
+    }
+    if (!adoptOwnerUpdatesRef.current) return;
+    const generationId = generationIdRef.current;
+    const isRegeneration = adoptedRegenerationRef.current;
+    if (ownerSummaryActivity.status === 'queued' && !ownerSummaryActivity.processId) return;
+    if (
+      ownerSummaryActivity.processId
+      && (ownerSummaryActivity.status === 'queued' || ownerSummaryActivity.status === 'processing')
+    ) {
+      pendingNativeStartGenerationRef.current = null;
+      if (activeProcessIdRef.current !== ownerSummaryActivity.processId) {
+        activeProcessIdRef.current = ownerSummaryActivity.processId;
+        subscribeToProcess(ownerSummaryActivity.processId, generationId, isRegeneration);
+      }
+      return;
+    }
+    if (ownerSummaryActivity.response) {
+      adoptOwnerUpdatesRef.current = false;
+      pendingNativeStartGenerationRef.current = null;
+      void handlePollingResult(ownerSummaryActivity.response, generationId, isRegeneration);
+    } else if (ownerSummaryActivity.status === 'failed') {
+      adoptOwnerUpdatesRef.current = false;
+      pendingNativeStartGenerationRef.current = null;
+      void failGeneration(
+        generationId,
+        isRegeneration,
+        ownerSummaryActivity.error || 'Summary generation failed.',
+      );
+    }
+  }, [failGeneration, handlePollingResult, ownerSummaryActivity, subscribeToProcess]);
 
   const processSummary = useCallback(async ({
     transcriptText,
@@ -350,6 +438,8 @@ export function useSummaryGeneration({
     }
 
     const generationId = ++generationIdRef.current;
+    handledTerminalRef.current = null;
+    adoptedRegenerationRef.current = isRegeneration;
     activeProcessIdRef.current = null;
     setSummaryStatus(isRegeneration ? 'regenerating' : 'processing');
     setSummaryError(null);

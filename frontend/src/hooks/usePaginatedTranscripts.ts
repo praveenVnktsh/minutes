@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Transcript, MeetingMetadata, PaginatedTranscriptsResponse, TranscriptSegmentData } from "@/types";
+import { fetchCompleteTranscripts } from '@/lib/meetingExport';
 
 const DEFAULT_PAGE_SIZE = 100;
 
@@ -44,7 +45,7 @@ function convertTranscriptsToSegments(transcripts: Transcript[]): TranscriptSegm
 
 export function usePaginatedTranscripts({
     meetingId,
-    initialTimestamp,
+    initialTimestamp: _initialTimestamp,
 }: UsePaginatedTranscriptsProps): UsePaginatedTranscriptsReturn {
     const [metadata, setMetadata] = useState<MeetingMetadata | null>(null);
     const [transcripts, setTranscripts] = useState<Transcript[]>([]);
@@ -148,38 +149,39 @@ export function usePaginatedTranscripts({
         }
     }, [meetingId, isCurrentRequest]);
 
-    // Load the entire transcript in one pass so the scrollbar reflects the full
-    // meeting instead of growing as you scroll. The query is cheap and the list
-    // is virtualized, so this is safe even for long meetings.
+    // Load every bounded page. Besides avoiding oversized native reads, this keeps
+    // search truthful for matches beyond the first 100 rows.
     const loadAllTranscripts = useCallback(async (requestId: number): Promise<void> => {
         if (!meetingId || !isCurrentRequest(requestId)) return;
 
         try {
-            const first = await invoke<PaginatedTranscriptsResponse>(
-                'api_get_meeting_transcripts',
-                { meetingId, limit: DEFAULT_PAGE_SIZE, offset: 0 }
-            );
-            if (!isCurrentRequest(requestId)) return;
-
-            const total = first.total_count;
-            let all = first.transcripts;
-
-            // Fetch the remainder in a single call rather than paging on scroll.
-            if (total > all.length) {
-                const full = await invoke<PaginatedTranscriptsResponse>(
-                    'api_get_meeting_transcripts',
-                    { meetingId, limit: total, offset: 0 }
-                );
-                if (!isCurrentRequest(requestId)) return;
-                all = full.transcripts;
+            let all: Transcript[] | null = null;
+            for (let attempt = 0; attempt < 2; attempt += 1) {
+                try {
+                    all = await fetchCompleteTranscripts(meetingId, async (args) => {
+                        if (!isCurrentRequest(requestId)) throw new Error('Transcript request was superseded');
+                        const page = await invoke<PaginatedTranscriptsResponse>('api_get_meeting_transcripts', args);
+                        if (!isCurrentRequest(requestId)) throw new Error('Transcript request was superseded');
+                        return page;
+                    });
+                    break;
+                } catch (error) {
+                    if (!isCurrentRequest(requestId)) return;
+                    if (attempt === 0 && error instanceof Error && error.message === 'Transcript total changed during pagination') {
+                        continue;
+                    }
+                    throw error;
+                }
             }
+            if (!all || !isCurrentRequest(requestId)) return;
 
             const sorted = [...all].sort(
                 (a, b) => (a.audio_start_time ?? 0) - (b.audio_start_time ?? 0)
             );
             setTranscripts(sorted);
-            setTotalCount(total);
+            setTotalCount(sorted.length);
             setHasMore(false);
+            setError(null);
             offsetRef.current = sorted.length;
         } catch (err) {
             if (!isCurrentRequest(requestId)) return;

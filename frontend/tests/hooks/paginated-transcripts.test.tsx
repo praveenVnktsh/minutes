@@ -124,16 +124,77 @@ describe('paginated transcript request ownership', () => {
     await resolve(request('metadata', 'A'), metadata('A'));
     // First page reports more rows, so the hook fetches the complete set.
     await resolve(request('transcripts', 'A', 0), page('A first', true));
-    await resolve(request('transcripts', 'A', 1), page('A second'));
+    await resolve(request('transcripts', 'A', 1), {
+      ...page('A second'), total_count: 2,
+    });
 
     expect(state.hasMore).toBe(false);
     expect(state.isLoading).toBe(false);
-    expect(state.transcripts.map(t => t.text)).toEqual(['A second']);
+    expect(state.transcripts.map(t => t.text)).toEqual(['A first', 'A second']);
 
     // Nothing left to page in, so scrolling must not trigger another IPC call.
     const calls = requests.length;
     await act(async () => { void state.loadMore(); });
     expect(requests.length).toBe(calls);
+  });
+
+  test('loads and retains matches beyond the first 100 rows without duplicates', async () => {
+    await show('long');
+    await resolve(request('metadata', 'long'), metadata('long'));
+    const firstPage: PaginatedTranscriptsResponse = {
+      transcripts: Array.from({ length: 100 }, (_, index) => ({
+        id: `row-${index}`,
+        text: `Row ${index}`,
+        timestamp: '00:00',
+        audio_start_time: index,
+      })),
+      total_count: 101,
+      has_more: true,
+    };
+    await resolve(request('transcripts', 'long', 0), firstPage);
+    expect(request('transcripts', 'long', 1).args.offset).toBe(100);
+    await resolve(request('transcripts', 'long', 1), {
+      transcripts: [{ id: 'row-100', text: 'Needle after page one', timestamp: '01:40', audio_start_time: 100 }],
+      total_count: 101,
+      has_more: false,
+    });
+
+    expect(state.transcripts).toHaveLength(101);
+    expect(state.transcripts[100].text).toBe('Needle after page one');
+    expect(new Set(state.transcripts.map((item) => item.id)).size).toBe(101);
+  });
+
+  test('retries a changing total and includes row 201 from one consistent snapshot', async () => {
+    const rows = (start: number, count: number) => Array.from({ length: count }, (_, index) => ({
+      id: `row-${start + index}`,
+      text: start + index === 200 ? 'Needle at row 201' : `Row ${start + index + 1}`,
+      timestamp: '00:00',
+      audio_start_time: start + index,
+    }));
+    await show('growing');
+    await resolve(request('metadata', 'growing'), metadata('growing'));
+    await resolve(request('transcripts', 'growing', 0), {
+      transcripts: rows(0, 100), total_count: 101, has_more: true,
+    });
+    await resolve(request('transcripts', 'growing', 1), {
+      transcripts: rows(100, 100), total_count: 201, has_more: true,
+    });
+
+    expect(request('transcripts', 'growing', 2).args.offset).toBe(0);
+    await resolve(request('transcripts', 'growing', 2), {
+      transcripts: rows(0, 100), total_count: 201, has_more: true,
+    });
+    await resolve(request('transcripts', 'growing', 3), {
+      transcripts: rows(100, 100), total_count: 201, has_more: true,
+    });
+    await resolve(request('transcripts', 'growing', 4), {
+      transcripts: rows(200, 1), total_count: 201, has_more: false,
+    });
+
+    expect(state.error).toBeNull();
+    expect(state.totalCount).toBe(201);
+    expect(state.transcripts).toHaveLength(201);
+    expect(state.transcripts[200].text).toBe('Needle at row 201');
   });
 
   test('a stale full load cannot replace the current meeting transcripts', async () => {

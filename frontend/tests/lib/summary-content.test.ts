@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { hasVisibleSummaryContent, parseSummaryContent } from '../../src/lib/summary-content';
+import { hasVisibleSummaryContent, isManuallyClearedSummary, parseSummaryContent } from '../../src/lib/summary-content';
 
 describe('summary content validation', () => {
   test('accepts visible markdown and rejects whitespace or reasoning markers', () => {
@@ -28,5 +28,14 @@ describe('summary content validation', () => {
   test('parses one historical double-encoded payload', () => {
     expect(parseSummaryContent('{"markdown":"Visible"}')).toEqual({ markdown: 'Visible' });
     expect(parseSummaryContent('{not json')).toBeNull();
+  });
+
+  test('recognizes only the explicit empty manual document representation', () => {
+    const cleared = { markdown: '', summary_json: [], manually_cleared: true };
+    expect(isManuallyClearedSummary(cleared)).toBe(true);
+    expect(parseSummaryContent(cleared)).toEqual(cleared);
+    expect(isManuallyClearedSummary({ markdown: '', summary_json: [] })).toBe(false);
+    expect(isManuallyClearedSummary({ markdown: '', summary_json: [], manually_cleared: true, Decisions: {} })).toBe(false);
+    expect(isManuallyClearedSummary({ markdown: '<think>hidden</think>', summary_json: [], manually_cleared: true })).toBe(false);
   });
 });

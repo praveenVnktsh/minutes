@@ -1,9 +1,8 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
-import { MeetingSummary, Summary, Transcript } from '@/types';
+import { MeetingSummary, Summary } from '@/types';
 import { BlockNoteSummaryViewRef } from '@/components/AISummary/BlockNoteSummaryView';
-import { CurrentMeeting, useSidebar } from '@/components/Sidebar/SidebarProvider';
 import { invoke as invokeTauri } from '@tauri-apps/api/core';
-import { hasVisibleSummaryContent } from '@/lib/summary-content';
+import { hasVisibleSummaryContent, isManuallyClearedSummary } from '@/lib/summary-content';
 
 interface UseMeetingDataProps {
   meeting: any;
@@ -16,52 +15,81 @@ export function useMeetingData({ meeting, summaryData, onMeetingUpdated }: UseMe
   // Use prop directly since summary generation fetches transcripts independently
   const transcripts = meeting.transcripts;
   const [meetingTitle, setMeetingTitle] = useState(meeting.title || '+ New Call');
-  const [aiSummary, setAiSummary] = useState<MeetingSummary | null>(summaryData);
+  const [aiSummary, setAiSummaryState] = useState<MeetingSummary | null>(summaryData);
   const [isSaving, setIsSaving] = useState(false);
   const [isSummaryDirty, setIsSummaryDirty] = useState(false);
+  const summaryDataKey = JSON.stringify(summaryData);
+  const summaryDataKeyRef = useRef(summaryDataKey);
+  const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const pendingSaveCountRef = useRef(0);
+  const documentGenerationRef = useRef(0);
+  const latestSaveIntentRef = useRef(0);
 
   // Ref for BlockNoteSummaryView
   const blockNoteSummaryRef = useRef<BlockNoteSummaryViewRef>(null);
 
-  // Sidebar context
-  const { setCurrentMeeting, setMeetings, meetings: sidebarMeetings } = useSidebar();
-
   // Sync aiSummary state when summaryData prop changes (fixes display of fetched summaries)
   useEffect(() => {
+    if (summaryDataKeyRef.current === summaryDataKey) return;
+    summaryDataKeyRef.current = summaryDataKey;
     console.log('[useMeetingData] Syncing summary data from prop:', summaryData ? 'present' : 'null');
-    setAiSummary(summaryData);
-  }, [summaryData]); // Only trigger when parent prop changes, not when aiSummary changes
+    documentGenerationRef.current += 1;
+    setAiSummaryState(summaryData);
+  }, [summaryData, summaryDataKey]);
+
+  const setAiSummary = useCallback((summary: MeetingSummary | null) => {
+    documentGenerationRef.current += 1;
+    setAiSummaryState(summary);
+  }, []);
 
   const handleSummaryChange = useCallback((newSummary: Summary) => {
     setAiSummary(newSummary);
-  }, []);
+  }, [setAiSummary]);
 
 
 
   const handleSaveSummary = useCallback(async (summary: MeetingSummary) => {
-    if (!hasVisibleSummaryContent(summary)) {
+    if (!hasVisibleSummaryContent(summary) && !isManuallyClearedSummary(summary)) {
       throw new Error('Summary contains no visible content to save.');
     }
 
     const formattedSummary = 'markdown' in summary || 'summary_json' in summary
       ? summary
       : { MeetingName: meetingTitle, ...summary };
-    await invokeTauri('api_save_meeting_summary', {
-      meetingId: meeting.id,
-      summary: formattedSummary,
+    const saveGeneration = documentGenerationRef.current;
+    const saveIntent = ++latestSaveIntentRef.current;
+    pendingSaveCountRef.current += 1;
+    setIsSaving(true);
+    const save = saveQueueRef.current.catch(() => {}).then(async () => {
+      if (
+        documentGenerationRef.current !== saveGeneration
+        || latestSaveIntentRef.current !== saveIntent
+      ) return;
+      await invokeTauri('api_save_meeting_summary', {
+        meetingId: meeting.id,
+        summary: formattedSummary,
+      });
+      if (
+        documentGenerationRef.current === saveGeneration
+        && latestSaveIntentRef.current === saveIntent
+      ) {
+        setAiSummaryState(formattedSummary);
+      }
     });
+    saveQueueRef.current = save;
+    try {
+      await save;
+    } finally {
+      pendingSaveCountRef.current -= 1;
+      if (pendingSaveCountRef.current === 0) setIsSaving(false);
+    }
   }, [meeting.id, meetingTitle]);
 
   // Update meeting title from external source (e.g., AI summary)
   const updateMeetingTitle = useCallback((newTitle: string) => {
     console.log('📝 Updating meeting title to:', newTitle);
     setMeetingTitle(newTitle);
-    const updatedMeetings = sidebarMeetings.map((m: CurrentMeeting) =>
-      m.id === meeting.id ? { id: m.id, title: newTitle } : m
-    );
-    setMeetings(updatedMeetings);
-    setCurrentMeeting({ id: meeting.id, title: newTitle });
-  }, [meeting.id, sidebarMeetings, setMeetings, setCurrentMeeting]);
+  }, []);
 
   return {
     // State

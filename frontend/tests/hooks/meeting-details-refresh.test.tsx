@@ -26,9 +26,12 @@ afterAll(() => {
 });
 
 let selectedMeeting = 'meeting-a';
+let includeFakeRecordingFlags = false;
 mock.module('next/navigation', () => ({
   usePathname: () => '/meeting-details', useRouter: () => ({}),
-  useSearchParams: () => new URLSearchParams({ id: selectedMeeting }),
+  useSearchParams: () => new URLSearchParams(includeFakeRecordingFlags
+    ? { id: selectedMeeting, recording: '1', source: 'recording', transcribing: '1' }
+    : { id: selectedMeeting }),
 }));
 mock.module('../../src/contexts/RecordingStateContext', () => ({ useRecordingState: () => ({ isRecording: false }) }));
 mock.module('../../src/contexts/ConfigContext', () => ({ useConfig: () => ({
@@ -56,9 +59,10 @@ const transcriptPage = {
   transcripts: [{ id: 'transcript', text: 'Meeting transcript', timestamp: '00:00' }], total_count: 1, has_more: false,
 };
 let savedSummary: SummaryProcessResponse;
+let readSummary: (meetingId: string) => Promise<SummaryProcessResponse>;
 const invoke = mock(async (command: string, args?: Record<string, unknown>): Promise<unknown> => {
   if (command === 'api_get_meetings') return [];
-  if (command === 'api_get_summary') return { ...savedSummary, meeting_id: args!.meetingId };
+  if (command === 'api_get_summary') return readSummary(args!.meetingId as string);
   if (command === 'api_get_meeting_metadata') return readMetadata(args!.meetingId as string);
   if (command === 'api_get_meeting_transcripts') return readTranscripts(args!.meetingId as string);
   if (command === 'get_meeting_live_notes') return null;
@@ -77,7 +81,9 @@ const { useMeetingData } = await import('../../src/hooks/meeting-details/useMeet
 let summaryState: ReturnType<typeof useSummaryGeneration>;
 let refresh: () => Promise<void>;
 let mounts = 0;
+let latestPageProps: Record<string, unknown> = {};
 function SummaryView(props: any) {
+  latestPageProps = props;
   const data = useMeetingData(props);
   summaryState = useSummaryGeneration({
     meeting: props.meeting, initialSummary: props.initialSummary, transcripts: data.transcripts,
@@ -98,9 +104,11 @@ const realSetInterval = globalThis.setInterval;
 const realClearInterval = globalThis.clearInterval;
 beforeEach(() => {
   selectedMeeting = 'meeting-a';
+  includeFakeRecordingFlags = false;
   readMetadata = async id => metadata(id);
   readTranscripts = async () => transcriptPage;
   savedSummary = { meeting_id: selectedMeeting, status: 'pending', start: 'attempt-a', end: null, data: null, error: null, meetingName: 'Meeting A' };
+  readSummary = async (id) => ({ ...savedSummary, meeting_id: id });
   mounts = 0; timers.clear(); invoke.mockClear(); notify.mockClear();
   globalThis.setInterval = ((callback: () => Promise<void>) => {
     const id = ++nextTimer; timers.set(id, callback); return id;
@@ -138,6 +146,14 @@ function deferMetadata() {
 }
 
 describe('meeting route transcript refresh', () => {
+  test('does not pass URL recording hints into workspace state', async () => {
+    includeFakeRecordingFlags = true;
+    await show();
+    expect(latestPageProps.arrivedRecording).toBeUndefined();
+    expect(latestPageProps.arrivedTranscribing).toBeUndefined();
+    expect(latestPageProps.expectSummary).toBeUndefined();
+  });
+
   test('navigation waits for the new meeting first transcript page before mounting its view', async () => {
     await show();
     await complete('Summary A', 'attempt-a');
@@ -189,5 +205,24 @@ describe('meeting route transcript refresh', () => {
     await act(async () => { await summaryState.handleStopGeneration(); });
     expect(invoke.mock.calls.find(([command]) => command === 'api_cancel_summary')?.[1]?.processId).toBe('attempt-b');
     expect(timers.size).toBe(0);
+  });
+
+  test('keeps an initial summary read failure explicit and retries the route read', async () => {
+    let reads = 0;
+    readSummary = async (id) => {
+      reads += 1;
+      if (reads === 1) throw new Error('summary database busy');
+      return { ...savedSummary, meeting_id: id, status: 'idle', start: null };
+    };
+    await show();
+    expect(latestPageProps.initialSummary).toBeNull();
+    expect(latestPageProps.initialSummaryError).toBe('summary database busy');
+
+    await act(async () => {
+      (latestPageProps.onRetryInitialSummary as () => void)();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(reads).toBe(2);
+    expect(latestPageProps.initialSummaryError).toBeNull();
   });
 });

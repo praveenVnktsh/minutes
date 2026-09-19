@@ -55,23 +55,44 @@ export function useCopyOperations({
   const title = meetingTitle || meeting.title || 'Untitled meeting';
 
   const buildSummaryMarkdown = useCallback(async (): Promise<string> => {
-    const editor = blockNoteSummaryRef.current;
     const storedMarkdown = storedSummaryMarkdown(aiSummary);
-    if (editor) {
-      const wasDirty = editor.isDirty;
-      if (wasDirty) await editor.saveSummary();
-      const editorMarkdown = (await editor.getMarkdown()).trim();
-      if (editorMarkdown) return editorMarkdown;
-      if (!storedMarkdown) return '';
+    let editor = blockNoteSummaryRef.current;
+    if (!editor) return storedMarkdown;
+
+    while (true) {
+      const capturedEditor: BlockNoteSummaryViewRef = editor;
+      if (editor.getMarkdownResult) {
+        const result = await editor.getMarkdownResult();
+        if (!result.ok) throw result.error;
+        editor = blockNoteSummaryRef.current;
+        if (!editor) throw new Error('Enhanced notes editor closed while preparing the document');
+        if (editor !== capturedEditor) continue;
+        if (editor.isDirty) {
+          await editor.saveSummary();
+          editor = blockNoteSummaryRef.current;
+          if (!editor) throw new Error('Enhanced notes editor closed while saving the document');
+          if (editor !== capturedEditor) continue;
+        }
+        return result.markdown;
+      }
+      if (editor.isDirty) await editor.saveSummary();
+      editor = blockNoteSummaryRef.current;
+      if (!editor) throw new Error('Enhanced notes editor closed while saving the document');
+      if (editor !== capturedEditor) continue;
+      const markdown = (await editor.getMarkdown()).trim();
+      if (blockNoteSummaryRef.current !== editor) {
+        editor = blockNoteSummaryRef.current;
+        if (!editor) throw new Error('Enhanced notes editor closed while preparing the document');
+        continue;
+      }
+      if (markdown) return markdown;
       const isLegacySummary = aiSummary !== null
         && !('markdown' in aiSummary)
         && !('summary_json' in aiSummary);
       if (isLegacySummary) return storedMarkdown;
-      throw new Error(wasDirty
-        ? 'Could not read the saved enhanced notes from the editor'
-        : 'Could not convert the enhanced notes from the editor');
+      if (!storedMarkdown) return '';
+      throw new Error('Could not convert the enhanced notes from the editor');
     }
-    return storedMarkdown;
   }, [aiSummary, blockNoteSummaryRef]);
 
   const handleCopyTranscript = useCallback(async () => {

@@ -10,6 +10,8 @@ import {
   Sparkles,
 } from 'lucide-react';
 import { useShell, SIDEBAR_WIDTH, SIDEBAR_COLLAPSED_WIDTH } from '@/contexts/ShellContext';
+import { ResizeSeparator } from '@/components/ui/resize-separator';
+import { SegmentedControl } from '@/components/ui/segmented-control';
 
 export type NotesMode = 'enhanced' | 'raw';
 
@@ -42,6 +44,7 @@ export function MeetingWorkspace({
   notesMode,
   onNotesModeChange,
   canShowEnhanced,
+  hasEnhancedContent = canShowEnhanced,
   summary,
   rawNotes,
   transcript,
@@ -54,6 +57,8 @@ export function MeetingWorkspace({
   onStopGeneration,
   isGenerating = false,
   notesDirty = false,
+  titlePending = false,
+  titleError,
 }: {
   title: string;
   createdAt: string;
@@ -61,6 +66,7 @@ export function MeetingWorkspace({
   notesMode: NotesMode;
   onNotesModeChange: (mode: NotesMode) => void;
   canShowEnhanced: boolean;
+  hasEnhancedContent?: boolean;
   summary: ReactNode;
   rawNotes: ReactNode;
   transcript: ReactNode;
@@ -68,33 +74,67 @@ export function MeetingWorkspace({
   showAssistant: boolean;
   peopleCount: number;
   toolbarActions?: ReactNode;
-  onTitleChange?: (title: string) => void;
+  onTitleChange?: (title: string) => void | Promise<void>;
   onRegenerate?: () => void;
   onStopGeneration?: () => void;
   isGenerating?: boolean;
   notesDirty?: boolean;
+  titlePending?: boolean;
+  titleError?: string | null;
 }) {
   const { compact, collapsed } = useShell();
   const sidebarWidth = collapsed ? SIDEBAR_COLLAPSED_WIDTH : SIDEBAR_WIDTH;
-  const [transcriptOpen, setTranscriptOpen] = useState(true);
+  const [transcriptOpen, setTranscriptOpen] = useState(() => !compact);
   const [chatOpen, setChatOpen] = useState(false);
   const [ratio, setRatio] = useState(62);
   const [dockWidth, setDockWidth] = useState(DEFAULT_DOCK_WIDTH);
   const [titleDraft, setTitleDraft] = useState(title);
+  const [localTitleError, setLocalTitleError] = useState<string | null>(null);
+  const skipBlurCommitRef = useRef(false);
+  const workspaceRef = useRef<HTMLDivElement>(null);
+  const [workspaceWidth, setWorkspaceWidth] = useState(0);
   const dockRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setTitleDraft(title);
+    setLocalTitleError(null);
   }, [title]);
 
-  const commitTitle = () => {
+  const commitTitle = async () => {
+    if (skipBlurCommitRef.current) {
+      skipBlurCommitRef.current = false;
+      return;
+    }
     const next = titleDraft.trim();
     if (!next) {
       setTitleDraft(title);
       return;
     }
-    if (next !== title) onTitleChange?.(next);
+    if (next !== title) {
+      setLocalTitleError(null);
+      try {
+        await onTitleChange?.(next);
+      } catch (error) {
+        setLocalTitleError(error instanceof Error ? error.message : String(error));
+      }
+    }
   };
+
+  useEffect(() => {
+    const node = workspaceRef.current;
+    if (!node) return;
+    if (typeof ResizeObserver === 'undefined') {
+      setWorkspaceWidth(node.getBoundingClientRect().width || window.innerWidth - sidebarWidth);
+      return;
+    }
+    const observer = new ResizeObserver(([entry]) => setWorkspaceWidth(entry.contentRect.width));
+    observer.observe(node);
+    setWorkspaceWidth(node.getBoundingClientRect().width);
+    return () => observer.disconnect();
+  }, [sidebarWidth]);
+
+  const activePointerCleanupRef = useRef<(() => void) | null>(null);
+  useEffect(() => () => activePointerCleanupRef.current?.(), []);
 
   useEffect(() => {
     const stored = localStorage.getItem(DOCK_RATIO_KEY);
@@ -125,6 +165,7 @@ export function MeetingWorkspace({
 
   const onDividerPointerDown = useCallback((event: React.PointerEvent) => {
     event.preventDefault();
+    activePointerCleanupRef.current?.();
     const rect = dockRef.current?.getBoundingClientRect();
     if (!rect) return;
     const startY = event.clientY;
@@ -135,9 +176,14 @@ export function MeetingWorkspace({
       const next = Math.min(80, Math.max(20, startRatio + deltaPct));
       setRatio(next);
     };
-    const up = () => {
+    const cleanup = () => {
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
+      activePointerCleanupRef.current = null;
+    };
+    const up = () => {
+      cleanup();
       setRatio((current) => {
         localStorage.setItem(DOCK_RATIO_KEY, String(current));
         return current;
@@ -145,10 +191,13 @@ export function MeetingWorkspace({
     };
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
+    activePointerCleanupRef.current = cleanup;
   }, [ratio]);
 
   const onColumnDividerPointerDown = useCallback((event: React.PointerEvent) => {
     event.preventDefault();
+    activePointerCleanupRef.current?.();
     const startX = event.clientX;
     const startWidth = dockWidth;
 
@@ -156,9 +205,14 @@ export function MeetingWorkspace({
       const delta = moveEvent.clientX - startX;
       setDockWidth(clampDockWidth(startWidth - delta, window.innerWidth, sidebarWidth));
     };
-    const up = () => {
+    const cleanup = () => {
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
+      activePointerCleanupRef.current = null;
+    };
+    const up = () => {
+      cleanup();
       setDockWidth((current) => {
         localStorage.setItem(DOCK_WIDTH_KEY, String(current));
         return current;
@@ -167,35 +221,38 @@ export function MeetingWorkspace({
 
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
+    activePointerCleanupRef.current = cleanup;
   }, [dockWidth, sidebarWidth]);
 
   const dateSubtitle = useMemo(() => formatDateSubtitle(createdAt), [createdAt]);
+  const narrow = compact || (workspaceWidth > 0 && workspaceWidth < 900);
   const dockVisible = transcriptOpen || (chatOpen && showAssistant);
 
   // Compact mode defaults to everything closed; the user opens a panel on demand.
   // Entering compact closes both, leaving compact restores both.
   const prevCompactRef = useRef(compact);
   useEffect(() => {
-    if (compact && !prevCompactRef.current) {
+    if (narrow && !prevCompactRef.current) {
       setTranscriptOpen(false);
       setChatOpen(false);
-    } else if (!compact && prevCompactRef.current) {
+    } else if (!narrow && prevCompactRef.current) {
       setTranscriptOpen(true);
       setChatOpen(false);
     }
-    prevCompactRef.current = compact;
-  }, [compact]);
+    prevCompactRef.current = narrow;
+  }, [narrow]);
 
   // In compact mode there is only room for one panel, so transcript and chat
   // become mutually exclusive.
   useEffect(() => {
-    if (compact && transcriptOpen && chatOpen) setChatOpen(false);
-  }, [compact, transcriptOpen, chatOpen]);
+    if (narrow && transcriptOpen && chatOpen) setChatOpen(false);
+  }, [narrow, transcriptOpen, chatOpen]);
 
   const toggleTranscript = () => {
     setTranscriptOpen((open) => {
       const next = !open;
-      if (compact && next) setChatOpen(false);
+      if (narrow && next) setChatOpen(false);
       return next;
     });
   };
@@ -204,25 +261,27 @@ export function MeetingWorkspace({
     if (!showAssistant) return;
     setChatOpen((open) => {
       const next = !open;
-      if (compact && next) setTranscriptOpen(false);
+      if (narrow && next) setTranscriptOpen(false);
       return next;
     });
   };
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-surface-0 text-ink">
+    <div ref={workspaceRef} className="relative flex min-h-0 flex-1 flex-col overflow-hidden bg-surface-0 text-ink">
       {/* Header */}
       <div className="flex min-h-[76px] shrink-0 items-center justify-between gap-6 px-8 py-3">
         <div className="min-w-0 flex-1">
           <input
             value={titleDraft}
             onChange={(event) => setTitleDraft(event.target.value)}
-            onBlur={commitTitle}
+            onBlur={() => void commitTitle()}
+            disabled={titlePending}
             onKeyDown={(event) => {
               if (event.key === 'Enter') {
                 event.preventDefault();
                 (event.target as HTMLInputElement).blur();
               } else if (event.key === 'Escape') {
+                skipBlurCommitRef.current = true;
                 setTitleDraft(title);
                 (event.target as HTMLInputElement).blur();
               }
@@ -230,9 +289,14 @@ export function MeetingWorkspace({
             spellCheck={false}
             aria-label="Meeting title"
             placeholder="Untitled meeting"
-            className="w-full truncate bg-transparent font-serif text-[26px] font-semibold tracking-[-0.02em] text-ink outline-none placeholder:text-ink-subtle"
+            className="w-full truncate rounded bg-transparent font-serif text-[26px] font-semibold tracking-[-0.02em] text-ink outline-none placeholder:text-ink-subtle focus-visible:ring-2 focus-visible:ring-focus"
           />
-          {dateSubtitle && <p className="mt-0.5 text-xs text-ink-subtle">{dateSubtitle}</p>}
+          {(dateSubtitle || peopleCount > 0) && (
+            <p className="mt-0.5 text-xs text-ink-subtle">
+              {[dateSubtitle, peopleCount > 0 ? `${peopleCount} ${peopleCount === 1 ? 'person' : 'people'}` : ''].filter(Boolean).join(' · ')}
+            </p>
+          )}
+          {(localTitleError || titleError) && <p role="alert" className="mt-1 text-xs text-error">Could not rename: {localTitleError || titleError}</p>}
         </div>
         <div className="flex shrink-0 items-center gap-2">
           {statusBanner}
@@ -240,6 +304,7 @@ export function MeetingWorkspace({
             type="button"
             onClick={toggleTranscript}
             title="Toggle transcript"
+            aria-pressed={transcriptOpen}
             className={`flex h-8 items-center gap-1.5 rounded-full px-3 text-xs transition-colors ${transcriptOpen ? 'bg-surface-2 text-ink' : 'text-ink-subtle hover:bg-surface-2 hover:text-ink'}`}
           >
             <FileText className="h-3.5 w-3.5" /> Transcript
@@ -249,6 +314,7 @@ export function MeetingWorkspace({
             onClick={toggleChat}
             disabled={!showAssistant}
             title="Toggle chat"
+            aria-pressed={chatOpen && showAssistant}
             className={`flex h-8 items-center gap-1.5 rounded-full px-3 text-xs transition-colors ${chatOpen && showAssistant ? 'bg-surface-2 text-ink' : 'text-ink-subtle hover:bg-surface-2 hover:text-ink'} disabled:opacity-40`}
           >
             <MessageCircle className="h-3.5 w-3.5" /> Chat
@@ -263,27 +329,18 @@ export function MeetingWorkspace({
           <div className="flex shrink-0 flex-wrap items-center gap-1.5 px-8 pb-3">
             {/* Enhanced / Raw segmented toggle */}
             <div className="flex h-8 shrink-0 items-center rounded-full bg-surface-2 p-0.5">
-              <button
-                type="button"
-                onClick={() => onNotesModeChange('raw')}
-                title="Raw notes"
-                className={`flex h-7 items-center gap-1.5 rounded-full px-3 text-xs transition-colors ${notesMode === 'raw' ? 'bg-surface-raised text-ink shadow-sm' : 'text-ink-muted hover:text-ink'}`}
-              >
-                <ListTree className="h-3.5 w-3.5" /> Raw
-              </button>
-              <div
-                className={`flex h-7 items-center rounded-full pr-1 transition-colors ${notesMode === 'enhanced' ? 'bg-surface-raised text-ink shadow-sm' : 'text-ink-muted'}`}
-              >
-                <button
-                  type="button"
-                  disabled={!canShowEnhanced}
-                  onClick={() => onNotesModeChange('enhanced')}
-                  title={canShowEnhanced ? 'Enhanced notes' : 'Enhanced notes appear after the summary is generated'}
-                  className="flex h-7 items-center gap-1.5 rounded-full pl-3 pr-2 text-xs disabled:opacity-40"
-                >
-                  <Sparkles className="h-3.5 w-3.5" /> Enhanced
-                </button>
-                {canShowEnhanced && (
+              <SegmentedControl
+                value={notesMode}
+                aria-label="Notes view"
+                className="h-8 rounded-full border-0 bg-transparent p-0"
+                options={[
+                  { value: 'raw', label: <span className="flex items-center gap-1.5"><ListTree className="h-3.5 w-3.5" /> Raw</span> },
+                  { value: 'enhanced', label: <span className="flex items-center gap-1.5"><Sparkles className="h-3.5 w-3.5" /> Enhanced</span> },
+                ]}
+                onValueChange={onNotesModeChange}
+              />
+              <div className="flex h-7 items-center rounded-full pr-1 text-ink-muted">
+                {hasEnhancedContent && (
                   <button
                     type="button"
                     onClick={() => (isGenerating ? onStopGeneration?.() : onRegenerate?.())}
@@ -309,22 +366,24 @@ export function MeetingWorkspace({
         </section>
 
         {/* Drag handle between the notes column and the side dock */}
-        {dockVisible && (
-          <div
+        {dockVisible && !narrow && (
+          <ResizeSeparator
+            value={dockWidth}
+            min={320}
+            max={Math.max(320, workspaceWidth - MIN_NOTES_WIDTH)}
+            onValueChange={setDockWidth}
+            label="Resize transcript and chat panel"
             onPointerDown={onColumnDividerPointerDown}
-            className="group flex w-2 shrink-0 cursor-col-resize items-center justify-center hover:bg-surface-2"
-            title="Drag to resize"
-          >
-            <span className="h-10 w-1 rounded-full bg-hairline group-hover:bg-ink-subtle" />
-          </div>
+            className="z-10 w-2 bg-transparent"
+          />
         )}
 
         {/* Transcript / chat dock: always a right-side rail; collapsed by default in compact */}
-        {dockVisible && (
-          <section
-            className="flex min-h-0 min-w-0 shrink-0 flex-col overflow-hidden border-l border-hairline bg-surface-1"
-            style={{ width: dockWidth }}
-          >
+        <section
+          aria-hidden={!dockVisible}
+          className={`${dockVisible ? 'flex' : 'hidden'} min-h-0 min-w-0 shrink-0 flex-col overflow-hidden border-l border-hairline bg-surface-1 ${narrow ? 'absolute inset-x-0 bottom-0 top-[76px] z-20' : ''}`}
+          style={narrow ? undefined : { width: dockWidth }}
+        >
             <div ref={dockRef} className="flex min-h-0 flex-1 flex-col">
               {transcriptOpen && (
                 <div className="min-h-0 flex-1 overflow-hidden" style={chatOpen && showAssistant ? { flexBasis: `${ratio}%`, flexGrow: 0 } : undefined}>
@@ -332,22 +391,24 @@ export function MeetingWorkspace({
                 </div>
               )}
               {transcriptOpen && chatOpen && showAssistant && (
-                <div
+                <ResizeSeparator
+                  value={ratio}
+                  min={20}
+                  max={80}
+                  onValueChange={setRatio}
+                  orientation="horizontal"
+                  label="Resize transcript and chat sections"
                   onPointerDown={onDividerPointerDown}
-                  className="flex h-3 shrink-0 cursor-row-resize items-center justify-center"
-                  title="Drag to resize"
-                >
-                  <span className="h-1 w-10 rounded-full bg-hairline" />
-                </div>
+                  className="h-3 bg-transparent"
+                />
               )}
-              {chatOpen && showAssistant && (
-                <div className="min-h-0 flex-1 overflow-hidden">
+              {showAssistant && (
+                <div className={`${chatOpen ? 'block' : 'hidden'} min-h-0 flex-1 overflow-hidden`}>
                   {assistant}
                 </div>
               )}
             </div>
-          </section>
-        )}
+        </section>
       </div>
     </div>
   );

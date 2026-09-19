@@ -112,6 +112,16 @@ afterEach(async () => {
   if (renderer) await act(async () => renderer.unmount());
   meetingActivityStore.stopSummaryPolling('meeting-a');
   meetingActivityStore.stopSummaryPolling('meeting-b');
+  for (const activity of meetingActivityStore.getState().summaries) {
+    if (activity.processId) {
+      meetingActivityStore.hydrateSummary(response({
+        meeting_id: activity.meetingId,
+        start: activity.processId,
+        status: 'cancelled',
+        data: activity.response?.data ?? null,
+      }));
+    }
+  }
   meetingActivityStore.dismissSummary('meeting-a');
   meetingActivityStore.dismissSummary('meeting-b');
   globalThis.setInterval = realSetInterval;
@@ -133,7 +143,7 @@ describe('summary state restored when returning to a meeting', () => {
     await show(response({ data: { markdown: 'Previous summary' } }));
     getSummary = async () => { throw new Error('Database unavailable'); };
     await tick();
-    expect(state.summaryStatus).toBe('processing');
+    expect(state.summaryStatus).toBe('regenerating');
     expect(meetingActivityStore.getState().summaries[0]?.reconciliationError).toContain('Database unavailable');
     expect(text()).toContain('Previous summary');
     expect(timers.size).toBe(1);
@@ -190,7 +200,7 @@ describe('summary state restored when returning to a meeting', () => {
 
   test('keeps regeneration loading with old content and restores content on failure', async () => {
     await show(response({ data: { markdown: 'Previous summary' } }));
-    expect(text()).toContain('processing');
+    expect(text()).toContain('regenerating');
     getSummary = async () => response({ status: 'failed', error: 'Model unavailable', data: { markdown: 'Previous summary' } });
     await tick();
     expect(text()).toContain('completed');
@@ -301,6 +311,111 @@ describe('summary state restored when returning to a meeting', () => {
       { meetingId: 'meeting-a', processId },
     ]);
     expect(timers.size).toBe(0);
+  });
+
+  test('remounts a pending regeneration with Stop attached to the delayed native start', async () => {
+    const initial = response({ status: 'completed', data: { markdown: 'Previous summary' } });
+    const processId = '2026-09-18T10:00:00.223456789Z';
+    let resolve!: (value: { process_id: string }) => void;
+    startProcess = () => new Promise(done => { resolve = done; });
+    getSummary = async () => initial;
+    await show(initial);
+    let generation!: Promise<void>;
+    await act(async () => {
+      generation = state.handleRegenerateSummary();
+      await new Promise((done) => setTimeout(done, 0));
+    });
+    await show(null);
+    await show(initial);
+    expect(state.summaryStatus).toBe('regenerating');
+
+    let stopping!: Promise<void>;
+    await act(async () => { stopping = state.handleStopGeneration(); });
+    await act(async () => {
+      resolve({ process_id: processId });
+      await Promise.all([generation, stopping]);
+    });
+    expect(invoke.mock.calls).toContainEqual([
+      'api_cancel_summary',
+      { meetingId: 'meeting-a', processId },
+    ]);
+  });
+
+  test.each(['cancelled', 'failed', 'error'] as const)(
+    'keeps retry after prior %s history pending through remount and Stop',
+    async (priorStatus) => {
+      const prior = response({
+        status: priorStatus,
+        start: '2026-09-18T10:00:00.123456789Z',
+        data: { markdown: 'Previous summary' },
+        error: priorStatus === 'cancelled' ? null : 'Previous attempt failed',
+      });
+      const processId = '2026-09-18T10:00:00.223456789Z';
+      let resolveStart!: (value: { process_id: string }) => void;
+      startProcess = () => new Promise((resolve) => { resolveStart = resolve; });
+      getSummary = async () => prior;
+      await show(prior);
+
+      let generation!: Promise<void>;
+      await act(async () => {
+        generation = state.handleRegenerateSummary();
+        await new Promise((done) => setTimeout(done, 0));
+      });
+      await show(null);
+      await show(prior);
+      expect(state.summaryStatus).toBe('regenerating');
+      expect(meetingActivityStore.getState().summaries.at(-1)).toMatchObject({
+        processId: null,
+        status: 'queued',
+      });
+
+      let stopping!: Promise<void>;
+      await act(async () => { stopping = state.handleStopGeneration(); });
+      await act(async () => {
+        resolveStart({ process_id: processId });
+        await Promise.all([generation, stopping]);
+      });
+      expect(invoke.mock.calls).toContainEqual([
+        'api_cancel_summary',
+        { meetingId: 'meeting-a', processId },
+      ]);
+    },
+  );
+
+  test('remounts with Stop while the owner pre-start summary read is still pending', async () => {
+    const initial = response({ status: 'completed', data: { markdown: 'Previous summary' } });
+    const processId = '2026-09-18T10:00:00.323456789Z';
+    let resolveRead!: (value: SummaryProcessResponse) => void;
+    let firstRead = true;
+    getSummary = () => {
+      if (firstRead) {
+        firstRead = false;
+        return new Promise((resolve) => { resolveRead = resolve; });
+      }
+      return Promise.resolve(response({ start: processId, status: 'cancelled', data: { markdown: 'Previous summary' } }));
+    };
+    startProcess = async () => ({ process_id: processId });
+    await show(initial);
+    let generation!: Promise<void>;
+    await act(async () => {
+      generation = state.handleRegenerateSummary();
+      await new Promise((done) => setTimeout(done, 0));
+    });
+    expect(meetingActivityStore.getState().summaries.at(-1)).toMatchObject({ processId: null, status: 'queued' });
+    await show(null);
+    await show(initial);
+    expect(state.summaryStatus).toBe('regenerating');
+
+    let stopping!: Promise<void>;
+    await act(async () => { stopping = state.handleStopGeneration(); });
+    await act(async () => {
+      resolveRead(initial);
+      await Promise.all([generation, stopping]);
+    });
+    expect(invoke.mock.calls).toContainEqual([
+      'api_cancel_summary',
+      { meetingId: 'meeting-a', processId },
+    ]);
   });
 
   test.each(['false', 'error'])('keeps observing when pending-start cancellation returns %s', async (outcome) => {
