@@ -1,13 +1,7 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
-import {
-  CancelSummaryResponse,
-  MeetingSummary,
-  ProcessTranscriptResponse,
-  SummaryProcessResponse,
-  Transcript,
-} from '@/types';
+import { MeetingSummary, SummaryProcessResponse, Transcript } from '@/types';
 import { ModelConfig } from '@/components/ModelSettingsModal';
-import { useSidebar } from '@/components/Sidebar/SidebarProvider';
+import { useMeetingActivity } from '@/contexts/MeetingActivityContext';
 import { invoke as invokeTauri } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
 import Analytics from '@/lib/analytics';
@@ -18,7 +12,9 @@ import {
   readCachedDetectedSummaryLanguage,
 } from '@/lib/summary-language-preferences';
 import { parseSummaryContent, readSummaryMetadata } from '@/lib/summary-content';
-import { buildLiveNotesSummaryContext, type LiveNotesDocument } from '@/lib/liveNotes';
+import { loadSummaryNotesContext, validateSummaryModel } from '@/lib/autoSummary';
+import { fetchCompleteTranscripts } from '@/lib/meetingExport';
+import { useConfig } from '@/contexts/ConfigContext';
 
 async function resolveSummaryLanguage(
   meetingId: string,
@@ -75,6 +71,8 @@ interface UseSummaryGenerationProps {
   transcripts: Transcript[];
   modelConfig: ModelConfig;
   isModelConfigLoading: boolean;
+  isModelConfigSaving?: boolean;
+  modelConfigSaveError?: Error | null;
   selectedTemplate: string;
   onMeetingUpdated?: () => Promise<void>;
   updateMeetingTitle: (title: string) => void;
@@ -85,15 +83,22 @@ interface UseSummaryGenerationProps {
 export function useSummaryGeneration({
   initialSummary,
   meeting,
-  transcripts,
+  transcripts: _transcripts,
   modelConfig,
   isModelConfigLoading,
+  isModelConfigSaving = false,
+  modelConfigSaveError = null,
   selectedTemplate,
   onMeetingUpdated,
   updateMeetingTitle,
   setAiSummary,
   onOpenModelSettings,
 }: UseSummaryGenerationProps) {
+  const committedConfig = useConfig();
+  const effectiveModelConfig = committedConfig.modelConfig ?? modelConfig;
+  const modelConfigurationLoading = isModelConfigLoading || committedConfig.isModelConfigLoading;
+  const modelConfigurationSaving = isModelConfigSaving || committedConfig.isModelConfigSaving;
+  const modelConfigurationError = modelConfigSaveError ?? committedConfig.modelConfigSaveError;
   const restored = initialSummary?.meeting_id === meeting.id ? initialSummary : null;
   const [summaryStatus, setSummaryStatus] = useState<SummaryStatus>(() => restoredSummaryStatus(restored));
   const [summaryError, setSummaryError] = useState<string | null>(() =>
@@ -106,6 +111,8 @@ export function useSummaryGeneration({
   visibleMeetingIdRef.current = meeting.id;
   const generationIdRef = useRef(0);
   const activeProcessIdRef = useRef<string | null>(null);
+  const pendingNativeStartGenerationRef = useRef<number | null>(null);
+  const pollSubscriptionRef = useRef<(() => void) | null>(null);
   const trackedAttemptRef = useRef<{
     generationId: number;
     startedAt: number;
@@ -113,7 +120,13 @@ export function useSummaryGeneration({
     model: ModelConfig['model'];
     finished: boolean;
   } | null>(null);
-  const { startSummaryPolling, stopSummaryPolling } = useSidebar();
+  const {
+    cancelSummary,
+    cancelPendingSummaryStart,
+    hydrateSummary,
+    startSummary,
+    startSummaryPolling,
+  } = useMeetingActivity();
 
   const getSummaryStatusMessage = useCallback((status: SummaryStatus) => {
     switch (status) {
@@ -176,6 +189,7 @@ export function useSummaryGeneration({
     if (!mountedRef.current || visibleMeetingIdRef.current !== meeting.id || generationId !== generationIdRef.current) {
       return;
     }
+    if (pollingResult.start) activeProcessIdRef.current = pollingResult.start;
     if (pollingResult.status === 'cancelled') {
       let existing: SummaryProcessResponse;
       try {
@@ -279,31 +293,45 @@ export function useSummaryGeneration({
   const pollingResultRef = useRef(handlePollingResult);
   pollingResultRef.current = handlePollingResult;
 
+  const subscribeToProcess = useCallback((
+    processId: string,
+    generationId: number,
+    isRegeneration: boolean,
+  ) => {
+    pollSubscriptionRef.current?.();
+    pollSubscriptionRef.current = startSummaryPolling(
+      meeting.id,
+      processId,
+      result => pollingResultRef.current(result, generationId, isRegeneration),
+    );
+  }, [meeting.id, startSummaryPolling]);
+
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
-      if (activeProcessIdRef.current) {
-        stopSummaryPolling(meeting.id, activeProcessIdRef.current);
-      }
+      pollSubscriptionRef.current?.();
+      pollSubscriptionRef.current = null;
     };
-  }, [meeting.id, stopSummaryPolling]);
+  }, [meeting.id]);
 
   useEffect(() => {
     if (!initialSummary || initialSummary.meeting_id !== meeting.id) return;
-    const status = restoredSummaryStatus(initialSummary);
+    const authoritative = hydrateSummary(initialSummary);
+    if (!authoritative) return;
+    const status = restoredSummaryStatus(authoritative);
     setSummaryStatus(status);
     setSummaryError(status === 'error'
-      ? initialSummary.error || 'Summary generation failed. Please retry.'
+      ? authoritative.error || 'Summary generation failed. Please retry.'
       : null);
-    if (status !== 'processing' || !initialSummary.start) return;
+    setAiSummary(parseSummaryContent(authoritative.data));
+    if (status !== 'processing' || !authoritative.start) return;
 
     const generationId = ++generationIdRef.current;
-    activeProcessIdRef.current = initialSummary.start;
-    const isRegeneration = !!parseSummaryContent(initialSummary.data);
-    startSummaryPolling(meeting.id, initialSummary.start, result =>
-      pollingResultRef.current(result, generationId, isRegeneration));
-  }, [initialSummary, meeting.id, startSummaryPolling]);
+    activeProcessIdRef.current = authoritative.start;
+    const isRegeneration = !!parseSummaryContent(authoritative.data);
+    subscribeToProcess(authoritative.start, generationId, isRegeneration);
+  }, [hydrateSummary, initialSummary, meeting.id, setAiSummary, subscribeToProcess]);
 
   const processSummary = useCallback(async ({
     transcriptText,
@@ -336,13 +364,13 @@ export function useSummaryGeneration({
       trackedAttemptRef.current = {
         generationId,
         startedAt: Date.now(),
-        provider: modelConfig.provider,
-        model: modelConfig.model,
+        provider: effectiveModelConfig.provider,
+        model: effectiveModelConfig.model,
         finished: false,
       };
       await Analytics.trackSummaryGenerationStarted(
-        modelConfig.provider,
-        modelConfig.model,
+        effectiveModelConfig.provider,
+        effectiveModelConfig.model,
         transcriptText.length,
         timeSinceRecording,
       );
@@ -358,76 +386,59 @@ export function useSummaryGeneration({
         return;
       }
 
-      const result = await invokeTauri<ProcessTranscriptResponse>('api_process_transcript', {
-        text: transcriptText,
-        model: modelConfig.provider,
-        modelName: modelConfig.model,
-        meetingId: meeting.id,
-        chunkSize: 40000,
-        overlap: 1000,
-        customPrompt,
-        templateId: selectedTemplate,
-        summaryLanguage,
-      });
-      const processId = result.process_id;
-      if (!mountedRef.current || visibleMeetingIdRef.current !== meeting.id) return;
-      if (generationId !== generationIdRef.current) {
-        await invokeTauri('api_cancel_summary', { meetingId: meeting.id, processId }).catch(() => {});
+      pendingNativeStartGenerationRef.current = generationId;
+      let result: Awaited<ReturnType<typeof startSummary>>;
+      try {
+        result = await startSummary({
+          text: transcriptText,
+          model: effectiveModelConfig.provider,
+          modelName: effectiveModelConfig.model,
+          meetingId: meeting.id,
+          chunkSize: 40000,
+          overlap: 1000,
+          customPrompt,
+          templateId: selectedTemplate,
+          summaryLanguage,
+          replaceExisting: isRegeneration,
+        });
+      } finally {
+        if (pendingNativeStartGenerationRef.current === generationId) {
+          pendingNativeStartGenerationRef.current = null;
+        }
+      }
+      const processId = result.processId;
+      if (!processId) {
+        if (result.response) await handlePollingResult(result.response, generationId, isRegeneration);
         return;
       }
+      // The owner registers the process before resolving this call. If this
+      // route disappeared meanwhile, global tracking continues without it.
+      if (!mountedRef.current || visibleMeetingIdRef.current !== meeting.id) return;
+      if (generationId !== generationIdRef.current) return;
       activeProcessIdRef.current = processId;
 
-      startSummaryPolling(meeting.id, processId, result =>
-        pollingResultRef.current(result, generationId, isRegeneration));
+      subscribeToProcess(processId, generationId, isRegeneration);
     } catch (error) {
       await failGeneration(generationId, isRegeneration, error instanceof Error ? error.message : 'Summary generation failed.');
     }
   }, [
     failGeneration,
     finishGeneration,
+    handlePollingResult,
     meeting.created_at,
     meeting.id,
-    modelConfig,
-    onMeetingUpdated,
+    effectiveModelConfig,
     selectedTemplate,
-    setAiSummary,
-    startSummaryPolling,
-    updateMeetingTitle,
+    startSummary,
+    subscribeToProcess,
   ]);
 
   // Helper function to fetch ALL transcripts for summary generation
   const fetchAllTranscripts = useCallback(async (meetingId: string): Promise<Transcript[]> => {
-    try {
-      console.log('📊 Fetching all transcripts for meeting:', meetingId);
-
-      // First, get total count by fetching first page
-      const firstPage = await invokeTauri('api_get_meeting_transcripts', {
-        meetingId,
-        limit: 1,
-        offset: 0,
-      }) as { transcripts: Transcript[]; total_count: number; has_more: boolean };
-
-      const totalCount = firstPage.total_count;
-      console.log(`📊 Total transcripts in database: ${totalCount}`);
-
-      if (totalCount === 0) {
-        return [];
-      }
-
-      // Fetch all transcripts in one call
-      const allData = await invokeTauri('api_get_meeting_transcripts', {
-        meetingId,
-        limit: totalCount,
-        offset: 0,
-      }) as { transcripts: Transcript[]; total_count: number; has_more: boolean };
-
-      console.log(`✅ Fetched ${allData.transcripts.length} transcripts from database`);
-      return allData.transcripts;
-    } catch (error) {
-      console.error('❌ Error fetching all transcripts:', error);
-      toast.error('Failed to fetch transcripts for summary generation');
-      return [];
-    }
+    return fetchCompleteTranscripts(
+      meetingId,
+      (args) => invokeTauri('api_get_meeting_transcripts', args),
+    );
   }, []);
 
   const buildSummaryTranscriptPayload = useCallback((allTranscripts: Transcript[]) => {
@@ -450,16 +461,8 @@ export function useSummaryGeneration({
   }, []);
 
   const withLiveNotesContext = useCallback(async (customPrompt: string): Promise<string> => {
-    try {
-      const notes = await invokeTauri<LiveNotesDocument | null>('get_meeting_live_notes', {
-        meetingId: meeting.id,
-      });
-      const notesContext = buildLiveNotesSummaryContext(notes);
-      return [customPrompt, notesContext].filter(Boolean).join('\n\n');
-    } catch (error) {
-      console.warn('Could not load live notes for summary generation:', error);
-      return customPrompt;
-    }
+    const notesContext = await loadSummaryNotesContext(meeting.id);
+    return [customPrompt, notesContext].filter(Boolean).join('\n\n');
   }, [meeting.id]);
 
   const showPreflightError = useCallback((message: string) => {
@@ -469,58 +472,51 @@ export function useSummaryGeneration({
   }, []);
 
   const handleGenerateSummary = useCallback(async (customPrompt: string = '') => {
-    if (isModelConfigLoading) {
+    if (modelConfigurationLoading || modelConfigurationSaving) {
       toast.info('Loading model configuration, please wait...');
       return;
     }
-    const allTranscripts = await fetchAllTranscripts(meeting.id);
+    if (modelConfigurationError) {
+      showPreflightError('Model configuration could not be saved. Retry saving it before generating a summary.');
+      return;
+    }
+    let allTranscripts: Transcript[];
+    try {
+      allTranscripts = await fetchAllTranscripts(meeting.id);
+    } catch (error) {
+      showPreflightError(`Could not read the complete transcript: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
     if (!allTranscripts.length) {
       showPreflightError('No transcripts available for summary');
       return;
     }
 
     try {
-      if (modelConfig.provider === 'ollama') {
-        const models = await invokeTauri<unknown[]>('get_ollama_models', {
-          endpoint: modelConfig.ollamaEndpoint || null,
-        });
-        if (models.length === 0) {
-          showPreflightError('No Ollama models found. Please download gemma3:1b from Model Settings.');
-          return;
-        }
-      }
-      if (modelConfig.provider === 'builtin-ai') {
-        if (!modelConfig.model) {
-          showPreflightError('No built-in AI model selected. Please select a model in settings.');
-          onOpenModelSettings?.();
-          return;
-        }
-        const isReady = await invokeTauri<boolean>('builtin_ai_is_model_ready', {
-          modelName: modelConfig.model,
-          refresh: true,
-        });
-        if (!isReady) {
-          showPreflightError('Built-in AI model is not ready. Please check model settings.');
-          onOpenModelSettings?.();
-          return;
-        }
-      }
+      await validateSummaryModel(effectiveModelConfig);
     } catch (error) {
       console.error('Failed to validate summary model:', error);
-      showPreflightError('Failed to validate summary model. Please check model settings.');
+      showPreflightError(error instanceof Error ? error.message : 'Failed to validate summary model. Please check model settings.');
+      onOpenModelSettings?.();
       return;
     }
 
-    await processSummary({
-      ...buildSummaryTranscriptPayload(allTranscripts),
-      customPrompt: await withLiveNotesContext(customPrompt),
-    });
+    try {
+      await processSummary({
+        ...buildSummaryTranscriptPayload(allTranscripts),
+        customPrompt: await withLiveNotesContext(customPrompt),
+      });
+    } catch (error) {
+      showPreflightError(`Could not save current notes before summary generation: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }, [
     buildSummaryTranscriptPayload,
     fetchAllTranscripts,
-    isModelConfigLoading,
+    effectiveModelConfig,
     meeting.id,
-    modelConfig,
+    modelConfigurationError,
+    modelConfigurationLoading,
+    modelConfigurationSaving,
     onOpenModelSettings,
     processSummary,
     showPreflightError,
@@ -529,7 +525,21 @@ export function useSummaryGeneration({
 
   // Public API: Regenerate summary from the current saved transcript
   const handleRegenerateSummary = useCallback(async () => {
-    const allTranscripts = await fetchAllTranscripts(meeting.id);
+    if (modelConfigurationLoading || modelConfigurationSaving) {
+      toast.info('Loading model configuration, please wait...');
+      return;
+    }
+    if (modelConfigurationError) {
+      showPreflightError('Model configuration could not be saved. Retry saving it before regenerating a summary.');
+      return;
+    }
+    let allTranscripts: Transcript[];
+    try {
+      allTranscripts = await fetchAllTranscripts(meeting.id);
+    } catch (error) {
+      showPreflightError(`Could not read the complete transcript: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
 
     if (!allTranscripts.length) {
       console.error('No transcripts available for regeneration');
@@ -537,42 +547,92 @@ export function useSummaryGeneration({
       return;
     }
 
-    await processSummary({
-      ...buildSummaryTranscriptPayload(allTranscripts),
-      customPrompt: await withLiveNotesContext(''),
-      isRegeneration: true
-    });
-  }, [meeting.id, fetchAllTranscripts, buildSummaryTranscriptPayload, processSummary, withLiveNotesContext]);
+    try {
+      await validateSummaryModel(effectiveModelConfig);
+      await processSummary({
+        ...buildSummaryTranscriptPayload(allTranscripts),
+        customPrompt: await withLiveNotesContext(''),
+        isRegeneration: true
+      });
+    } catch (error) {
+      showPreflightError(`Could not save current notes before summary regeneration: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }, [
+    buildSummaryTranscriptPayload,
+    fetchAllTranscripts,
+    effectiveModelConfig,
+    meeting.id,
+    modelConfigurationError,
+    modelConfigurationLoading,
+    modelConfigurationSaving,
+    processSummary,
+    showPreflightError,
+    withLiveNotesContext,
+  ]);
 
   // Public API: Stop ongoing summary generation
   const handleStopGeneration = useCallback(async () => {
     const generationId = generationIdRef.current;
     const processId = activeProcessIdRef.current;
     if (!processId) {
-      generationIdRef.current += 1;
-      activeProcessIdRef.current = null;
-      setSummaryStatus('idle');
-      setSummaryError(null);
-      await finishGeneration(generationId, 'cancelled');
-      toast.info('Summary generation stopped', {
-        description: 'You can generate a new summary anytime',
-        duration: 3000,
-      });
+      if (pendingNativeStartGenerationRef.current !== generationId) {
+        generationIdRef.current += 1;
+        activeProcessIdRef.current = null;
+        setSummaryStatus('idle');
+        setSummaryError(null);
+        await finishGeneration(generationId, 'cancelled');
+        toast.info('Summary generation stopped', {
+          description: 'You can generate a new summary anytime',
+          duration: 3000,
+        });
+        return;
+      }
+      const cancellation = cancelPendingSummaryStart(meeting.id);
+      try {
+        const cancelled = await cancellation;
+        if (!mountedRef.current || visibleMeetingIdRef.current !== meeting.id) return;
+        if (cancelled && generationId === generationIdRef.current) {
+          generationIdRef.current += 1;
+          activeProcessIdRef.current = null;
+          pollSubscriptionRef.current?.();
+          pollSubscriptionRef.current = null;
+          setSummaryStatus('idle');
+          setSummaryError(null);
+          await finishGeneration(generationId, 'cancelled');
+          toast.info('Summary generation stopped', {
+            description: 'You can generate a new summary anytime',
+            duration: 3000,
+          });
+        } else if (!cancelled && generationId === generationIdRef.current) {
+          toast.info('Summary is already finishing', {
+            description: 'Waiting for the latest result.',
+          });
+        }
+      } catch (error) {
+        console.error('Failed to cancel summary generation after it started:', error);
+        if (
+          mountedRef.current
+          && visibleMeetingIdRef.current === meeting.id
+          && generationId === generationIdRef.current
+        ) {
+          toast.error('Failed to stop summary generation', {
+            description: 'Generation is still running; waiting for its latest status.',
+          });
+        }
+      }
       return;
     }
 
     try {
-      const result = await invokeTauri<CancelSummaryResponse>('api_cancel_summary', {
-        meetingId: meeting.id,
-        processId,
-      });
+      const cancelled = await cancelSummary(meeting.id, processId);
       if (!mountedRef.current || visibleMeetingIdRef.current !== meeting.id || generationId !== generationIdRef.current) {
         return;
       }
-      if (result.cancelled) {
+      if (cancelled) {
         generationIdRef.current += 1;
         activeProcessIdRef.current = null;
-        stopSummaryPolling(meeting.id, processId);
+        pollSubscriptionRef.current?.();
+        pollSubscriptionRef.current = null;
         setSummaryStatus('idle');
         setSummaryError(null);
         await finishGeneration(generationId, 'cancelled');
@@ -596,7 +656,7 @@ export function useSummaryGeneration({
         });
       }
     }
-  }, [finishGeneration, meeting.id, stopSummaryPolling]);
+  }, [cancelPendingSummaryStart, cancelSummary, finishGeneration, meeting.id]);
 
   return {
     summaryStatus,

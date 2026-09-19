@@ -1,12 +1,20 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { ModelConfig } from '@/services/configService';
-import type { SummaryProcessResponse, Transcript } from '@/types';
+import type { Transcript } from '@/types';
 import {
   detectAndCacheSummaryLanguage,
   readCachedDetectedSummaryLanguage,
   readMeetingSummaryLanguage,
 } from '@/lib/summary-language-preferences';
-import { buildLiveNotesSummaryContext, type LiveNotesDocument } from '@/lib/liveNotes';
+import { fetchCompleteTranscripts, originalNotesMarkdown } from '@/lib/meetingExport';
+import {
+  flushNotes,
+  loadNotes,
+  meetingNotesTarget,
+  notePersistenceService,
+  type NoteDocumentTarget,
+} from '@/services/notePersistenceService';
+import { meetingActivityStore } from '@/contexts/MeetingActivityContext';
 
 const PENDING_DEFERRED_SUMMARIES_KEY = 'meetily:pending-deferred-auto-summaries';
 
@@ -36,26 +44,49 @@ export function consumeDeferredMeetingForAutoSummary(meetingId: string): boolean
   return true;
 }
 
+const claimedAutoSummaryJobs = new Set<string>();
+
+function autoSummaryJobKey(
+  taskId: string,
+  modelConfig: Pick<ModelConfig, 'provider' | 'model'>,
+): string {
+  return `${taskId}\u0000${modelConfig.provider}\u0000${modelConfig.model}`;
+}
+
+export function claimAutoSummaryJob(
+  taskId: string,
+  modelConfig: Pick<ModelConfig, 'provider' | 'model'>,
+): boolean {
+  const key = autoSummaryJobKey(taskId, modelConfig);
+  if (claimedAutoSummaryJobs.has(key)) return false;
+  claimedAutoSummaryJobs.add(key);
+  return true;
+}
+
+export function releaseAutoSummaryJob(
+  taskId: string,
+  modelConfig: Pick<ModelConfig, 'provider' | 'model'>,
+): void {
+  claimedAutoSummaryJobs.delete(autoSummaryJobKey(taskId, modelConfig));
+}
+
+export async function loadSummaryNotesContext(
+  meetingId: string,
+  target: NoteDocumentTarget = meetingNotesTarget(meetingId),
+): Promise<string> {
+  await flushNotes(target);
+  let snapshot = notePersistenceService.getSnapshot(target);
+  if (snapshot.loadState === 'idle' || snapshot.loadState === 'loading') {
+    snapshot = await loadNotes(target);
+  }
+  if (snapshot.loadState === 'error') {
+    throw snapshot.loadError ?? new Error('Could not load the current meeting notes.');
+  }
+  return originalNotesMarkdown(snapshot.document);
+}
+
 async function fetchAllTranscripts(meetingId: string): Promise<Transcript[]> {
-  const firstPage = await invoke<{
-    transcripts: Transcript[];
-    total_count: number;
-  }>('api_get_meeting_transcripts', {
-    meetingId,
-    limit: 1,
-    offset: 0,
-  });
-
-  if (firstPage.total_count === 0) return [];
-
-  const allTranscripts = await invoke<{
-    transcripts: Transcript[];
-  }>('api_get_meeting_transcripts', {
-    meetingId,
-    limit: firstPage.total_count,
-    offset: 0,
-  });
-  return allTranscripts.transcripts;
+  return fetchCompleteTranscripts(meetingId, (args) => invoke('api_get_meeting_transcripts', args));
 }
 
 async function resolveSummaryLanguage(meetingId: string, transcriptTexts: string[]) {
@@ -69,35 +100,49 @@ async function resolveSummaryLanguage(meetingId: string, transcriptTexts: string
   return detected?.language ?? null;
 }
 
+export async function validateSummaryModel(modelConfig: ModelConfig): Promise<void> {
+  if (modelConfig.provider === 'ollama') {
+    const models = await invoke<unknown[]>('get_ollama_models', {
+      endpoint: modelConfig.ollamaEndpoint || null,
+    });
+    if (models.length === 0) {
+      throw new Error('No Ollama models found. Please download gemma3:1b from Model Settings.');
+    }
+  }
+  if (modelConfig.provider === 'builtin-ai') {
+    if (!modelConfig.model) throw new Error('No built-in AI model selected. Please select a model in settings.');
+    const ready = await invoke<boolean>('builtin_ai_is_model_ready', {
+      modelName: modelConfig.model,
+      refresh: true,
+    });
+    if (!ready) throw new Error('Built-in AI model is not ready. Please check model settings.');
+  }
+}
+
 export async function generateAutomaticSummary(meetingId: string, modelConfig: ModelConfig) {
-  const existing = await invoke<SummaryProcessResponse>('api_get_summary', { meetingId });
-  if (existing.status !== 'idle') {
-    return { started: false, reason: 'summary-exists' as const };
-  }
-
-  const transcripts = await fetchAllTranscripts(meetingId);
-  const transcriptTexts = transcripts.map(({ text }) => text.trim()).filter(Boolean);
-  if (transcriptTexts.length === 0) {
-    return { started: false, reason: 'empty-transcript' as const };
-  }
-
-  // Anchor the enhanced notes on whatever the user typed during the meeting.
-  const liveNotes = await invoke<LiveNotesDocument | null>('get_meeting_live_notes', { meetingId })
-    .catch(() => null);
-  const notesContext = buildLiveNotesSummaryContext(liveNotes);
-
-  const summaryLanguage = await resolveSummaryLanguage(meetingId, transcriptTexts);
-  await invoke('api_process_transcript', {
-    text: transcriptTexts.join('\n'),
-    model: modelConfig.provider,
-    modelName: modelConfig.model,
-    meetingId,
-    chunkSize: 40000,
-    overlap: 1000,
-    customPrompt: notesContext,
-    templateId: 'standard_meeting',
-    summaryLanguage,
+  const result = await meetingActivityStore.prepareAndStartSummary(meetingId, async () => {
+    const transcripts = await fetchAllTranscripts(meetingId);
+    const transcriptTexts = transcripts.map(({ text }) => text.trim()).filter(Boolean);
+    if (transcriptTexts.length === 0) throw new Error('No transcripts available for summary.');
+    const notesContext = await loadSummaryNotesContext(meetingId);
+    await validateSummaryModel(modelConfig);
+    const summaryLanguage = await resolveSummaryLanguage(meetingId, transcriptTexts);
+    return {
+      text: transcriptTexts.join('\n'),
+      model: modelConfig.provider,
+      modelName: modelConfig.model,
+      meetingId,
+      chunkSize: 40000,
+      overlap: 1000,
+      customPrompt: notesContext,
+      templateId: 'standard_meeting',
+      summaryLanguage,
+      replaceExisting: false,
+    };
   });
 
-  return { started: true, reason: 'started' as const };
+  return {
+    started: result.started,
+    reason: result.started ? 'started' as const : 'summary-exists' as const,
+  };
 }

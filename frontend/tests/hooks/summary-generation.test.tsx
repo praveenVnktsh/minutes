@@ -16,6 +16,7 @@ const originalPreferences = { ...await import('../../src/lib/summary-language-pr
 const originalToast = { ...await import('sonner') };
 const originalNavigation = { ...await import('next/navigation') };
 const originalRecordingState = { ...await import('../../src/contexts/RecordingStateContext') };
+const originalConfig = { ...await import('../../src/contexts/ConfigContext') };
 afterAll(() => {
   mock.module('@tauri-apps/api/core', () => originalCore);
   mock.module('../../src/lib/analytics', () => originalAnalytics);
@@ -23,10 +24,19 @@ afterAll(() => {
   mock.module('sonner', () => originalToast);
   mock.module('next/navigation', () => originalNavigation);
   mock.module('../../src/contexts/RecordingStateContext', () => originalRecordingState);
+  mock.module('../../src/contexts/ConfigContext', () => originalConfig);
 });
 
 mock.module('next/navigation', () => ({ usePathname: () => '/meeting-details', useRouter: () => ({}) }));
 mock.module('../../src/contexts/RecordingStateContext', () => ({ useRecordingState: () => ({ isRecording: false }) }));
+mock.module('../../src/contexts/ConfigContext', () => ({
+  useConfig: () => ({
+    modelConfig: { provider: 'ollama', model: configuredModel, whisperModel: 'base' },
+    isModelConfigLoading: false,
+    isModelConfigSaving: configSaving,
+    modelConfigSaveError: configError,
+  }),
+}));
 const notify = mock(() => {});
 mock.module('sonner', () => ({ toast: { info: notify, error: notify, success: notify, warning: notify } }));
 const trackCompletion = mock(async (..._args: Parameters<typeof originalAnalytics.default.trackSummaryGenerationCompleted>) => {});
@@ -36,13 +46,15 @@ mock.module('../../src/lib/analytics', () => ({ default: {
 } }));
 let startProcess: () => Promise<{ process_id: string }>;
 let getSummary: (meetingId: string) => Promise<SummaryProcessResponse>;
+let cancelProcess: () => Promise<{ cancelled: boolean }>;
 const invoke = mock(async (command: string, args?: Record<string, unknown>): Promise<unknown> => {
   if (command === 'api_get_meetings') return [];
   if (command === 'api_get_summary') return getSummary(args!.meetingId as string);
+  if (command === 'get_meeting_live_notes') return null;
   if (command === 'api_get_meeting_transcripts') return { transcripts: [{ text: 'Meeting transcript', timestamp: '00:00' }], total_count: 1 };
   if (command === 'get_ollama_models') return [{ name: 'test' }];
   if (command === 'api_process_transcript') return startProcess();
-  if (command === 'api_cancel_summary') return { cancelled: true };
+  if (command === 'api_cancel_summary') return cancelProcess();
   throw new Error(`Unexpected command: ${command}`);
 });
 mock.module('@tauri-apps/api/core', () => ({ invoke }));
@@ -52,6 +64,7 @@ mock.module('../../src/lib/summary-language-preferences', () => ({
   readMeetingSummaryLanguage: async () => ({ language: 'en', storage: 'metadata' }),
 }));
 const { SidebarProvider, useSidebar } = await import('../../src/components/Sidebar/SidebarProvider');
+const { meetingActivityStore } = await import('../../src/contexts/MeetingActivityContext');
 const { useSummaryGeneration } = await import('../../src/hooks/meeting-details/useSummaryGeneration');
 
 const response = (overrides: Partial<SummaryProcessResponse> = {}): SummaryProcessResponse => ({
@@ -59,6 +72,8 @@ const response = (overrides: Partial<SummaryProcessResponse> = {}): SummaryProce
   data: null, error: null, meetingName: 'Meeting A', ...overrides,
 });
 let configuredModel = 'test';
+let configSaving = false;
+let configError: Error | null = null;
 let state: ReturnType<typeof useSummaryGeneration>;
 function Status({ initialSummary, meetingId = 'meeting-a' }: {
   initialSummary: SummaryProcessResponse; meetingId?: string;
@@ -82,9 +97,12 @@ const realClearInterval = globalThis.clearInterval;
 beforeEach(() => {
   renderer = undefined as unknown as ReactTestRenderer;
   configuredModel = 'test';
+  configSaving = false;
+  configError = null;
   timers.clear(); notify.mockClear(); trackCompletion.mockClear(); invoke.mockClear();
   getSummary = async () => response();
   startProcess = async () => ({ process_id: 'attempt-a' });
+  cancelProcess = async () => ({ cancelled: true });
   globalThis.setInterval = ((callback: () => Promise<void>) => {
     const id = ++nextTimer; timers.set(id, callback); return id;
   }) as typeof setInterval;
@@ -92,6 +110,10 @@ beforeEach(() => {
 });
 afterEach(async () => {
   if (renderer) await act(async () => renderer.unmount());
+  meetingActivityStore.stopSummaryPolling('meeting-a');
+  meetingActivityStore.stopSummaryPolling('meeting-b');
+  meetingActivityStore.dismissSummary('meeting-a');
+  meetingActivityStore.dismissSummary('meeting-b');
   globalThis.setInterval = realSetInterval;
   globalThis.clearInterval = realClearInterval;
 });
@@ -111,10 +133,10 @@ describe('summary state restored when returning to a meeting', () => {
     await show(response({ data: { markdown: 'Previous summary' } }));
     getSummary = async () => { throw new Error('Database unavailable'); };
     await tick();
-    expect(state.summaryStatus).toBe('error');
-    expect(state.summaryError).toContain('Database unavailable');
+    expect(state.summaryStatus).toBe('processing');
+    expect(meetingActivityStore.getState().summaries[0]?.reconciliationError).toContain('Database unavailable');
     expect(text()).toContain('Previous summary');
-    expect(timers.size).toBe(0);
+    expect(timers.size).toBe(1);
   });
 
   test('failed cancellation recovery ends loading without discarding visible notes', async () => {
@@ -130,7 +152,7 @@ describe('summary state restored when returning to a meeting', () => {
     expect(timers.size).toBe(0);
   });
 
-  test.each(['read', 'callback'])('polling stops when %s fails and its error callback also rejects', async (failure) => {
+  test.each(['read', 'callback'])('polling safely handles a %s failure and a rejecting consumer', async (failure) => {
     function RejectingConsumer() {
       const { startSummaryPolling } = useSidebar();
       useEffect(() => {
@@ -148,14 +170,14 @@ describe('summary state restored when returning to a meeting', () => {
       return response({ status: 'completed', data: { markdown: 'Finished summary' } });
     };
     await tick();
-    expect(timers.size).toBe(0);
+    expect(timers.size).toBe(failure === 'read' ? 1 : 0);
   });
 
   test('resumes pending generation after leaving and returning, then displays completion', async () => {
     await show(response());
     expect(text()).toContain('processing');
     await show(null);
-    expect(timers.size).toBe(0);
+    expect(timers.size).toBe(1);
     await show(response());
     expect(text()).toContain('processing');
     getSummary = async () => response({ status: 'completed', data: { markdown: 'Finished summary' }, meetingName: 'New title' });
@@ -243,18 +265,83 @@ describe('summary state restored when returning to a meeting', () => {
   test('leaving before the start response arrives keeps the backend job running for a later visit', async () => {
     let resolve!: (value: { process_id: string }) => void;
     startProcess = () => new Promise(done => { resolve = done; });
+    getSummary = async () => response({ status: 'idle', start: null });
     await show(response({ status: 'idle', start: null }));
     let generation!: Promise<void>;
     await act(async () => { generation = state.handleGenerateSummary(); });
     await show(null);
     await act(async () => { resolve({ process_id: 'attempt-a' }); await generation; });
     expect(invoke.mock.calls.filter(([command]) => command === 'api_cancel_summary')).toEqual([]);
-    expect(timers.size).toBe(0);
+    expect(timers.size).toBe(1);
     await show(response());
     expect(state.summaryStatus).toBe('processing');
     getSummary = async () => response({ status: 'completed', data: { markdown: 'Finished summary' } });
     await tick();
     expect(state.summaryStatus).toBe('completed');
+  });
+
+  test('Stop during native start cancels the exact process after its token resolves', async () => {
+    const processId = '2026-09-18T10:00:00.123456789Z';
+    let resolve!: (value: { process_id: string }) => void;
+    startProcess = () => new Promise(done => { resolve = done; });
+    getSummary = async () => response({ status: 'idle', start: null });
+    await show(response({ status: 'idle', start: null }));
+    let generation!: Promise<void>;
+    await act(async () => { generation = state.handleGenerateSummary(); });
+    let stopping!: Promise<void>;
+    await act(async () => { stopping = state.handleStopGeneration(); });
+    expect(state.summaryStatus).toBe('processing');
+
+    await act(async () => {
+      resolve({ process_id: processId });
+      await Promise.all([generation, stopping]);
+    });
+    expect(invoke.mock.calls).toContainEqual([
+      'api_cancel_summary',
+      { meetingId: 'meeting-a', processId },
+    ]);
+    expect(timers.size).toBe(0);
+  });
+
+  test.each(['false', 'error'])('keeps observing when pending-start cancellation returns %s', async (outcome) => {
+    const processId = '2026-09-18T10:00:00.123456789Z';
+    let resolve!: (value: { process_id: string }) => void;
+    startProcess = () => new Promise(done => { resolve = done; });
+    cancelProcess = outcome === 'false'
+      ? async () => ({ cancelled: false })
+      : async () => { throw new Error('cancel unavailable'); };
+    getSummary = async () => response({ status: 'idle', start: null });
+    await show(response({ status: 'idle', start: null }));
+    let generation!: Promise<void>;
+    await act(async () => { generation = state.handleGenerateSummary(); });
+    let stopping!: Promise<void>;
+    await act(async () => { stopping = state.handleStopGeneration(); });
+
+    await act(async () => {
+      resolve({ process_id: processId });
+      await Promise.all([generation, stopping]);
+    });
+    expect(state.summaryStatus).toBe('processing');
+    expect(timers.size).toBe(1);
+
+    getSummary = async () => response({ start: processId, status: 'completed', data: { markdown: 'Finished summary' } });
+    await tick();
+    expect(state.summaryStatus).toBe('completed');
+  });
+
+  test('an older initial response follows the newer owner process', async () => {
+    const older = '2026-09-18T10:00:00.123456700Z';
+    const newer = '2026-09-18T10:00:00.123456789Z';
+    getSummary = async () => response({ start: newer, status: 'processing' });
+    meetingActivityStore.hydrateSummary(response({ start: newer, status: 'processing' }));
+    await show(response({ start: older, status: 'pending' }));
+
+    await act(async () => state.handleStopGeneration());
+    expect(invoke.mock.calls).toContainEqual([
+      'api_cancel_summary',
+      { meetingId: 'meeting-a', processId: newer },
+    ]);
+    expect(timers.size).toBe(0);
   });
 
   test('completion analytics retain the model used to start the attempt after settings change', async () => {
@@ -280,5 +367,20 @@ describe('summary state restored when returning to a meeting', () => {
     await tick();
     expect(state.summaryStatus).toBe('completed');
     expect(text()).toContain('Finished summary');
+  });
+
+  test('does not generate while committed model configuration is saving or failed', async () => {
+    const initial = response({ status: 'idle', start: null });
+    configSaving = true;
+    await show(initial);
+    await act(async () => state.handleGenerateSummary());
+    expect(invoke.mock.calls.some(([command]) => command === 'api_process_transcript')).toBe(false);
+
+    configSaving = false;
+    configError = new Error('save failed');
+    await show(initial);
+    await act(async () => state.handleRegenerateSummary());
+    expect(invoke.mock.calls.some(([command]) => command === 'api_process_transcript')).toBe(false);
+    expect(state.summaryStatus).toBe('error');
   });
 });
