@@ -31,10 +31,39 @@ module.exports = {
   				subtle: 'var(--ink-subtle)'
   			},
   			hairline: 'var(--hairline)',
-  			brand: {
+			brand: {
   				DEFAULT: 'var(--brand)',
   				foreground: 'var(--brand-foreground)'
-  			},
+			},
+			selected: {
+				DEFAULT: 'rgb(var(--selected-rgb) / <alpha-value>)',
+				foreground: 'rgb(var(--selected-foreground-rgb) / <alpha-value>)'
+			},
+			focus: 'rgb(var(--focus-rgb) / <alpha-value>)',
+			info: {
+				DEFAULT: 'rgb(var(--info-rgb) / <alpha-value>)',
+				subtle: 'rgb(var(--info-subtle-rgb) / <alpha-value>)'
+			},
+			success: {
+				DEFAULT: 'rgb(var(--success-rgb) / <alpha-value>)',
+				subtle: 'rgb(var(--success-subtle-rgb) / <alpha-value>)'
+			},
+			warning: {
+				DEFAULT: 'rgb(var(--warning-rgb) / <alpha-value>)',
+				subtle: 'rgb(var(--warning-subtle-rgb) / <alpha-value>)'
+			},
+			error: {
+				DEFAULT: 'rgb(var(--error-rgb) / <alpha-value>)',
+				subtle: 'rgb(var(--error-subtle-rgb) / <alpha-value>)'
+			},
+			recording: {
+				DEFAULT: 'rgb(var(--recording-rgb) / <alpha-value>)',
+				subtle: 'rgb(var(--recording-subtle-rgb) / <alpha-value>)'
+			},
+			paused: {
+				DEFAULT: 'rgb(var(--paused-rgb) / <alpha-value>)',
+				subtle: 'rgb(var(--paused-subtle-rgb) / <alpha-value>)'
+			},
   			border: 'hsl(var(--border))',
   			input: 'hsl(var(--input))',
   			ring: 'hsl(var(--ring))',
