@@ -16,29 +16,58 @@ const invoke = mock(async (command: string, _args?: Record<string, unknown>) => 
   return '/tmp/export.md';
 });
 let onEditorChange: ((blocks: unknown[]) => void) | undefined;
+let onMarkdownEditorChange: ((blocks: unknown[]) => void) | undefined;
 let conversionFails = false;
 let parseMarkdown: (markdown: string) => Promise<unknown[]> = async () => [];
+let convertBlocks: (blocks: any[]) => Promise<string> = async (blocks) => (
+  blocks.flatMap((block) => block.content ?? []).map((item: any) => item.text ?? '').join('')
+);
 const editorInitialContents: unknown[] = [];
+let updateMarkdownView: ((blocks: unknown[]) => void) | undefined;
 
 const editor = {
   document: [] as unknown[],
-  replaceBlocks: () => {},
+  replaceBlocks: (_previous: unknown[], blocks: unknown[]) => {
+    editor.document = blocks;
+    updateMarkdownView?.(blocks);
+  },
   tryParseMarkdownToBlocks: (markdown: string) => parseMarkdown(markdown),
   blocksToMarkdownLossy: async (blocks: any[]) => {
     if (conversionFails) throw new Error('conversion failed');
-    return blocks.flatMap((block) => block.content ?? []).map((item: any) => item.text ?? '').join('');
+    return convertBlocks(blocks);
   },
 };
 
 mock.module('next/dynamic', () => ({
   default: () => function Editor(props: { onChange: (blocks: unknown[]) => void; initialContent: unknown }) {
-    onEditorChange = props.onChange;
+    const [document, setDocument] = useState(props.initialContent);
+    onEditorChange = (blocks) => {
+      setDocument(blocks);
+      props.onChange(blocks);
+    };
     useEffect(() => { editorInitialContents.push(props.initialContent); }, []);
-    return null;
+    return <output data-editor="structured">{JSON.stringify(document)}</output>;
   },
 }));
 mock.module('@blocknote/react', () => ({ useCreateBlockNote: () => editor }));
-mock.module('@blocknote/shadcn', () => ({ BlockNoteView: () => null }));
+mock.module('@blocknote/shadcn', () => ({
+  BlockNoteView: (props: { onChange?: () => void }) => {
+    const [document, setDocument] = useState(editor.document);
+    useEffect(() => {
+      updateMarkdownView = setDocument;
+      onMarkdownEditorChange = (blocks) => {
+        editor.document = blocks;
+        setDocument(blocks);
+        props.onChange?.();
+      };
+      return () => {
+        updateMarkdownView = undefined;
+        onMarkdownEditorChange = undefined;
+      };
+    }, [props.onChange]);
+    return <output data-editor="markdown">{JSON.stringify(document)}</output>;
+  },
+}));
 mock.module('../../src/components/AISummary', () => ({ AISummary: () => null }));
 mock.module('@tauri-apps/api/core', () => ({ ...originalCore, invoke }));
 mock.module('../../src/contexts/ShellContext', () => ({
@@ -64,7 +93,14 @@ afterAll(() => {
 beforeEach(() => {
   conversionFails = false;
   parseMarkdown = async () => [];
+  convertBlocks = async (blocks) => blocks
+    .flatMap((block) => block.content ?? [])
+    .map((item: any) => item.text ?? '')
+    .join('');
   onEditorChange = undefined;
+  onMarkdownEditorChange = undefined;
+  updateMarkdownView = undefined;
+  editor.document = [];
   editorInitialContents.length = 0;
   invoke.mockClear();
   saveHandler = async () => ({ message: 'saved' });
@@ -291,6 +327,119 @@ describe('BlockNoteSummaryView current document contract', () => {
       expect.objectContaining({ markdown: 'B', summary_json: block('B') }),
       expect.objectContaining({ markdown: 'C', summary_json: block('C') }),
     ]);
+    expect(ref.current?.isDirty).toBe(false);
+    await act(async () => renderer.unmount());
+  });
+
+  test('keeps the mounted Markdown editor on C when the deferred B save is acknowledged', async () => {
+    const ref = createRef<BlockNoteSummaryViewRef>();
+    const saveResolvers: Array<(value: unknown) => void> = [];
+    saveHandler = () => new Promise((resolve) => { saveResolvers.push(resolve); });
+    const block = (text: string) => [{ id: `block-${text}`, type: 'paragraph', content: [{ type: 'text', text, styles: {} }] }];
+    parseMarkdown = async (markdown) => block(markdown);
+    const meeting = { id: 'meeting-markdown-deferred', title: 'Planning', created_at: '2026-09-19', transcripts: [] };
+    function Owner() {
+      const data = useMeetingData({ meeting, summaryData: { markdown: 'A' } });
+      return <BlockNoteSummaryView ref={ref} summaryData={data.aiSummary} onSave={data.handleSaveSummary} />;
+    }
+    let renderer!: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(<Owner />);
+      await new Promise((resolve) => setTimeout(resolve, 110));
+    });
+
+    await act(async () => onMarkdownEditorChange?.(block('B')));
+    let savingB!: Promise<void>;
+    await act(async () => { savingB = ref.current!.saveSummary(); await Promise.resolve(); });
+    await act(async () => onMarkdownEditorChange?.(block('C')));
+    await act(async () => { saveResolvers[0]!({ message: 'saved' }); await savingB; });
+
+    expect(ref.current?.isDirty).toBe(true);
+    expect(ref.current?.getCurrentBlocks?.()).toEqual(block('C'));
+    expect(renderer.root.findByProps({ 'data-editor': 'markdown' }).children.join('')).toContain('C');
+    expect(editorInitialContents).toEqual([]);
+
+    await act(async () => onMarkdownEditorChange?.(block('C plus next edit')));
+    let savingC!: Promise<void>;
+    await act(async () => { savingC = ref.current!.saveSummary(); await Promise.resolve(); });
+    await act(async () => { saveResolvers[1]!({ message: 'saved' }); await savingC; });
+    const savedDocuments = invoke.mock.calls
+      .filter(([command]) => command === 'api_save_meeting_summary')
+      .map(([, args]) => args?.summary);
+    expect(savedDocuments).toEqual([
+      expect.objectContaining({ markdown: 'B', summary_json: block('B') }),
+      expect.objectContaining({ markdown: 'C plus next edit', summary_json: block('C plus next edit') }),
+    ]);
+    expect(ref.current?.isDirty).toBe(false);
+    await act(async () => renderer.unmount());
+  });
+
+  test('drops an older conversion when a later save intent finishes first', async () => {
+    const ref = createRef<BlockNoteSummaryViewRef>();
+    const block = (text: string) => [{ id: `block-${text}`, type: 'paragraph', content: [{ type: 'text', text, styles: {} }] }];
+    let resolveB!: (markdown: string) => void;
+    convertBlocks = (blocks) => {
+      const text = blocks[0]?.content?.[0]?.text;
+      return text === 'B' ? new Promise((resolve) => { resolveB = resolve; }) : Promise.resolve(text ?? '');
+    };
+    const meeting = { id: 'meeting-save-order', title: 'Planning', created_at: '2026-09-19', transcripts: [] };
+    function Owner() {
+      const data = useMeetingData({ meeting, summaryData: { summary_json: block('A') } });
+      return <BlockNoteSummaryView ref={ref} summaryData={data.aiSummary} onSave={data.handleSaveSummary} />;
+    }
+    let renderer!: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(<Owner />);
+      await new Promise((resolve) => setTimeout(resolve, 110));
+    });
+    await act(async () => onEditorChange?.(block('B')));
+    let savingB!: Promise<void>;
+    await act(async () => { savingB = ref.current!.saveSummary(); await Promise.resolve(); });
+    await act(async () => onEditorChange?.(block('C')));
+    await act(async () => ref.current!.saveSummary());
+    await act(async () => { resolveB('B'); await savingB; });
+
+    const writes = invoke.mock.calls
+      .filter(([command]) => command === 'api_save_meeting_summary')
+      .map(([, args]) => (args?.summary as { markdown: string }).markdown);
+    expect(writes).toEqual(['C']);
+    expect(ref.current?.getCurrentBlocks?.()).toEqual(block('C'));
+    await act(async () => renderer.unmount());
+  });
+
+  test('drops an already-started conversion after an acknowledged document replacement', async () => {
+    const ref = createRef<BlockNoteSummaryViewRef>();
+    const block = (text: string) => [{ id: `block-${text}`, type: 'paragraph', content: [{ type: 'text', text, styles: {} }] }];
+    let resolveConversion!: (markdown: string) => void;
+    convertBlocks = () => new Promise((resolve) => { resolveConversion = resolve; });
+    parseMarkdown = async (markdown) => block(markdown);
+    let replaceDocument!: (summary: { markdown: string }) => void;
+    let currentSummary: unknown;
+    const meeting = { id: 'meeting-replacement', title: 'Planning', created_at: '2026-09-19', transcripts: [] };
+    function Owner() {
+      const data = useMeetingData({ meeting, summaryData: { summary_json: block('A') } });
+      replaceDocument = data.setAiSummary;
+      currentSummary = data.aiSummary;
+      return <BlockNoteSummaryView ref={ref} summaryData={data.aiSummary} onSave={data.handleSaveSummary} />;
+    }
+    let renderer!: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(<Owner />);
+      await new Promise((resolve) => setTimeout(resolve, 110));
+    });
+    await act(async () => onEditorChange?.(block('Obsolete A')));
+    let saving!: Promise<void>;
+    await act(async () => { saving = ref.current!.saveSummary(); await Promise.resolve(); });
+    await act(async () => replaceDocument({ markdown: 'Acknowledged B' }));
+    await act(async () => { resolveConversion('Obsolete A'); await saving; });
+    convertBlocks = async (blocks) => blocks
+      .flatMap((block) => block.content ?? [])
+      .map((item: any) => item.text ?? '')
+      .join('');
+
+    expect(invoke.mock.calls.filter(([command]) => command === 'api_save_meeting_summary')).toEqual([]);
+    expect(currentSummary).toEqual({ markdown: 'Acknowledged B' });
+    expect(await ref.current?.getMarkdown()).toBe('Acknowledged B');
     expect(ref.current?.isDirty).toBe(false);
     await act(async () => renderer.unmount());
   });

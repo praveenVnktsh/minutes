@@ -529,11 +529,14 @@ export class MeetingActivityStore {
       this.retainSummaryStartFailure(request.meetingId, error, attemptId);
       throw error;
     }
-    // During regeneration the queued lock is the current lifecycle authority;
-    // hydrating the previous completed payload here would temporarily hide Stop.
-    const authoritative = stored.status === 'completed' && request.replaceExisting
-      ? stored
-      : this.hydrateSummary(stored) ?? stored;
+    // A retryable terminal record is history while this start lock is active.
+    // Only active native work or a completed no-op may replace the queued attempt.
+    const shouldHydrateStored = stored.status === 'pending'
+      || stored.status === 'processing'
+      || (stored.status === 'completed' && !request.replaceExisting);
+    const authoritative = shouldHydrateStored
+      ? this.hydrateSummary(stored) ?? stored
+      : stored;
     if (authoritative.start && (authoritative.status === 'pending' || authoritative.status === 'processing')) {
       this.removeSummary(attemptId);
       return { started: false, processId: authoritative.start, response: authoritative };

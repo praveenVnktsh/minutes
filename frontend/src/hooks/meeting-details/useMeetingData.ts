@@ -15,13 +15,15 @@ export function useMeetingData({ meeting, summaryData, onMeetingUpdated }: UseMe
   // Use prop directly since summary generation fetches transcripts independently
   const transcripts = meeting.transcripts;
   const [meetingTitle, setMeetingTitle] = useState(meeting.title || '+ New Call');
-  const [aiSummary, setAiSummary] = useState<MeetingSummary | null>(summaryData);
+  const [aiSummary, setAiSummaryState] = useState<MeetingSummary | null>(summaryData);
   const [isSaving, setIsSaving] = useState(false);
   const [isSummaryDirty, setIsSummaryDirty] = useState(false);
   const summaryDataKey = JSON.stringify(summaryData);
   const summaryDataKeyRef = useRef(summaryDataKey);
   const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
   const pendingSaveCountRef = useRef(0);
+  const documentGenerationRef = useRef(0);
+  const latestSaveIntentRef = useRef(0);
 
   // Ref for BlockNoteSummaryView
   const blockNoteSummaryRef = useRef<BlockNoteSummaryViewRef>(null);
@@ -31,12 +33,18 @@ export function useMeetingData({ meeting, summaryData, onMeetingUpdated }: UseMe
     if (summaryDataKeyRef.current === summaryDataKey) return;
     summaryDataKeyRef.current = summaryDataKey;
     console.log('[useMeetingData] Syncing summary data from prop:', summaryData ? 'present' : 'null');
-    setAiSummary(summaryData);
+    documentGenerationRef.current += 1;
+    setAiSummaryState(summaryData);
   }, [summaryData, summaryDataKey]);
+
+  const setAiSummary = useCallback((summary: MeetingSummary | null) => {
+    documentGenerationRef.current += 1;
+    setAiSummaryState(summary);
+  }, []);
 
   const handleSummaryChange = useCallback((newSummary: Summary) => {
     setAiSummary(newSummary);
-  }, []);
+  }, [setAiSummary]);
 
 
 
@@ -48,14 +56,25 @@ export function useMeetingData({ meeting, summaryData, onMeetingUpdated }: UseMe
     const formattedSummary = 'markdown' in summary || 'summary_json' in summary
       ? summary
       : { MeetingName: meetingTitle, ...summary };
+    const saveGeneration = documentGenerationRef.current;
+    const saveIntent = ++latestSaveIntentRef.current;
     pendingSaveCountRef.current += 1;
     setIsSaving(true);
     const save = saveQueueRef.current.catch(() => {}).then(async () => {
+      if (
+        documentGenerationRef.current !== saveGeneration
+        || latestSaveIntentRef.current !== saveIntent
+      ) return;
       await invokeTauri('api_save_meeting_summary', {
         meetingId: meeting.id,
         summary: formattedSummary,
       });
-      setAiSummary(formattedSummary);
+      if (
+        documentGenerationRef.current === saveGeneration
+        && latestSaveIntentRef.current === saveIntent
+      ) {
+        setAiSummaryState(formattedSummary);
+      }
     });
     saveQueueRef.current = save;
     try {
