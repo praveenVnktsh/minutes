@@ -36,7 +36,7 @@ function initialBlocks(document: LiveNotesDocument): PartialBlock[] {
 }
 
 function documentSignature(document: LiveNotesDocument): string {
-  return JSON.stringify(document.editorBlocks ?? document.notes);
+  return JSON.stringify([document.updatedAt, document.editorBlocks ?? document.notes]);
 }
 
 export function BlockNotesEditor({
@@ -63,9 +63,14 @@ export function BlockNotesEditor({
     },
   });
 
+  useEffect(() => () => {
+    changeVersion.current += 1;
+  }, []);
+
   useEffect(() => {
     const nextSignature = documentSignature(document);
     if (nextSignature === appliedSignature.current) return;
+    changeVersion.current += 1;
     applyingExternalDocument.current = true;
     appliedSignature.current = nextSignature;
     timestamps.current = new Map(document.notes.map((note) => [note.id, note.timestampSeconds]));
@@ -81,37 +86,47 @@ export function BlockNotesEditor({
       if (applyingExternalDocument.current) return;
       const version = ++changeVersion.current;
       const blocks = editor.document;
+      const nowSeconds = Math.max(0, (Date.now() - latestDocument.current.meetingStartedAtMs) / 1000);
+      const previousById = new Map(latestDocument.current.notes.map((note) => [note.id, note]));
+      const notes: LiveNote[] = blocks.map((block) => {
+        const previous = previousById.get(block.id);
+        const timestampSeconds = previous?.timestampSeconds ?? timestamps.current.get(block.id) ?? nowSeconds;
+        timestamps.current.set(block.id, timestampSeconds);
+        return {
+          id: block.id,
+          timestampSeconds,
+          text: textFromBlock(block),
+          important: previous?.important ?? false,
+        };
+      });
+      const draft = {
+        ...latestDocument.current,
+        version: 2,
+        updatedAt: new Date().toISOString(),
+        notes,
+        rawMarkdown: undefined,
+        editorBlocks: blocks,
+      };
+      appliedSignature.current = documentSignature(draft);
+      latestDocument.current = draft;
+      onChange(draft);
+
       void blocksToMarkdownSafely(editor, blocks, {
         source: 'BlockNotesEditor',
-        fallbackMarkdown: latestDocument.current.rawMarkdown,
+        fallbackMarkdown: document.rawMarkdown,
       }).then((result) => {
-        if (version !== changeVersion.current) return;
-        const nowSeconds = Math.max(0, (Date.now() - latestDocument.current.meetingStartedAtMs) / 1000);
-        const previousById = new Map(latestDocument.current.notes.map((note) => [note.id, note]));
-        const notes: LiveNote[] = blocks.map((block) => {
-          const previous = previousById.get(block.id);
-          const timestampSeconds = previous?.timestampSeconds ?? timestamps.current.get(block.id) ?? nowSeconds;
-          timestamps.current.set(block.id, timestampSeconds);
-          return {
-            id: block.id,
-            timestampSeconds,
-            text: textFromBlock(block),
-            important: previous?.important ?? false,
-          };
-        });
+        if (version !== changeVersion.current || !result.ok) return;
         const nextDocument = {
-          ...latestDocument.current,
-          version: 2,
+          ...draft,
           updatedAt: new Date().toISOString(),
-          notes,
           rawMarkdown: result.markdown,
-          editorBlocks: blocks,
         };
         appliedSignature.current = documentSignature(nextDocument);
+        latestDocument.current = nextDocument;
         onChange(nextDocument);
       });
     });
-  }, [editable, editor, onChange]);
+  }, [document.rawMarkdown, editable, editor, onChange]);
 
   return (
     <div className="raw-notes-editor min-h-full text-[15px] text-ink">

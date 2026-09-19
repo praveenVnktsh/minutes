@@ -6,6 +6,7 @@ import { SaveFeedback, StatusFeedback } from '@/components/ui/status-feedback';
 import { createEmptyLiveNotesDocument, type LiveNotesDocument } from '@/lib/liveNotes';
 import {
   meetingNotesTarget,
+  noteDocumentId,
   notePersistenceService,
   type NotePersistenceSnapshot,
 } from '@/services/notePersistenceService';
@@ -15,6 +16,9 @@ export function MeetingRawNotesEditor({ meetingId }: { meetingId: string }) {
   const [snapshot, setSnapshot] = useState<NotePersistenceSnapshot>(() => ({
     ...notePersistenceService.getSnapshot(target),
   }));
+  const visibleSnapshot = noteDocumentId(snapshot.target) === noteDocumentId(target)
+    ? snapshot
+    : { ...notePersistenceService.getSnapshot(target) };
 
   const loadNotes = useCallback(async () => {
     await notePersistenceService.loadNotes(target, { createEmpty: createEmptyLiveNotesDocument });
@@ -54,10 +58,10 @@ export function MeetingRawNotesEditor({ meetingId }: { meetingId: string }) {
     window.dispatchEvent(new CustomEvent('meetily:raw-notes-changed', { detail: { meetingId } }));
   }, [meetingId, target]);
 
-  if (snapshot.loadState === 'loading' && !snapshot.document) {
+  if (visibleSnapshot.loadState === 'loading' && !visibleSnapshot.document) {
     return <div className="flex h-full items-center justify-center text-sm text-[var(--ink-subtle)]">Loading your notes…</div>;
   }
-  if (snapshot.loadState === 'error' && !snapshot.document) {
+  if (visibleSnapshot.loadState === 'error' && !visibleSnapshot.document) {
     return (
       <div className="flex h-full items-center justify-center px-8 text-center">
         <div>
@@ -68,7 +72,7 @@ export function MeetingRawNotesEditor({ meetingId }: { meetingId: string }) {
       </div>
     );
   }
-  if (!snapshot.document) {
+  if (!visibleSnapshot.document) {
     return (
       <div className="flex h-full items-center justify-center px-8 text-center">
         <div>
@@ -82,21 +86,21 @@ export function MeetingRawNotesEditor({ meetingId }: { meetingId: string }) {
   return (
     <div className="h-full overflow-y-auto">
       <div className="sticky top-0 z-10 flex justify-end bg-[var(--surface-0)] px-10 py-2">
-        {snapshot.loadState === 'error' && (
+        {visibleSnapshot.loadState === 'error' && (
           <StatusFeedback tone="error" actionLabel="Retry" onAction={() => void loadNotes()} className="mr-auto">
             Could not refresh notes; showing your local draft
           </StatusFeedback>
         )}
         <SaveFeedback
-          state={snapshot.saveState}
-          actionLabel={snapshot.saveState === 'error' ? 'Retry' : undefined}
-          onAction={snapshot.saveState === 'error' ? () => void notePersistenceService.retryNotes(target).catch(() => {}) : undefined}
+          state={visibleSnapshot.saveState}
+          actionLabel={visibleSnapshot.saveState === 'error' ? 'Retry' : undefined}
+          onAction={visibleSnapshot.saveState === 'error' ? () => void notePersistenceService.retryNotes(target).catch(() => {}) : undefined}
         />
       </div>
       <div className="meeting-notes-editor raw-notes-editor mx-auto w-full max-w-[860px] px-10 pb-24 pt-6">
         <BlockNotesEditor
           key={meetingId}
-          document={snapshot.document}
+          document={visibleSnapshot.document}
           onChange={handleChange}
         />
       </div>

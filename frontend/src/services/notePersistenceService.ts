@@ -35,6 +35,7 @@ interface NoteEntry extends NotePersistenceSnapshot {
   saveTimer: ReturnType<typeof setTimeout> | null;
   writePromise: Promise<void> | null;
   loadRequest: number;
+  draftPersistPending: boolean;
 }
 
 export interface NotePersistenceDependencies {
@@ -75,6 +76,22 @@ function draftKey(target: NoteDocumentTarget): string {
 
 function browserStorage(): Pick<Storage, 'getItem' | 'setItem' | 'removeItem'> | undefined {
   return typeof localStorage === 'undefined' ? undefined : localStorage;
+}
+
+function isLiveNotesDocument(value: unknown): value is LiveNotesDocument {
+  if (!value || typeof value !== 'object') return false;
+  const document = value as Partial<LiveNotesDocument>;
+  return Number.isFinite(document.version)
+    && Number.isFinite(document.meetingStartedAtMs)
+    && typeof document.updatedAt === 'string'
+    && Array.isArray(document.notes)
+    && document.notes.every((note) => Boolean(note)
+      && typeof note.id === 'string'
+      && Number.isFinite(note.timestampSeconds)
+      && typeof note.text === 'string'
+      && (note.important === undefined || typeof note.important === 'boolean'))
+    && (document.rawMarkdown === undefined || typeof document.rawMarkdown === 'string')
+    && (document.editorBlocks === undefined || Array.isArray(document.editorBlocks));
 }
 
 async function loadFromTauri(target: NoteDocumentTarget): Promise<LiveNotesDocument | null> {
@@ -120,6 +137,9 @@ export class NotePersistenceService {
     const entry = this.entry(target);
     const loadRequest = ++entry.loadRequest;
     const revisionAtStart = entry.revision;
+    const hadPendingDraftAtStart = entry.revision > entry.acknowledgedRevision
+      || entry.writePromise !== null
+      || entry.saveTimer !== null;
     entry.loadState = 'loading';
     entry.loadError = null;
     this.emit(entry);
@@ -127,7 +147,11 @@ export class NotePersistenceService {
     try {
       const stored = await this.loadDocument(target);
       if (loadRequest !== entry.loadRequest) return entry;
-      const hasNewerDraft = entry.revision !== revisionAtStart
+      if (stored !== null && !isLiveNotesDocument(stored)) {
+        throw new Error('Stored notes document is invalid');
+      }
+      const hasNewerDraft = hadPendingDraftAtStart
+        || entry.revision !== revisionAtStart
         || entry.revision > entry.acknowledgedRevision;
       if (!hasNewerDraft) {
         entry.document = stored ?? options.createEmpty?.() ?? null;
@@ -160,7 +184,7 @@ export class NotePersistenceService {
     if (entry.saveTimer) clearTimeout(entry.saveTimer);
     entry.saveTimer = setTimeout(() => {
       entry.saveTimer = null;
-      void this.startWrite(entry).catch(() => {});
+      void this.drainWrites(entry).catch(() => {});
     }, this.debounceMs);
     return entry.revision;
   };
@@ -197,6 +221,7 @@ export class NotePersistenceService {
       saveTimer: null,
       writePromise: null,
       loadRequest: 0,
+      draftPersistPending: false,
     };
     this.entries.set(id, entry);
     this.restoreDraft(entry);
@@ -220,7 +245,10 @@ export class NotePersistenceService {
       }
       if (!raw) return;
       const draft = JSON.parse(raw) as DraftEnvelope;
-      if (!draft.document || !Number.isFinite(draft.revision)) return;
+      if (!isLiveNotesDocument(draft.document)
+        || !Number.isFinite(draft.revision)
+        || draft.revision < 0
+        || !Number.isFinite(draft.acknowledgedRevision ?? 0)) return;
       entry.document = draft.document;
       entry.revision = draft.revision;
       entry.acknowledgedRevision = Math.min(draft.acknowledgedRevision ?? 0, draft.revision);
@@ -230,8 +258,11 @@ export class NotePersistenceService {
     }
   }
 
-  private persistDraft(entry: NoteEntry): void {
-    if (!this.storage || !entry.document) return;
+  private persistDraft(entry: NoteEntry): boolean {
+    if (!this.storage || !entry.document) {
+      entry.draftPersistPending = false;
+      return true;
+    }
     try {
       const envelope: DraftEnvelope = {
         revision: entry.revision,
@@ -239,9 +270,13 @@ export class NotePersistenceService {
         document: entry.document,
       };
       this.storage.setItem(draftKey(entry.target), JSON.stringify(envelope));
+      entry.draftPersistPending = false;
+      return true;
     } catch (error) {
+      entry.draftPersistPending = true;
       entry.saveError = error;
       entry.saveState = 'error';
+      return false;
     }
   }
 
@@ -283,9 +318,14 @@ export class NotePersistenceService {
       clearTimeout(entry.saveTimer);
       entry.saveTimer = null;
     }
-    while (entry.revision > entry.acknowledgedRevision) {
-      await this.startWrite(entry);
-    }
+    await this.drainWrites(entry);
+    if (entry.draftPersistPending && !this.persistDraft(entry)) throw entry.saveError;
+    if (entry.revision === entry.acknowledgedRevision) entry.saveState = 'saved';
+    this.emit(entry);
+  }
+
+  private async drainWrites(entry: NoteEntry): Promise<void> {
+    while (entry.revision > entry.acknowledgedRevision) await this.startWrite(entry);
   }
 
   private matches(target: NoteDocumentTarget, scope?: FlushNotesScope | NoteDocumentTarget): boolean {
