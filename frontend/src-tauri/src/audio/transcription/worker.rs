@@ -2,6 +2,7 @@
 //
 // Parallel transcription worker pool and chunk processing logic.
 
+use super::dedup::{DedupVerdict, TranscriptDeduper};
 use super::engine::TranscriptionEngine;
 use super::provider::TranscriptionError;
 use crate::audio::{AudioChunk, RecordingDeviceType};
@@ -33,6 +34,38 @@ fn source_label(device_type: &RecordingDeviceType) -> &'static str {
     match device_type {
         RecordingDeviceType::Microphone => "mic",
         RecordingDeviceType::System => "system",
+    }
+}
+
+/// Consult the session's duplicate detector for one transcribed candidate and,
+/// only when it is genuinely new, draw the next sequence id for it.
+///
+/// This is the whole emit-vs-skip decision pulled out of the async worker loop
+/// so it can be unit tested without the worker pool: `Some(id)` means "build
+/// and emit a `TranscriptUpdate` with this sequence id"; `None` means the
+/// candidate was a duplicate, which this function has already logged (with the
+/// text, its window and the source it came from) and recorded nothing new for
+/// - the caller must not burn a sequence id or emit anything for it.
+fn next_sequence_id_if_not_duplicate(
+    deduper: &mut TranscriptDeduper,
+    sequence_counter: &AtomicU64,
+    text: &str,
+    source: &str,
+    audio_start_time: f64,
+    audio_end_time: f64,
+) -> Option<u64> {
+    match deduper.check_and_record(text, audio_start_time, audio_end_time) {
+        DedupVerdict::Emit => Some(sequence_counter.fetch_add(1, Ordering::SeqCst)),
+        DedupVerdict::Duplicate {
+            previous_start,
+            previous_end,
+        } => {
+            info!(
+                "🔁 Skipping duplicate transcript from {} source: \"{}\" [{:.2}s-{:.2}s] overlaps already-emitted [{:.2}s-{:.2}s]",
+                source, text, audio_start_time, audio_end_time, previous_start, previous_end
+            );
+            None
+        }
     }
 }
 
@@ -87,6 +120,16 @@ pub fn start_transcription_task<R: Runtime>(
         let chunks_completed = Arc::new(AtomicU64::new(0));
         let input_finished = Arc::new(AtomicBool::new(false));
 
+        // Session-scoped duplicate detector. `start_transcription_task` is
+        // called exactly once per recording session (from both start_recording
+        // paths and from the enable-live-transcription-mid-recording path in
+        // recording_commands.rs), so a fresh instance created here starts every
+        // session on a clean timeline with no explicit reset wiring needed.
+        // Wrapped for sharing across the worker pool below; the lock is only
+        // ever held for the duration of one `check_and_record` call, never
+        // across an `.await` that transcribes.
+        let deduper = Arc::new(tokio::sync::Mutex::new(TranscriptDeduper::new()));
+
         info!("📊 Starting {} transcription worker{} (serial mode for ordered emission)", NUM_WORKERS, if NUM_WORKERS == 1 { "" } else { "s" });
 
         // Spawn worker tasks
@@ -102,6 +145,7 @@ pub fn start_transcription_task<R: Runtime>(
             let chunks_completed_clone = chunks_completed.clone();
             let input_finished_clone = input_finished.clone();
             let chunks_queued_clone = chunks_queued.clone();
+            let deduper_clone = deduper.clone();
 
             let worker_handle = tokio::spawn(async move {
                 info!("👷 Worker {} started", worker_id);
@@ -181,7 +225,14 @@ pub fn start_transcription_task<R: Runtime>(
                                               worker_id, transcript, confidence_str, is_partial);
 
                                         // Emit speech-detected event for frontend UX (only on first detection per session)
-                                        // This is lightweight and provides better user feedback
+                                        // This is lightweight and provides better user feedback.
+                                        //
+                                        // Deliberately runs ahead of the duplicate check below and is never
+                                        // gated on its result: a duplicate segment is still real speech (an
+                                        // echo of speech that reached both the mic and system paths, not
+                                        // silence), so suppressing this latch on a duplicate would regress the
+                                        // UX whenever the very first utterance of a session happens to arrive
+                                        // twice.
                                         let current_flag = SPEECH_DETECTED_EMITTED.load(Ordering::SeqCst);
                                         info!("🔍 Checking speech-detected flag: current={}, will_emit={}", current_flag, !current_flag);
 
@@ -197,42 +248,69 @@ pub fn start_transcription_task<R: Runtime>(
                                             info!("🔍 Speech already detected in this session, not re-emitting");
                                         }
 
-                                        // Generate sequence ID and calculate timestamps FIRST
-                                        let sequence_id = SEQUENCE_COUNTER.fetch_add(1, Ordering::SeqCst);
+                                        // Calculate timestamps FIRST - the duplicate check below needs the
+                                        // audio window before a sequence id is ever drawn for it.
                                         let audio_start_time = chunk_timestamp; // Already in seconds from recording start
                                         let audio_end_time = chunk_timestamp + chunk_duration;
 
-                                        // Save structured transcript segment to recording manager (only final results)
-                                        // Save ALL segments (partial and final) to ensure complete JSON
-                                        // Create structured segment with full timestamp data
-                                        // NOTE: This is now handled via the transcript-update event emission below
-                                        // The recording_commands module listens to these events and saves them
-                                        // This decouples the transcription worker from direct RECORDING_MANAGER access
-
-                                        // Emit transcript update with NEW recording-relative timestamps
-
-                                        let update = TranscriptUpdate {
-                                            text: transcript,
-                                            timestamp: format_current_timestamp(), // Wall-clock for reference
-                                            source: source.to_string(),
-                                            sequence_id,
-                                            chunk_start_time: chunk_timestamp, // Legacy compatibility
-                                            is_partial,
-                                            confidence: confidence_opt.unwrap_or(0.85), // Default for providers without confidence
-                                            // NEW: Recording-relative timestamps for sync
-                                            audio_start_time,
-                                            audio_end_time,
-                                            duration: chunk_duration,
+                                        // Consult the session-scoped duplicate detector before allocating a
+                                        // sequence id or emitting anything. The mixing pipeline runs one VAD
+                                        // per capture source over the same aligned windows, so the same speech
+                                        // reaching both the mic and system paths (or an overlapping VAD
+                                        // force-flush on one source) can transcribe to matching text on
+                                        // overlapping windows. Skip that echo entirely here - no event, no
+                                        // sequence id - rather than let it through and rely on the UI/recording
+                                        // saver's sequence-id-only dedup, which cannot tell it apart from a
+                                        // genuinely new segment.
+                                        let sequence_id = {
+                                            let mut deduper = deduper_clone.lock().await;
+                                            next_sequence_id_if_not_duplicate(
+                                                &mut deduper,
+                                                &SEQUENCE_COUNTER,
+                                                &transcript,
+                                                source,
+                                                audio_start_time,
+                                                audio_end_time,
+                                            )
                                         };
 
-                                        if let Err(e) = app_clone.emit("transcript-update", &update)
-                                        {
-                                            error!(
-                                                "Worker {}: Failed to emit transcript update: {}",
-                                                worker_id, e
-                                            );
+                                        if let Some(sequence_id) = sequence_id {
+                                            // Save structured transcript segment to recording manager (only final results)
+                                            // Save ALL segments (partial and final) to ensure complete JSON
+                                            // Create structured segment with full timestamp data
+                                            // NOTE: This is now handled via the transcript-update event emission below
+                                            // The recording_commands module listens to these events and saves them
+                                            // This decouples the transcription worker from direct RECORDING_MANAGER access
+
+                                            // Emit transcript update with NEW recording-relative timestamps
+
+                                            let update = TranscriptUpdate {
+                                                text: transcript,
+                                                timestamp: format_current_timestamp(), // Wall-clock for reference
+                                                source: source.to_string(),
+                                                sequence_id,
+                                                chunk_start_time: chunk_timestamp, // Legacy compatibility
+                                                is_partial,
+                                                confidence: confidence_opt.unwrap_or(0.85), // Default for providers without confidence
+                                                // NEW: Recording-relative timestamps for sync
+                                                audio_start_time,
+                                                audio_end_time,
+                                                duration: chunk_duration,
+                                            };
+
+                                            if let Err(e) = app_clone.emit("transcript-update", &update)
+                                            {
+                                                error!(
+                                                    "Worker {}: Failed to emit transcript update: {}",
+                                                    worker_id, e
+                                                );
+                                            }
+                                            // PERFORMANCE: Removed verbose logging of every emission
                                         }
-                                        // PERFORMANCE: Removed verbose logging of every emission
+                                        // else: duplicate segment. next_sequence_id_if_not_duplicate() already
+                                        // logged it; nothing more to do. The chunk still falls through to the
+                                        // chunks_completed increment below, so completed/queued accounting
+                                        // stays exact and never trips transcript-chunk-loss-detected.
                                     }
                                 }
                                 Err(e) => {
@@ -618,5 +696,110 @@ fn format_recording_time(seconds: f64) -> String {
         fn labels_capture_sources_for_first_layer_diarization() {
             assert_eq!(source_label(&RecordingDeviceType::Microphone), "mic");
             assert_eq!(source_label(&RecordingDeviceType::System), "system");
+        }
+
+        #[test]
+        fn first_candidate_is_emitted_with_a_sequence_id() {
+            let mut deduper = TranscriptDeduper::new();
+            let counter = AtomicU64::new(0);
+
+            let id = next_sequence_id_if_not_duplicate(
+                &mut deduper,
+                &counter,
+                "let's get started",
+                "mic",
+                10.0,
+                12.5,
+            );
+
+            assert_eq!(id, Some(0));
+        }
+
+        #[test]
+        fn mic_and_system_echo_of_the_same_speech_is_skipped() {
+            // The PRA-468 bug: mic and system VADs both see the same utterance
+            // over the same aligned window and each hands the worker its own
+            // segment. The second one must be skipped, not given a sequence id.
+            let mut deduper = TranscriptDeduper::new();
+            let counter = AtomicU64::new(0);
+
+            let mic_id = next_sequence_id_if_not_duplicate(
+                &mut deduper,
+                &counter,
+                "let's get started",
+                "mic",
+                10.0,
+                12.5,
+            );
+            let system_id = next_sequence_id_if_not_duplicate(
+                &mut deduper,
+                &counter,
+                "let's get started",
+                "system",
+                10.0,
+                12.5,
+            );
+
+            assert_eq!(mic_id, Some(0));
+            assert_eq!(system_id, None, "the overlapping echo must not be emitted");
+            assert_eq!(
+                counter.load(Ordering::SeqCst),
+                1,
+                "a skipped duplicate must not consume a sequence id"
+            );
+        }
+
+        #[test]
+        fn identical_text_at_a_later_non_overlapping_window_still_emits() {
+            // A phrase genuinely repeated later in the meeting is not a
+            // duplicate - only overlapping windows are.
+            let mut deduper = TranscriptDeduper::new();
+            let counter = AtomicU64::new(0);
+
+            let first = next_sequence_id_if_not_duplicate(
+                &mut deduper, &counter, "sounds good", "mic", 5.0, 6.0,
+            );
+            let second = next_sequence_id_if_not_duplicate(
+                &mut deduper, &counter, "sounds good", "mic", 20.0, 21.0,
+            );
+
+            assert_eq!(first, Some(0));
+            assert_eq!(second, Some(1));
+        }
+
+        #[test]
+        fn different_text_over_the_same_window_both_emit() {
+            let mut deduper = TranscriptDeduper::new();
+            let counter = AtomicU64::new(0);
+
+            let mic = next_sequence_id_if_not_duplicate(
+                &mut deduper, &counter, "hello there", "mic", 4.0, 6.0,
+            );
+            let system = next_sequence_id_if_not_duplicate(
+                &mut deduper, &counter, "general kenobi", "system", 4.0, 6.0,
+            );
+
+            assert_eq!(mic, Some(0));
+            assert_eq!(system, Some(1));
+        }
+
+        #[test]
+        fn sequence_ids_are_not_reused_after_a_skip() {
+            let mut deduper = TranscriptDeduper::new();
+            let counter = AtomicU64::new(0);
+
+            let a = next_sequence_id_if_not_duplicate(
+                &mut deduper, &counter, "one", "mic", 0.0, 1.0,
+            );
+            let dup = next_sequence_id_if_not_duplicate(
+                &mut deduper, &counter, "one", "system", 0.0, 1.0,
+            );
+            let b = next_sequence_id_if_not_duplicate(
+                &mut deduper, &counter, "two", "mic", 2.0, 3.0,
+            );
+
+            assert_eq!(a, Some(0));
+            assert_eq!(dup, None);
+            assert_eq!(b, Some(1), "the next real segment must not skip ahead to 2");
         }
     }
