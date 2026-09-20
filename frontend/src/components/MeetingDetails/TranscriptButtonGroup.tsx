@@ -61,19 +61,36 @@ export function TranscriptButtonGroup({
   const handleIdentifySpeakers = useCallback(async (numSpeakers: number | null) => {
     if (!meetingId || isIdentifyingSpeakers) return;
     setIsIdentifyingSpeakers(true);
-    const toastId = toast.loading('Identifying speakers locally…');
+    // sonner never auto-dismisses a loading toast and renders no close button for one, so if
+    // `run_speaker_diarization` hangs (it has no timeout) the toast would otherwise be stuck
+    // on screen for the rest of the session. sonner still renders the `cancel` button for a
+    // loading toast and dismisses it on click, so we use that as the escape hatch. This only
+    // hides the toast — the diarization run keeps going in the Rust core — so the label says
+    // "Dismiss", not "Cancel".
+    let toastDismissedByUser = false;
+    const toastId = toast.loading('Identifying speakers locally…', {
+      cancel: {
+        label: 'Dismiss',
+        onClick: () => {
+          toastDismissedByUser = true;
+        },
+      },
+    });
     try {
       const result = await invoke<{ speaker_count: number }>('run_speaker_diarization', {
         meetingId,
         numSpeakers,
       });
       await onRefetchTranscripts?.();
-      toast.success(
-        `Identified ${result.speaker_count} speaker${result.speaker_count === 1 ? '' : 's'}`,
-        { id: toastId },
-      );
+      const message = `Identified ${result.speaker_count} speaker${result.speaker_count === 1 ? '' : 's'}`;
+      // If the user already dismissed the loading toast, reusing its id would merge the
+      // stale "cancel" affordance into this toast and could replay it well after the user
+      // moved on. Show a fresh toast instead so a late result is still surfaced, but as its
+      // own new toast rather than a resurrection of the one the user dismissed.
+      toast.success(message, toastDismissedByUser ? undefined : { id: toastId });
     } catch (error) {
-      toast.error(`Speaker identification failed: ${String(error)}`, { id: toastId });
+      const message = `Speaker identification failed: ${String(error)}`;
+      toast.error(message, toastDismissedByUser ? undefined : { id: toastId });
     } finally {
       setIsIdentifyingSpeakers(false);
     }
