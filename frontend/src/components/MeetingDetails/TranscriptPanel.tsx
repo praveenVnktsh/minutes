@@ -29,6 +29,26 @@ export function findSegmentIdAtTime(
   return current;
 }
 
+// Decides which line is lit up. A remembered seek target is the last resort so
+// that a click still highlights its line while the file is decoding and
+// playback has not moved off 0 yet - otherwise the click looks like it missed.
+export function resolveActiveSegmentId(
+  segments: Array<{ id: string; timestamp: number; endTime?: number }>,
+  state: {
+    hasAudio: boolean;
+    scrubTime: number | null;
+    seekTarget: number | null;
+    isPlaying: boolean;
+    currentTime: number;
+  },
+): string | undefined {
+  if (!state.hasAudio) return undefined;
+  const time = state.scrubTime
+    ?? (state.isPlaying || state.currentTime > 0 ? state.currentTime : state.seekTarget);
+  if (time === null) return undefined;
+  return findSegmentIdAtTime(segments, time);
+}
+
 interface TranscriptPanelProps {
   transcripts: Transcript[];
   onCopyTranscript: () => void;
@@ -77,6 +97,9 @@ export function TranscriptPanel({
   const [searchQuery, setSearchQuery] = useState('');
   const [audioPath, setAudioPath] = useState<string | null>(null);
   const [scrubTime, setScrubTime] = useState<number | null>(null);
+  // The position last asked for, remembered so the clicked line lights up
+  // before the audio has decoded far enough to report it back.
+  const [seekTarget, setSeekTarget] = useState<number | null>(null);
   // Local speaker edits applied in place so renaming/reassigning does not
   // refetch (and reset) the transcript scroll position.
   const [speakerNames, setSpeakerNames] = useState<Record<string, string>>({});
@@ -99,6 +122,7 @@ export function TranscriptPanel({
 
   // Resolve the meeting's audio so the transcript can jump to a line.
   useEffect(() => {
+    setSeekTarget(null);
     if (!meetingId) {
       setAudioPath(null);
       return;
@@ -118,10 +142,15 @@ export function TranscriptPanel({
 
   const player = useAudioPlayer(audioPath);
 
+  // Playing the recording changes nothing on disk, so unlike the speaker edits
+  // this stays available while a summary or re-transcription pass is running.
   const handleSeek = useCallback(async (seconds: number) => {
     setScrubTime(null);
+    setSeekTarget(seconds);
     await player.seek(seconds);
-    await player.play();
+    // seek() restarts the source when it is already running, so playing again
+    // here would restart it a second time from the same position.
+    if (!player.isPlaying) await player.play();
   }, [player]);
 
   const handleScrubPreview = useCallback((time: number) => {
@@ -130,6 +159,7 @@ export function TranscriptPanel({
 
   const handleScrubCommit = useCallback(async (time: number) => {
     setScrubTime(null);
+    setSeekTarget(time);
     await player.seek(time);
   }, [player]);
 
@@ -221,11 +251,13 @@ export function TranscriptPanel({
 
   const playbackTime = scrubTime ?? player.currentTime;
 
-  const activeSegmentId = useMemo(() => {
-    if (!audioPath) return undefined;
-    if (scrubTime === null && !player.isPlaying && player.currentTime <= 0) return undefined;
-    return findSegmentIdAtTime(convertedSegments, playbackTime);
-  }, [audioPath, convertedSegments, playbackTime, player.currentTime, player.isPlaying, scrubTime]);
+  const activeSegmentId = useMemo(() => resolveActiveSegmentId(convertedSegments, {
+    hasAudio: Boolean(audioPath),
+    scrubTime,
+    seekTarget,
+    isPlaying: player.isPlaying,
+    currentTime: player.currentTime,
+  }), [audioPath, convertedSegments, player.currentTime, player.isPlaying, scrubTime, seekTarget]);
 
   const normalizedQuery = searchQuery.trim().toLowerCase();
 
@@ -459,7 +491,7 @@ export function TranscriptPanel({
               speakerOptions={speakerOptions}
               onSpeakerChange={meetingId && !editsLocked ? handleSpeakerReassignment : undefined}
               onRenameSpeaker={meetingId && !editsLocked ? handleRenameSpeaker : undefined}
-              onSeek={audioPath && !editsLocked ? handleSeek : undefined}
+              onSeek={audioPath ? handleSeek : undefined}
               activeSegmentId={activeSegmentId}
             />
           </div>

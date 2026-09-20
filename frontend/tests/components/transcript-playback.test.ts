@@ -1,5 +1,8 @@
 import { describe, expect, test } from 'bun:test';
-import { findSegmentIdAtTime } from '../../src/components/MeetingDetails/TranscriptPanel';
+import {
+  findSegmentIdAtTime,
+  resolveActiveSegmentId,
+} from '../../src/components/MeetingDetails/TranscriptPanel';
 
 const segments = [
   { id: 'a', timestamp: 0, endTime: 5 },
@@ -28,5 +31,56 @@ describe('findSegmentIdAtTime', () => {
   test('returns nothing before the first spoken segment', () => {
     expect(findSegmentIdAtTime([{ id: 'a', timestamp: 3, endTime: 6 }], 0)).toBeUndefined();
     expect(findSegmentIdAtTime([], 4)).toBeUndefined();
+  });
+});
+
+const idle = {
+  hasAudio: true,
+  scrubTime: null,
+  seekTarget: null,
+  isPlaying: false,
+  currentTime: 0,
+};
+
+describe('resolveActiveSegmentId', () => {
+  test('highlights nothing when the meeting has no audio', () => {
+    expect(resolveActiveSegmentId(segments, {
+      ...idle,
+      hasAudio: false,
+      seekTarget: 6,
+      isPlaying: true,
+      currentTime: 13,
+    })).toBeUndefined();
+  });
+
+  test('a scrub in progress wins over the playback position', () => {
+    expect(resolveActiveSegmentId(segments, {
+      ...idle,
+      scrubTime: 13,
+      seekTarget: 6,
+      isPlaying: true,
+      currentTime: 1,
+    })).toBe('c');
+  });
+
+  test('a live playback position wins over the remembered seek target', () => {
+    expect(resolveActiveSegmentId(segments, {
+      ...idle,
+      seekTarget: 13,
+      isPlaying: true,
+      currentTime: 6,
+    })).toBe('b');
+  });
+
+  test('falls back to the seek target while playback is still at zero', () => {
+    expect(resolveActiveSegmentId(segments, { ...idle, seekTarget: 13 })).toBe('c');
+  });
+
+  test('a seek to the very start highlights the first line', () => {
+    expect(resolveActiveSegmentId(segments, { ...idle, seekTarget: 0 })).toBe('a');
+  });
+
+  test('highlights nothing when nothing is playing and nothing was asked for', () => {
+    expect(resolveActiveSegmentId(segments, idle)).toBeUndefined();
   });
 });
