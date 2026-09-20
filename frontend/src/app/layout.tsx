@@ -2,7 +2,7 @@
 
 import './globals.css'
 import { Source_Sans_3, Source_Serif_4 } from 'next/font/google'
-import { useCallback, useEffect, useLayoutEffect, useState, type CSSProperties } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useState } from 'react'
 import { usePathname } from 'next/navigation'
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
@@ -33,7 +33,7 @@ import { AutoSummaryProvider } from '@/components/AutoSummaryProvider'
 import { RecordingControllerFeedback } from '@/components/RecordingControllerFeedback'
 import { TranscriptRecoveryMount } from '@/components/TranscriptRecovery/TranscriptRecoveryMount'
 import { ShellActivitySurface } from '@/components/ShellActivitySurface'
-import { THEMED_TOAST_VARIABLES, ThemedToaster } from '@/components/ThemedToaster'
+import { SHARED_TOASTER_PROPS, ThemedToaster } from '@/components/ThemedToaster'
 import { CommandPalette } from '@/components/CommandPalette'
 import { isAudioExtension, getAudioFormatsDisplayList } from '@/constants/audioFormats'
 import { applyTheme, listenForThemeChanges, readTheme, syncNativeTheme, type AppTheme } from '@/lib/theme'
@@ -73,7 +73,7 @@ function BootToaster() {
     void listenForThemeChanges(setTheme).then((dispose) => { unlisten = dispose }).catch(() => {})
     return () => unlisten?.()
   }, [])
-  return <Toaster position="bottom-center" richColors closeButton theme={theme} className="minutes-toaster" style={THEMED_TOAST_VARIABLES as CSSProperties} />
+  return <Toaster theme={theme} {...SHARED_TOASTER_PROPS} />
 }
 
 function BootSurface({ state, onRetry }: { state: StartupState; onRetry: () => void }) {

@@ -78,9 +78,21 @@ function DownloadToastContent({
         )}
       </div>
 
+      {/* Dismiss */}
+      {onDismiss && (
+        <button
+          type="button"
+          onClick={onDismiss}
+          aria-label={`Dismiss ${download.displayName} notification`}
+          className="absolute top-1 right-1 rounded p-1 text-ink-muted transition-colors hover:bg-surface-2 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus"
+        >
+          <X className="w-3.5 h-3.5" />
+        </button>
+      )}
+
       {/* Content */}
       <div className="flex-1 min-w-0">
-        <div className="flex items-center justify-between gap-2 mb-1">
+        <div className="flex items-center justify-between gap-2 mb-1 pr-5">
           <p className="text-sm font-medium text-ink truncate">
             {download.displayName}
           </p>
@@ -198,22 +210,24 @@ export function useDownloadProgressToast() {
   // Effect to handle toast visibility based on dismissed state
   useEffect(() => {
     downloads.forEach((download) => {
-      // If model was dismissed and is still downloading, don't show it
-      if (dismissedModels.has(download.modelName) && download.status === 'downloading') {
-        return;
-      }
+      const wasDismissed = dismissedModels.has(download.modelName);
 
-      // If status changed to completed or error, we might want to show it even if dismissed previously
-      // (Optional: remove from dismissed set if you want to force show completion)
-      if (download.status === 'completed' || download.status === 'error') {
-        if (dismissedModels.has(download.modelName)) {
-          // Remove from dismissed so we can show the completion/error toast
-          setDismissedModels(prev => {
-            const next = new Set(prev);
-            next.delete(download.modelName);
-            return next;
-          });
+      if (download.status === 'downloading') {
+        // A dismissal only hides the in-progress toast, and it keeps hiding it
+        // for as long as the download is still running.
+        if (wasDismissed) {
+          return;
         }
+      } else if (wasDismissed) {
+        // The download reached a terminal state (completed, error or cancelled),
+        // so the dismissal has served its purpose. Clear it so the final toast
+        // can appear and so a stale dismissal can't silence a later re-download
+        // of the same model. This converges: once removed, the branch is skipped.
+        setDismissedModels(prev => {
+          const next = new Set(prev);
+          next.delete(download.modelName);
+          return next;
+        });
       }
 
       showDownloadToast(download);
