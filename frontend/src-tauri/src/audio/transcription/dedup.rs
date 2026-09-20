@@ -14,6 +14,12 @@
 //
 // This module holds the rule that decides, before anything is emitted, whether
 // a freshly transcribed segment is one of those echoes.
+//
+// The rule has to stay narrow, because segment windows carry VAD padding and
+// therefore overlap far more often than the speech inside them does - see
+// `MIN_OVERLAP_RATIO`. Suppressing a segment deletes those words from both the
+// live panel and the saved meeting, so anything short of "these two windows
+// cover the same speech" must be emitted.
 
 use log::debug;
 use std::collections::VecDeque;
@@ -45,6 +51,43 @@ const MAX_HISTORY_ENTRIES: usize = 128;
 /// a VAD segment becomes an audio chunk.
 const OVERLAP_EPSILON_SECS: f64 = 1e-3;
 
+/// How much of the shorter window the overlap must cover for two segments to
+/// be considered the same stretch of speech.
+///
+/// A bare "the intervals intersect" test is not enough, because **consecutive
+/// segments from a single source already intersect**. `audio/vad.rs` configures
+/// Silero with `pre_speech_pad = 300ms` and `post_speech_pad = 400ms`, and the
+/// library reports the padded bounds: `SpeechStart` at `speech_start -
+/// pre_speech_pad` and `SpeechEnd` at `speech_end + post_speech_pad`. Two
+/// consecutive segments are only split once the silence between their speech
+/// exceeds `VAD_REDEMPTION_TIME_MS` (500ms on the live path in
+/// `audio/pipeline.rs`), so any gap in the 500-700ms band yields windows that
+/// intersect by `700ms - gap` even though the speech in them is disjoint. A
+/// speaker repeating a short phrase across a 600ms pause hits that band, and
+/// under a bare-intersection rule the second copy would be deleted from the
+/// transcript.
+///
+/// Sizing the threshold against those same constants:
+///
+/// * Adjacent same-source windows intersect by at most
+///   `pre_pad + post_pad - redemption` = `700ms - 500ms` = **200ms**.
+/// * The shortest window the VAD can emit is `min_speech_time` (250ms) widened
+///   by both pads: `250 + 700` = **950ms**.
+/// * So adjacency can never cover more than `200 / 950` ~= **21%** of the
+///   shorter window.
+///
+/// A genuine echo sits at the other extreme. Both VAD sessions are driven from
+/// the *same* aligned mixing windows with the same padding, so one utterance
+/// reaching both capture paths produces two windows over essentially the same
+/// span - a ratio near 1.0. Measuring against the *shorter* window keeps that
+/// true when one source only caught part of the utterance: a window sitting
+/// inside the other's still scores ~1.0.
+///
+/// 50% sits more than twice above the adjacency ceiling and far below the echo
+/// case. If `vad.rs` ever widens the pads or `pipeline.rs` shortens the
+/// redemption time, the 21% figure above is what moves - recheck it here.
+const MIN_OVERLAP_RATIO: f64 = 0.5;
+
 /// The verdict for one candidate segment.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DedupVerdict {
@@ -52,8 +95,9 @@ pub enum DedupVerdict {
     /// over this stretch of the timeline. The candidate has been recorded, so
     /// later echoes of it will be caught.
     Emit,
-    /// The candidate repeats an earlier segment whose audio window overlaps it.
-    /// The caller should skip it entirely - no event, no sequence id.
+    /// The candidate repeats an earlier segment over the same stretch of the
+    /// recording timeline. The caller should skip it entirely - no event, no
+    /// sequence id.
     Duplicate {
         /// Start of the already-emitted segment, in seconds from recording start.
         previous_start: f64,
@@ -86,12 +130,16 @@ struct EmittedSegment {
 ///
 /// 1. their texts match after normalization (trim, case-fold, collapse internal
 ///    whitespace, strip leading/trailing punctuation), and
-/// 2. their audio windows `[start, end)` overlap by more than
-///    [`OVERLAP_EPSILON_SECS`].
+/// 2. their audio windows `[start, end)` cover the same stretch of speech -
+///    they overlap by more than [`OVERLAP_EPSILON_SECS`], and that overlap is
+///    at least [`MIN_OVERLAP_RATIO`] of the shorter window.
 ///
-/// Identical text at a *non-overlapping* time - a phrase the speaker genuinely
-/// repeats a minute later - is emitted normally. That is the whole point of
-/// pairing the text match with the interval test.
+/// Identical text over a *different* stretch of the timeline - a phrase the
+/// speaker genuinely repeats, whether a minute later or across a single
+/// half-second pause - is emitted normally. Pairing the text match with the
+/// interval test is the whole point, and [`MIN_OVERLAP_RATIO`] is what keeps
+/// the interval test from firing on the VAD padding that makes *consecutive*
+/// segments from one source overlap by design.
 ///
 /// # The capture source is deliberately not part of the key
 ///
@@ -168,7 +216,10 @@ impl TranscriptDeduper {
         if let Some(previous) = self
             .history
             .iter()
-            .find(|entry| entry.normalized_text == normalized && overlaps(entry.start, entry.end, start, end))
+            .find(|entry| {
+                entry.normalized_text == normalized
+                    && covers_same_speech(entry.start, entry.end, start, end)
+            })
         {
             let verdict = DedupVerdict::Duplicate {
                 previous_start: previous.start,
@@ -218,12 +269,24 @@ impl TranscriptDeduper {
     }
 }
 
-/// True when `[a_start, a_end)` and `[b_start, b_end)` share more than
-/// [`OVERLAP_EPSILON_SECS`] of the timeline. Windows that only touch at a
-/// boundary do not overlap.
-fn overlaps(a_start: f64, a_end: f64, b_start: f64, b_end: f64) -> bool {
+/// True when `[a_start, a_end)` and `[b_start, b_end)` cover the same stretch
+/// of speech: they must share more than [`OVERLAP_EPSILON_SECS`] of the
+/// timeline *and* that shared part must be at least [`MIN_OVERLAP_RATIO`] of
+/// the shorter window.
+///
+/// The ratio is what separates one utterance heard twice from two different
+/// utterances whose VAD padding happens to meet - see [`MIN_OVERLAP_RATIO`].
+fn covers_same_speech(a_start: f64, a_end: f64, b_start: f64, b_end: f64) -> bool {
     let overlap = a_end.min(b_end) - a_start.max(b_start);
-    overlap > OVERLAP_EPSILON_SECS
+    if overlap <= OVERLAP_EPSILON_SECS {
+        return false;
+    }
+
+    // `overlap` can never exceed either window's own length, so the shorter of
+    // the two is strictly greater than the epsilon here and the ratio is well
+    // defined.
+    let shorter = (a_end - a_start).min(b_end - b_start);
+    overlap / shorter >= MIN_OVERLAP_RATIO
 }
 
 /// Normalize transcript text for comparison.
@@ -307,12 +370,60 @@ mod tests {
     }
 
     #[test]
-    fn partial_overlap_counts_as_overlap() {
+    fn substantial_partial_overlap_still_counts() {
+        // The two sources disagree slightly about where the utterance began and
+        // ended, but the windows still cover the same speech.
         let mut d = deduper();
         assert_eq!(d.check_and_record("same words here", 10.0, 14.0), DedupVerdict::Emit);
         assert!(
-            d.check_and_record("same words here", 13.0, 17.0).is_duplicate(),
-            "one second of shared timeline is an overlap"
+            d.check_and_record("same words here", 10.4, 14.3).is_duplicate(),
+            "3.6s of a 3.9s window is the same speech heard twice"
+        );
+    }
+
+    #[test]
+    fn short_phrase_repeated_across_a_vad_pause_is_kept() {
+        // One speaker, one source. `vad.rs` pads segments by 300ms in front and
+        // 400ms behind, and `pipeline.rs` splits them after 500ms of silence, so
+        // "Okay." at 12.0-12.4 and "Okay." again at 13.0-13.4 - a 600ms pause -
+        // arrive as [11.7, 12.8] and [12.7, 13.8]. Those windows intersect by
+        // 100ms purely because of the padding. The speaker said the word twice
+        // and the transcript must contain it twice.
+        let mut d = deduper();
+        assert_eq!(d.check_and_record("Okay.", 11.7, 12.8), DedupVerdict::Emit);
+        assert_eq!(
+            d.check_and_record("Okay.", 12.7, 13.8),
+            DedupVerdict::Emit,
+            "padding overlap between consecutive segments is not an echo"
+        );
+        assert_eq!(d.len(), 2, "both copies must be retained and emitted");
+    }
+
+    #[test]
+    fn worst_case_padding_overlap_stays_below_the_threshold() {
+        // The tightest adjacency the VAD can produce: the shortest segment it
+        // will emit (min_speech_time 250ms, so a 950ms padded window) against
+        // the shortest silence that still splits a segment (just over the 500ms
+        // redemption time), giving just under the 200ms padding ceiling.
+        let mut d = deduper();
+        assert_eq!(d.check_and_record("yes", 0.0, 0.95), DedupVerdict::Emit);
+        assert_eq!(
+            d.check_and_record("yes", 0.75, 1.70),
+            DedupVerdict::Emit,
+            "200ms of a 950ms window is adjacency, not an echo"
+        );
+    }
+
+    #[test]
+    fn echo_from_the_other_source_is_caught_despite_vad_jitter() {
+        // Both VAD sessions see the same aligned windows, so a genuine echo
+        // lands on essentially the same span even when the two probability
+        // traces trip a chunk or two apart (30ms VAD chunks).
+        let mut d = deduper();
+        assert_eq!(d.check_and_record("can everyone hear me", 20.0, 22.4), DedupVerdict::Emit);
+        assert!(
+            d.check_and_record("can everyone hear me", 20.06, 22.46).is_duplicate(),
+            "60ms of jitter between sources is still one utterance"
         );
     }
 
