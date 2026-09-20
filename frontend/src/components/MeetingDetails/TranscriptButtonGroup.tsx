@@ -12,7 +12,7 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { Copy, FolderOpen, Link2, MoreHorizontal, RefreshCw, UserRoundCog, Users } from 'lucide-react';
+import { Copy, FolderOpen, Link2, Loader2, MoreHorizontal, RefreshCw, UserRoundCog, Users } from 'lucide-react';
 import { toast } from 'sonner';
 import Analytics from '@/lib/analytics';
 import { RetranscribeDialog } from './RetranscribeDialog';
@@ -28,6 +28,7 @@ interface TranscriptButtonGroupProps {
   onRefetchTranscripts?: () => Promise<void>;
   onOpenSpeakerManager?: () => void;
   locked?: boolean;
+  isEnhancing?: boolean;
 }
 
 
@@ -40,23 +41,13 @@ export function TranscriptButtonGroup({
   onRefetchTranscripts,
   onOpenSpeakerManager,
   locked = false,
+  isEnhancing = false,
 }: TranscriptButtonGroupProps) {
   const { betaFeatures } = useConfig();
   const [showRetranscribeDialog, setShowRetranscribeDialog] = useState(false);
   const [isIdentifyingSpeakers, setIsIdentifyingSpeakers] = useState(false);
-  const hasMoreActions = !locked && Boolean(
-    meetingId && (
-      (betaFeatures.importAndRetranscribe && meetingFolderPath)
-      || (transcriptCount > 0 && (meetingFolderPath || onOpenSpeakerManager))
-    )
-  );
-
-  const handleRetranscribeComplete = useCallback(async () => {
-    // Refetch transcripts to show the updated data
-    if (onRefetchTranscripts) {
-      await onRefetchTranscripts();
-    }
-  }, [onRefetchTranscripts]);
+  // "Copy meeting link" only needs meetingId, so it alone keeps the menu non-empty.
+  const hasMoreActions = !locked && Boolean(meetingId);
 
   const handleIdentifySpeakers = useCallback(async (numSpeakers: number | null) => {
     if (!meetingId || isIdentifyingSpeakers) return;
@@ -144,6 +135,23 @@ export function TranscriptButtonGroup({
           </Button>
         )}
 
+        {betaFeatures.importAndRetranscribe && meetingId && meetingFolderPath && !locked && (
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-8 w-8 rounded-full bg-[var(--surface-2)] p-0 text-[var(--ink-muted)] hover:bg-[var(--surface-2)]"
+            onClick={() => {
+              Analytics.trackButtonClick('enhance_transcript', 'meeting_details');
+              setShowRetranscribeDialog(true);
+            }}
+            disabled={isEnhancing}
+            title={isEnhancing ? 'Enhancing transcript…' : 'Enhance transcript'}
+            aria-label={isEnhancing ? 'Enhancing transcript…' : 'Enhance transcript'}
+          >
+            {isEnhancing ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw size={18} />}
+          </Button>
+        )}
+
         {hasMoreActions && <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button size="sm" variant="ghost" className="h-8 rounded-full bg-[var(--surface-2)] px-2.5 text-[var(--ink-muted)] hover:bg-[var(--surface-2)]" title="More transcript actions" aria-label="More transcript actions">
@@ -151,14 +159,6 @@ export function TranscriptButtonGroup({
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="w-52">
-            {betaFeatures.importAndRetranscribe && meetingId && meetingFolderPath && (
-              <DropdownMenuItem onClick={() => {
-                Analytics.trackButtonClick('enhance_transcript', 'meeting_details');
-                setShowRetranscribeDialog(true);
-              }}>
-                <RefreshCw className="mr-2 h-4 w-4" /> Enhance transcript
-              </DropdownMenuItem>
-            )}
             {meetingId && meetingFolderPath && transcriptCount > 0 && (
               <DropdownMenuSub>
                 <DropdownMenuSubTrigger disabled={isIdentifyingSpeakers}>
@@ -202,7 +202,6 @@ export function TranscriptButtonGroup({
           onOpenChange={setShowRetranscribeDialog}
           meetingId={meetingId}
           meetingFolderPath={meetingFolderPath}
-          onComplete={handleRetranscribeComplete}
         />
       )}
     </div>
