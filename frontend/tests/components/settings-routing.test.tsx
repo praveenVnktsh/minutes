@@ -55,4 +55,20 @@ describe('canonical settings sections', () => {
     act(() => tabs.props.onValueChange('summary'));
     expect(push).toHaveBeenCalledWith('/settings?section=summary');
   });
+
+  test('active tab uses the ink foreground token, not the selected surface token (PRA-471)', async () => {
+    // PRA-471: the active tab's text/underline used `text-selected`/`border-selected`, but
+    // `--selected` is a surface (background) color, not a foreground one — in both light and dark
+    // theme it nearly matches the surface-2 background behind the tab, so the active label and its
+    // underline were almost invisible. `ink` is the foreground token, so pin it here to stop a
+    // future edit from silently reintroducing the surface token on the active state.
+    section = 'general';
+    await act(async () => { renderer = create(<SettingsPageContent />); });
+    const buttons = renderer.root.findAllByType('button');
+    const trigger = buttons.find(button => button.props.value === 'general');
+    expect(trigger?.props.className).toContain('data-[state=active]:text-ink');
+    expect(trigger?.props.className).not.toContain('data-[state=active]:text-selected');
+    expect(trigger?.props.className).toContain('data-[state=active]:border-ink');
+    expect(trigger?.props.className).not.toContain('data-[state=active]:border-selected');
+  });
 });

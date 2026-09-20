@@ -62,7 +62,7 @@ export function SettingsPageContent() {
                     <TabsTrigger
                       key={tab.value}
                       value={tab.value}
-                      className="gap-2 rounded-none border-b-2 border-transparent bg-transparent px-3 py-3 text-ink-muted shadow-none hover:text-ink data-[state=active]:border-selected data-[state=active]:bg-transparent data-[state=active]:text-selected sm:px-5"
+                      className="gap-2 rounded-none border-b-2 border-transparent bg-transparent px-3 py-3 text-ink-muted shadow-none hover:text-ink data-[state=active]:border-ink data-[state=active]:bg-transparent data-[state=active]:text-ink sm:px-5"
                     >
                       <Icon className="h-4 w-4" />
                       {tab.label}
