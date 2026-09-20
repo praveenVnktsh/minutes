@@ -20,7 +20,8 @@ const { useTranscriptionProgress } = await import('../../src/hooks/useTranscript
 
 function View({ meetingId }: { meetingId?: string }) {
   const progress = useTranscriptionProgress(meetingId);
-  return <output>{progress ? `${progress.percent}|${progress.stageLabel}|${progress.message ?? ''}` : 'none'}</output>;
+  const percent = progress?.indeterminate ? '?' : progress?.percent;
+  return <output>{progress ? `${percent}|${progress.stageLabel}|${progress.message ?? ''}` : 'none'}</output>;
 }
 
 let renderer: ReactTestRenderer | undefined;
@@ -74,10 +75,21 @@ describe('useTranscriptionProgress', () => {
     expect(text()).toContain('none');
   });
 
-  test('keeps unknown progress indeterminate instead of inventing zero', async () => {
+  test('surfaces a pass with no reported percentage as indeterminate, not as zero', async () => {
     await show('meeting-a');
     await act(async () => activityListener?.(snapshot(++nextRevision, 'meeting-a', null, 'queued')));
-    expect(text()).toContain('none');
+    expect(text()).toContain('?|Queued|Working');
+  });
+
+  test('surfaces a queued pass that has not reported a stage yet', async () => {
+    await show('meeting-a');
+    await act(async () => {
+      const pending = snapshot(++nextRevision, 'meeting-a', null);
+      pending.activities[0].status = 'queued';
+      pending.activities[0].stage = null;
+      activityListener?.(pending);
+    });
+    expect(text()).toContain('?|Queued|Working');
   });
 
   test('ignores out-of-order snapshots and cleans up the shared listener', async () => {

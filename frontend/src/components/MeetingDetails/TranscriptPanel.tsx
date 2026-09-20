@@ -9,6 +9,7 @@ import { toast } from 'sonner';
 import { ChevronDown, ChevronUp, Loader2, Search, X } from 'lucide-react';
 import { useAudioPlayer } from '@/hooks/useAudioPlayer';
 import { useTranscriptionProgress } from '@/hooks/useTranscriptionProgress';
+import { useMeetingActivity } from '@/contexts/MeetingActivityContext';
 import { SpeakerCorrectionDialog, SpeakerIdentity } from './SpeakerCorrectionDialog';
 import { AudioScrubber } from './AudioScrubber';
 
@@ -81,8 +82,14 @@ export function TranscriptPanel({
   const [speakerNames, setSpeakerNames] = useState<Record<string, string>>({});
   const [segmentSpeakerIds, setSegmentSpeakerIds] = useState<Record<string, string>>({});
 
-  // Live stage-by-stage progress for the meeting currently being transcribed.
+  // Live stage-by-stage progress for the meeting currently being transcribed,
+  // whether that is its first pass or a re-run over an existing transcript.
   const transcriptionProgress = useTranscriptionProgress(meetingId);
+  const { cancelTranscription } = useMeetingActivity();
+
+  // Segments are about to be replaced by the running pass, so edits made now
+  // would be thrown away.
+  const editsLocked = locked || transcriptionProgress !== null;
 
   useEffect(() => {
     setSpeakerNames(
@@ -259,6 +266,72 @@ export function TranscriptPanel({
     }
   }, [activeMatch, matchIndices, convertedSegments]);
 
+  // No optimistic state: the activity snapshot removes the surface once the
+  // cancellation actually lands.
+  const handleCancelTranscription = useCallback(async () => {
+    if (!transcriptionProgress) return;
+    try {
+      await cancelTranscription(transcriptionProgress.taskId);
+    } catch (error) {
+      toast.error(`Could not cancel transcription: ${String(error)}`);
+    }
+  }, [cancelTranscription, transcriptionProgress]);
+
+  // One copy of the progress markup, shown either in place of an empty
+  // transcript or laid over an existing one.
+  const progressSurface = transcriptionProgress ? (
+    <div
+      role="status"
+      aria-live="polite"
+      className="flex flex-col items-center justify-center gap-3 px-8 text-center"
+    >
+      <Loader2 className="h-6 w-6 animate-spin text-[var(--ink-subtle)]" />
+      {/* A pass that has not reported a percentage yet gets a pulsing bar
+          rather than a "0%" that reads as a stalled measurement. */}
+      {!transcriptionProgress.indeterminate && (
+        <p className="text-2xl font-semibold tabular-nums text-[var(--ink-muted)]">
+          {transcriptionProgress.percent}%
+        </p>
+      )}
+      <div className="w-full max-w-xs">
+        <div
+          role="progressbar"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={transcriptionProgress.indeterminate ? undefined : transcriptionProgress.percent}
+          className="h-1.5 w-full overflow-hidden rounded-full bg-[var(--surface-2)]"
+        >
+          <div
+            className={`h-full rounded-full bg-[var(--ink-muted)] ${
+              transcriptionProgress.indeterminate
+                ? 'w-full animate-pulse opacity-40'
+                : 'transition-all duration-300 ease-out'
+            }`}
+            style={transcriptionProgress.indeterminate ? undefined : { width: `${transcriptionProgress.percent}%` }}
+          />
+        </div>
+      </div>
+      <div>
+        <p className="text-sm font-medium text-[var(--ink-muted)]">
+          {transcriptionProgress.stageLabel}…
+        </p>
+        <p className="mt-1 text-xs text-[var(--ink-subtle)]">
+          {transcriptionProgress.message
+            ?? 'This can take a moment. Your notes are safe and stay editable meanwhile.'}
+        </p>
+      </div>
+      {transcriptionProgress.cancellable && (
+        <button
+          type="button"
+          onClick={() => void handleCancelTranscription()}
+          className="h-8 rounded-full bg-[var(--surface-2)] px-3 text-xs font-medium text-[var(--ink-muted)] hover:text-ink"
+        >
+          Cancel
+        </button>
+      )}
+    </div>
+  ) : null;
+
   return (
     <div className="flex h-full min-w-0 w-full bg-[var(--surface-0)] flex-col relative @container">
       {/* Title area */}
@@ -272,6 +345,7 @@ export function TranscriptPanel({
           onRefetchTranscripts={onRefetchTranscripts}
           onOpenSpeakerManager={() => setShowSpeakerDialog(true)}
           locked={locked}
+          isEnhancing={transcriptionProgress?.kind === 'retranscription'}
         />
         <div className="mt-3 flex items-center gap-2">
           <div className="relative min-w-0 flex-1">
@@ -346,73 +420,60 @@ export function TranscriptPanel({
       </div>
 
       {/* Transcript content - use virtualized view for better performance */}
-      {isTranscribing && convertedSegments.length === 0 ? (
-        <div className="flex flex-1 flex-col items-center justify-center gap-3 px-8 pb-16 text-center">
-          {transcriptionProgress ? (
-            <>
-              <Loader2 className="h-6 w-6 animate-spin text-[var(--ink-subtle)]" />
-              <p className="text-2xl font-semibold tabular-nums text-[var(--ink-muted)]">
-                {transcriptionProgress.percent}%
-              </p>
-              <div className="w-full max-w-xs">
-                <div className="h-1.5 w-full overflow-hidden rounded-full bg-[var(--surface-2)]">
-                  <div
-                    className="h-full rounded-full bg-[var(--ink-muted)] transition-all duration-300 ease-out"
-                    style={{ width: `${transcriptionProgress.percent}%` }}
-                  />
+      <div className="relative flex min-h-0 flex-1 flex-col">
+        {(transcriptionProgress || isTranscribing) && convertedSegments.length === 0 ? (
+          <div className="flex flex-1 flex-col items-center justify-center gap-3 px-8 pb-16 text-center">
+            {progressSurface ?? (
+              <>
+                <Loader2 className="h-6 w-6 animate-spin text-[var(--ink-subtle)]" />
+                <div>
+                  <p className="text-sm font-medium text-[var(--ink-muted)]">Transcribing meeting audio…</p>
+                  <p className="mt-1 text-xs text-[var(--ink-subtle)]">This can take a moment. Your notes are safe and stay editable meanwhile.</p>
                 </div>
-              </div>
-              <div>
-                <p className="text-sm font-medium text-[var(--ink-muted)]">
-                  {transcriptionProgress.stageLabel}…
-                </p>
-                <p className="mt-1 text-xs text-[var(--ink-subtle)]">
-                  {transcriptionProgress.message
-                    ?? 'This can take a moment. Your notes are safe and stay editable meanwhile.'}
-                </p>
-              </div>
-            </>
-          ) : (
-            <>
-              <Loader2 className="h-6 w-6 animate-spin text-[var(--ink-subtle)]" />
-              <div>
-                <p className="text-sm font-medium text-[var(--ink-muted)]">Transcribing meeting audio…</p>
-                <p className="mt-1 text-xs text-[var(--ink-subtle)]">This can take a moment. Your notes are safe and stay editable meanwhile.</p>
-              </div>
-            </>
-          )}
-        </div>
-      ) : normalizedQuery && matchIndices.length === 0 ? (
-        <div className="flex flex-1 items-center justify-center px-8 pb-16 text-center text-sm text-[var(--ink-subtle)]">
-          No transcript matches “{searchQuery.trim()}”.
-        </div>
-      ) : (
-        <div className="mx-auto w-full max-w-[900px] flex-1 overflow-hidden pb-4">
-          <VirtualizedTranscriptView
-            segments={convertedSegments}
-            matchIds={matchIds}
-            activeMatchId={activeMatchId}
-            highlightQuery={normalizedQuery}
-            isRecording={isRecording}
-            isPaused={false}
-            isProcessing={false}
-            isStopping={false}
-            enableStreaming={false}
-            showConfidence={true}
-            disableAutoScroll={disableAutoScroll}
-            hasMore={hasMore}
-            isLoadingMore={isLoadingMore}
-            totalCount={totalCount}
-            loadedCount={loadedCount}
-            onLoadMore={onLoadMore}
-            speakerOptions={speakerOptions}
-            onSpeakerChange={meetingId && !locked ? handleSpeakerReassignment : undefined}
-            onRenameSpeaker={meetingId && !locked ? handleRenameSpeaker : undefined}
-            onSeek={audioPath && !locked ? handleSeek : undefined}
-            activeSegmentId={activeSegmentId}
-          />
-        </div>
-      )}
+              </>
+            )}
+          </div>
+        ) : normalizedQuery && matchIndices.length === 0 ? (
+          <div className="flex flex-1 items-center justify-center px-8 pb-16 text-center text-sm text-[var(--ink-subtle)]">
+            No transcript matches “{searchQuery.trim()}”.
+          </div>
+        ) : (
+          <div className="mx-auto w-full max-w-[900px] flex-1 overflow-hidden pb-4">
+            <VirtualizedTranscriptView
+              segments={convertedSegments}
+              matchIds={matchIds}
+              activeMatchId={activeMatchId}
+              highlightQuery={normalizedQuery}
+              isRecording={isRecording}
+              isPaused={false}
+              isProcessing={false}
+              isStopping={false}
+              enableStreaming={false}
+              showConfidence={true}
+              disableAutoScroll={disableAutoScroll}
+              hasMore={hasMore}
+              isLoadingMore={isLoadingMore}
+              totalCount={totalCount}
+              loadedCount={loadedCount}
+              onLoadMore={onLoadMore}
+              speakerOptions={speakerOptions}
+              onSpeakerChange={meetingId && !editsLocked ? handleSpeakerReassignment : undefined}
+              onRenameSpeaker={meetingId && !editsLocked ? handleRenameSpeaker : undefined}
+              onSeek={audioPath && !editsLocked ? handleSeek : undefined}
+              activeSegmentId={activeSegmentId}
+            />
+          </div>
+        )}
+
+        {/* A pass over an existing transcript keeps it visible but inert. */}
+        {progressSurface && convertedSegments.length > 0 && (
+          <div className="absolute inset-0 z-20 flex flex-col items-center justify-center pb-16">
+            {/* Separate scrim layer so the progress text itself stays opaque. */}
+            <div aria-hidden="true" className="absolute inset-0 bg-[var(--surface-0)] opacity-[0.85]" />
+            <div className="relative">{progressSurface}</div>
+          </div>
+        )}
+      </div>
 
       {meetingId && (
         <SpeakerCorrectionDialog

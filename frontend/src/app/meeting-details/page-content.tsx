@@ -2,6 +2,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { motion } from 'framer-motion';
 import { MeetingSummary, SummaryProcessResponse } from '@/types';
+import type { MeetingActivity, MeetingActivityStatus } from '@/types/meetingActivity';
 import { useSidebar } from '@/components/Sidebar/SidebarProvider';
 import Analytics from '@/lib/analytics';
 import { invoke } from '@tauri-apps/api/core';
@@ -77,15 +78,25 @@ export default function PageContent({
   const [notesDirtySinceSummary, setNotesDirtySinceSummary] = useState(false);
   const activity = useMeetingActivity();
   const meetingActivities = activity.getMeetingActivities(meeting.id);
-  const latestMeetingActivity = meetingActivities.reduce<(typeof meetingActivities)[number] | null>(
-    (latest, item) => !latest || item.revision > latest.revision ? item : latest,
-    null,
+  // A meeting accumulates activities over time (an import, then retranscriptions), so each
+  // derived value picks the newest activity whose status it actually cares about rather than
+  // whichever task happens to hold the highest revision.
+  const latestActivityWithStatus = (statuses: MeetingActivityStatus[]): MeetingActivity | null => (
+    meetingActivities.reduce<MeetingActivity | null>(
+      (latest, item) => statuses.includes(item.status) && (!latest || item.revision > latest.revision) ? item : latest,
+      null,
+    )
   );
+  const inFlightActivity = latestActivityWithStatus(['queued', 'transcribing']);
+  const latestTerminalActivity = latestActivityWithStatus(['ready', 'failed', 'cancelled']);
   const isRecordingThisMeeting = activity.activeMeetingId === meeting.id
     && activity.recording !== null
     && ['starting', 'recording', 'paused', 'saving'].includes(activity.recording.status);
-  const isTranscribing = latestMeetingActivity?.status === 'queued' || latestMeetingActivity?.status === 'transcribing';
-  const activityError = latestMeetingActivity?.status === 'failed' ? latestMeetingActivity.error : null;
+  const isTranscribing = inFlightActivity !== null;
+  // A queued or running pass supersedes an older failure, so a stale error cannot linger.
+  const activityError = !isTranscribing && latestTerminalActivity?.status === 'failed'
+    ? latestTerminalActivity.error
+    : null;
   const summaryActivity = activity.getSummaryActivity(meeting.id);
   const [liveFolderPath, setLiveFolderPath] = useState<string | null>(null);
 
@@ -190,13 +201,23 @@ export default function PageContent({
     return () => { cancelled = true; };
   }, [isRecordingThisMeeting]);
 
-  const previousActivityRevision = useRef<number | null>(null);
+  // A finished pass replaces every transcript row with fresh ids, so refetch once per task
+  // that reaches 'ready'. Cancelled and failed passes leave the existing rows in place.
+  const refetchedTaskIdsRef = useRef(new Set<string>());
+  const refetchedMeetingIdRef = useRef(meeting.id);
   useEffect(() => {
-    if (latestMeetingActivity?.status === 'ready' && previousActivityRevision.current !== latestMeetingActivity.revision) {
-      void onRefetchTranscripts?.();
+    if (refetchedMeetingIdRef.current !== meeting.id) {
+      refetchedMeetingIdRef.current = meeting.id;
+      refetchedTaskIdsRef.current = new Set<string>();
     }
-    previousActivityRevision.current = latestMeetingActivity?.revision ?? null;
-  }, [latestMeetingActivity, onRefetchTranscripts]);
+    let hasNewlyReadyTask = false;
+    for (const item of meetingActivities) {
+      if (item.status !== 'ready' || refetchedTaskIdsRef.current.has(item.task_id)) continue;
+      refetchedTaskIdsRef.current.add(item.task_id);
+      hasNewlyReadyTask = true;
+    }
+    if (hasNewlyReadyTask) void onRefetchTranscripts?.();
+  }, [meeting.id, meetingActivities, onRefetchTranscripts]);
 
   useEffect(() => {
     const handleFinalized = (event: Event) => {
@@ -246,7 +267,7 @@ export default function PageContent({
     </span>
   ) : isTranscribing ? (
     <span className="flex shrink-0 items-center gap-1.5 rounded-full bg-info-soft px-3 py-1.5 text-[11px] font-medium text-info" role="status">
-      <Loader2 className="h-3.5 w-3.5 animate-spin" /> {latestMeetingActivity?.progress_percentage == null ? 'Transcribing…' : `Transcribing ${Math.round(latestMeetingActivity.progress_percentage)}%`}
+      <Loader2 className="h-3.5 w-3.5 animate-spin" /> {inFlightActivity?.progress_percentage == null ? 'Transcribing…' : `Transcribing ${Math.round(inFlightActivity.progress_percentage)}%`}
     </span>
   ) : activityError ? <span role="alert" className="text-xs font-medium text-error">{activityError}</span> : null;
 
