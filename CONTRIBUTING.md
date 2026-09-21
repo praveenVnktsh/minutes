@@ -2,6 +2,10 @@
 
 Issues and pull requests are welcome at [github.com/praveenvnktsh/minutes](https://github.com/praveenvnktsh/minutes).
 
+## Feedback from the App
+
+The desktop app's "Send feedback" dialog opens a prefilled GitHub issue on [github.com/praveenvnktsh/minutes/issues/new](https://github.com/praveenvnktsh/minutes/issues/new). Issues must stay enabled on the repository (Settings → General → Features → Issues, or `gh repo edit --enable-issues`). If Issues are ever disabled, the dialog copies the report to the clipboard and tells the user instead of opening a broken page.
+
 ## Workflow
 
 1. Create a focused branch from `main`.
