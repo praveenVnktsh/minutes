@@ -876,6 +876,9 @@ pub fn run() {
             start_audio_level_monitoring,
             stop_audio_level_monitoring,
             is_audio_level_monitoring,
+            // Onboarding microphone check
+            audio::mic_check::mic_check_start,
+            audio::mic_check::mic_check_cancel,
             // Recording pause/resume commands
             audio::recording_commands::pause_recording,
             audio::recording_commands::resume_recording,

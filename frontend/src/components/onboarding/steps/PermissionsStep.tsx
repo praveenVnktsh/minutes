@@ -7,7 +7,7 @@ import { PermissionRow } from '../shared';
 import { useOnboarding } from '@/contexts/OnboardingContext';
 
 export function PermissionsStep() {
-  const { setPermissionStatus, setPermissionsSkipped, permissions, completeOnboarding } = useOnboarding();
+  const { setPermissionStatus, setPermissionsSkipped, permissions, goNext } = useOnboarding();
   const [isPending, setIsPending] = useState(false);
 
   // Check permissions - only logs current state, doesn't auto-authorize
@@ -93,18 +93,13 @@ export function PermissionsStep() {
     }
   };
 
-  const handleFinish = async () => {
-    try {
-      await completeOnboarding();
-      window.location.reload();
-    } catch (error) {
-      console.error('Failed to complete onboarding:', error);
-    }
+  const handleContinueToMicCheck = () => {
+    goNext();
   };
 
-  const handleSkip = async () => {
+  const handleSkip = () => {
     setPermissionsSkipped(true);
-    await handleFinish();
+    handleContinueToMicCheck();
   };
 
   const allPermissionsGranted =
@@ -146,8 +141,8 @@ export function PermissionsStep() {
 
         {/* Action Buttons */}
         <div className="flex flex-col gap-3 pt-4">
-          <Button onClick={handleFinish} disabled={!allPermissionsGranted} className="w-full h-11">
-            Finish Setup
+          <Button onClick={handleContinueToMicCheck} disabled={!allPermissionsGranted} className="w-full h-11">
+            Continue to Mic Check
           </Button>
 
           <button
