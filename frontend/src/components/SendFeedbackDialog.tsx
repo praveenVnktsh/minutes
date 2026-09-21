@@ -3,6 +3,7 @@
 import { useEffect, useState, type FormEvent, type RefObject } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { Loader2, Send } from 'lucide-react';
+import { toast } from 'sonner';
 import {
   Dialog,
   DialogContent,
@@ -14,7 +15,13 @@ import {
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
-import { buildFeedbackIssueUrl, collectFeedbackContext } from '@/lib/feedback';
+import { writeClipboardText } from '@/lib/clipboard';
+import {
+  buildFeedbackClipboardText,
+  buildFeedbackIssueUrl,
+  collectFeedbackContext,
+  feedbackIssuesAreOpen,
+} from '@/lib/feedback';
 
 interface SendFeedbackDialogProps {
   open: boolean;
@@ -42,10 +49,31 @@ export function SendFeedbackDialog({ open, onOpenChange, returnFocusRef }: SendF
 
     setIsSubmitting(true);
     try {
+      const draft = { title, description };
       const context = await collectFeedbackContext();
-      const url = buildFeedbackIssueUrl({ title, description }, context);
-      await invoke('open_external_url', { url });
-      onOpenChange(false);
+
+      if (await feedbackIssuesAreOpen()) {
+        const url = buildFeedbackIssueUrl(draft, context);
+        await invoke('open_external_url', { url });
+        onOpenChange(false);
+        return;
+      }
+
+      // Issues are closed on the project repo: opening the URL would just be a
+      // 404, so hand the user their draft instead of losing it.
+      try {
+        await writeClipboardText(buildFeedbackClipboardText(draft, context));
+        toast.warning('Issue reporting is closed on the project repo', {
+          description: 'Your feedback was copied to the clipboard so you can send it elsewhere.',
+        });
+        onOpenChange(false);
+      } catch (clipboardError) {
+        console.error('Failed to copy feedback to the clipboard:', clipboardError);
+        toast.error('Could not copy feedback to the clipboard', {
+          description: 'Issue reporting is closed on the project repo. Please try again.',
+        });
+        setIsSubmitting(false);
+      }
     } catch (error) {
       console.error('Failed to open the feedback form:', error);
       setIsSubmitting(false);

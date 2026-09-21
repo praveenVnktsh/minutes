@@ -1503,6 +1503,86 @@ fn open_url_on_windows(url: &str) -> std::io::Result<std::process::Output> {
         .output()
 }
 
+/// Where the feedback preflight asks whether a repository accepts issues.
+const GITHUB_API_BASE: &str = "https://api.github.com";
+
+/// How long that preflight waits before giving up.
+const FEEDBACK_PREFLIGHT_TIMEOUT_SECS: u64 = 4;
+
+/// Repository slugs the preflight is willing to ask GitHub about.
+///
+/// The slug is interpolated into a URL path, so it is held to exactly
+/// `owner/name` in GitHub's own character set. Anything else — an empty
+/// segment, a `..`, a slash too many, a query string — is refused rather than
+/// sent, so a caller cannot steer the request at another endpoint.
+fn is_feedback_repo_allowed(repo: &str) -> bool {
+    let mut segments = repo.split('/');
+    let (Some(owner), Some(name), None) = (segments.next(), segments.next(), segments.next())
+    else {
+        return false;
+    };
+
+    [owner, name].iter().all(|segment| {
+        !segment.is_empty()
+            && *segment != "."
+            && *segment != ".."
+            && segment
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+    })
+}
+
+/// Reads `has_issues` for one repository from a GitHub-shaped API.
+///
+/// Split from the command so tests can point `base` at a local server. Every
+/// failure is an error rather than a `false`: the caller decides what an
+/// unknown answer means, and for the feedback dialog it means "open".
+async fn repo_has_issues(base: &str, repo: &str) -> Result<bool, String> {
+    if !is_feedback_repo_allowed(repo) {
+        return Err(format!("Refusing to query unsupported repository: {repo}"));
+    }
+
+    // GitHub answers 403 to a request without a User-Agent.
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(FEEDBACK_PREFLIGHT_TIMEOUT_SECS))
+        .user_agent(concat!("Minutes/", env!("CARGO_PKG_VERSION"), " (feedback)"))
+        .build()
+        .map_err(|error| format!("Failed to create HTTP client: {error}"))?;
+
+    let response = client
+        .get(format!("{base}/repos/{repo}"))
+        .header("accept", "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|error| format!("Could not reach GitHub: {error}"))?;
+
+    if !response.status().is_success() {
+        return Err(format!("GitHub returned HTTP {}", response.status()));
+    }
+
+    let repository: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|error| format!("Could not read GitHub's answer: {error}"))?;
+
+    repository
+        .get("has_issues")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or_else(|| "GitHub did not report has_issues".to_string())
+}
+
+/// Tells the feedback dialog whether the project still accepts issues, so it
+/// can offer the clipboard instead of opening a new-issue form that 404s.
+///
+/// This lives in Rust rather than the webview because the window's
+/// `connect-src` policy allows no third-party host: the same request from the
+/// renderer is blocked in a packaged build, and the dialog would open the 404
+/// it is trying to avoid.
+#[tauri::command]
+pub async fn feedback_issues_are_open(repo: String) -> Result<bool, String> {
+    repo_has_issues(GITHUB_API_BASE, &repo).await
+}
+
 #[tauri::command]
 pub async fn open_external_url(url: String) -> Result<(), String> {
     use std::process::Command;
@@ -1775,8 +1855,46 @@ pub async fn api_test_custom_openai_connection<R: Runtime>(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_browser_url_allowed, model_config_from_setting};
+    use super::{is_browser_url_allowed, is_feedback_repo_allowed, model_config_from_setting, repo_has_issues};
     use crate::database::models::Setting;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// Serves one canned response on a loopback port and hands back its base
+    /// URL plus the request it received.
+    async fn github_stub(
+        status: &'static str,
+        body: &'static str,
+    ) -> (String, tokio::task::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            loop {
+                let bytes_read = socket.read(&mut buffer).await.unwrap();
+                if bytes_read == 0 || request.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..bytes_read]);
+                if request.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+            }
+
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            socket.flush().await.unwrap();
+            String::from_utf8_lossy(&request).to_string()
+        });
+
+        (format!("http://{address}"), server)
+    }
 
     #[test]
     fn model_config_uses_one_setting_snapshot_and_tolerates_invalid_custom_json() {
@@ -1805,6 +1923,62 @@ mod tests {
             "https://github.com/praveenvnktsh/minutes/issues/new?title=a&body=b"
         ));
         assert!(is_browser_url_allowed("http://localhost:3118"));
+    }
+
+    #[tokio::test]
+    async fn reports_a_closed_issue_tracker() {
+        let (base, server) = github_stub("200 OK", r#"{"has_issues": false}"#).await;
+
+        assert_eq!(repo_has_issues(&base, "praveenvnktsh/minutes").await, Ok(false));
+
+        let request = server.await.unwrap();
+        assert!(request.starts_with("GET /repos/praveenvnktsh/minutes "));
+        // GitHub answers 403 without one.
+        assert!(request.to_ascii_lowercase().contains("user-agent: minutes/"));
+    }
+
+    #[tokio::test]
+    async fn reports_an_open_issue_tracker() {
+        let (base, server) = github_stub("200 OK", r#"{"has_issues": true}"#).await;
+
+        assert_eq!(repo_has_issues(&base, "praveenvnktsh/minutes").await, Ok(true));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn errors_rather_than_guessing_when_github_will_not_say() {
+        let (rate_limited, server) = github_stub("403 Forbidden", r#"{"message": "rate limit"}"#).await;
+        assert!(repo_has_issues(&rate_limited, "praveenvnktsh/minutes").await.is_err());
+        server.await.unwrap();
+
+        let (malformed, server) = github_stub("200 OK", "not json").await;
+        assert!(repo_has_issues(&malformed, "praveenvnktsh/minutes").await.is_err());
+        server.await.unwrap();
+
+        let (silent, server) = github_stub("200 OK", r#"{"name": "minutes"}"#).await;
+        assert!(repo_has_issues(&silent, "praveenvnktsh/minutes").await.is_err());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn refuses_a_repository_slug_it_cannot_put_in_a_path() {
+        // Never reaches the network: an unusable slug is refused outright.
+        assert!(repo_has_issues("http://127.0.0.1:1", "../../search").await.is_err());
+    }
+
+    #[test]
+    fn allows_only_owner_slash_name_slugs() {
+        assert!(is_feedback_repo_allowed("praveenvnktsh/minutes"));
+        assert!(is_feedback_repo_allowed("some-owner/some_repo.js"));
+
+        assert!(!is_feedback_repo_allowed("praveenvnktsh"));
+        assert!(!is_feedback_repo_allowed("praveenvnktsh/minutes/issues"));
+        assert!(!is_feedback_repo_allowed("../../search"));
+        assert!(!is_feedback_repo_allowed("owner/.."));
+        assert!(!is_feedback_repo_allowed("owner/"));
+        assert!(!is_feedback_repo_allowed(""));
+        assert!(!is_feedback_repo_allowed("owner/name?query=1"));
+        assert!(!is_feedback_repo_allowed("owner/na me"));
     }
 
     #[test]
