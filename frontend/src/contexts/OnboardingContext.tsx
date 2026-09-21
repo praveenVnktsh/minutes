@@ -3,11 +3,16 @@
 import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import type { PermissionStatus, OnboardingPermissions } from '@/types/onboarding';
+import type { PermissionStatus, OnboardingPermissions, OnboardingStep } from '@/types/onboarding';
 import { resolveOnboardingSummaryModelStatus } from '@/lib/onboarding-summary-model';
 import type { ParakeetDownloadProgressEvent } from '@/lib/parakeet';
 
 const PARAKEET_MODEL = 'parakeet-tdt-0.6b-v3-int8';
+
+// Step 1: Welcome, 2: Setup Overview, 3: Download Progress, 4: Permissions (macOS only),
+// 5: Mic Check. Non-macOS jumps from 3 to 5. The mic check is the last step and the only
+// one that calls completeOnboarding().
+const LAST_STEP: OnboardingStep = 5;
 
 interface OnboardingStatus {
   version: string;
@@ -419,14 +424,14 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
       summaryModelDownloaded = false;
     }
 
-    // Determine the correct step based on verified status
-    // New simplified flow: Step 1: Welcome, Step 2: Setup Overview, Step 3: Download Progress, Step 4: Permissions (macOS)
+    // Resume on the step the user left off on, so someone who quit during the mic check comes
+    // back to the mic check instead of watching a finished download again.
     let currentStep = savedStatus.current_step;
     const completed = savedStatus.completed;
 
-    // Clamp step to new max (4)
-    if (currentStep > 4) {
-      currentStep = 3; // Go to download progress step
+    // A step saved by a different version of the flow must not strand the user past the last screen
+    if (currentStep > LAST_STEP) {
+      currentStep = LAST_STEP;
     }
 
     // Trust the completed status - don't revert based on model downloads
@@ -506,7 +511,7 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
     } catch (error) {
       console.error('[OnboardingContext] Failed to complete onboarding:', error);
       isCompletingRef.current = false; // Reset flag on error
-      throw error; // Re-throw so PermissionsStep can handle it
+      throw error; // Re-throw so the mic check step can surface the failure
     }
   };
 
@@ -589,14 +594,14 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
   }, []);
 
   const goToStep = useCallback((step: number) => {
-    setCurrentStep(Math.max(1, Math.min(step, 4)));
+    setCurrentStep(Math.max(1, Math.min(step, LAST_STEP)));
   }, []);
 
   const goNext = useCallback(() => {
     setCurrentStep((prev: number) => {
       const next = prev + 1;
-      // Don't go past step 4
-      return Math.min(next, 4);
+      // Don't go past the mic check
+      return Math.min(next, LAST_STEP);
     });
   }, []);
 
