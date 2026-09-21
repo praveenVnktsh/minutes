@@ -8,10 +8,9 @@
  * whether the issue form is worth opening at all.
  */
 
-export const FEEDBACK_REPO = 'praveenvnktsh/minutes';
+import { invoke } from '@tauri-apps/api/core';
 
-/** How long the issues preflight waits before giving up and assuming "open". */
-const ISSUES_PREFLIGHT_TIMEOUT_MS = 4000;
+export const FEEDBACK_REPO = 'praveenvnktsh/minutes';
 
 export interface FeedbackDraft {
   title: string;
@@ -69,35 +68,27 @@ export function buildFeedbackClipboardText(
 }
 
 /**
- * Asks GitHub whether the feedback repository still accepts issues.
+ * Asks whether the feedback repository still accepts issues.
  *
- * Unknown means open: this resolves to `false` only when the API definitively
+ * The request itself is made by the Rust command `feedback_issues_are_open`,
+ * not from here: the window's `connect-src` policy allows no third-party host,
+ * so a `fetch` to GitHub is blocked in a packaged build — and a preflight that
+ * fails in production is worse than none, because it fails towards opening the
+ * 404 it exists to prevent.
+ *
+ * Unknown means open. This resolves to `false` only when GitHub definitively
  * reports the repository with `has_issues: false`. A network error, a non-OK
  * or rate-limited response, a malformed body, a timeout or a runtime without
- * `fetch` all resolve to `true`, because an offline or flaky machine must
- * never be the reason a user cannot file feedback. It never throws.
+ * Tauri all resolve to `true`, because an offline or flaky machine must never
+ * be the reason a user cannot file feedback. It never throws.
  */
 export async function feedbackIssuesAreOpen(): Promise<boolean> {
-  if (typeof fetch !== 'function') return true;
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), ISSUES_PREFLIGHT_TIMEOUT_MS);
-
   try {
-    const response = await fetch(`https://api.github.com/repos/${FEEDBACK_REPO}`, {
-      headers: { Accept: 'application/vnd.github+json' },
-      signal: controller.signal,
-    });
-    if (!response.ok) return true;
-
-    const repo: unknown = await response.json();
-    if (typeof repo !== 'object' || repo === null) return true;
-    return (repo as { has_issues?: unknown }).has_issues !== false;
+    const open = await invoke<boolean>('feedback_issues_are_open', { repo: FEEDBACK_REPO });
+    return open !== false;
   } catch {
-    // Offline, aborted, rate limited or unparseable: assume issues are open.
+    // Offline, rate limited, timed out, or not running inside Tauri.
     return true;
-  } finally {
-    clearTimeout(timeout);
   }
 }
 
