@@ -1,0 +1,27 @@
+# git blame skips the revisions listed in this file, so blame keeps naming
+# whoever actually wrote a line instead of the commit that bulk-reformatted
+# it. Without this file, one repo-wide "cargo fmt --all" run would bury the
+# real authorship of every line it touches.
+#
+# To use this locally, run:
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+# GitHub reads this file automatically, so blame views on github.com already
+# skip these revisions without any setup.
+#
+# This file is deliberately empty of SHAs for now. The formatting change
+# lands as a squash-merged pull request, so the commit that actually applies
+# it on main does not exist until that merge happens, and its SHA cannot be
+# known ahead of time. Do not add this branch's own commit SHA here: once
+# the PR is squash-merged, that SHA is not an ancestor of main, and git
+# blame fails outright ("fatal: cannot find revision ... to ignore") for
+# anyone using this file on a fresh clone if an unreachable SHA is listed.
+# Only revisions reachable from main may ever be listed here.
+#
+# Follow-up, once this PR is squash-merged: find the resulting commit on
+# main, e.g.
+#   git log --oneline -1 main
+# and append it below, one SHA per line, with a short comment above each
+# one saying what the commit was, for example:
+#
+# # cargo fmt --all (PRA-489)
+# <squash-merge commit sha>
