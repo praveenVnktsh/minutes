@@ -920,9 +920,6 @@ pub fn run() {
             api::api_get_transcription_vocabulary,
             api::api_set_transcription_vocabulary,
             api::api_search_transcripts,
-            api::api_get_profile,
-            api::api_save_profile,
-            api::api_update_profile,
             api::api_get_model_config,
             api::api_save_model_config,
             api::api_get_api_key,
@@ -939,8 +936,6 @@ pub fn run() {
             api::api_create_meeting,
             api::api_save_transcript,
             api::open_meeting_folder,
-            api::test_backend_connection,
-            api::debug_backend_connection,
             api::open_external_url,
             api::feedback_issues_are_open,
             // Custom OpenAI commands

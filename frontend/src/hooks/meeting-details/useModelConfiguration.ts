@@ -3,11 +3,7 @@ import Analytics from '@/lib/analytics';
 import { useConfig } from '@/contexts/ConfigContext';
 import type { ModelConfig } from '@/types/modelConfig';
 
-interface UseModelConfigurationProps {
-  serverAddress: string | null;
-}
-
-export function useModelConfiguration({ serverAddress: _serverAddress }: UseModelConfigurationProps) {
+export function useModelConfiguration() {
   const {
     modelConfig,
     setModelConfig,
