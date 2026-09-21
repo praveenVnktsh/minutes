@@ -135,8 +135,9 @@ jobs:
       - name: install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
-          # Only aarch64-apple-darwin for Apple Silicon (no Intel support)
-          targets: ${{ contains(inputs.platform, 'macos') && 'aarch64-apple-darwin' || '' }}
+          # macOS ships two targets from the same arm64 runner, so install the one
+          # this job was asked for rather than assuming Apple Silicon.
+          targets: ${{ contains(inputs.platform, 'macos') && inputs.target || '' }}
 
       - name: Configure portable Windows native build
         id: windows-portability
@@ -588,33 +589,44 @@ jobs:
           Write-Host "Copied llama-helper to frontend/src-tauri/binaries/"
           Get-ChildItem "frontend/src-tauri/binaries/"
 
+      - name: Configure portable Intel macOS native build
+        if: inputs.target == 'x86_64-apple-darwin'
+        shell: bash
+        run: |
+          # The Intel bundle cross-builds on the arm64 runner, so stop ggml
+          # specializing for the host CPU. No RUSTFLAGS here: setting it would
+          # override .cargo/config.toml and drop the deployment-target link arg.
+          echo "CMAKE_PROJECT_INCLUDE=$GITHUB_WORKSPACE/.github/force-portable-ggml.cmake" >> "$GITHUB_ENV"
+
       - name: Build llama-helper sidecar (macOS/Linux)
         if: "!contains(inputs.platform, 'windows')"
         shell: bash
         run: |
           echo "Building llama-helper sidecar..."
 
-          # Determine llama-helper features based on platform
-          LLAMA_FEATURES=""
-          if [[ "${{ inputs.platform }}" == *"macos"* ]]; then
-            LLAMA_FEATURES="--features metal"
-            echo "Using Metal GPU acceleration for macOS"
-          else
-            echo "Using CPU-only mode for Linux"
-          fi
-
-          # Build llama-helper from workspace root
-          cargo build --release -p llama-helper $LLAMA_FEATURES
-
-          # Determine target triple and binary extension
+          # Resolve the triple before building: with an explicit --target the
+          # binary always lands in target/<triple>/release, never target/release.
           TARGET="${{ inputs.target }}"
           if [[ -z "$TARGET" ]]; then
             TARGET=$(rustc -vV | grep "host:" | awk '{print $2}')
           fi
 
+          # Metal relies on Apple Silicon unified memory, so Intel macOS builds
+          # CPU-only like Linux does.
+          LLAMA_FEATURES=""
+          if [[ "$TARGET" == "aarch64-apple-darwin" ]]; then
+            LLAMA_FEATURES="--features metal"
+            echo "Using Metal GPU acceleration for Apple Silicon"
+          else
+            echo "Using CPU-only mode for $TARGET"
+          fi
+
+          # Build llama-helper from workspace root
+          cargo build --release -p llama-helper --target "$TARGET" $LLAMA_FEATURES
+
           # Copy binary to binaries directory
           mkdir -p frontend/src-tauri/binaries
-          cp target/release/llama-helper frontend/src-tauri/binaries/llama-helper-${TARGET}
+          cp target/${TARGET}/release/llama-helper frontend/src-tauri/binaries/llama-helper-${TARGET}
 
           echo "Copied llama-helper to frontend/src-tauri/binaries/llama-helper-${TARGET}"
           ls -la frontend/src-tauri/binaries/
@@ -622,8 +634,10 @@ jobs:
       - name: Cache FFmpeg binary
         uses: actions/cache@v4
         with:
-          path: frontend/src-tauri/binaries/ffmpeg-*
-          key: ${{ runner.os }}-ffmpeg-${{ hashFiles('frontend/src-tauri/build.rs', 'frontend/src-tauri/build/ffmpeg.rs') }}    
+          # Keyed per target: both macOS jobs share runner.os and would otherwise
+          # restore each other's architecture.
+          path: frontend/src-tauri/binaries/ffmpeg-${{ inputs.target }}*
+          key: ${{ runner.os }}-ffmpeg-${{ inputs.target }}-${{ hashFiles('frontend/src-tauri/build.rs', 'frontend/src-tauri/build/ffmpeg.rs') }}
       - name: Cache Windows ONNX Runtime
         if: contains(inputs.platform, 'windows')
         uses: actions/cache@v4

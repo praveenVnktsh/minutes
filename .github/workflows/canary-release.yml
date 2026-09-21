@@ -96,9 +96,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # macos-latest is an arm64 runner and macos-13 (the last Intel image)
+          # is retired, so the x86_64 bundle is cross-built here too.
           - platform: "macos-latest"
             args: "--target aarch64-apple-darwin"
             target: "aarch64-apple-darwin"
+          - platform: "macos-latest"
+            args: "--target x86_64-apple-darwin"
+            target: "x86_64-apple-darwin"
           - platform: "windows-latest"
             args: ""
             target: "x86_64-pc-windows-msvc"
@@ -134,13 +139,18 @@ jobs:
           workdir="$(mktemp -d)"
 
           gh release download canary -R "$REPO" -D "$workdir" \
-            -p "*_aarch64.dmg" -p "*_x64-setup.exe" -p "*_x64_*-US.msi" || true
+            -p "*_aarch64.dmg" -p "*_x64.dmg" -p "*_x64-setup.exe" -p "*_x64_*-US.msi" || true
 
           upload=()
           dmg="$(ls "$workdir"/*_aarch64.dmg 2>/dev/null | head -1 || true)"
           if [ -n "$dmg" ]; then
             cp "$dmg" "$workdir/minutes-macos-arm64.dmg"
             upload+=("$workdir/minutes-macos-arm64.dmg")
+          fi
+          dmgx64="$(ls "$workdir"/*_x64.dmg 2>/dev/null | head -1 || true)"
+          if [ -n "$dmgx64" ]; then
+            cp "$dmgx64" "$workdir/minutes-macos-x64.dmg"
+            upload+=("$workdir/minutes-macos-x64.dmg")
           fi
           exe="$(ls "$workdir"/*_x64-setup.exe 2>/dev/null | head -1 || true)"
           if [ -n "$exe" ]; then
