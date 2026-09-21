@@ -6,9 +6,16 @@
 /// Download and bundle FFmpeg binary for current target platform
 /// Checks cache first, downloads only if missing or corrupted
 pub fn ensure_ffmpeg_binary() {
+    let host = std::env::var("HOST").ok();
     let target = std::env::var("TARGET")
-        .or_else(|_| std::env::var("HOST"))
+        .ok()
+        .or_else(|| host.clone())
         .expect("Neither TARGET nor HOST environment variable set");
+
+    // Executing the binary proves nothing when it was built for another architecture: the Intel
+    // macOS bundle is cross-built on an arm64 runner, where the exec either fails for want of
+    // Rosetta 2 or succeeds because of it. Falling back to HOST is not a cross-build.
+    let cross_compiling = host.as_deref().is_some_and(|h| h != target);
 
     println!("cargo:warning=🎬 Checking FFmpeg binary for target: {}", target);
 
@@ -26,7 +33,7 @@ pub fn ensure_ffmpeg_binary() {
     // Cache check: Skip download if binary exists and works
     if binary_path.exists() {
         println!("cargo:warning=🔍 Found cached FFmpeg binary: {}", binary_name);
-        if verify_ffmpeg_binary(&binary_path) {
+        if verify_ffmpeg_binary(&binary_path, cross_compiling) {
             println!("cargo:warning=✅ FFmpeg binary already cached and verified: {}", binary_name);
             return;
         } else {
@@ -49,7 +56,7 @@ pub fn ensure_ffmpeg_binary() {
             println!("cargo:warning=✅ FFmpeg binary downloaded successfully: {}", binary_name);
 
             // Verify downloaded binary works
-            if !verify_ffmpeg_binary(&binary_path) {
+            if !verify_ffmpeg_binary(&binary_path, cross_compiling) {
                 panic!("⚠️  Downloaded FFmpeg binary verification failed!");
             }
         }
@@ -327,8 +334,16 @@ fn find_ffmpeg_in_extracted_dir(
     Err(format!("FFmpeg binary '{}' not found in extracted archive", executable_name))
 }
 
+/// Smallest plausible real FFmpeg binary; below this it is a truncated download or an HTML error page
+const MIN_FFMPEG_BINARY_BYTES: u64 = 10 * 1_048_576;
+
 /// Verify FFmpeg binary is functional (runs -version successfully)
-fn verify_ffmpeg_binary(path: &std::path::PathBuf) -> bool {
+/// When cross-compiling it cannot be run here, so only its size is checked
+fn verify_ffmpeg_binary(path: &std::path::PathBuf, cross_compiling: bool) -> bool {
+    if cross_compiling {
+        return verify_ffmpeg_binary_size(path);
+    }
+
     match std::process::Command::new(path)
         .arg("-version")
         .output()
@@ -345,5 +360,28 @@ fn verify_ffmpeg_binary(path: &std::path::PathBuf) -> bool {
             }
         }
         Err(_) => false,
+    }
+}
+
+/// Size-only fallback used when the binary targets another architecture than this host
+fn verify_ffmpeg_binary_size(path: &std::path::PathBuf) -> bool {
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.len() >= MIN_FFMPEG_BINARY_BYTES => {
+            println!("cargo:warning=✅ FFmpeg size check passed (cross-compiling, not executed): {:.1} MB",
+                metadata.len() as f64 / 1_048_576.0);
+            true
+        }
+        Ok(metadata) => {
+            println!("cargo:warning=⚠️  FFmpeg binary is only {:.1} MB (cross-compiling, size check only)",
+                metadata.len() as f64 / 1_048_576.0);
+            false
+        }
+        Err(e) => {
+            println!(
+                "cargo:warning=⚠️  Could not read FFmpeg binary metadata: {}",
+                e
+            );
+            false
+        }
     }
 }

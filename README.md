@@ -83,6 +83,7 @@ Click to download the latest version directly:
 | Platform | Download |
 | --- | --- |
 | **macOS** (Apple Silicon) | [**minutes-macos-arm64.dmg**](https://github.com/praveenvnktsh/minutes/releases/latest/download/minutes-macos-arm64.dmg) |
+| **macOS** (Intel) | [**minutes-macos-x64.dmg**](https://github.com/praveenvnktsh/minutes/releases/latest/download/minutes-macos-x64.dmg) |
 | **Windows** (x64) | [**minutes-windows-x64-setup.exe**](https://github.com/praveenvnktsh/minutes/releases/latest/download/minutes-windows-x64-setup.exe) · [.msi](https://github.com/praveenvnktsh/minutes/releases/latest/download/minutes-windows-x64.msi) |
 
 All releases and notes: [github.com/praveenvnktsh/minutes/releases/latest](https://github.com/praveenvnktsh/minutes/releases/latest).
