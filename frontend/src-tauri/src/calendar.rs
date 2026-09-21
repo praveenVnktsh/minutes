@@ -161,7 +161,8 @@ pub fn normalize_feed_url(raw: &str) -> Result<String, String> {
         trimmed.to_string()
     };
 
-    let parsed = url::Url::parse(&rewritten).map_err(|_| "Calendar URL is not a valid URL".to_string())?;
+    let parsed =
+        url::Url::parse(&rewritten).map_err(|_| "Calendar URL is not a valid URL".to_string())?;
     let is_localhost = parsed.host_str().is_some_and(|host| {
         host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1"
     });
@@ -225,7 +226,11 @@ fn validate_config(config: &CalendarConfig) -> Result<(), String> {
 fn build_http_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .timeout(StdDuration::from_secs(20))
-        .user_agent(concat!("Minutes/", env!("CARGO_PKG_VERSION"), " (calendar-sync)"))
+        .user_agent(concat!(
+            "Minutes/",
+            env!("CARGO_PKG_VERSION"),
+            " (calendar-sync)"
+        ))
         .build()
         .map_err(|error| format!("Failed to create HTTP client: {error}"))
 }
@@ -285,7 +290,10 @@ async fn fetch_feed(
     }
     let text = String::from_utf8_lossy(&buffer).into_owned();
 
-    Ok(FetchOutcome::Body { text, etag: new_etag })
+    Ok(FetchOutcome::Body {
+        text,
+        etag: new_etag,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -363,10 +371,7 @@ pub fn expand_ics(
         let event = calendar_event.event();
 
         let uid = event.get_uid().unwrap_or_default().to_string();
-        let base_title = event
-            .get_summary()
-            .unwrap_or("Untitled event")
-            .to_string();
+        let base_title = event.get_summary().unwrap_or("Untitled event").to_string();
         let location = event.get_location().map(str::to_string);
         let all_day = matches!(event.get_start(), Some(DatePerhapsTime::Date(_)));
         let base_duration = event_duration(event);
@@ -384,7 +389,10 @@ pub fn expand_ics(
             let timezone = recurrences.get_dt_start().timezone();
             let after = timezone.from_utc_datetime(&window_start.naive_utc());
             let before = timezone.from_utc_datetime(&window_end.naive_utc());
-            let result = recurrences.after(after).before(before).all(MAX_OCCURRENCES_PER_SERIES);
+            let result = recurrences
+                .after(after)
+                .before(before)
+                .all(MAX_OCCURRENCES_PER_SERIES);
 
             for occurrence in result.dates {
                 let occurrence_start = occurrence.with_timezone(&Utc);
@@ -473,7 +481,9 @@ async fn refresh_feed(config: &CalendarConfig) -> Result<CalendarSnapshot, Strin
         FetchOutcome::NotModified => match fetch_feed(&client, &url, None).await? {
             FetchOutcome::Body { text, etag } => (text, etag),
             FetchOutcome::NotModified => {
-                return Err("Calendar feed reported no changes but no cached copy exists".to_string())
+                return Err(
+                    "Calendar feed reported no changes but no cached copy exists".to_string(),
+                )
             }
         },
         FetchOutcome::Body { text, etag } => (text, etag),
@@ -624,9 +634,7 @@ pub fn init_worker<R: Runtime>(app: &AppHandle<R>) {
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-pub async fn get_calendar_config<R: Runtime>(
-    app: AppHandle<R>,
-) -> Result<CalendarConfig, String> {
+pub async fn get_calendar_config<R: Runtime>(app: AppHandle<R>) -> Result<CalendarConfig, String> {
     load_config(&app)
 }
 
@@ -672,9 +680,7 @@ pub async fn test_calendar_feed<R: Runtime>(
     let outcome = fetch_feed(&client, &normalized, None).await?;
     let text = match outcome {
         FetchOutcome::Body { text, .. } => text,
-        FetchOutcome::NotModified => {
-            return Err("Calendar feed returned no content".to_string())
-        }
+        FetchOutcome::NotModified => return Err("Calendar feed returned no content".to_string()),
     };
 
     let now = Utc::now();
@@ -802,10 +808,7 @@ END:VCALENDAR\r\n";
             .unwrap();
         assert_eq!(single.title, "Single meeting");
         assert_eq!(single.location.as_deref(), Some("Room 1"));
-        assert_eq!(
-            single.end.unwrap() - single.start,
-            Duration::hours(1)
-        );
+        assert_eq!(single.end.unwrap() - single.start, Duration::hours(1));
     }
 
     #[test]
@@ -816,8 +819,14 @@ END:VCALENDAR\r\n";
             .filter(|event| event.uid == "daily@example.com")
             .collect();
         assert_eq!(daily.len(), 3);
-        assert_eq!(daily[0].start, Utc.with_ymd_and_hms(2026, 1, 10, 9, 0, 0).unwrap());
-        assert_eq!(daily[2].start, Utc.with_ymd_and_hms(2026, 1, 12, 9, 0, 0).unwrap());
+        assert_eq!(
+            daily[0].start,
+            Utc.with_ymd_and_hms(2026, 1, 10, 9, 0, 0).unwrap()
+        );
+        assert_eq!(
+            daily[2].start,
+            Utc.with_ymd_and_hms(2026, 1, 12, 9, 0, 0).unwrap()
+        );
     }
 
     #[test]

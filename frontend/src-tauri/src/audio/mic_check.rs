@@ -174,8 +174,10 @@ pub async fn mic_check_start<R: Runtime>(
         Err(error) => {
             warn!("Mic check could not resolve an input device: {}", error);
             let name = device_name.unwrap_or_else(|| UNNAMED_DEVICE.to_string());
-            return Ok(MicCheckResult::new(MicCheckOutcome::DeviceUnavailable, name)
-                .with_detail(Some(error)));
+            return Ok(
+                MicCheckResult::new(MicCheckOutcome::DeviceUnavailable, name)
+                    .with_detail(Some(error)),
+            );
         }
     };
 
@@ -198,9 +200,8 @@ pub async fn mic_check_start<R: Runtime>(
 
     let peak = peak_of(&capture.samples);
     let duration_ms = captured_duration_ms(&capture);
-    let result = |outcome| {
-        MicCheckResult::new(outcome, device.name.clone()).with_capture(peak, duration_ms)
-    };
+    let result =
+        |outcome| MicCheckResult::new(outcome, device.name.clone()).with_capture(peak, duration_ms);
 
     if capture.cancelled {
         info!("Mic check cancelled after {} ms of audio", duration_ms);
@@ -220,7 +221,10 @@ pub async fn mic_check_start<R: Runtime>(
     let engine = match ready_engine().await {
         Ok(engine) => engine,
         Err((outcome, detail)) => {
-            warn!("Mic check has no usable Parakeet model: {:?} ({:?})", outcome, detail);
+            warn!(
+                "Mic check has no usable Parakeet model: {:?} ({:?})",
+                outcome, detail
+            );
             return Ok(result(outcome).with_detail(detail));
         }
     };
@@ -236,8 +240,9 @@ pub async fn mic_check_start<R: Runtime>(
         Ok(transcript) => transcript,
         Err(error) => {
             error!("Mic check transcription failed: {}", error);
-            return Ok(result(MicCheckOutcome::TranscriptionFailed)
-                .with_detail(Some(error.to_string())));
+            return Ok(
+                result(MicCheckOutcome::TranscriptionFailed).with_detail(Some(error.to_string()))
+            );
         }
     };
 
@@ -442,7 +447,9 @@ fn emit_levels<R: Runtime>(
         std::thread::sleep(LEVEL_INTERVAL);
 
         let (rms, peak, total) = {
-            let buffer = buffer.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let buffer = buffer
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             let window = &buffer.samples[reported..];
             (rms_of(window), peak_of(window), buffer.samples.len())
         };

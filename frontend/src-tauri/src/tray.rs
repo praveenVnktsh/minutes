@@ -1,9 +1,8 @@
 use tauri::{
-    Emitter,
     image::Image,
     menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder},
     tray::TrayIconBuilder,
-    AppHandle, Manager, Runtime,
+    AppHandle, Emitter, Manager, Runtime,
 };
 
 /// How many meetings to surface in the tray's "Recent Meetings" submenu.
@@ -25,10 +24,7 @@ fn cached_recent_meetings() -> Vec<(String, String)> {
 static MEETING_DETECTED: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 fn detected_meeting() -> Option<String> {
-    MEETING_DETECTED
-        .lock()
-        .ok()
-        .and_then(|guard| guard.clone())
+    MEETING_DETECTED.lock().ok().and_then(|guard| guard.clone())
 }
 
 /// Set or clear the "meeting detected" tray state.
@@ -136,7 +132,9 @@ pub fn start_tray_timer<R: Runtime>(app: &AppHandle<R>) {
                 if detected_meeting().is_some() {
                     set_meeting_detected(&app, None);
                 }
-                let Some(seconds) = crate::audio::recording_commands::current_active_duration_seconds() else {
+                let Some(seconds) =
+                    crate::audio::recording_commands::current_active_duration_seconds()
+                else {
                     continue;
                 };
                 let elapsed = format_elapsed(seconds as u64);
@@ -293,7 +291,10 @@ pub(crate) fn toggle_recording_handler<R: Runtime>(app: &AppHandle<R>) {
                     // Trigger frontend post-processing via event (works from any page)
                     // (SQLite save, navigation, analytics)
                     if let Err(e) = app_clone.emit("recording-stop-complete", true) {
-                        log::error!("Tray toggle: Failed to emit recording-stop-complete event: {}", e);
+                        log::error!(
+                            "Tray toggle: Failed to emit recording-stop-complete event: {}",
+                            e
+                        );
                     }
                 }
                 Err(e) => {
@@ -404,9 +405,7 @@ fn stop_recording_handler<R: Runtime>(app: &AppHandle<R>) {
 fn check_updates_handler<R: Runtime>(app: &AppHandle<R>) {
     focus_main_window(app);
     if let Some(window) = app.get_webview_window("main") {
-        let _ = window.eval(
-            "window.dispatchEvent(new CustomEvent('check-updates-from-tray'))"
-        );
+        let _ = window.eval("window.dispatchEvent(new CustomEvent('check-updates-from-tray'))");
     }
 }
 
@@ -471,7 +470,10 @@ async fn check_can_record<R: Runtime>(app: &AppHandle<R>) -> bool {
     let onboarding_complete = match crate::onboarding::load_onboarding_status(app).await {
         Ok(status) => status.completed,
         Err(e) => {
-            log::warn!("Tray: Failed to load onboarding status: {}, assuming complete", e);
+            log::warn!(
+                "Tray: Failed to load onboarding status: {}, assuming complete",
+                e
+            );
             true // Assume complete if we can't check (safe default)
         }
     };
@@ -486,7 +488,10 @@ async fn check_can_record<R: Runtime>(app: &AppHandle<R>) -> bool {
     match crate::parakeet_engine::commands::parakeet_has_available_models().await {
         Ok(has_models) => has_models,
         Err(e) => {
-            log::warn!("Tray: Failed to check Parakeet models: {}, assuming not ready", e);
+            log::warn!(
+                "Tray: Failed to check Parakeet models: {}, assuming not ready",
+                e
+            );
             false
         }
     }
@@ -563,7 +568,9 @@ fn tray_icon(state: RecordingState, detected: bool) -> (Image<'static>, bool) {
             (Image::new_owned(pixels, SIZE, SIZE), true)
         }
         _ => {
-            const M: [&str; 7] = ["10001", "11011", "10101", "10101", "10001", "10001", "10001"];
+            const M: [&str; 7] = [
+                "10001", "11011", "10101", "10101", "10001", "10001", "10001",
+            ];
 
             // Detected: the same mark drawn in solid accent green. Non-template so
             // the colour actually shows in the menu bar.
@@ -573,7 +580,11 @@ fn tray_icon(state: RecordingState, detected: bool) -> (Image<'static>, bool) {
                         if value == b'1' {
                             for dy in 0..2 {
                                 for dx in 0..2 {
-                                    set_pixel(4 + column as u32 * 2 + dx, 2 + row as u32 * 2 + dy, [52, 199, 89, 255]);
+                                    set_pixel(
+                                        4 + column as u32 * 2 + dx,
+                                        2 + row as u32 * 2 + dy,
+                                        [52, 199, 89, 255],
+                                    );
                                 }
                             }
                         }
@@ -587,7 +598,11 @@ fn tray_icon(state: RecordingState, detected: bool) -> (Image<'static>, bool) {
                     if value == b'1' {
                         for dy in 0..2 {
                             for dx in 0..2 {
-                                set_pixel(4 + column as u32 * 2 + dx, 2 + row as u32 * 2 + dy, [0, 0, 0, 255]);
+                                set_pixel(
+                                    4 + column as u32 * 2 + dx,
+                                    2 + row as u32 * 2 + dy,
+                                    [0, 0, 0, 255],
+                                );
                             }
                         }
                     }
@@ -655,8 +670,9 @@ fn build_menu<R: Runtime>(
     } else {
         match state {
             RecordingState::Stopped => {
-                builder = builder
-                    .item(&MenuItemBuilder::with_id("toggle_recording", "Start Recording").build(app)?);
+                builder = builder.item(
+                    &MenuItemBuilder::with_id("toggle_recording", "Start Recording").build(app)?,
+                );
             }
             RecordingState::Starting => {
                 builder = builder.item(
@@ -673,8 +689,14 @@ fn build_menu<R: Runtime>(
                             .build(app)?,
                     )
                     .item(&PredefinedMenuItem::separator(app)?)
-                    .item(&MenuItemBuilder::with_id("pause_recording", "⏸ Pause Recording").build(app)?)
-                    .item(&MenuItemBuilder::with_id("stop_recording", "⏹ Stop Recording").build(app)?);
+                    .item(
+                        &MenuItemBuilder::with_id("pause_recording", "⏸ Pause Recording")
+                            .build(app)?,
+                    )
+                    .item(
+                        &MenuItemBuilder::with_id("stop_recording", "⏹ Stop Recording")
+                            .build(app)?,
+                    );
             }
             RecordingState::Pausing => {
                 builder = builder
@@ -683,7 +705,10 @@ fn build_menu<R: Runtime>(
                             .enabled(false)
                             .build(app)?,
                     )
-                    .item(&MenuItemBuilder::with_id("stop_recording", "⏹ Stop Recording").build(app)?);
+                    .item(
+                        &MenuItemBuilder::with_id("stop_recording", "⏹ Stop Recording")
+                            .build(app)?,
+                    );
             }
             RecordingState::Paused => {
                 builder = builder
@@ -697,7 +722,10 @@ fn build_menu<R: Runtime>(
                         &MenuItemBuilder::with_id("resume_recording", "▶ Resume Recording")
                             .build(app)?,
                     )
-                    .item(&MenuItemBuilder::with_id("stop_recording", "⏹ Stop Recording").build(app)?);
+                    .item(
+                        &MenuItemBuilder::with_id("stop_recording", "⏹ Stop Recording")
+                            .build(app)?,
+                    );
             }
             RecordingState::Resuming => {
                 builder = builder
@@ -706,7 +734,10 @@ fn build_menu<R: Runtime>(
                             .enabled(false)
                             .build(app)?,
                     )
-                    .item(&MenuItemBuilder::with_id("stop_recording", "⏹ Stop Recording").build(app)?);
+                    .item(
+                        &MenuItemBuilder::with_id("stop_recording", "⏹ Stop Recording")
+                            .build(app)?,
+                    );
             }
             RecordingState::Stopping => {
                 builder = builder.item(
@@ -744,8 +775,8 @@ fn build_recent_meetings_submenu<R: Runtime>(
         );
     } else {
         for (meeting_id, title) in recent_meetings {
-            let item =
-                MenuItemBuilder::with_id(format!("recent_meeting:{meeting_id}"), title).build(app)?;
+            let item = MenuItemBuilder::with_id(format!("recent_meeting:{meeting_id}"), title)
+                .build(app)?;
             submenu = submenu.item(&item);
         }
     }
@@ -855,25 +886,35 @@ mod tests {
 
     #[test]
     fn recent_meeting_label_appends_the_title() {
-        let created = chrono::Utc
-            .with_ymd_and_hms(2026, 9, 11, 12, 0, 0)
-            .unwrap();
+        let created = chrono::Utc.with_ymd_and_hms(2026, 9, 11, 12, 0, 0).unwrap();
         let label = recent_meeting_label("Weekly planning", created);
-        assert!(label.ends_with(" · Weekly planning"), "unexpected label: {label}");
+        assert!(
+            label.ends_with(" · Weekly planning"),
+            "unexpected label: {label}"
+        );
     }
 
     #[test]
     fn tray_status_distinguishes_idle_recording_and_paused_states() {
         assert_eq!(tray_tooltip(RecordingState::Stopped), "Minutes is active");
-        assert_eq!(tray_tooltip(RecordingState::Recording), "Minutes is recording");
-        assert_eq!(tray_tooltip(RecordingState::Paused), "Minutes recording is paused");
+        assert_eq!(
+            tray_tooltip(RecordingState::Recording),
+            "Minutes is recording"
+        );
+        assert_eq!(
+            tray_tooltip(RecordingState::Paused),
+            "Minutes recording is paused"
+        );
 
         let (idle_icon, idle_is_template) = tray_icon(RecordingState::Stopped, false);
         let (recording_icon, recording_is_template) = tray_icon(RecordingState::Recording, false);
         assert!(idle_is_template);
         assert!(!recording_is_template);
         assert!(idle_icon.rgba().chunks_exact(4).any(|pixel| pixel[3] > 0));
-        assert!(recording_icon.rgba().chunks_exact(4).any(|pixel| pixel[0] == 235));
+        assert!(recording_icon
+            .rgba()
+            .chunks_exact(4)
+            .any(|pixel| pixel[0] == 235));
     }
 
     #[test]
@@ -887,6 +928,9 @@ mod tests {
             .rgba()
             .chunks_exact(4)
             .any(|pixel| pixel[0] == 52 && pixel[1] == 199 && pixel[2] == 89);
-        assert!(has_accent, "detected icon should use the high-contrast accent");
+        assert!(
+            has_accent,
+            "detected icon should use the high-contrast accent"
+        );
     }
 }

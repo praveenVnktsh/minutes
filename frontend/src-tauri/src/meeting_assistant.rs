@@ -232,7 +232,10 @@ mod tests {
 
     #[test]
     fn falls_back_to_the_stored_string_when_it_is_not_a_summary_object() {
-        assert_eq!(enhanced_notes_markdown("  # Plain notes  "), "# Plain notes");
+        assert_eq!(
+            enhanced_notes_markdown("  # Plain notes  "),
+            "# Plain notes"
+        );
         assert_eq!(
             enhanced_notes_markdown(r#"{"status":"running"}"#),
             r#"{"status":"running"}"#

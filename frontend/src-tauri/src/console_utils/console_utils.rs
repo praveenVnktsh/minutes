@@ -1,9 +1,9 @@
 #[cfg(target_os = "windows")]
-use std::ptr;
-#[cfg(target_os = "windows")]
 use env_logger;
 #[cfg(target_os = "macos")]
 use std::process::Command;
+#[cfg(target_os = "windows")]
+use std::ptr;
 
 #[cfg(target_os = "windows")]
 #[link(name = "kernel32")]
@@ -28,7 +28,10 @@ const SW_SHOW: i32 = 5;
 fn current_process_name() -> String {
     std::env::current_exe()
         .ok()
-        .and_then(|path| path.file_stem().map(|stem| stem.to_string_lossy().into_owned()))
+        .and_then(|path| {
+            path.file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+        })
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| "minutes".to_string())
 }
@@ -52,7 +55,7 @@ pub fn show_console() -> Result<String, String> {
         }
         Ok("Console shown".to_string())
     }
-    
+
     #[cfg(target_os = "macos")]
     {
         // On macOS, we'll open Terminal.app with our app's logs
@@ -67,16 +70,12 @@ pub fn show_console() -> Result<String, String> {
             process_name
         );
 
-        match Command::new("osascript")
-            .arg("-e")
-            .arg(script)
-            .spawn()
-        {
+        match Command::new("osascript").arg("-e").arg(script).spawn() {
             Ok(_) => Ok("Console opened in Terminal".to_string()),
             Err(e) => Err(format!("Failed to open console: {}", e)),
         }
     }
-    
+
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         Ok("Console control is only available on Windows and macOS".to_string())
@@ -95,7 +94,7 @@ pub fn hide_console() -> Result<String, String> {
             Err("No console window found".to_string())
         }
     }
-    
+
     #[cfg(target_os = "macos")]
     {
         // On macOS, we'll close the Terminal window that's showing our logs
@@ -114,16 +113,12 @@ pub fn hide_console() -> Result<String, String> {
             process_name
         );
 
-        match Command::new("osascript")
-            .arg("-e")
-            .arg(script)
-            .spawn()
-        {
+        match Command::new("osascript").arg("-e").arg(script).spawn() {
             Ok(_) => Ok("Console closed".to_string()),
             Err(e) => Err(format!("Failed to close console: {}", e)),
         }
     }
-    
+
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         Ok("Console control is only available on Windows and macOS".to_string())
@@ -143,7 +138,7 @@ pub fn toggle_console() -> Result<String, String> {
             hide_console()
         }
     }
-    
+
     #[cfg(target_os = "macos")]
     {
         // On macOS, check if Terminal is running with our log stream
@@ -163,11 +158,8 @@ pub fn toggle_console() -> Result<String, String> {
             process_name
         );
 
-        let check_result = Command::new("osascript")
-            .arg("-e")
-            .arg(script)
-            .output();
-            
+        let check_result = Command::new("osascript").arg("-e").arg(script).output();
+
         match check_result {
             Ok(output) => {
                 let output_str = String::from_utf8_lossy(&output.stdout);
@@ -177,10 +169,10 @@ pub fn toggle_console() -> Result<String, String> {
                     show_console()
                 }
             }
-            Err(_) => show_console()
+            Err(_) => show_console(),
         }
     }
-    
+
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         Ok("Console control is only available on Windows and macOS".to_string())

@@ -102,12 +102,18 @@ mod tests {
 
     #[test]
     fn recognizes_known_meeting_apps() {
-        assert_eq!(detect_meeting_app(&apps(&["zoom.us"])).as_deref(), Some("Zoom"));
+        assert_eq!(
+            detect_meeting_app(&apps(&["zoom.us"])).as_deref(),
+            Some("Zoom")
+        );
         assert_eq!(
             detect_meeting_app(&apps(&["Microsoft Teams (work or school)"])).as_deref(),
             Some("Microsoft Teams")
         );
-        assert_eq!(detect_meeting_app(&apps(&["WhatsApp"])).as_deref(), Some("WhatsApp"));
+        assert_eq!(
+            detect_meeting_app(&apps(&["WhatsApp"])).as_deref(),
+            Some("WhatsApp")
+        );
     }
 
     #[test]

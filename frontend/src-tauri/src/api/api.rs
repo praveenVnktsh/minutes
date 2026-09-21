@@ -133,9 +133,7 @@ fn model_config_from_setting(setting: Setting) -> ModelConfig {
         ollama_endpoint: setting.ollama_endpoint,
         custom_openai_endpoint: custom.as_ref().map(|value| value.endpoint.clone()),
         custom_openai_model: custom.as_ref().map(|value| value.model.clone()),
-        custom_openai_api_key: custom
-            .as_ref()
-            .and_then(|value| value.api_key.clone()),
+        custom_openai_api_key: custom.as_ref().and_then(|value| value.api_key.clone()),
         max_tokens: custom.as_ref().and_then(|value| value.max_tokens),
         temperature: custom.as_ref().and_then(|value| value.temperature),
         top_p: custom.as_ref().and_then(|value| value.top_p),
@@ -469,7 +467,11 @@ pub async fn save_text_export<R: Runtime>(
         })
         .collect();
     let sanitized = sanitized.trim();
-    let sanitized = if sanitized.is_empty() { "meeting-export.md" } else { sanitized };
+    let sanitized = if sanitized.is_empty() {
+        "meeting-export.md"
+    } else {
+        sanitized
+    };
 
     let path = dir.join(sanitized);
     std::fs::write(&path, contents).map_err(|e| e.to_string())?;
@@ -1544,8 +1546,14 @@ async fn repo_has_issues(base: &str, repo: &str) -> Result<bool, String> {
 
     // GitHub answers 403 to a request without a User-Agent.
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(FEEDBACK_PREFLIGHT_TIMEOUT_SECS))
-        .user_agent(concat!("Minutes/", env!("CARGO_PKG_VERSION"), " (feedback)"))
+        .timeout(std::time::Duration::from_secs(
+            FEEDBACK_PREFLIGHT_TIMEOUT_SECS,
+        ))
+        .user_agent(concat!(
+            "Minutes/",
+            env!("CARGO_PKG_VERSION"),
+            " (feedback)"
+        ))
         .build()
         .map_err(|error| format!("Failed to create HTTP client: {error}"))?;
 
@@ -1855,7 +1863,10 @@ pub async fn api_test_custom_openai_connection<R: Runtime>(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_browser_url_allowed, is_feedback_repo_allowed, model_config_from_setting, repo_has_issues};
+    use super::{
+        is_browser_url_allowed, is_feedback_repo_allowed, model_config_from_setting,
+        repo_has_issues,
+    };
     use crate::database::models::Setting;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -1929,41 +1940,58 @@ mod tests {
     async fn reports_a_closed_issue_tracker() {
         let (base, server) = github_stub("200 OK", r#"{"has_issues": false}"#).await;
 
-        assert_eq!(repo_has_issues(&base, "praveenvnktsh/minutes").await, Ok(false));
+        assert_eq!(
+            repo_has_issues(&base, "praveenvnktsh/minutes").await,
+            Ok(false)
+        );
 
         let request = server.await.unwrap();
         assert!(request.starts_with("GET /repos/praveenvnktsh/minutes "));
         // GitHub answers 403 without one.
-        assert!(request.to_ascii_lowercase().contains("user-agent: minutes/"));
+        assert!(request
+            .to_ascii_lowercase()
+            .contains("user-agent: minutes/"));
     }
 
     #[tokio::test]
     async fn reports_an_open_issue_tracker() {
         let (base, server) = github_stub("200 OK", r#"{"has_issues": true}"#).await;
 
-        assert_eq!(repo_has_issues(&base, "praveenvnktsh/minutes").await, Ok(true));
+        assert_eq!(
+            repo_has_issues(&base, "praveenvnktsh/minutes").await,
+            Ok(true)
+        );
         server.await.unwrap();
     }
 
     #[tokio::test]
     async fn errors_rather_than_guessing_when_github_will_not_say() {
-        let (rate_limited, server) = github_stub("403 Forbidden", r#"{"message": "rate limit"}"#).await;
-        assert!(repo_has_issues(&rate_limited, "praveenvnktsh/minutes").await.is_err());
+        let (rate_limited, server) =
+            github_stub("403 Forbidden", r#"{"message": "rate limit"}"#).await;
+        assert!(repo_has_issues(&rate_limited, "praveenvnktsh/minutes")
+            .await
+            .is_err());
         server.await.unwrap();
 
         let (malformed, server) = github_stub("200 OK", "not json").await;
-        assert!(repo_has_issues(&malformed, "praveenvnktsh/minutes").await.is_err());
+        assert!(repo_has_issues(&malformed, "praveenvnktsh/minutes")
+            .await
+            .is_err());
         server.await.unwrap();
 
         let (silent, server) = github_stub("200 OK", r#"{"name": "minutes"}"#).await;
-        assert!(repo_has_issues(&silent, "praveenvnktsh/minutes").await.is_err());
+        assert!(repo_has_issues(&silent, "praveenvnktsh/minutes")
+            .await
+            .is_err());
         server.await.unwrap();
     }
 
     #[tokio::test]
     async fn refuses_a_repository_slug_it_cannot_put_in_a_path() {
         // Never reaches the network: an unusable slug is refused outright.
-        assert!(repo_has_issues("http://127.0.0.1:1", "../../search").await.is_err());
+        assert!(repo_has_issues("http://127.0.0.1:1", "../../search")
+            .await
+            .is_err());
     }
 
     #[test]
@@ -1985,10 +2013,10 @@ mod tests {
     fn refuses_other_schemes_and_shell_characters() {
         assert!(!is_browser_url_allowed("file:///etc/passwd"));
         assert!(!is_browser_url_allowed("javascript:alert(1)"));
+        assert!(!is_browser_url_allowed("https://example.com/\" --flag"));
         assert!(!is_browser_url_allowed(
-            "https://example.com/\" --flag"
+            "https://example.com/\nhttps://evil"
         ));
-        assert!(!is_browser_url_allowed("https://example.com/\nhttps://evil"));
         assert!(!is_browser_url_allowed("  https://example.com"));
         assert!(!is_browser_url_allowed(""));
     }

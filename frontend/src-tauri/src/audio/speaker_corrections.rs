@@ -167,12 +167,14 @@ pub async fn get_speaker_identities(
 
     let mut result: Vec<_> = counts
         .into_iter()
-        .map(|(speaker_id, (display_name, segment_count))| SpeakerIdentity {
-            samples: samples.remove(&speaker_id).unwrap_or_default(),
-            speaker_id,
-            display_name,
-            segment_count,
-        })
+        .map(
+            |(speaker_id, (display_name, segment_count))| SpeakerIdentity {
+                samples: samples.remove(&speaker_id).unwrap_or_default(),
+                speaker_id,
+                display_name,
+                segment_count,
+            },
+        )
         .collect();
     result.sort_by(|left, right| left.speaker_id.cmp(&right.speaker_id));
     Ok(result)

@@ -213,14 +213,10 @@ impl TranscriptDeduper {
         self.timeline_head = self.timeline_head.max(end);
         self.evict_stale();
 
-        if let Some(previous) = self
-            .history
-            .iter()
-            .find(|entry| {
-                entry.normalized_text == normalized
-                    && covers_same_speech(entry.start, entry.end, start, end)
-            })
-        {
+        if let Some(previous) = self.history.iter().find(|entry| {
+            entry.normalized_text == normalized
+                && covers_same_speech(entry.start, entry.end, start, end)
+        }) {
             let verdict = DedupVerdict::Duplicate {
                 previous_start: previous.start,
                 previous_end: previous.end,
@@ -321,7 +317,10 @@ mod tests {
         // The bug: one utterance reaches both capture paths over the same
         // aligned windows, so both VADs emit it on the same timeline.
         let mut d = deduper();
-        assert_eq!(d.check_and_record("Let's get started", 10.0, 12.5), DedupVerdict::Emit);
+        assert_eq!(
+            d.check_and_record("Let's get started", 10.0, 12.5),
+            DedupVerdict::Emit
+        );
 
         let verdict = d.check_and_record("Let's get started", 10.0, 12.5);
         assert!(verdict.is_duplicate());
@@ -338,7 +337,10 @@ mod tests {
     #[test]
     fn same_text_at_a_later_window_still_emits() {
         let mut d = deduper();
-        assert_eq!(d.check_and_record("sounds good", 5.0, 6.0), DedupVerdict::Emit);
+        assert_eq!(
+            d.check_and_record("sounds good", 5.0, 6.0),
+            DedupVerdict::Emit
+        );
         assert_eq!(
             d.check_and_record("sounds good", 20.0, 21.0),
             DedupVerdict::Emit,
@@ -350,23 +352,41 @@ mod tests {
     #[test]
     fn case_and_edge_punctuation_differences_collapse() {
         let mut d = deduper();
-        assert_eq!(d.check_and_record("Okay, let's start.", 1.0, 3.0), DedupVerdict::Emit);
-        assert!(d.check_and_record("  okay, LET'S START  ", 1.2, 3.1).is_duplicate());
-        assert!(d.check_and_record("...Okay, let's start!", 1.0, 3.0).is_duplicate());
+        assert_eq!(
+            d.check_and_record("Okay, let's start.", 1.0, 3.0),
+            DedupVerdict::Emit
+        );
+        assert!(d
+            .check_and_record("  okay, LET'S START  ", 1.2, 3.1)
+            .is_duplicate());
+        assert!(d
+            .check_and_record("...Okay, let's start!", 1.0, 3.0)
+            .is_duplicate());
     }
 
     #[test]
     fn collapses_internal_whitespace_runs() {
         let mut d = deduper();
-        assert_eq!(d.check_and_record("one two three", 0.0, 2.0), DedupVerdict::Emit);
-        assert!(d.check_and_record("one\t two\n\nthree", 0.5, 2.5).is_duplicate());
+        assert_eq!(
+            d.check_and_record("one two three", 0.0, 2.0),
+            DedupVerdict::Emit
+        );
+        assert!(d
+            .check_and_record("one\t two\n\nthree", 0.5, 2.5)
+            .is_duplicate());
     }
 
     #[test]
     fn different_text_in_the_same_window_both_emit() {
         let mut d = deduper();
-        assert_eq!(d.check_and_record("hello there", 4.0, 6.0), DedupVerdict::Emit);
-        assert_eq!(d.check_and_record("general kenobi", 4.0, 6.0), DedupVerdict::Emit);
+        assert_eq!(
+            d.check_and_record("hello there", 4.0, 6.0),
+            DedupVerdict::Emit
+        );
+        assert_eq!(
+            d.check_and_record("general kenobi", 4.0, 6.0),
+            DedupVerdict::Emit
+        );
     }
 
     #[test]
@@ -374,9 +394,13 @@ mod tests {
         // The two sources disagree slightly about where the utterance began and
         // ended, but the windows still cover the same speech.
         let mut d = deduper();
-        assert_eq!(d.check_and_record("same words here", 10.0, 14.0), DedupVerdict::Emit);
+        assert_eq!(
+            d.check_and_record("same words here", 10.0, 14.0),
+            DedupVerdict::Emit
+        );
         assert!(
-            d.check_and_record("same words here", 10.4, 14.3).is_duplicate(),
+            d.check_and_record("same words here", 10.4, 14.3)
+                .is_duplicate(),
             "3.6s of a 3.9s window is the same speech heard twice"
         );
     }
@@ -420,9 +444,13 @@ mod tests {
         // lands on essentially the same span even when the two probability
         // traces trip a chunk or two apart (30ms VAD chunks).
         let mut d = deduper();
-        assert_eq!(d.check_and_record("can everyone hear me", 20.0, 22.4), DedupVerdict::Emit);
+        assert_eq!(
+            d.check_and_record("can everyone hear me", 20.0, 22.4),
+            DedupVerdict::Emit
+        );
         assert!(
-            d.check_and_record("can everyone hear me", 20.06, 22.46).is_duplicate(),
+            d.check_and_record("can everyone hear me", 20.06, 22.46)
+                .is_duplicate(),
             "60ms of jitter between sources is still one utterance"
         );
     }
@@ -430,14 +458,22 @@ mod tests {
     #[test]
     fn containment_counts_as_overlap() {
         let mut d = deduper();
-        assert_eq!(d.check_and_record("same words here", 10.0, 20.0), DedupVerdict::Emit);
-        assert!(d.check_and_record("same words here", 12.0, 13.0).is_duplicate());
+        assert_eq!(
+            d.check_and_record("same words here", 10.0, 20.0),
+            DedupVerdict::Emit
+        );
+        assert!(d
+            .check_and_record("same words here", 12.0, 13.0)
+            .is_duplicate());
     }
 
     #[test]
     fn touching_windows_do_not_overlap() {
         let mut d = deduper();
-        assert_eq!(d.check_and_record("next slide", 8.0, 10.0), DedupVerdict::Emit);
+        assert_eq!(
+            d.check_and_record("next slide", 8.0, 10.0),
+            DedupVerdict::Emit
+        );
         assert_eq!(
             d.check_and_record("next slide", 10.0, 12.0),
             DedupVerdict::Emit,
@@ -508,7 +544,11 @@ mod tests {
             );
         }
         // Only the last 30s of timeline survives: ~15 two-second slots.
-        assert!(d.len() <= 16, "expected the horizon to prune, got {}", d.len());
+        assert!(
+            d.len() <= 16,
+            "expected the horizon to prune, got {}",
+            d.len()
+        );
     }
 
     #[test]
@@ -528,20 +568,33 @@ mod tests {
     #[test]
     fn stale_entries_stop_matching_once_evicted() {
         let mut d = deduper();
-        assert_eq!(d.check_and_record("long gone", 0.0, 1.0), DedupVerdict::Emit);
+        assert_eq!(
+            d.check_and_record("long gone", 0.0, 1.0),
+            DedupVerdict::Emit
+        );
         // Push the timeline head well past the horizon.
-        assert_eq!(d.check_and_record("much later", 100.0, 101.0), DedupVerdict::Emit);
+        assert_eq!(
+            d.check_and_record("much later", 100.0, 101.0),
+            DedupVerdict::Emit
+        );
         assert_eq!(d.len(), 1, "the stale entry should have been evicted");
     }
 
     #[test]
     fn late_arriving_segment_does_not_prune_newer_history() {
         let mut d = deduper();
-        assert_eq!(d.check_and_record("recent words", 50.0, 52.0), DedupVerdict::Emit);
+        assert_eq!(
+            d.check_and_record("recent words", 50.0, 52.0),
+            DedupVerdict::Emit
+        );
         // A worker finishing out of order reports an older window.
-        assert_eq!(d.check_and_record("older words", 40.0, 41.0), DedupVerdict::Emit);
+        assert_eq!(
+            d.check_and_record("older words", 40.0, 41.0),
+            DedupVerdict::Emit
+        );
         assert!(
-            d.check_and_record("recent words", 51.0, 53.0).is_duplicate(),
+            d.check_and_record("recent words", 51.0, 53.0)
+                .is_duplicate(),
             "the newer entry must survive an out-of-order candidate"
         );
     }
@@ -549,7 +602,10 @@ mod tests {
     #[test]
     fn non_finite_and_reversed_windows_are_handled() {
         let mut d = deduper();
-        assert_eq!(d.check_and_record("nan window", f64::NAN, 2.0), DedupVerdict::Emit);
+        assert_eq!(
+            d.check_and_record("nan window", f64::NAN, 2.0),
+            DedupVerdict::Emit
+        );
         assert!(d.is_empty(), "a non-finite window is not recorded");
 
         // A reversed window is normalized, so it still matches its mirror.

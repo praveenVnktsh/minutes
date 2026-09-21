@@ -21,7 +21,10 @@ static SPEECH_DETECTED_EMITTED: AtomicBool = AtomicBool::new(false);
 /// Reset the speech detected flag for a new recording session
 pub fn reset_speech_detected_flag() {
     SPEECH_DETECTED_EMITTED.store(false, Ordering::SeqCst);
-    info!("🔍 SPEECH_DETECTED_EMITTED reset to: {}", SPEECH_DETECTED_EMITTED.load(Ordering::SeqCst));
+    info!(
+        "🔍 SPEECH_DETECTED_EMITTED reset to: {}",
+        SPEECH_DETECTED_EMITTED.load(Ordering::SeqCst)
+    );
 }
 
 /// Returns true if the transcript text is non-trivial and should be emitted.
@@ -81,7 +84,7 @@ pub struct TranscriptUpdate {
     // NEW: Recording-relative timestamps for playback sync
     pub audio_start_time: f64, // Seconds from recording start (e.g., 125.3)
     pub audio_end_time: f64,   // Seconds from recording start (e.g., 128.6)
-    pub duration: f64,          // Segment duration in seconds (e.g., 3.3)
+    pub duration: f64,         // Segment duration in seconds (e.g., 3.3)
 }
 
 // NOTE: get_transcript_history and get_recording_meeting_name functions
@@ -96,7 +99,8 @@ pub fn start_transcription_task<R: Runtime>(
         info!("🚀 Starting optimized parallel transcription task - guaranteeing zero chunk loss");
 
         // Initialize transcription engine (Whisper or Parakeet based on config)
-        let transcription_engine = match super::engine::get_or_init_transcription_engine(&app).await {
+        let transcription_engine = match super::engine::get_or_init_transcription_engine(&app).await
+        {
             Ok(engine) => engine,
             Err(e) => {
                 error!("Failed to initialize transcription engine: {}", e);
@@ -130,7 +134,11 @@ pub fn start_transcription_task<R: Runtime>(
         // across an `.await` that transcribes.
         let deduper = Arc::new(tokio::sync::Mutex::new(TranscriptDeduper::new()));
 
-        info!("📊 Starting {} transcription worker{} (serial mode for ordered emission)", NUM_WORKERS, if NUM_WORKERS == 1 { "" } else { "s" });
+        info!(
+            "📊 Starting {} transcription worker{} (serial mode for ordered emission)",
+            NUM_WORKERS,
+            if NUM_WORKERS == 1 { "" } else { "s" }
+        );
 
         // Spawn worker tasks
         let mut worker_handles = Vec::new();
@@ -165,7 +173,10 @@ pub fn start_transcription_task<R: Runtime>(
                         worker_id, engine_name, current_model
                     );
                 } else {
-                    warn!("⚠️ Worker {} pre-validation: {} model not loaded - chunks may be skipped", worker_id, engine_name);
+                    warn!(
+                        "⚠️ Worker {} pre-validation: {} model not loaded - chunks may be skipped",
+                        worker_id, engine_name
+                    );
                 }
 
                 loop {
@@ -203,12 +214,8 @@ pub fn start_transcription_task<R: Runtime>(
                             let source = source_label(&chunk.device_type);
 
                             // Transcribe with provider-agnostic approach
-                            match transcribe_chunk_with_provider(
-                                &engine_clone,
-                                chunk,
-                                &app_clone,
-                            )
-                            .await
+                            match transcribe_chunk_with_provider(&engine_clone, chunk, &app_clone)
+                                .await
                             {
                                 Ok((transcript, confidence_opt, is_partial)) => {
                                     let confidence_str = match confidence_opt {
@@ -233,7 +240,8 @@ pub fn start_transcription_task<R: Runtime>(
                                         // silence), so suppressing this latch on a duplicate would regress the
                                         // UX whenever the very first utterance of a session happens to arrive
                                         // twice.
-                                        let current_flag = SPEECH_DETECTED_EMITTED.load(Ordering::SeqCst);
+                                        let current_flag =
+                                            SPEECH_DETECTED_EMITTED.load(Ordering::SeqCst);
                                         info!("🔍 Checking speech-detected flag: current={}, will_emit={}", current_flag, !current_flag);
 
                                         if !current_flag {
@@ -298,7 +306,8 @@ pub fn start_transcription_task<R: Runtime>(
                                                 duration: chunk_duration,
                                             };
 
-                                            if let Err(e) = app_clone.emit("transcript-update", &update)
+                                            if let Err(e) =
+                                                app_clone.emit("transcript-update", &update)
                                             {
                                                 error!(
                                                     "Worker {}: Failed to emit transcript update: {}",
@@ -323,13 +332,20 @@ pub fn start_transcription_task<R: Runtime>(
                                             continue;
                                         }
                                         TranscriptionError::ModelNotLoaded => {
-                                            warn!("Worker {}: Model unloaded during transcription", worker_id);
+                                            warn!(
+                                                "Worker {}: Model unloaded during transcription",
+                                                worker_id
+                                            );
                                             chunks_completed_clone.fetch_add(1, Ordering::SeqCst);
                                             continue;
                                         }
                                         _ => {
-                                            warn!("Worker {}: Transcription failed: {}", worker_id, e);
-                                            let _ = app_clone.emit("transcription-warning", e.to_string());
+                                            warn!(
+                                                "Worker {}: Transcription failed: {}",
+                                                worker_id, e
+                                            );
+                                            let _ = app_clone
+                                                .emit("transcription-warning", e.to_string());
                                         }
                                     }
                                 }
@@ -674,132 +690,147 @@ fn format_recording_time(seconds: f64) -> String {
     let secs = total_seconds % 60;
 
     format!("[{:02}:{:02}]", minutes, secs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keeps_short_acknowledgements() {
+        assert!(should_emit_transcript("Yes"));
+        assert!(should_emit_transcript("ok"));
     }
 
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        #[test]
-        fn keeps_short_acknowledgements() {
-            assert!(should_emit_transcript("Yes"));
-            assert!(should_emit_transcript("ok"));
-        }
-
-        #[test]
-        fn drops_empty_and_whitespace_only() {
-            assert!(!should_emit_transcript(""));
-            assert!(!should_emit_transcript("   "));
-        }
-
-        #[test]
-        fn labels_capture_sources_for_first_layer_diarization() {
-            assert_eq!(source_label(&RecordingDeviceType::Microphone), "mic");
-            assert_eq!(source_label(&RecordingDeviceType::System), "system");
-        }
-
-        #[test]
-        fn first_candidate_is_emitted_with_a_sequence_id() {
-            let mut deduper = TranscriptDeduper::new();
-            let counter = AtomicU64::new(0);
-
-            let id = next_sequence_id_if_not_duplicate(
-                &mut deduper,
-                &counter,
-                "let's get started",
-                "mic",
-                10.0,
-                12.5,
-            );
-
-            assert_eq!(id, Some(0));
-        }
-
-        #[test]
-        fn mic_and_system_echo_of_the_same_speech_is_skipped() {
-            // The PRA-468 bug: mic and system VADs both see the same utterance
-            // over the same aligned window and each hands the worker its own
-            // segment. The second one must be skipped, not given a sequence id.
-            let mut deduper = TranscriptDeduper::new();
-            let counter = AtomicU64::new(0);
-
-            let mic_id = next_sequence_id_if_not_duplicate(
-                &mut deduper,
-                &counter,
-                "let's get started",
-                "mic",
-                10.0,
-                12.5,
-            );
-            let system_id = next_sequence_id_if_not_duplicate(
-                &mut deduper,
-                &counter,
-                "let's get started",
-                "system",
-                10.0,
-                12.5,
-            );
-
-            assert_eq!(mic_id, Some(0));
-            assert_eq!(system_id, None, "the overlapping echo must not be emitted");
-            assert_eq!(
-                counter.load(Ordering::SeqCst),
-                1,
-                "a skipped duplicate must not consume a sequence id"
-            );
-        }
-
-        #[test]
-        fn identical_text_at_a_later_non_overlapping_window_still_emits() {
-            // A phrase genuinely repeated later in the meeting is not a
-            // duplicate - only overlapping windows are.
-            let mut deduper = TranscriptDeduper::new();
-            let counter = AtomicU64::new(0);
-
-            let first = next_sequence_id_if_not_duplicate(
-                &mut deduper, &counter, "sounds good", "mic", 5.0, 6.0,
-            );
-            let second = next_sequence_id_if_not_duplicate(
-                &mut deduper, &counter, "sounds good", "mic", 20.0, 21.0,
-            );
-
-            assert_eq!(first, Some(0));
-            assert_eq!(second, Some(1));
-        }
-
-        #[test]
-        fn different_text_over_the_same_window_both_emit() {
-            let mut deduper = TranscriptDeduper::new();
-            let counter = AtomicU64::new(0);
-
-            let mic = next_sequence_id_if_not_duplicate(
-                &mut deduper, &counter, "hello there", "mic", 4.0, 6.0,
-            );
-            let system = next_sequence_id_if_not_duplicate(
-                &mut deduper, &counter, "general kenobi", "system", 4.0, 6.0,
-            );
-
-            assert_eq!(mic, Some(0));
-            assert_eq!(system, Some(1));
-        }
-
-        #[test]
-        fn sequence_ids_are_not_reused_after_a_skip() {
-            let mut deduper = TranscriptDeduper::new();
-            let counter = AtomicU64::new(0);
-
-            let a = next_sequence_id_if_not_duplicate(
-                &mut deduper, &counter, "one", "mic", 0.0, 1.0,
-            );
-            let dup = next_sequence_id_if_not_duplicate(
-                &mut deduper, &counter, "one", "system", 0.0, 1.0,
-            );
-            let b = next_sequence_id_if_not_duplicate(
-                &mut deduper, &counter, "two", "mic", 2.0, 3.0,
-            );
-
-            assert_eq!(a, Some(0));
-            assert_eq!(dup, None);
-            assert_eq!(b, Some(1), "the next real segment must not skip ahead to 2");
-        }
+    #[test]
+    fn drops_empty_and_whitespace_only() {
+        assert!(!should_emit_transcript(""));
+        assert!(!should_emit_transcript("   "));
     }
+
+    #[test]
+    fn labels_capture_sources_for_first_layer_diarization() {
+        assert_eq!(source_label(&RecordingDeviceType::Microphone), "mic");
+        assert_eq!(source_label(&RecordingDeviceType::System), "system");
+    }
+
+    #[test]
+    fn first_candidate_is_emitted_with_a_sequence_id() {
+        let mut deduper = TranscriptDeduper::new();
+        let counter = AtomicU64::new(0);
+
+        let id = next_sequence_id_if_not_duplicate(
+            &mut deduper,
+            &counter,
+            "let's get started",
+            "mic",
+            10.0,
+            12.5,
+        );
+
+        assert_eq!(id, Some(0));
+    }
+
+    #[test]
+    fn mic_and_system_echo_of_the_same_speech_is_skipped() {
+        // The PRA-468 bug: mic and system VADs both see the same utterance
+        // over the same aligned window and each hands the worker its own
+        // segment. The second one must be skipped, not given a sequence id.
+        let mut deduper = TranscriptDeduper::new();
+        let counter = AtomicU64::new(0);
+
+        let mic_id = next_sequence_id_if_not_duplicate(
+            &mut deduper,
+            &counter,
+            "let's get started",
+            "mic",
+            10.0,
+            12.5,
+        );
+        let system_id = next_sequence_id_if_not_duplicate(
+            &mut deduper,
+            &counter,
+            "let's get started",
+            "system",
+            10.0,
+            12.5,
+        );
+
+        assert_eq!(mic_id, Some(0));
+        assert_eq!(system_id, None, "the overlapping echo must not be emitted");
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "a skipped duplicate must not consume a sequence id"
+        );
+    }
+
+    #[test]
+    fn identical_text_at_a_later_non_overlapping_window_still_emits() {
+        // A phrase genuinely repeated later in the meeting is not a
+        // duplicate - only overlapping windows are.
+        let mut deduper = TranscriptDeduper::new();
+        let counter = AtomicU64::new(0);
+
+        let first = next_sequence_id_if_not_duplicate(
+            &mut deduper,
+            &counter,
+            "sounds good",
+            "mic",
+            5.0,
+            6.0,
+        );
+        let second = next_sequence_id_if_not_duplicate(
+            &mut deduper,
+            &counter,
+            "sounds good",
+            "mic",
+            20.0,
+            21.0,
+        );
+
+        assert_eq!(first, Some(0));
+        assert_eq!(second, Some(1));
+    }
+
+    #[test]
+    fn different_text_over_the_same_window_both_emit() {
+        let mut deduper = TranscriptDeduper::new();
+        let counter = AtomicU64::new(0);
+
+        let mic = next_sequence_id_if_not_duplicate(
+            &mut deduper,
+            &counter,
+            "hello there",
+            "mic",
+            4.0,
+            6.0,
+        );
+        let system = next_sequence_id_if_not_duplicate(
+            &mut deduper,
+            &counter,
+            "general kenobi",
+            "system",
+            4.0,
+            6.0,
+        );
+
+        assert_eq!(mic, Some(0));
+        assert_eq!(system, Some(1));
+    }
+
+    #[test]
+    fn sequence_ids_are_not_reused_after_a_skip() {
+        let mut deduper = TranscriptDeduper::new();
+        let counter = AtomicU64::new(0);
+
+        let a = next_sequence_id_if_not_duplicate(&mut deduper, &counter, "one", "mic", 0.0, 1.0);
+        let dup =
+            next_sequence_id_if_not_duplicate(&mut deduper, &counter, "one", "system", 0.0, 1.0);
+        let b = next_sequence_id_if_not_duplicate(&mut deduper, &counter, "two", "mic", 2.0, 3.0);
+
+        assert_eq!(a, Some(0));
+        assert_eq!(dup, None);
+        assert_eq!(b, Some(1), "the next real segment must not skip ahead to 2");
+    }
+}

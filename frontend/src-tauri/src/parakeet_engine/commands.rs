@@ -13,7 +13,9 @@ static MODELS_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
 /// Initialize the models directory path using app_data_dir
 /// This should be called during app setup before parakeet_init
 pub fn set_models_directory<R: Runtime>(app: &AppHandle<R>) {
-    let app_data_dir = app.path().app_data_dir()
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
         .expect("Failed to get app data dir");
 
     let models_dir = app_data_dir.join("models");
@@ -71,7 +73,7 @@ pub async fn parakeet_get_available_models() -> Result<Vec<ModelInfo>, String> {
 #[command]
 pub async fn parakeet_load_model<R: Runtime>(
     app_handle: AppHandle<R>,
-    model_name: String
+    model_name: String,
 ) -> Result<(), String> {
     let engine = {
         let guard = PARAKEET_ENGINE.lock().unwrap();
@@ -102,7 +104,10 @@ pub async fn parakeet_load_model<R: Runtime>(
                     "modelName": model_name
                 }),
             ) {
-                log::error!("Failed to emit parakeet-model-loading-completed event: {}", e);
+                log::error!(
+                    "Failed to emit parakeet-model-loading-completed event: {}",
+                    e
+                );
             }
         } else if let Err(ref error) = result {
             if let Err(e) = app_handle.emit(
@@ -209,7 +214,8 @@ pub async fn parakeet_validate_model_ready() -> Result<String, String> {
         }
 
         // Try to load the first available model (prefer int8 for speed)
-        let first_model = available_models.iter()
+        let first_model = available_models
+            .iter()
             .find(|m| m.quantization == crate::parakeet_engine::QuantizationType::Int8)
             .or_else(|| available_models.first())
             .unwrap();
@@ -304,7 +310,10 @@ pub async fn parakeet_validate_model_ready_with_config<R: tauri::Runtime>(
         let model_name = if let Some(configured_model) = model_to_load {
             // Check if configured model is available
             if available_models.iter().any(|m| m.name == configured_model) {
-                log::info!("Loading user's configured Parakeet model: {}", configured_model);
+                log::info!(
+                    "Loading user's configured Parakeet model: {}",
+                    configured_model
+                );
                 configured_model
             } else {
                 log::warn!(
@@ -393,8 +402,11 @@ pub async fn parakeet_download_model<R: Runtime>(
         let progress_callback = Box::new(move |progress: DownloadProgress| {
             log::info!(
                 "Parakeet download progress for {}: {:.1} MB / {:.1} MB ({:.1} MB/s) - {}%",
-                model_name_clone, progress.downloaded_mb, progress.total_mb,
-                progress.speed_mbps, progress.percent
+                model_name_clone,
+                progress.downloaded_mb,
+                progress.total_mb,
+                progress.speed_mbps,
+                progress.percent
             );
 
             // Emit download progress event with detailed info
@@ -453,10 +465,7 @@ pub async fn parakeet_download_model<R: Runtime>(
                         "status": "cancelled"
                     }),
                 ) {
-                    log::error!(
-                        "Failed to emit Parakeet cancellation event: {}",
-                        emit_error
-                    );
+                    log::error!("Failed to emit Parakeet cancellation event: {}", emit_error);
                 }
                 log::info!("Parakeet download cancelled: {}", model_name);
                 Ok(())
@@ -469,7 +478,10 @@ pub async fn parakeet_download_model<R: Runtime>(
                         "error": error.to_string()
                     }),
                 ) {
-                    log::error!("Failed to emit parakeet download error event: {}", emit_error);
+                    log::error!(
+                        "Failed to emit parakeet download error event: {}",
+                        emit_error
+                    );
                 }
                 Err(format!("Failed to download Parakeet model: {}", error))
             }
@@ -480,9 +492,7 @@ pub async fn parakeet_download_model<R: Runtime>(
 }
 
 #[command]
-pub async fn parakeet_cancel_download(
-    model_name: String,
-) -> Result<CancelDownloadOutcome, String> {
+pub async fn parakeet_cancel_download(model_name: String) -> Result<CancelDownloadOutcome, String> {
     let engine = {
         let guard = PARAKEET_ENGINE.lock().unwrap();
         guard.as_ref().cloned()

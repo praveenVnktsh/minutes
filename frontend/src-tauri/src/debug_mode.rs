@@ -64,10 +64,11 @@ pub async fn get_debug_info<R: Runtime>(
         .fetch_one(pool)
         .await
         .map_err(|e| e.to_string())?;
-    let debug_meetings: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM meetings WHERE is_debug = 1")
-        .fetch_one(pool)
-        .await
-        .map_err(|e| e.to_string())?;
+    let debug_meetings: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM meetings WHERE is_debug = 1")
+            .fetch_one(pool)
+            .await
+            .map_err(|e| e.to_string())?;
     let transcripts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM transcripts")
         .fetch_one(pool)
         .await
