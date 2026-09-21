@@ -99,6 +99,24 @@ function cleanStopWords(text: string): string {
     return cleanedText.replace(/\s+/g, ' ').trim();
 }
 
+// A row click only scrubs the audio when it was a click and nothing else claimed
+// it: people drag across transcript lines to copy quotes, and the row contains its
+// own controls (the speaker chip, the [MM:SS] clock) that handle their own clicks.
+export function shouldSeekFromRowClick(options: {
+    insideInteractive: boolean;
+    selectedText: string;
+    pointerMoved: boolean;
+}): boolean {
+    if (options.insideInteractive || options.pointerMoved) return false;
+    return options.selectedText.trim().length === 0;
+}
+
+// Pointer travel, in px, past which a click counts as a drag instead.
+const ROW_CLICK_SLOP = 4;
+
+// Controls inside a row that own their own click.
+const INTERACTIVE_SELECTOR = 'button, a, input, textarea, select, [role]';
+
 // Click-to-edit speaker label. Renaming applies to every segment for that
 // speaker; the list lets you re-assign just this line.
 const EditableSpeakerLabel = memo(function EditableSpeakerLabel({
@@ -242,6 +260,46 @@ const TranscriptSegment = memo(function TranscriptSegment({
 }) {
     const displayText = cleanStopWords(text) || (text.trim() === '' ? '[Silence]' : text);
 
+    // Where the pointer went down, so a release far away reads as a drag.
+    const pointerOrigin = useRef<{ x: number; y: number } | null>(null);
+
+    const handleRowPointerDown = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+        pointerOrigin.current = { x: event.clientX, y: event.clientY };
+    }, []);
+
+    const handleRowClick = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+        if (!onSeek) return;
+
+        const origin = pointerOrigin.current;
+        pointerOrigin.current = null;
+
+        // Scoped to the row: `closest` would otherwise keep walking past it and find
+        // whatever container the transcript happens to be rendered inside.
+        const target = event.target as Element | null;
+        const control = typeof target?.closest === 'function' ? target.closest(INTERACTIVE_SELECTOR) : null;
+        const insideInteractive = control !== null && control !== event.currentTarget && event.currentTarget.contains(control);
+
+        const selection =
+            typeof window !== 'undefined' && typeof window.getSelection === 'function'
+                ? window.getSelection()
+                : null;
+
+        const pointerMoved =
+            origin !== null &&
+            (Math.abs(event.clientX - origin.x) > ROW_CLICK_SLOP ||
+                Math.abs(event.clientY - origin.y) > ROW_CLICK_SLOP);
+
+        if (
+            shouldSeekFromRowClick({
+                insideInteractive,
+                selectedText: selection?.toString() ?? '',
+                pointerMoved,
+            })
+        ) {
+            onSeek(timestamp);
+        }
+    }, [onSeek, timestamp]);
+
     const highlightClass = isActiveMatch
         ? 'bg-amber-400/25 ring-1 ring-amber-400/60'
         : isMatch
@@ -278,7 +336,11 @@ const TranscriptSegment = memo(function TranscriptSegment({
             id={`segment-${id}`}
             data-playing={isActive ? 'true' : undefined}
             aria-current={isActive ? 'true' : undefined}
-            className={`mb-3 rounded-lg px-2 -mx-2 transition-colors ${highlightClass}`}
+            data-seekable={onSeek ? 'true' : undefined}
+            title={onSeek ? 'Play from here' : undefined}
+            onPointerDown={onSeek ? handleRowPointerDown : undefined}
+            onClick={onSeek ? handleRowClick : undefined}
+            className={`mb-3 rounded-lg px-2 -mx-2 transition-colors ${highlightClass}${onSeek ? ' cursor-pointer' : ''}`}
         >
             <div className="flex items-start gap-2">
                 <Tooltip>
