@@ -37,12 +37,19 @@ static MODELS_CACHE: RwLock<Option<CacheEntry>> = RwLock::new(None);
 /// Cache TTL in seconds
 const CACHE_TTL_SECS: u64 = 300;
 
-/// Fallback models when API fetch fails (matches frontend hardcoded values)
+/// Fallback models when the API fetch fails, in the order the picker offers
+/// them. The first entry is what a new user gets: summarising a whole meeting
+/// transcript is a long-context job where quality shows, so Sonnet 5 leads and
+/// Haiku 4.5 stays on as the fast, cheap option.
+///
+/// `frontend/src/components/settings/ModelConfigForm.tsx` and
+/// `frontend/src/contexts/ConfigContext.tsx` hold the same list for the case
+/// where this command cannot be reached; keep all three in step.
 const FALLBACK_MODELS: &[(&str, &str)] = &[
-    ("claude-sonnet-4-5-20250929", "Claude 4.5 Sonnet"),
-    ("claude-haiku-4-5-20251001", "Claude 4.5 Haiku"),
-    ("claude-opus-4-1-20250805", "Claude 4.1 Opus"),
-    ("claude-sonnet-4-20250514", "Claude 4 Sonnet"),
+    ("claude-sonnet-5", "Claude Sonnet 5"),
+    ("claude-opus-5", "Claude Opus 5"),
+    ("claude-fable-5-1", "Claude Fable 5.1"),
+    ("claude-haiku-4-5-20251001", "Claude Haiku 4.5"),
 ];
 
 /// Get fallback models as AnthropicModel vec

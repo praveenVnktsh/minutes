@@ -382,8 +382,12 @@ pub(crate) async fn generate_summary(
             system: system_prompt.to_string(),
             model: model_name.to_string(),
             // Shared budget: on models with thinking enabled by default this
-            // covers thinking tokens as well as the answer.
-            max_tokens: 8192,
+            // covers thinking tokens as well as the answer. Every model we
+            // offer now thinks by default, so a meeting-length summary has to
+            // fit in what is left — 8192 truncated it. The request is not
+            // streamed, and a full budget still returns inside
+            // REQUEST_TIMEOUT_DURATION.
+            max_tokens: 16000,
             messages: vec![ChatMessage {
                 role: "user".to_string(),
                 content: user_prompt.to_string(),

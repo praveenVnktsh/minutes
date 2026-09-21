@@ -38,7 +38,9 @@ const PROVIDERS: Array<{ value: ModelProvider; label: string }> = [
 ];
 
 const FALLBACK_MODELS: Partial<Record<ModelProvider, string[]>> = {
-  claude: ['claude-sonnet-4-5-20250929', 'claude-haiku-4-5-20251001', 'claude-3-5-sonnet-latest'],
+  // Mirrors FALLBACK_MODELS in src-tauri/src/anthropic/anthropic.rs. The first
+  // entry is the default a new user lands on when they pick Claude.
+  claude: ['claude-sonnet-5', 'claude-opus-5', 'claude-fable-5-1', 'claude-haiku-4-5-20251001'],
   groq: ['llama-3.3-70b-versatile', 'llama-3.1-70b-versatile', 'mixtral-8x7b-32768'],
   openai: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'gpt-4'],
 };

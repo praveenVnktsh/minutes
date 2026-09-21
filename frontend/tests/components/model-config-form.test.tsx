@@ -37,7 +37,7 @@ const context = {
   isModelConfigSaving: false,
   providerApiKeys: { claude: 'claude-key', groq: 'groq-key', openai: 'openai-key', openrouter: 'router-key' } as ProviderApiKeys,
   modelOptions: {
-    ollama: ['llama3'], claude: ['claude-sonnet-4-5-20250929'], groq: ['llama-3.3-70b-versatile'],
+    ollama: ['llama3'], claude: ['claude-sonnet-5'], groq: ['llama-3.3-70b-versatile'],
     openrouter: [], openai: ['gpt-4o', 'gpt-4o-mini'], 'builtin-ai': [], 'custom-openai': [],
   },
 };
@@ -237,6 +237,20 @@ describe('transactional model configuration form', () => {
     await act(async () => first.resolve([{ name: 'old-model' }]));
     expect(optionValues()).toContain('new-model');
     expect(optionValues()).not.toContain('old-model');
+  });
+
+  test('offers the current Claude models and starts a new user on Sonnet 5', async () => {
+    await renderForm();
+    act(() => renderer.root.findAllByType('select')[0].props.onChange({ target: { value: 'claude' } }));
+    await flush();
+
+    expect(optionValues()).toEqual([
+      'claude-sonnet-5',
+      'claude-opus-5',
+      'claude-fable-5-1',
+      'claude-haiku-4-5-20251001',
+    ]);
+    expect(modelSelect().props.value).toBe('claude-sonnet-5');
   });
 
   test('survives a malformed provider model cache', async () => {
