@@ -211,11 +211,8 @@ fn copy_exact<R: Read, W: Write>(
     destination: &mut W,
     expected_size: u64,
 ) -> Result<(), String> {
-    let copied = std::io::copy(
-        &mut source.by_ref().take(expected_size),
-        destination,
-    )
-    .map_err(|error| format!("failed to copy ONNX Runtime download: {error}"))?;
+    let copied = std::io::copy(&mut source.by_ref().take(expected_size), destination)
+        .map_err(|error| format!("failed to copy ONNX Runtime download: {error}"))?;
     if copied != expected_size {
         return Err(format!(
             "downloaded ONNX Runtime archive has size {copied}, expected {expected_size}"

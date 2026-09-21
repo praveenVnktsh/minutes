@@ -10,14 +10,23 @@ The desktop app's "Send feedback" dialog opens a prefilled GitHub issue on [gith
 
 1. Create a focused branch from `main`.
 2. Make the change and add tests where practical.
-3. Run the relevant frontend and Rust checks.
-4. Open a pull request describing behavior, verification, and user-visible impact.
+3. Run `cargo fmt --all`. The repo uses rustfmt's defaults, so there is no `rustfmt.toml` and format-on-save in your editor produces the same result. PR Check does not enforce this yet, so it is on you.
+4. Run the relevant frontend and Rust checks.
+5. Open a pull request describing behavior, verification, and user-visible impact.
 
 ```bash
 git clone https://github.com/YOUR_USERNAME/minutes.git
 cd minutes
 git switch -c feature/short-description
 ```
+
+Run this once per clone so `git blame` skips the wholesale rustfmt reformatting and keeps naming the person who actually wrote a line:
+
+```bash
+git config blame.ignoreRevsFile .git-blame-ignore-revs
+```
+
+GitHub applies the same file automatically when it renders blame on the web.
 
 Keep unrelated changes separate and never commit API keys, signing keys, recordings, transcripts, model binaries, or other private data.
 

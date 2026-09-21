@@ -1,24 +1,21 @@
 use crate::database::repositories::{
-    meeting::MeetingsRepository,
-    summary::SummaryProcessesRepository, transcript_chunk::TranscriptChunksRepository,
+    meeting::MeetingsRepository, summary::SummaryProcessesRepository,
+    transcript_chunk::TranscriptChunksRepository,
 };
 use crate::state::AppState;
+use crate::summary::language_detection::{detect_summary_language, SummaryLanguageDetection};
 use crate::summary::metadata::{
     read_detected_summary_language_from_metadata, read_summary_language_from_metadata,
     write_detected_summary_language_to_metadata, write_summary_language_to_metadata,
 };
-use crate::summary::language_detection::{
-    detect_summary_language, SummaryLanguageDetection,
-};
 use crate::summary::processor::{clean_llm_markdown_detailed, contains_reasoning_marker};
 use crate::summary::service::SummaryService;
-use log::{error as log_error, info as log_info, warn as log_warn};
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
+use log::{error as log_error, info as log_info, warn as log_warn};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex};
 use tauri::{AppHandle, Runtime};
-
 
 static SUMMARY_START_LOCK: LazyLock<tokio::sync::Mutex<()>> =
     LazyLock::new(|| tokio::sync::Mutex::new(()));
@@ -104,10 +101,12 @@ pub async fn api_save_meeting_summary<R: Runtime>(
         meeting_id
     );
     if !summary_is_renderable(&summary) {
-        return Err("Summary contains no visible content or model reasoning markers and was not saved.".into());
+        return Err(
+            "Summary contains no visible content or model reasoning markers and was not saved."
+                .into(),
+        );
     }
     let pool = state.db_manager.pool();
-
 
     match SummaryProcessesRepository::update_meeting_summary(pool, &meeting_id, &summary).await {
         Ok(true) => {
@@ -189,9 +188,11 @@ pub async fn api_get_meeting_detected_summary_language<R: Runtime>(
     );
 
     match resolve_meeting_folder(state.db_manager.pool(), &meeting_id).await? {
-        MeetingFolderResolution::Folder(folder) => read_detected_summary_language_from_metadata(&folder)
-            .map(MeetingSummaryLanguagePreference::metadata)
-            .map_err(|e| e.to_string()),
+        MeetingFolderResolution::Folder(folder) => {
+            read_detected_summary_language_from_metadata(&folder)
+                .map(MeetingSummaryLanguagePreference::metadata)
+                .map_err(|e| e.to_string())
+        }
         MeetingFolderResolution::NoFolder => Ok(MeetingSummaryLanguagePreference::local_fallback()),
     }
 }
@@ -212,8 +213,11 @@ pub async fn api_save_meeting_detected_summary_language<R: Runtime>(
 
     match resolve_meeting_folder(state.db_manager.pool(), &meeting_id).await? {
         MeetingFolderResolution::Folder(folder) => {
-            write_detected_summary_language_to_metadata(&folder, detected_summary_language.as_deref())
-                .map_err(|e| e.to_string())?;
+            write_detected_summary_language_to_metadata(
+                &folder,
+                detected_summary_language.as_deref(),
+            )
+            .map_err(|e| e.to_string())?;
             read_detected_summary_language_from_metadata(&folder)
                 .map(MeetingSummaryLanguagePreference::metadata)
                 .map_err(|e| e.to_string())
@@ -283,10 +287,10 @@ fn summary_contains_reasoning_marker(value: &serde_json::Value) -> bool {
     match value {
         serde_json::Value::Array(items) => items.iter().any(summary_contains_reasoning_marker),
         serde_json::Value::Object(object) => object.iter().any(|(key, value)| match key.as_str() {
-            "markdown" | "text" | "content" => value
-                .as_str()
-                .is_some_and(contains_reasoning_marker)
-                || value.is_array() && summary_contains_reasoning_marker(value),
+            "markdown" | "text" | "content" => {
+                value.as_str().is_some_and(contains_reasoning_marker)
+                    || value.is_array() && summary_contains_reasoning_marker(value)
+            }
             "summary_json" | "children" => summary_contains_reasoning_marker(value),
             _ => false,
         }),
@@ -306,10 +310,12 @@ fn summary_is_renderable(value: &serde_json::Value) -> bool {
         .and_then(serde_json::Value::as_bool)
         == Some(true)
     {
-        return object
-            .keys()
-            .all(|key| matches!(key.as_str(), "markdown" | "summary_json" | "manually_cleared"))
-            && object.get("markdown").and_then(serde_json::Value::as_str) == Some("")
+        return object.keys().all(|key| {
+            matches!(
+                key.as_str(),
+                "markdown" | "summary_json" | "manually_cleared"
+            )
+        }) && object.get("markdown").and_then(serde_json::Value::as_str) == Some("")
             && object
                 .get("summary_json")
                 .and_then(serde_json::Value::as_array)
@@ -358,7 +364,10 @@ fn redact_flagged_reasoning(mut result: serde_json::Value) -> serde_json::Value 
         reasoning_stripped |= sanitize_markdown_value(cache.get_mut("markdown"));
     }
     if reasoning_stripped {
-        object.insert("reasoning_stripped".to_string(), serde_json::Value::Bool(true));
+        object.insert(
+            "reasoning_stripped".to_string(),
+            serde_json::Value::Bool(true),
+        );
     }
     result
 }
@@ -503,7 +512,11 @@ pub async fn api_process_transcript<R: Runtime>(
     // Normalise empty / whitespace-only to None so "" and null behave identically
     let summary_language = summary_language.and_then(|s| {
         let t = s.trim();
-        if t.is_empty() { None } else { Some(t.to_string()) }
+        if t.is_empty() {
+            None
+        } else {
+            Some(t.to_string())
+        }
     });
 
     // ponytail: summary starts are rare; use per-meeting locks only if start contention is measured.
@@ -527,18 +540,13 @@ pub async fn api_process_transcript<R: Runtime>(
     .await
     {
         let message = format!("Failed to save transcript data: {}", error);
-        let _ = SummaryProcessesRepository::update_process_failed(
-            &pool,
-            &m_id,
-            started_at,
-            &message,
-        )
-        .await;
+        let _ =
+            SummaryProcessesRepository::update_process_failed(&pool, &m_id, started_at, &message)
+                .await;
         return Err(message);
     }
 
-    let cancellation_token =
-        SummaryService::register_cancellation_token(&m_id, started_at);
+    let cancellation_token = SummaryService::register_cancellation_token(&m_id, started_at);
     let meeting_id_clone = m_id.clone();
     tauri::async_runtime::spawn(async move {
         SummaryService::process_transcript_background(
@@ -587,15 +595,25 @@ pub async fn api_cancel_summary<R: Runtime>(
             .await
         {
             Ok(true) => {
-                log_info!("Successfully cancelled summary generation for meeting_id: {}", meeting_id);
+                log_info!(
+                    "Successfully cancelled summary generation for meeting_id: {}",
+                    meeting_id
+                );
                 true
             }
             Ok(false) => {
-                log_info!("Summary generation was already terminal for meeting_id: {}", meeting_id);
+                log_info!(
+                    "Summary generation was already terminal for meeting_id: {}",
+                    meeting_id
+                );
                 false
             }
             Err(error) => {
-                log_error!("Failed to update cancellation status for {}: {}", meeting_id, error);
+                log_error!(
+                    "Failed to update cancellation status for {}: {}",
+                    meeting_id,
+                    error
+                );
                 return Err(format!("Failed to update cancellation status: {}", error));
             }
         }
@@ -641,10 +659,7 @@ mod tests {
     #[test]
     fn summary_start_tokens_are_monotonic_with_identical_clock_inputs() {
         let first = next_summary_start(Utc::now());
-        assert_eq!(
-            next_summary_start(first),
-            first + Duration::nanoseconds(1)
-        );
+        assert_eq!(next_summary_start(first), first + Duration::nanoseconds(1));
     }
 
     #[test]

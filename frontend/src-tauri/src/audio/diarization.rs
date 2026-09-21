@@ -543,9 +543,16 @@ pub async fn run_for_meeting<R: Runtime>(
         85,
         "Saving speaker labels...",
     );
-    persist(app, meeting_id, &folder, &transcripts, &result, user_label.as_deref())
-        .await
-        .context("Failed to persist diarization output")?;
+    persist(
+        app,
+        meeting_id,
+        &folder,
+        &transcripts,
+        &result,
+        user_label.as_deref(),
+    )
+    .await
+    .context("Failed to persist diarization output")?;
     emit_stage(
         app,
         meeting_id,
@@ -643,9 +650,24 @@ mod tests {
             transcript("c", 6.0, 8.0, Some("system")),
         ];
         let turns = vec![
-            SpeakerTurn { start: 0.0, end: 2.5, speaker: "speaker_00".into(), confidence: 1.0 },
-            SpeakerTurn { start: 3.0, end: 5.0, speaker: "speaker_00".into(), confidence: 1.0 },
-            SpeakerTurn { start: 6.0, end: 8.0, speaker: "speaker_01".into(), confidence: 1.0 },
+            SpeakerTurn {
+                start: 0.0,
+                end: 2.5,
+                speaker: "speaker_00".into(),
+                confidence: 1.0,
+            },
+            SpeakerTurn {
+                start: 3.0,
+                end: 5.0,
+                speaker: "speaker_00".into(),
+                confidence: 1.0,
+            },
+            SpeakerTurn {
+                start: 6.0,
+                end: 8.0,
+                speaker: "speaker_01".into(),
+                confidence: 1.0,
+            },
         ];
         assert_eq!(
             detect_user_speaker_label(&transcripts, &turns),
@@ -660,8 +682,18 @@ mod tests {
             transcript("b", 3.0, 5.0, Some("mic")),
         ];
         let turns = vec![
-            SpeakerTurn { start: 0.0, end: 2.5, speaker: "speaker_00".into(), confidence: 1.0 },
-            SpeakerTurn { start: 3.0, end: 5.0, speaker: "speaker_01".into(), confidence: 1.0 },
+            SpeakerTurn {
+                start: 0.0,
+                end: 2.5,
+                speaker: "speaker_00".into(),
+                confidence: 1.0,
+            },
+            SpeakerTurn {
+                start: 3.0,
+                end: 5.0,
+                speaker: "speaker_01".into(),
+                confidence: 1.0,
+            },
         ];
         assert_eq!(detect_user_speaker_label(&transcripts, &turns), None);
     }
@@ -684,15 +716,33 @@ mod tests {
     #[test]
     fn resolved_speaker_promotes_user_cluster_to_mic() {
         let turns = vec![
-            SpeakerTurn { start: 0.0, end: 2.0, speaker: "speaker_00".into(), confidence: 1.0 },
-            SpeakerTurn { start: 2.0, end: 4.0, speaker: "speaker_01".into(), confidence: 1.0 },
+            SpeakerTurn {
+                start: 0.0,
+                end: 2.0,
+                speaker: "speaker_00".into(),
+                confidence: 1.0,
+            },
+            SpeakerTurn {
+                start: 2.0,
+                end: 4.0,
+                speaker: "speaker_01".into(),
+                confidence: 1.0,
+            },
         ];
         assert_eq!(
-            resolved_speaker(&transcript("a", 0.0, 1.5, Some("mic")), &turns, Some("speaker_00")),
+            resolved_speaker(
+                &transcript("a", 0.0, 1.5, Some("mic")),
+                &turns,
+                Some("speaker_00")
+            ),
             Some("mic".to_string())
         );
         assert_eq!(
-            resolved_speaker(&transcript("b", 2.0, 3.5, Some("system")), &turns, Some("speaker_00")),
+            resolved_speaker(
+                &transcript("b", 2.0, 3.5, Some("system")),
+                &turns,
+                Some("speaker_00")
+            ),
             Some("speaker_01".to_string())
         );
     }
