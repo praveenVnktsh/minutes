@@ -51,7 +51,7 @@ describe('MeetingAssistantPanel operation recovery', () => {
       throw new Error(`Unexpected command: ${command}`);
     };
     await act(async () => {
-      renderer = create(<MeetingAssistantPanel meetingId="history-error" modelConfig={modelConfig} onNotesUpdated={() => {}} />);
+      renderer = create(<MeetingAssistantPanel meetingId="history-error" modelConfig={modelConfig} />);
     });
     expect(JSON.stringify(renderer!.toJSON())).toContain('database busy');
     expect(JSON.stringify(renderer!.toJSON())).not.toContain('Ask about this meeting');
@@ -62,41 +62,36 @@ describe('MeetingAssistantPanel operation recovery', () => {
     expect(JSON.stringify(renderer!.toJSON())).toContain('Ask about this meeting');
   });
 
-  test('delivers a pending result once to the current callbacks after remount', async () => {
+  test('delivers a pending result once after remount, clearing the submitted draft and rendering reloaded history', async () => {
     let resolveChat!: (value: unknown) => void;
     const chat = new Promise((resolve) => { resolveChat = resolve; });
+    let historyLoaded = false;
     handler = async (command) => {
-      if (command === 'get_meeting_chat') return [];
+      if (command === 'get_meeting_chat') {
+        return historyLoaded
+          ? [{ id: 'answer', role: 'assistant', content: 'Updated', createdAt: '2026-09-19' }]
+          : [];
+      }
       if (command === 'chat_with_meeting') return chat;
       throw new Error(`Unexpected command: ${command}`);
     };
-    const oldNotes = mock(() => {});
-    const newNotes = mock(() => {});
-    const oldTranscript = mock(async () => {});
-    const newTranscript = mock(async () => {});
     await act(async () => {
-      renderer = create(<MeetingAssistantPanel meetingId="pending-success" modelConfig={modelConfig} onNotesUpdated={oldNotes} onTranscriptUpdated={oldTranscript} />);
+      renderer = create(<MeetingAssistantPanel meetingId="pending-success" modelConfig={modelConfig} />);
     });
     const textarea = renderer!.root.findByType('textarea');
     await act(async () => textarea.props.onChange({ target: { value: 'Revise notes' } }));
     await act(async () => { void renderer!.root.findByType('form').props.onSubmit({ preventDefault() {} }); });
     await act(async () => renderer!.unmount());
     renderer = undefined;
+    historyLoaded = true;
     await act(async () => {
-      renderer = create(<MeetingAssistantPanel meetingId="pending-success" modelConfig={modelConfig} onNotesUpdated={newNotes} onTranscriptUpdated={newTranscript} />);
+      renderer = create(<MeetingAssistantPanel meetingId="pending-success" modelConfig={modelConfig} />);
     });
-    await act(async () => resolveChat({
-      message: { id: 'answer', role: 'assistant', content: 'Updated', createdAt: '2026-09-19' },
-      notesMarkdown: 'Current notes',
-      transcriptEditsApplied: 1,
-    }));
+    await act(async () => resolveChat({ id: 'answer', role: 'assistant', content: 'Updated', createdAt: '2026-09-19' }));
 
-    expect(oldNotes).not.toHaveBeenCalled();
-    expect(oldTranscript).not.toHaveBeenCalled();
-    expect(newNotes).toHaveBeenCalledTimes(1);
-    expect(newNotes).toHaveBeenCalledWith('Current notes');
-    expect(newTranscript).toHaveBeenCalledTimes(1);
     expect(renderer!.root.findByType('textarea').props.value).toBe('');
+    expect(JSON.stringify(renderer!.toJSON())).toContain('Updated');
+    expect(notify).not.toHaveBeenCalled();
   });
 
   test('does not clear text typed after restoring a submitted draft', async () => {
@@ -108,20 +103,17 @@ describe('MeetingAssistantPanel operation recovery', () => {
       throw new Error(`Unexpected command: ${command}`);
     };
     await act(async () => {
-      renderer = create(<MeetingAssistantPanel meetingId="pending-new-draft" modelConfig={modelConfig} onNotesUpdated={() => {}} />);
+      renderer = create(<MeetingAssistantPanel meetingId="pending-new-draft" modelConfig={modelConfig} />);
     });
     await act(async () => renderer!.root.findByType('textarea').props.onChange({ target: { value: 'Submitted' } }));
     await act(async () => { void renderer!.root.findByType('form').props.onSubmit({ preventDefault() {} }); });
     await act(async () => renderer!.unmount());
     renderer = undefined;
     await act(async () => {
-      renderer = create(<MeetingAssistantPanel meetingId="pending-new-draft" modelConfig={modelConfig} onNotesUpdated={() => {}} />);
+      renderer = create(<MeetingAssistantPanel meetingId="pending-new-draft" modelConfig={modelConfig} />);
     });
     await act(async () => renderer!.root.findByType('textarea').props.onChange({ target: { value: 'Next question' } }));
-    await act(async () => resolveChat({
-      message: { id: 'answer', role: 'assistant', content: 'Done', createdAt: '2026-09-19' },
-      transcriptEditsApplied: 0,
-    }));
+    await act(async () => resolveChat({ id: 'answer', role: 'assistant', content: 'Done', createdAt: '2026-09-19' }));
     expect(renderer!.root.findByType('textarea').props.value).toBe('Next question');
   });
 
@@ -134,17 +126,31 @@ describe('MeetingAssistantPanel operation recovery', () => {
       throw new Error(`Unexpected command: ${command}`);
     };
     await act(async () => {
-      renderer = create(<MeetingAssistantPanel meetingId="pending-error" modelConfig={modelConfig} onNotesUpdated={() => {}} />);
+      renderer = create(<MeetingAssistantPanel meetingId="pending-error" modelConfig={modelConfig} />);
     });
     await act(async () => renderer!.root.findByType('textarea').props.onChange({ target: { value: 'Do not lose me' } }));
     await act(async () => { void renderer!.root.findByType('form').props.onSubmit({ preventDefault() {} }); });
     await act(async () => renderer!.unmount());
     renderer = undefined;
     await act(async () => {
-      renderer = create(<MeetingAssistantPanel meetingId="pending-error" modelConfig={modelConfig} onNotesUpdated={() => {}} />);
+      renderer = create(<MeetingAssistantPanel meetingId="pending-error" modelConfig={modelConfig} />);
     });
     await act(async () => rejectChat(new Error('provider unavailable')));
     expect(renderer!.root.findByType('textarea').props.value).toBe('Do not lose me');
     expect(renderer!.root.findAllByProps({ role: 'alert' }).some((node: any) => node.children.join('').includes('provider unavailable'))).toBe(true);
+  });
+
+  test('a normal answer fires no success toast', async () => {
+    handler = async (command) => {
+      if (command === 'get_meeting_chat') return [];
+      if (command === 'chat_with_meeting') return { id: 'answer', role: 'assistant', content: 'Here is the answer', createdAt: '2026-09-19' };
+      throw new Error(`Unexpected command: ${command}`);
+    };
+    await act(async () => {
+      renderer = create(<MeetingAssistantPanel meetingId="no-toast" modelConfig={modelConfig} />);
+    });
+    await act(async () => renderer!.root.findByType('textarea').props.onChange({ target: { value: 'What decisions did we make?' } }));
+    await act(async () => { await renderer!.root.findByType('form').props.onSubmit({ preventDefault() {} }); });
+    expect(notify).not.toHaveBeenCalled();
   });
 });

@@ -18,17 +18,11 @@ interface ChatMessage {
   createdAt: string;
 }
 
-interface AssistantResponse {
-  message: ChatMessage;
-  notesMarkdown?: string | null;
-  transcriptEditsApplied: number;
-}
-
 interface ChatOperation {
   status: 'pending' | 'result' | 'error';
   draft: string;
-  promise: Promise<AssistantResponse>;
-  result?: AssistantResponse;
+  promise: Promise<ChatMessage>;
+  result?: ChatMessage;
   error?: string;
   optimisticId?: string;
 }
@@ -38,19 +32,15 @@ const chatOperations = new Map<string, ChatOperation>();
 const STARTERS = [
   'What decisions did we make?',
   'Turn this into clear action items',
-  'Make the notes more concise',
+  'What open questions are still unresolved?',
 ];
 
 export function MeetingAssistantPanel({
   meetingId,
   modelConfig,
-  onNotesUpdated,
-  onTranscriptUpdated,
 }: {
   meetingId: string;
   modelConfig: ModelConfig;
-  onNotesUpdated: (markdown: string) => void;
-  onTranscriptUpdated?: () => Promise<void>;
 }) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
@@ -63,11 +53,7 @@ export function MeetingAssistantPanel({
   const endRef = useRef<HTMLDivElement>(null);
   const mountedRef = useRef(true);
   const historyRequestRef = useRef(0);
-  const onNotesUpdatedRef = useRef(onNotesUpdated);
-  const onTranscriptUpdatedRef = useRef(onTranscriptUpdated);
   const restoredDraftRef = useRef<string | null>(null);
-  onNotesUpdatedRef.current = onNotesUpdated;
-  onTranscriptUpdatedRef.current = onTranscriptUpdated;
 
   const loadHistory = useCallback(async () => {
     const requestId = ++historyRequestRef.current;
@@ -86,18 +72,10 @@ export function MeetingAssistantPanel({
     }
   }, [meetingId]);
 
-  const applyResult = useCallback(async (operation: ChatOperation, response: AssistantResponse) => {
+  const applyResult = useCallback(async (operation: ChatOperation) => {
     if (!mountedRef.current || chatOperations.get(meetingId) !== operation) return;
     await loadHistory();
     if (!mountedRef.current || chatOperations.get(meetingId) !== operation) return;
-    if (response.notesMarkdown) onNotesUpdatedRef.current(response.notesMarkdown);
-    if (response.transcriptEditsApplied > 0) {
-      await onTranscriptUpdatedRef.current?.();
-      if (!mountedRef.current || chatOperations.get(meetingId) !== operation) return;
-      toast.success(`Updated ${response.transcriptEditsApplied} transcript segment${response.transcriptEditsApplied === 1 ? '' : 's'}`);
-    } else if (response.notesMarkdown) {
-      toast.success('Enhanced notes updated');
-    }
     setInput((current) => current === restoredDraftRef.current ? '' : current);
     restoredDraftRef.current = null;
     chatOperations.delete(meetingId);
@@ -125,10 +103,10 @@ export function MeetingAssistantPanel({
       setIsSending(true);
       restoredDraftRef.current = operation.draft;
       setInput(operation.draft);
-      void operation.promise.then((response) => applyResult(operation, response)).catch((error) => applyError(operation, error));
+      void operation.promise.then(() => applyResult(operation)).catch((error) => applyError(operation, error));
     } else if (operation?.status === 'result' && operation.result) {
       setIsSending(true);
-      void applyResult(operation, operation.result);
+      void applyResult(operation);
     } else if (operation?.status === 'error') {
       setSendError(operation.error ?? 'Unknown error');
       restoredDraftRef.current = operation.draft;
@@ -155,14 +133,14 @@ export function MeetingAssistantPanel({
     setInput('');
     setIsSending(true);
     setSendError(null);
-    const request = invoke<AssistantResponse>('chat_with_meeting', { meetingId, message: content });
+    const request = invoke<ChatMessage>('chat_with_meeting', { meetingId, message: content });
     const operation: ChatOperation = { status: 'pending', draft: content, promise: request, optimisticId: optimistic.id };
     chatOperations.set(meetingId, operation);
     try {
       const response = await request;
       operation.status = 'result';
       operation.result = response;
-      await applyResult(operation, response);
+      await applyResult(operation);
     } catch (error) {
       applyError(operation, error);
       toast.error('The meeting assistant could not respond', { description: String(error) });
@@ -181,7 +159,7 @@ export function MeetingAssistantPanel({
       <div className="flex items-start justify-between gap-3 px-5 pb-3 pt-5">
         <div>
           <h2 className="text-sm font-semibold text-ink">AI chat</h2>
-          <p className="mt-0.5 text-[11px] text-[var(--ink-subtle)]">Works across notes and transcript</p>
+          <p className="mt-0.5 text-[11px] text-[var(--ink-subtle)]">Answers from the notes and transcript</p>
         </div>
         <Dialog open={settingsOpen} onOpenChange={(open) => { if (!isModelConfigSaving) setSettingsOpen(open); }}>
           <DialogTrigger asChild>
@@ -218,7 +196,7 @@ export function MeetingAssistantPanel({
                 <Bot className="h-5 w-5" />
               </div>
               <h3 className="mt-4 text-sm font-semibold text-ink">Ask about this meeting</h3>
-              <p className="mt-1.5 text-xs leading-5 text-[var(--ink-muted)]">Ask questions or tell AI to revise the enhanced notes or transcript.</p>
+              <p className="mt-1.5 text-xs leading-5 text-[var(--ink-muted)]">Ask questions about the enhanced notes or transcript.</p>
               <div className="mt-5 flex flex-col items-start gap-2">
                 {STARTERS.map((starter) => (
                   <button key={starter} type="button" onClick={() => setInput(starter)} className="rounded-full bg-surface-2 px-3 py-1.5 text-left text-[11px] text-ink-muted hover:bg-surface-raised">
@@ -239,7 +217,7 @@ export function MeetingAssistantPanel({
           ))}
           {isSending && (
             <div className="flex items-center gap-2 text-sm text-[var(--ink-subtle)]">
-              <Sparkles className="h-4 w-4 animate-pulse" /> Working across the meeting…
+              <Sparkles className="h-4 w-4 animate-pulse" /> Reading the meeting…
             </div>
           )}
           {sendError && <p role="alert" className="text-xs text-error">The meeting assistant could not respond: {sendError}</p>}
@@ -253,14 +231,14 @@ export function MeetingAssistantPanel({
             onChange={(event) => setInput(event.target.value)}
             onKeyDown={onKeyDown}
             rows={1}
-            placeholder="Ask, summarize, or tell AI what to change…"
+            placeholder="Ask about the notes or transcript…"
             className="max-h-32 min-h-10 flex-1 resize-none bg-transparent px-2 py-2 text-xs leading-5 text-ink outline-none placeholder:text-[var(--ink-subtle)]"
           />
           <button type="submit" disabled={!input.trim() || isSending} className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-brand text-brand-foreground disabled:opacity-40" aria-label="Send message">
             <ArrowUp className="h-4 w-4" />
           </button>
         </div>
-        <p className="mt-2 text-center text-[10px] text-[var(--ink-subtle)]">Transcript edits keep revision history.</p>
+        <p className="mt-2 text-center text-[10px] text-[var(--ink-subtle)]">Answers from the notes and transcript without changing them.</p>
       </form>
     </div>
   );

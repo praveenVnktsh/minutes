@@ -365,8 +365,6 @@ export default function PageContent({
             <MeetingAssistantPanel
               meetingId={meeting.id}
               modelConfig={modelConfig}
-              onNotesUpdated={(markdown) => meetingData.setAiSummary({ markdown })}
-              onTranscriptUpdated={onRefetchTranscripts}
             />
           }
           showAssistant
@@ -438,11 +436,6 @@ export default function PageContent({
             <MeetingAssistantPanel
               meetingId={meeting.id}
               modelConfig={modelConfig}
-              onNotesUpdated={(markdown) => {
-                meetingData.setAiSummary({ markdown });
-                setNotesMode('enhanced');
-              }}
-              onTranscriptUpdated={onRefetchTranscripts}
             />
           }
           summary={

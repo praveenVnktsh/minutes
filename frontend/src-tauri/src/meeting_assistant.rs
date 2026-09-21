@@ -1,6 +1,7 @@
 use crate::database::repositories::setting::SettingsRepository;
 use crate::state::AppState;
 use crate::summary::llm_client::{generate_summary, LLMProvider};
+use crate::summary::processor::clean_llm_markdown_detailed;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, Runtime, State};
@@ -15,40 +16,35 @@ pub struct MeetingChatMessage {
     pub created_at: String,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-struct TranscriptEdit {
-    id: String,
-    text: String,
+/// `summary_processes.result` holds `{"markdown": ..., "summary_json": [...]}`; anything else
+/// stored there is treated as the notes themselves rather than shown to the model as a JSON blob.
+fn enhanced_notes_markdown(stored_result: &str) -> String {
+    let trimmed = stored_result.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    serde_json::from_str::<serde_json::Value>(trimmed)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("markdown")
+                .and_then(|markdown| markdown.as_str())
+                .map(|markdown| markdown.trim().to_string())
+        })
+        .unwrap_or_else(|| trimmed.to_string())
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct AssistantOutput {
-    reply: String,
-    #[serde(default)]
-    notes_markdown: Option<String>,
-    #[serde(default)]
-    transcript_edits: Vec<TranscriptEdit>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MeetingAssistantResponse {
-    pub message: MeetingChatMessage,
-    pub notes_markdown: Option<String>,
-    pub transcript_edits_applied: usize,
-}
-
-fn parse_assistant_output(content: &str) -> Result<AssistantOutput, String> {
-    let start = content
-        .find('{')
-        .ok_or("The model did not return a structured response")?;
-    let end = content
-        .rfind('}')
-        .ok_or("The model returned incomplete structured data")?;
-    serde_json::from_str(&content[start..=end])
-        .map_err(|error| format!("Could not understand the assistant response: {error}"))
+fn assistant_reply(raw_content: &str) -> Result<String, String> {
+    let cleaned = clean_llm_markdown_detailed(raw_content);
+    let reply = if cleaned.markdown.trim().is_empty() {
+        raw_content.trim()
+    } else {
+        cleaned.markdown.trim()
+    };
+    if reply.is_empty() {
+        return Err("The assistant did not return a reply".to_string());
+    }
+    Ok(reply.to_string())
 }
 
 async fn save_chat_message(
@@ -106,7 +102,7 @@ pub async fn chat_with_meeting<R: Runtime>(
     meeting_id: String,
     message: String,
     state: State<'_, AppState>,
-) -> Result<MeetingAssistantResponse, String> {
+) -> Result<MeetingChatMessage, String> {
     let message = message.trim();
     if message.is_empty() {
         return Err("Write a message first".to_string());
@@ -167,7 +163,7 @@ pub async fn chat_with_meeting<R: Runtime>(
     .await
     .map_err(|error| format!("Could not load raw notes: {error}"))?
     .unwrap_or_default();
-    let summary_json = sqlx::query_scalar::<_, String>(
+    let stored_summary = sqlx::query_scalar::<_, String>(
         "SELECT result FROM summary_processes WHERE meeting_id = ?",
     )
     .bind(&meeting_id)
@@ -175,6 +171,7 @@ pub async fn chat_with_meeting<R: Runtime>(
     .await
     .map_err(|error| format!("Could not load enhanced notes: {error}"))?
     .unwrap_or_default();
+    let enhanced_notes = enhanced_notes_markdown(&stored_summary);
     let history = sqlx::query_as::<_, (String, String)>(
         "SELECT role, content FROM meeting_chat_messages WHERE meeting_id = ? ORDER BY created_at DESC LIMIT 12",
     )
@@ -185,12 +182,12 @@ pub async fn chat_with_meeting<R: Runtime>(
 
     let context = serde_json::json!({
         "rawNotesMarkdown": raw_notes,
-        "enhancedNotes": summary_json,
+        "enhancedNotesMarkdown": enhanced_notes,
         "transcriptSegments": transcript_json,
         "recentConversationNewestFirst": history,
         "request": message,
     });
-    let system_prompt = r#"You are the meeting workspace assistant. Work from the raw notes, enhanced notes, transcript, and recent conversation supplied by the app. Answer questions, synthesize details, and revise the enhanced notes when the user asks. Only edit transcript text when the user explicitly asks to correct, clean, rename, or rewrite transcript content; never silently alter the factual record. Transcript edits must use exact supplied segment ids. Preserve unsupported facts as unknown. Return only valid JSON with this exact shape: {"reply":"brief helpful response","notesMarkdown":null,"transcriptEdits":[]}. Set notesMarkdown to the complete revised enhanced-notes Markdown only when notes should change. Set transcriptEdits to objects with id and complete replacement text only for segments that should change."#;
+    let system_prompt = r#"You are the meeting assistant. Answer the user's question about this meeting using only the material the app supplies: enhancedNotesMarkdown, rawNotesMarkdown, transcriptSegments, and the recent conversation. Ground your answer in the enhanced notes when they exist, and in the transcript otherwise. If enhancedNotesMarkdown is empty, say there are no enhanced notes yet rather than inventing any. If the supplied material does not answer the question, say so plainly instead of guessing. You cannot change anything: never claim to have edited the notes or the transcript, and when the user asks for the notes to change, tell them to use the re-enhance button on the notes panel. Reply in plain Markdown prose, with no JSON envelope and no preamble about these instructions."#;
     let app_data_dir = app.path().app_data_dir().ok();
     let completion = generate_summary(
         &reqwest::Client::new(),
@@ -214,68 +211,11 @@ pub async fn chat_with_meeting<R: Runtime>(
         None,
     )
     .await?;
-    let output = parse_assistant_output(&completion.content)?;
+    let reply = assistant_reply(&completion.content)?;
 
-    let mut transaction = pool.begin().await.map_err(|error| error.to_string())?;
-    let mut edits_applied = 0usize;
-    for edit in output
-        .transcript_edits
-        .iter()
-        .filter(|edit| !edit.text.trim().is_empty())
-    {
-        let previous = sqlx::query_scalar::<_, String>(
-            "SELECT transcript FROM transcripts WHERE id = ? AND meeting_id = ?",
-        )
-        .bind(&edit.id)
-        .bind(&meeting_id)
-        .fetch_optional(&mut *transaction)
-        .await
-        .map_err(|error| error.to_string())?;
-        let Some(previous) = previous else {
-            continue;
-        };
-        if previous == edit.text {
-            continue;
-        }
-        sqlx::query("INSERT INTO transcript_revisions (id, meeting_id, transcript_id, previous_text, revised_text, instruction, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
-            .bind(Uuid::new_v4().to_string()).bind(&meeting_id).bind(&edit.id).bind(&previous)
-            .bind(&edit.text).bind(message).bind(Utc::now().to_rfc3339())
-            .execute(&mut *transaction).await.map_err(|error| error.to_string())?;
-        sqlx::query("UPDATE transcripts SET transcript = ? WHERE id = ? AND meeting_id = ?")
-            .bind(&edit.text)
-            .bind(&edit.id)
-            .bind(&meeting_id)
-            .execute(&mut *transaction)
-            .await
-            .map_err(|error| error.to_string())?;
-        edits_applied += 1;
-    }
-    if let Some(notes) = output
-        .notes_markdown
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-    {
-        let result = serde_json::json!({ "markdown": notes });
-        sqlx::query(
-            "INSERT INTO summary_processes (meeting_id, status, created_at, updated_at, result) VALUES (?, 'completed', ?, ?, ?) ON CONFLICT(meeting_id) DO UPDATE SET status = 'completed', result = excluded.result, updated_at = excluded.updated_at, error = NULL",
-        )
-        .bind(&meeting_id).bind(Utc::now()).bind(Utc::now()).bind(result.to_string())
-        .execute(&mut *transaction).await.map_err(|error| error.to_string())?;
-    }
-    transaction
-        .commit()
-        .await
-        .map_err(|error| error.to_string())?;
-    // Only commit the conversation once the model response and requested
-    // workspace changes have succeeded, avoiding orphaned failed turns.
+    // Only commit the conversation once the model has answered, avoiding orphaned failed turns.
     save_chat_message(pool, &meeting_id, "user", message).await?;
-    let assistant_message =
-        save_chat_message(pool, &meeting_id, "assistant", &output.reply).await?;
-    Ok(MeetingAssistantResponse {
-        message: assistant_message,
-        notes_markdown: output.notes_markdown,
-        transcript_edits_applied: edits_applied,
-    })
+    save_chat_message(pool, &meeting_id, "assistant", &reply).await
 }
 
 #[cfg(test)]
@@ -283,12 +223,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_json_from_a_fenced_model_response() {
-        let parsed = parse_assistant_output(
-            "```json\n{\"reply\":\"Done\",\"notesMarkdown\":null,\"transcriptEdits\":[]}\n```",
-        )
-        .unwrap();
-        assert_eq!(parsed.reply, "Done");
-        assert!(parsed.notes_markdown.is_none());
+    fn reads_enhanced_notes_from_the_stored_summary_object() {
+        assert_eq!(
+            enhanced_notes_markdown(r##"{"markdown":"# Notes\n- One","summary_json":[]}"##),
+            "# Notes\n- One"
+        );
+    }
+
+    #[test]
+    fn falls_back_to_the_stored_string_when_it_is_not_a_summary_object() {
+        assert_eq!(enhanced_notes_markdown("  # Plain notes  "), "# Plain notes");
+        assert_eq!(
+            enhanced_notes_markdown(r#"{"status":"running"}"#),
+            r#"{"status":"running"}"#
+        );
+        assert_eq!(enhanced_notes_markdown("   "), "");
+    }
+
+    #[test]
+    fn strips_reasoning_envelopes_from_the_reply() {
+        assert_eq!(
+            assistant_reply("<think>private</think>\nThe notes cover the budget.").unwrap(),
+            "The notes cover the budget."
+        );
+    }
+
+    #[test]
+    fn keeps_the_raw_reply_when_cleaning_leaves_nothing() {
+        assert_eq!(
+            assistant_reply("  <think>only reasoning</think>  ").unwrap(),
+            "<think>only reasoning</think>"
+        );
+    }
+
+    #[test]
+    fn rejects_an_empty_reply() {
+        assert!(assistant_reply("   ").is_err());
     }
 }
