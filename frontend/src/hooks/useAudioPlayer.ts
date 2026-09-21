@@ -252,6 +252,12 @@ export const useAudioPlayer = (audioPath: string | null) => {
 
       sourceRef.current.connect(audioRef.current.destination);
 
+      // The clock is bounded by the buffer actually playing, not by the
+      // `duration` state. A play deferred until decoding finished runs in the
+      // closure of the render that queued it, where that state is still 0, so
+      // every frame would read as "past the end" and stop on the very first one.
+      const trackDuration = audioBufferRef.current.duration;
+
       // Setup ended callback
       sourceRef.current.onended = () => {
         console.log('Playback ended naturally');
@@ -281,7 +287,7 @@ export const useAudioPlayer = (audioPath: string | null) => {
 
         const newTime = audioRef.current.currentTime - startTimeRef.current;
 
-        if (newTime >= duration) {
+        if (newTime >= trackDuration) {
           console.log('Playback finished');
           stopPlayback();
           setCurrentTime(0);

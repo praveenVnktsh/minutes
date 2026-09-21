@@ -47,6 +47,9 @@ const invoke = mock(() => new Promise<number[]>(resolve => {
 }));
 mock.module('@tauri-apps/api/core', () => ({ invoke }));
 
+// Offsets the hook actually started the source at, newest last.
+const started: number[] = [];
+
 class FakeAudioContext {
   state = 'running';
   currentTime = 0;
@@ -58,7 +61,7 @@ class FakeAudioContext {
       buffer: null as unknown,
       onended: null as (() => void) | null,
       connect() {},
-      start() {},
+      start(_when: number, offset: number) { started.push(offset); },
       stop() {},
       disconnect() {},
     };
@@ -75,9 +78,22 @@ const originalWindow = (globalThis as any).window;
 const originalRaf = (globalThis as any).requestAnimationFrame;
 const originalCaf = (globalThis as any).cancelAnimationFrame;
 
+// The frame the hook is waiting on, held rather than run: a stub that never
+// calls back cannot see what the playback clock does on its first frame, and a
+// stub that calls back immediately would recurse forever.
+let frameCallback: (() => void) | undefined;
+function runFrame() {
+  const callback = frameCallback;
+  frameCallback = undefined;
+  callback?.();
+}
+
 (globalThis as any).window = { AudioContext: FakeAudioContext };
-(globalThis as any).requestAnimationFrame = () => 0;
-(globalThis as any).cancelAnimationFrame = () => {};
+(globalThis as any).requestAnimationFrame = (callback: () => void) => {
+  frameCallback = callback;
+  return 1;
+};
+(globalThis as any).cancelAnimationFrame = () => { frameCallback = undefined; };
 
 afterAll(() => {
   (globalThis as any).window = originalWindow;
@@ -128,6 +144,49 @@ describe('useAudioPlayer seek-before-ready', () => {
 
     expect(state.isReady).toBe(true);
     expect(state.duration).toBe(120);
+    expect(state.currentTime).toBe(42);
+  });
+});
+
+describe('useAudioPlayer play-before-ready', () => {
+  let renderer: ReactTestRenderer | undefined;
+
+  afterEach(async () => {
+    if (renderer) await act(async () => renderer!.unmount());
+    renderer = undefined;
+    started.length = 0;
+    frameCallback = undefined;
+  });
+
+  test('deferred playback survives its first animation frame', async () => {
+    await act(async () => {
+      renderer = create(createElement(View, { audioPath: 'meeting.wav' }));
+    });
+
+    // Clicking a transcript line at 0:42 before the file has decoded: the panel
+    // seeks and then plays, and both have to wait for the buffer.
+    await act(async () => {
+      await state.seek(42);
+      await state.play();
+    });
+    expect(state.isPlaying).toBe(false);
+
+    await act(async () => {
+      pendingRead?.([1, 2, 3, 4]);
+      for (let i = 0; i < 6; i += 1) await Promise.resolve();
+    });
+
+    expect(state.isPlaying).toBe(true);
+    expect(started).toEqual([42]);
+
+    // The frame that used to end it a few milliseconds in: `updateTime`
+    // compared the position against a duration of 0, captured by the render
+    // that queued this play, so 42 counted as past the end of a 120s file.
+    await act(async () => {
+      runFrame();
+    });
+
+    expect(state.isPlaying).toBe(true);
     expect(state.currentTime).toBe(42);
   });
 });
