@@ -13,6 +13,7 @@ import {
   getModelTagline,
   WhisperAPI
 } from '../lib/whisper';
+import { listenAll, useModelDownload, type ModelDownloadSource } from '@/hooks/useModelDownload';
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion';
 
 interface ModelManagerProps {
@@ -21,6 +22,23 @@ interface ModelManagerProps {
   className?: string;
   autoSave?: boolean;
 }
+
+const whisperDownloadSource: ModelDownloadSource = {
+  subscribe: emit =>
+    listenAll([
+      listen<{ modelName: string; progress: number }>('model-download-progress', event => {
+        emit({ kind: 'progress', model: event.payload.modelName, progress: event.payload.progress });
+      }),
+      listen<{ modelName: string }>('model-download-complete', event => {
+        emit({ kind: 'complete', model: event.payload.modelName });
+      }),
+      listen<{ modelName: string; error: string }>('model-download-error', event => {
+        emit({ kind: 'error', model: event.payload.modelName, error: event.payload.error });
+      }),
+    ]),
+  start: modelName => WhisperAPI.downloadModel(modelName),
+  cancel: modelName => WhisperAPI.cancelDownload(modelName),
+};
 
 export function ModelManager({
   selectedModel,
@@ -32,43 +50,70 @@ export function ModelManager({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [initialized, setInitialized] = useState(false);
-  const [downloadingModels, setDownloadingModels] = useState<Set<string>>(new Set());
-  const [cancellingModels, setCancellingModels] = useState<Set<string>>(new Set());
   const [hasUserSelection, setHasUserSelection] = useState(false);
 
-  // Refs for stable callbacks
-  const onModelSelectRef = useRef(onModelSelect);
-  const autoSaveRef = useRef(autoSave);
-
-  // Progress throttle map to prevent rapid updates
-  const progressThrottleRef = useRef<Map<string, { progress: number; timestamp: number }>>(new Map());
   const cancellationReconciliationModelsRef = useRef<Set<string>>(new Set());
   const cancellationReconcileTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
 
-  // Update refs when props change
-  useEffect(() => {
-    onModelSelectRef.current = onModelSelect;
-    autoSaveRef.current = autoSave;
-  }, [onModelSelect, autoSave]);
-
-  // Load persisted downloading state from localStorage
-  const getPersistedDownloadingModels = (): Set<string> => {
-    try {
-      const saved = localStorage.getItem('downloading-models');
-      return saved ? new Set<string>(JSON.parse(saved) as string[]) : new Set<string>();
-    } catch {
-      return new Set<string>();
-    }
+  const setModelStatus = (modelName: string, status: ModelStatus) => {
+    setModels(prevModels =>
+      prevModels.map(model => (model.name === modelName ? { ...model, status } : model))
+    );
   };
 
-  // Persist downloading state to localStorage
-  const updateDownloadingModels = (updater: (prev: Set<string>) => Set<string>) => {
-    setDownloadingModels(prev => {
-      const newSet = updater(prev);
-      localStorage.setItem('downloading-models', JSON.stringify(Array.from(newSet)));
-      return newSet;
-    });
-  };
+  const modelDownload = useModelDownload({
+    source: whisperDownloadSource,
+    persistKey: 'downloading-models',
+    onStart: modelName => {
+      setModelStatus(modelName, { Downloading: { progress: 0 } });
+      toast.info(`Downloading ${getDisplayName(modelName)}...`, {
+        description: 'This may take a few minutes',
+        duration: 5000
+      });
+    },
+    onProgress: (modelName, progress) => {
+      setModelStatus(modelName, { Downloading: { progress } });
+    },
+    onComplete: modelName => {
+      const model = models.find(m => m.name === modelName);
+      clearCancellationReconciliation(modelName);
+      setModelStatus(modelName, 'Available');
+
+      toast.success(`${getModelIcon(model?.accuracy || 'Good')} ${getDisplayName(modelName)} ready!`, {
+        description: 'Model downloaded and ready to use',
+        duration: 4000
+      });
+
+      if (onModelSelect) {
+        onModelSelect(modelName);
+        if (autoSave) {
+          saveModelSelection(modelName);
+        }
+      }
+    },
+    onError: (modelName, error) => {
+      clearCancellationReconciliation(modelName);
+      setModelStatus(modelName, { Error: error });
+
+      toast.error(`Failed to download ${getDisplayName(modelName)}`, {
+        description: error,
+        duration: 6000,
+        action: {
+          label: 'Retry',
+          onClick: () => modelDownload.download(modelName)
+        }
+      });
+    },
+    onStartFailed: (modelName, err) => {
+      console.error('Download failed:', err);
+      setModelStatus(modelName, { Error: err instanceof Error ? err.message : 'Download failed' });
+    },
+  });
+
+  const settleDownload = modelDownload.settle;
+
+  // Read once: the in-flight set restored from localStorage before the model list loads.
+  const persistedDownloadingRef = useRef(modelDownload.downloading);
 
   const clearCancellationReconciliation = (modelName: string) => {
     cancellationReconciliationModelsRef.current.delete(modelName);
@@ -77,18 +122,13 @@ export function ModelManager({
       clearTimeout(timer);
       cancellationReconcileTimersRef.current.delete(modelName);
     }
-    setCancellingModels(prev => {
-      const next = new Set(prev);
-      next.delete(modelName);
-      return next;
-    });
   };
 
   const reconcileCancellation = (modelName: string) => {
     if (cancellationReconciliationModelsRef.current.has(modelName)) return;
 
     cancellationReconciliationModelsRef.current.add(modelName);
-    setCancellingModels(prev => new Set([...prev, modelName]));
+    modelDownload.markCancelling(modelName);
 
     const scheduleNextCheck = () => {
       if (!cancellationReconciliationModelsRef.current.has(modelName)) return;
@@ -109,13 +149,8 @@ export function ModelManager({
         const isStillDownloading = typeof model?.status === 'object' && 'Downloading' in model.status;
         if (model && !isStillDownloading) {
           clearCancellationReconciliation(modelName);
-          updateDownloadingModels(prev => {
-            const next = new Set(prev);
-            next.delete(modelName);
-            return next;
-          });
+          modelDownload.settle(modelName);
           setModels(modelList);
-          progressThrottleRef.current.delete(modelName);
           toast.info(
             model.status === 'Available'
               ? `${getDisplayName(modelName)} download completed before cancellation`
@@ -134,6 +169,19 @@ export function ModelManager({
     void reconcile();
   };
 
+  // Stop any cancellation polling on unmount.
+  useEffect(() => {
+    const reconcilingModels = cancellationReconciliationModelsRef.current;
+    const reconcileTimers = cancellationReconcileTimersRef.current;
+    return () => {
+      for (const timer of reconcileTimers.values()) {
+        clearTimeout(timer);
+      }
+      reconcileTimers.clear();
+      reconcilingModels.clear();
+    };
+  }, []);
+
   // Initialize models
   useEffect(() => {
     if (initialized) return;
@@ -145,22 +193,14 @@ export function ModelManager({
         const modelList = await WhisperAPI.getAvailableModels();
 
         // Apply persisted downloading states
-        const persistedDownloading = getPersistedDownloadingModels();
+        const persistedDownloading = persistedDownloadingRef.current;
         const modelsWithDownloadState = modelList.map(model => {
           if (persistedDownloading.has(model.name) && model.status !== 'Available') {
             if (typeof model.status === 'object' && 'Corrupted' in model.status) {
-              updateDownloadingModels(prev => {
-                const newSet = new Set(prev);
-                newSet.delete(model.name);
-                return newSet;
-              });
+              settleDownload(model.name);
               return model;
             } else if (model.status === 'Missing') {
-              updateDownloadingModels(prev => {
-                const newSet = new Set(prev);
-                newSet.delete(model.name);
-                return newSet;
-              });
+              settleDownload(model.name);
               return model;
             } else {
               return { ...model, status: { Downloading: { progress: 0 } } as ModelStatus };
@@ -184,139 +224,7 @@ export function ModelManager({
     };
 
     initializeModels();
-  }, [initialized, selectedModel, onModelSelect]);
-
-  // Set up event listeners for download progress
-  useEffect(() => {
-    let unlistenProgress: (() => void) | null = null;
-    let unlistenComplete: (() => void) | null = null;
-    let unlistenError: (() => void) | null = null;
-
-    const setupListeners = async () => {
-      console.log('[ModelManager] Setting up event listeners...');
-
-      // Download progress with throttling
-      unlistenProgress = await listen<{ modelName: string; progress: number }>(
-        'model-download-progress',
-        (event) => {
-          const { modelName, progress } = event.payload;
-          const now = Date.now();
-          const throttleData = progressThrottleRef.current.get(modelName);
-
-          // Throttle: only update if 300ms passed OR progress jumped by 5%+
-          const shouldUpdate = !throttleData ||
-            now - throttleData.timestamp > 300 ||
-            Math.abs(progress - throttleData.progress) >= 5;
-
-          if (shouldUpdate) {
-            console.log(`[ModelManager] Progress update for ${modelName}: ${progress}%`);
-            progressThrottleRef.current.set(modelName, { progress, timestamp: now });
-
-            setModels(prevModels =>
-              prevModels.map(model =>
-                model.name === modelName
-                  ? { ...model, status: { Downloading: { progress } } as ModelStatus }
-                  : model
-              )
-            );
-          }
-        }
-      );
-
-      // Download complete
-      unlistenComplete = await listen<{ modelName: string }>(
-        'model-download-complete',
-        (event) => {
-          const { modelName } = event.payload;
-          const model = models.find(m => m.name === modelName);
-          const displayName = getDisplayName(modelName);
-
-          clearCancellationReconciliation(modelName);
-
-          setModels(prevModels =>
-            prevModels.map(model =>
-              model.name === modelName
-                ? { ...model, status: 'Available' as ModelStatus }
-                : model
-            )
-          );
-
-          updateDownloadingModels(prev => {
-            const newSet = new Set(prev);
-            newSet.delete(modelName);
-            return newSet;
-          });
-
-          // Clean up throttle data
-          progressThrottleRef.current.delete(modelName);
-
-          toast.success(`${getModelIcon(model?.accuracy || 'Good')} ${displayName} ready!`, {
-            description: 'Model downloaded and ready to use',
-            duration: 4000
-          });
-
-          // Auto-select after download using stable refs
-          if (onModelSelectRef.current) {
-            onModelSelectRef.current(modelName);
-            if (autoSaveRef.current) {
-              saveModelSelection(modelName);
-            }
-          }
-        }
-      );
-
-      // Download error
-      unlistenError = await listen<{ modelName: string; error: string }>(
-        'model-download-error',
-        (event) => {
-          const { modelName, error } = event.payload;
-          const displayName = getDisplayName(modelName);
-
-          clearCancellationReconciliation(modelName);
-
-          setModels(prevModels =>
-            prevModels.map(model =>
-              model.name === modelName
-                ? { ...model, status: { Error: error } as ModelStatus }
-                : model
-            )
-          );
-
-          updateDownloadingModels(prev => {
-            const newSet = new Set(prev);
-            newSet.delete(modelName);
-            return newSet;
-          });
-
-          // Clean up throttle data
-          progressThrottleRef.current.delete(modelName);
-
-          toast.error(`Failed to download ${displayName}`, {
-            description: error,
-            duration: 6000,
-            action: {
-              label: 'Retry',
-              onClick: () => downloadModel(modelName)
-            }
-          });
-        }
-      );
-    };
-
-    setupListeners();
-
-    return () => {
-      console.log('[ModelManager] Cleaning up event listeners...');
-      if (unlistenProgress) unlistenProgress();
-      if (unlistenComplete) unlistenComplete();
-      if (unlistenError) unlistenError();
-      for (const timer of cancellationReconcileTimersRef.current.values()) {
-        clearTimeout(timer);
-      }
-      cancellationReconcileTimersRef.current.clear();
-      cancellationReconciliationModelsRef.current.clear();
-    };
-  }, []); // Empty dependency array - listeners use refs for stable callbacks
+  }, [initialized, selectedModel, onModelSelect, settleDownload]);
 
   const saveModelSelection = async (modelName: string) => {
     try {
@@ -334,7 +242,7 @@ export function ModelManager({
     const displayName = getDisplayName(modelName);
 
     try {
-      const outcome = await WhisperAPI.cancelDownload(modelName);
+      const outcome = await modelDownload.cancel(modelName);
       if (outcome === 'pending') {
         reconcileCancellation(modelName);
         toast.info(`Cancelling ${displayName}...`, {
@@ -357,44 +265,9 @@ export function ModelManager({
   };
 
   const downloadModel = async (modelName: string) => {
-    if (downloadingModels.has(modelName)) return;
-
+    if (modelDownload.isBusy(modelName)) return;
     clearCancellationReconciliation(modelName);
-
-    const displayName = getDisplayName(modelName);
-
-    try {
-      updateDownloadingModels(prev => new Set([...prev, modelName]));
-
-      setModels(prevModels =>
-        prevModels.map(model =>
-          model.name === modelName
-            ? { ...model, status: { Downloading: { progress: 0 } } as ModelStatus }
-            : model
-        )
-      );
-
-      toast.info(`Downloading ${displayName}...`, {
-        description: 'This may take a few minutes',
-        duration: 5000
-      });
-
-      await WhisperAPI.downloadModel(modelName);
-    } catch (err) {
-      console.error('Download failed:', err);
-      updateDownloadingModels(prev => {
-        const newSet = new Set(prev);
-        newSet.delete(modelName);
-        return newSet;
-      });
-
-      const errorMessage = err instanceof Error ? err.message : 'Download failed';
-      setModels(prev =>
-        prev.map(model =>
-          model.name === modelName ? { ...model, status: { Error: errorMessage } } : model
-        )
-      );
-    }
+    await modelDownload.download(modelName);
   };
 
   const selectModel = async (modelName: string) => {
@@ -504,8 +377,8 @@ export function ModelManager({
               onDownload={() => downloadModel(model.name)}
               onCancel={() => cancelDownload(model.name)}
               onDelete={() => deleteModel(model.name)}
-              isDownloading={downloadingModels.has(model.name)}
-              isCancelling={cancellingModels.has(model.name)}
+              isDownloading={modelDownload.downloading.has(model.name)}
+              isCancelling={modelDownload.cancelling.has(model.name)}
               displayName={getDisplayName(model.name)}
             />
           );
@@ -535,8 +408,8 @@ export function ModelManager({
                     onDownload={() => downloadModel(model.name)}
                     onCancel={() => cancelDownload(model.name)}
                     onDelete={() => deleteModel(model.name)}
-                    isDownloading={downloadingModels.has(model.name)}
-                    isCancelling={cancellingModels.has(model.name)}
+                    isDownloading={modelDownload.downloading.has(model.name)}
+                    isCancelling={modelDownload.cancelling.has(model.name)}
                     displayName={getDisplayName(model.name)}
                   />
                 ))}

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -12,6 +12,12 @@ import {
   getModelDisplayInfo,
   getModelDisplayName
 } from '../lib/parakeet';
+import {
+  ModelDownloadSource,
+  UseModelDownloadOptions,
+  listenAll,
+  useModelDownload
+} from '../hooks/useModelDownload';
 
 interface ParakeetModelManagerProps {
   selectedModel?: string;
@@ -19,6 +25,33 @@ interface ParakeetModelManagerProps {
   className?: string;
   autoSave?: boolean;
 }
+
+// Module-level so it is referentially stable across renders/remounts.
+const parakeetDownloadSource: ModelDownloadSource = {
+  subscribe: emit =>
+    listenAll([
+      listen<ParakeetDownloadProgressEvent>('parakeet-model-download-progress', event => {
+        const { modelName, progress, status, downloaded_mb, total_mb, speed_mbps } = event.payload;
+        if (status === 'cancelled') {
+          emit({ kind: 'cancelled', model: modelName });
+          return;
+        }
+        const detail =
+          downloaded_mb !== undefined && total_mb !== undefined
+            ? { downloadedMb: downloaded_mb, totalMb: total_mb, speedMbps: speed_mbps ?? 0 }
+            : undefined;
+        emit({ kind: 'progress', model: modelName, progress, detail, completed: status === 'completed' });
+      }),
+      listen<{ modelName: string }>('parakeet-model-download-complete', event => {
+        emit({ kind: 'complete', model: event.payload.modelName });
+      }),
+      listen<{ modelName: string; error: string }>('parakeet-model-download-error', event => {
+        emit({ kind: 'error', model: event.payload.modelName, error: event.payload.error });
+      })
+    ]),
+  start: model => ParakeetAPI.downloadModel(model),
+  cancel: model => ParakeetAPI.cancelDownload(model)
+};
 
 export function ParakeetModelManager({
   selectedModel,
@@ -30,9 +63,6 @@ export function ParakeetModelManager({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [initialized, setInitialized] = useState(false);
-  const [listenersReady, setListenersReady] = useState(false);
-  const [downloadingModels, setDownloadingModels] = useState<Set<string>>(new Set());
-  const [cancellingModels, setCancellingModels] = useState<Set<string>>(new Set());
 
   // Refs for stable callbacks
   const onModelSelectRef = useRef(onModelSelect);
@@ -43,20 +73,95 @@ export function ParakeetModelManager({
     autoSaveRef.current = autoSave;
   }, [onModelSelect, autoSave]);
 
-  // Progress throttle map to prevent rapid updates
-  const progressThrottleRef = useRef<Map<string, { progress: number; timestamp: number }>>(new Map());
   const latestStatusByModelRef = useRef<Map<string, ModelStatus>>(new Map());
-  const clearCancellingModel = (modelName: string) => {
-    setCancellingModels(prev => {
-      const next = new Set(prev);
-      next.delete(modelName);
-      return next;
-    });
+
+  // `handlers` closes over `hook` for the Retry toast action; the closures
+  // below only run later (after `hook` is assigned), so this is safe.
+  const handlers: UseModelDownloadOptions = {
+    source: parakeetDownloadSource,
+    onStart: model => {
+      const displayInfo = getModelDisplayInfo(model);
+      const displayName = displayInfo?.friendlyName || model;
+
+      setModels(prevModels =>
+        prevModels.map(m =>
+          m.name === model ? { ...m, status: { Downloading: { progress: 0 } } as ModelStatus } : m
+        )
+      );
+
+      toast.info(`Downloading ${displayName}...`, {
+        description: 'This may take a few minutes',
+        duration: 5000 // Auto-dismiss after 5 seconds
+      });
+    },
+    onProgress: (model, progress, event) => {
+      const modelStatus: ModelStatus = event.completed ? 'Available' : { Downloading: { progress } };
+      latestStatusByModelRef.current.set(model, modelStatus);
+      setModels(prevModels => prevModels.map(m => (m.name === model ? { ...m, status: modelStatus } : m)));
+    },
+    onComplete: model => {
+      const displayInfo = getModelDisplayInfo(model);
+      const displayName = displayInfo?.friendlyName || model;
+      latestStatusByModelRef.current.set(model, 'Available');
+
+      setModels(prevModels =>
+        prevModels.map(m => (m.name === model ? { ...m, status: 'Available' as ModelStatus } : m))
+      );
+
+      toast.success(`${displayInfo?.icon || '✓'} ${displayName} ready!`, {
+        description: 'Model downloaded and ready to use',
+        duration: 4000
+      });
+
+      // Auto-select after download using stable refs
+      if (onModelSelectRef.current) {
+        onModelSelectRef.current(model);
+        if (autoSaveRef.current) {
+          saveModelSelection(model);
+        }
+      }
+    },
+    onError: (model, error) => {
+      const displayInfo = getModelDisplayInfo(model);
+      const displayName = displayInfo?.friendlyName || model;
+      latestStatusByModelRef.current.set(model, { Error: error });
+
+      setModels(prevModels =>
+        prevModels.map(m => (m.name === model ? { ...m, status: { Error: error } as ModelStatus } : m))
+      );
+
+      toast.error(`Failed to download ${displayName}`, {
+        description: error,
+        duration: 6000,
+        action: {
+          label: 'Retry',
+          onClick: () => hook.download(model)
+        }
+      });
+    },
+    onCancelled: model => {
+      latestStatusByModelRef.current.set(model, 'Missing');
+
+      setModels(prevModels =>
+        prevModels.map(m => (m.name === model ? { ...m, status: 'Missing' as ModelStatus } : m))
+      );
+
+      toast.info(`${getModelDisplayName(model)} download cancelled`, {
+        duration: 3000
+      });
+    },
+    onStartFailed: (model, err) => {
+      console.error('Download failed:', err);
+      const errorMessage = err instanceof Error ? err.message : 'Download failed';
+      setModels(prev => prev.map(m => (m.name === model ? { ...m, status: { Error: errorMessage } } : m)));
+    }
   };
+
+  const hook = useModelDownload(handlers);
 
   // Initialize and load models
   useEffect(() => {
-    if (initialized || !listenersReady) return;
+    if (initialized || !hook.listenersReady) return;
 
     const initializeModels = async () => {
       try {
@@ -82,178 +187,15 @@ export function ParakeetModelManager({
     };
 
     initializeModels();
-  }, [initialized, listenersReady, selectedModel, onModelSelect]);
+  }, [initialized, hook.listenersReady, selectedModel, onModelSelect]);
 
-  // Set up event listeners for download progress
+  // Surface a failed listener registration the same way the old inline setup did.
   useEffect(() => {
-    let disposed = false;
-    let registeredUnlisteners: Array<() => void> = [];
-
-    const setupListeners = async () => {
-      console.log('[ParakeetModelManager] Setting up event listeners...');
-
-      const registrations = await Promise.allSettled([
-        listen<ParakeetDownloadProgressEvent>(
-          'parakeet-model-download-progress',
-          (event) => {
-            const { modelName, progress, status } = event.payload;
-            if (status === 'cancelled') {
-              latestStatusByModelRef.current.set(modelName, 'Missing');
-              progressThrottleRef.current.delete(modelName);
-              clearCancellingModel(modelName);
-              setDownloadingModels(prev => {
-                const next = new Set(prev);
-                next.delete(modelName);
-                return next;
-              });
-              setModels(prevModels =>
-                prevModels.map(model =>
-                  model.name === modelName
-                    ? { ...model, status: 'Missing' as ModelStatus }
-                    : model
-                )
-              );
-              toast.info(`${getModelDisplayName(modelName)} download cancelled`, {
-                duration: 3000
-              });
-              return;
-            }
-
-            const modelStatus: ModelStatus = status === 'completed'
-              ? 'Available'
-              : { Downloading: { progress } };
-            latestStatusByModelRef.current.set(modelName, modelStatus);
-
-            const now = Date.now();
-            const throttleData = progressThrottleRef.current.get(modelName);
-            const shouldUpdate = !throttleData ||
-              now - throttleData.timestamp > 300 ||
-              Math.abs(progress - throttleData.progress) >= 5;
-
-            if (shouldUpdate) {
-              console.log(`[ParakeetModelManager] Progress update for ${modelName}: ${progress}%`);
-              progressThrottleRef.current.set(modelName, { progress, timestamp: now });
-              setModels(prevModels =>
-                prevModels.map(model =>
-                  model.name === modelName
-                    ? { ...model, status: modelStatus }
-                    : model
-                )
-              );
-            }
-          }
-        ),
-        listen<{ modelName: string }>(
-          'parakeet-model-download-complete',
-          (event) => {
-            const { modelName } = event.payload;
-            const displayInfo = getModelDisplayInfo(modelName);
-            const displayName = displayInfo?.friendlyName || modelName;
-            latestStatusByModelRef.current.set(modelName, 'Available');
-            clearCancellingModel(modelName);
-
-            setModels(prevModels =>
-              prevModels.map(model =>
-                model.name === modelName
-                  ? { ...model, status: 'Available' as ModelStatus }
-                  : model
-              )
-            );
-
-            setDownloadingModels(prev => {
-              const newSet = new Set(prev);
-              newSet.delete(modelName);
-              return newSet;
-            });
-
-            // Clean up throttle data
-            progressThrottleRef.current.delete(modelName);
-
-            toast.success(`${displayInfo?.icon || '✓'} ${displayName} ready!`, {
-              description: 'Model downloaded and ready to use',
-              duration: 4000
-            });
-
-            // Auto-select after download using stable refs
-            if (onModelSelectRef.current) {
-              onModelSelectRef.current(modelName);
-              if (autoSaveRef.current) {
-                saveModelSelection(modelName);
-              }
-            }
-          }
-        ),
-        listen<{ modelName: string; error: string }>(
-          'parakeet-model-download-error',
-          (event) => {
-            const { modelName, error } = event.payload;
-            const displayInfo = getModelDisplayInfo(modelName);
-            const displayName = displayInfo?.friendlyName || modelName;
-            latestStatusByModelRef.current.set(modelName, { Error: error });
-            clearCancellingModel(modelName);
-
-            setModels(prevModels =>
-              prevModels.map(model =>
-                model.name === modelName
-                  ? { ...model, status: { Error: error } as ModelStatus }
-                  : model
-              )
-            );
-
-            setDownloadingModels(prev => {
-              const newSet = new Set(prev);
-              newSet.delete(modelName);
-              return newSet;
-            });
-
-            // Clean up throttle data
-            progressThrottleRef.current.delete(modelName);
-
-            toast.error(`Failed to download ${displayName}`, {
-              description: error,
-              duration: 6000,
-              action: {
-                label: 'Retry',
-                onClick: () => downloadModel(modelName)
-              }
-            });
-          }
-        )
-      ]);
-
-      const unlisteners = registrations.flatMap(result =>
-        result.status === 'fulfilled' ? [result.value] : []
-      );
-      const failedRegistration = registrations.find(
-        (result): result is PromiseRejectedResult => result.status === 'rejected'
-      );
-
-      if (disposed || failedRegistration) {
-        unlisteners.forEach(unlisten => unlisten());
-        if (!disposed && failedRegistration) {
-          const message = failedRegistration.reason instanceof Error
-            ? failedRegistration.reason.message
-            : typeof failedRegistration.reason === 'string'
-              ? failedRegistration.reason
-              : 'Failed to listen for Parakeet model updates';
-          setError(message);
-          setLoading(false);
-        }
-        return;
-      }
-
-      registeredUnlisteners = unlisteners;
-      setListenersReady(true);
-    };
-
-    setupListeners();
-
-    return () => {
-      console.log('[ParakeetModelManager] Cleaning up event listeners...');
-      disposed = true;
-      registeredUnlisteners.forEach(unlisten => unlisten());
-    };
-  }, []); // Empty dependency array - listeners use refs for stable callbacks
+    if (hook.listenError) {
+      setError(hook.listenError);
+      setLoading(false);
+    }
+  }, [hook.listenError]);
 
   const saveModelSelection = async (modelName: string) => {
     try {
@@ -271,9 +213,8 @@ export function ParakeetModelManager({
     const displayInfo = getModelDisplayInfo(modelName);
     const displayName = displayInfo?.friendlyName || modelName;
 
-    setCancellingModels(prev => new Set([...prev, modelName]));
     try {
-      const outcome = await ParakeetAPI.cancelDownload(modelName);
+      const outcome = await hook.cancel(modelName);
       if (outcome === 'pending') {
         toast.info(`Cancelling ${displayName}...`, {
           description: 'The download is still shutting down. Retry will be available when cleanup completes.',
@@ -281,53 +222,11 @@ export function ParakeetModelManager({
         });
       }
     } catch (err) {
-      clearCancellingModel(modelName);
       console.error('Failed to cancel download:', err);
       toast.error('Failed to cancel download', {
         description: err instanceof Error ? err.message : 'Unknown error',
         duration: 4000
       });
-    }
-  };
-
-  const downloadModel = async (modelName: string) => {
-    if (downloadingModels.has(modelName) || cancellingModels.has(modelName)) return;
-    clearCancellingModel(modelName);
-
-    const displayInfo = getModelDisplayInfo(modelName);
-    const displayName = displayInfo?.friendlyName || modelName;
-
-    try {
-      setDownloadingModels(prev => new Set([...prev, modelName]));
-
-      setModels(prevModels =>
-        prevModels.map(model =>
-          model.name === modelName
-            ? { ...model, status: { Downloading: { progress: 0 } } as ModelStatus }
-            : model
-        )
-      );
-
-      toast.info(`Downloading ${displayName}...`, {
-        description: 'This may take a few minutes',
-        duration: 5000  // Auto-dismiss after 5 seconds
-      });
-
-      await ParakeetAPI.downloadModel(modelName);
-    } catch (err) {
-      console.error('Download failed:', err);
-      setDownloadingModels(prev => {
-        const newSet = new Set(prev);
-        newSet.delete(modelName);
-        return newSet;
-      });
-
-      const errorMessage = err instanceof Error ? err.message : 'Download failed';
-      setModels(prev =>
-        prev.map(model =>
-          model.name === modelName ? { ...model, status: { Error: errorMessage } } : model
-        )
-      );
     }
   };
 
@@ -416,11 +315,11 @@ export function ParakeetModelManager({
               selectModel(recommendedModel.name);
             }
           }}
-          onDownload={() => downloadModel(recommendedModel.name)}
+          onDownload={() => hook.download(recommendedModel.name)}
           onCancel={() => cancelDownload(recommendedModel.name)}
           onDelete={() => deleteModel(recommendedModel.name)}
-          isDownloading={downloadingModels.has(recommendedModel.name)}
-          isCancelling={cancellingModels.has(recommendedModel.name)}
+          isDownloading={hook.downloading.has(recommendedModel.name)}
+          isCancelling={hook.cancelling.has(recommendedModel.name)}
         />
       )}
 
@@ -438,11 +337,11 @@ export function ParakeetModelManager({
                   selectModel(model.name);
                 }
               }}
-              onDownload={() => downloadModel(model.name)}
+              onDownload={() => hook.download(model.name)}
               onCancel={() => cancelDownload(model.name)}
               onDelete={() => deleteModel(model.name)}
-              isDownloading={downloadingModels.has(model.name)}
-              isCancelling={cancellingModels.has(model.name)}
+              isDownloading={hook.downloading.has(model.name)}
+              isCancelling={hook.cancelling.has(model.name)}
             />
           ))}
         </div>
