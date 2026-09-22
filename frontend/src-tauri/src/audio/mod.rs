@@ -61,6 +61,10 @@ pub mod speaker_corrections;
 // Onboarding's microphone check: record, meter and transcribe a short sample.
 pub mod mic_check;
 
+// One channel of that check — microphone or system audio — captured and metered
+// by the same code, so neither channel is a special case of the other.
+pub mod capture_probe;
+
 pub use devices::{
     default_input_device, default_output_device, get_device_and_config, list_audio_devices,
     parse_audio_device, trigger_audio_permission, AudioDevice, AudioTranscriptionEngine,
