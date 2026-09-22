@@ -1130,47 +1130,72 @@ mod tests {
         IMPORT_CANCELLED.store(false, Ordering::SeqCst);
     }
 
-    #[test]
-    fn test_extract_duration_from_metadata_wav() {
-        // Test with sample WAV file if available
-        let test_path = Path::new("../../backend/whisper.cpp/samples/jfk.wav");
-        if test_path.exists() {
-            let result = extract_duration_from_metadata(test_path);
-            // Should succeed and return a reasonable duration
-            assert!(result.is_ok());
-            let duration = result.unwrap();
-            assert!(
-                duration > 0.0 && duration < 60.0,
-                "Duration {} seems unreasonable",
-                duration
-            );
+    /// Write a minimal 16-bit PCM WAV file (mono, `sample_rate` Hz, `num_frames` samples of a
+    /// quiet sine tone) so metadata-based tests don't depend on external fixtures.
+    fn write_test_wav(path: &Path, sample_rate: u32, num_frames: u32) {
+        let bits_per_sample: u16 = 16;
+        let num_channels: u16 = 1;
+        let block_align = num_channels * (bits_per_sample / 8);
+        let byte_rate = sample_rate * block_align as u32;
+        let data_size = num_frames * block_align as u32;
+        let chunk_size = 36 + data_size;
+
+        let mut buf = Vec::with_capacity(44 + data_size as usize);
+        buf.extend_from_slice(b"RIFF");
+        buf.extend_from_slice(&chunk_size.to_le_bytes());
+        buf.extend_from_slice(b"WAVE");
+        buf.extend_from_slice(b"fmt ");
+        buf.extend_from_slice(&16u32.to_le_bytes()); // fmt chunk size
+        buf.extend_from_slice(&1u16.to_le_bytes()); // PCM format tag
+        buf.extend_from_slice(&num_channels.to_le_bytes());
+        buf.extend_from_slice(&sample_rate.to_le_bytes());
+        buf.extend_from_slice(&byte_rate.to_le_bytes());
+        buf.extend_from_slice(&block_align.to_le_bytes());
+        buf.extend_from_slice(&bits_per_sample.to_le_bytes());
+        buf.extend_from_slice(b"data");
+        buf.extend_from_slice(&data_size.to_le_bytes());
+
+        for i in 0..num_frames {
+            let t = i as f32 / sample_rate as f32;
+            let sample = (t * 440.0 * 2.0 * std::f32::consts::PI).sin() * 0.2;
+            buf.extend_from_slice(&((sample * i16::MAX as f32) as i16).to_le_bytes());
         }
+
+        std::fs::write(path, &buf).expect("failed to write test wav file");
     }
 
     #[test]
-    fn test_extract_duration_from_metadata_mp3() {
-        // Test with sample MP3 file if available
-        let test_path = Path::new("../../backend/whisper.cpp/samples/jfk.mp3");
-        if test_path.exists() {
-            let result = extract_duration_from_metadata(test_path);
-            // MP3 files may not have n_frames metadata, so fallback is expected
-            // We just verify it doesn't panic
-            let _ = result;
-        }
+    fn test_extract_duration_from_metadata_wav() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav_path = dir.path().join("test.wav");
+        write_test_wav(&wav_path, 16_000, 16_000);
+
+        let result = extract_duration_from_metadata(&wav_path);
+        assert!(
+            result.is_ok(),
+            "extract_duration_from_metadata failed: {:?}",
+            result
+        );
+        let duration = result.unwrap();
+        assert!(
+            (duration - 1.0).abs() < 0.01,
+            "Duration {} not close to expected 1.0s",
+            duration
+        );
     }
 
     #[test]
     fn test_validate_audio_file_with_metadata() {
-        // Test validation with actual audio file
-        let test_path = Path::new("../../backend/whisper.cpp/samples/jfk.wav");
-        if test_path.exists() {
-            let result = validate_audio_file(test_path);
-            assert!(result.is_ok());
-            let info = result.unwrap();
-            assert_eq!(info.format, "WAV");
-            assert!(info.duration_seconds > 0.0);
-            assert!(info.size_bytes > 0);
-        }
+        let dir = tempfile::tempdir().unwrap();
+        let wav_path = dir.path().join("test.wav");
+        write_test_wav(&wav_path, 16_000, 16_000);
+
+        let result = validate_audio_file(&wav_path);
+        assert!(result.is_ok(), "validate_audio_file failed: {:?}", result);
+        let info = result.unwrap();
+        assert_eq!(info.format, "WAV");
+        assert!(info.duration_seconds > 0.0);
+        assert!(info.size_bytes > 0);
     }
 
     #[test]
