@@ -20,6 +20,7 @@
 
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { openPermissionSettings, PERMISSION_PANES, type PermissionPane } from '@/lib/permissions';
 import type {
   ChannelOutcome,
   ChannelReport,
@@ -453,44 +454,34 @@ export function skippedSetupCheckRecord(result?: SetupCheckResult | null): Setup
   };
 }
 
-async function isMacOS(): Promise<boolean> {
-  try {
-    const { platform } = await import('@tauri-apps/plugin-os');
-    return platform() === 'macos';
-  } catch {
-    return typeof navigator !== 'undefined' && navigator.userAgent.includes('Mac');
-  }
-}
-
 /**
- * The pane names `open_system_settings` understands. They match what
- * components/PermissionWarning.tsx already passes; the first-run audit (FR-04)
- * found that the onboarding copies of this call left the argument off entirely
- * and so could never have opened anything.
+ * Which fix opens which pane. The pane names themselves live in
+ * `@/lib/permissions` (`PERMISSION_PANES`) — the first-run audit (FR-04) found
+ * that the onboarding copies of this call left the argument off entirely and
+ * so could never have opened anything, and having two files each spell out
+ * `'Privacy_Microphone'` is exactly how that kind of drift happens again. This
+ * mapping from `SetupCheckFixKind` to a pane is still the setup check's own
+ * business, so it stays here.
  */
-const SETTINGS_PANES: Partial<Record<SetupCheckFixKind, string>> = {
-  'open-mic-settings': 'Privacy_Microphone',
-  'open-screen-recording-settings': 'Privacy_ScreenCapture',
+const SETTINGS_PANES: Partial<Record<SetupCheckFixKind, PermissionPane>> = {
+  'open-mic-settings': PERMISSION_PANES.microphone,
+  'open-screen-recording-settings': PERMISSION_PANES.systemAudio,
 };
 
 /**
  * Carries out the fixes this module can carry out itself, which are the two
  * privacy panes on macOS. Returns false when the fix could not be performed, so
- * the caller can fall back to the written instructions in the message;
- * `open_system_settings` exists only on macOS.
+ * the caller can fall back to the written instructions in the message.
+ *
+ * The actual opening — the macOS check, the `invoke`, and turning a rejection
+ * into `false` — is `openPermissionSettings` from `@/lib/permissions`, the one
+ * place that call is made (FR-04). This function's own job is just picking the
+ * pane for a fix.
  *
  * `choose-device`, `retry` and `retry-download` belong to the step's own UI.
  */
 export async function applySetupCheckFix(kind: SetupCheckFixKind): Promise<boolean> {
-  const preferencePane = SETTINGS_PANES[kind];
-  if (!preferencePane) return false;
-  if (!(await isMacOS())) return false;
-
-  try {
-    await invoke('open_system_settings', { preferencePane });
-    return true;
-  } catch (error) {
-    console.error('Failed to open system settings:', error);
-    return false;
-  }
+  const pane = SETTINGS_PANES[kind];
+  if (!pane) return false;
+  return openPermissionSettings(pane);
 }

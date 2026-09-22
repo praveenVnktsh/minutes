@@ -68,7 +68,7 @@ pub mod utils;
 pub mod webhooks;
 pub mod whisper_engine;
 
-use audio::{list_audio_devices, trigger_audio_permission, AudioDevice};
+use audio::{list_audio_devices, AudioDevice, PermissionReport};
 use log::{error as log_error, info as log_info};
 use notifications::commands::NotificationManagerState;
 use std::sync::Arc;
@@ -403,10 +403,17 @@ async fn get_audio_devices() -> Result<Vec<AudioDevice>, String> {
         .map_err(|e| format!("Failed to list audio devices: {}", e))
 }
 
+/// Ask the frontend's onboarding screen whether the microphone is usable, by
+/// actually listening for audio rather than by checking whether a stream
+/// opened. The verdict is `Authorized` only when a callback carrying a
+/// non-zero sample arrived within the wait `verify_microphone` allows —
+/// never merely because a stream was constructed. The `Result` here is not
+/// load-bearing: `verify_microphone` cannot fail, it answers `Undetermined`
+/// instead, so this only keeps the command's existing return shape for the
+/// frontend.
 #[tauri::command]
-async fn trigger_microphone_permission() -> Result<bool, String> {
-    trigger_audio_permission()
-        .map_err(|e| format!("Failed to trigger microphone permission: {}", e))
+async fn trigger_microphone_permission() -> Result<PermissionReport, String> {
+    Ok(audio::permission_check::verify_microphone().await)
 }
 
 #[tauri::command]
@@ -732,16 +739,6 @@ pub fn run() {
                     }
                 }
             });
-
-            // Trigger system audio permission request on startup (similar to microphone permission)
-            // #[cfg(target_os = "macos")]
-            // {
-            //     tauri::async_runtime::spawn(async {
-            //         if let Err(e) = audio::permissions::trigger_system_audio_permission() {
-            //             log::warn!("Failed to trigger system audio permission: {}", e);
-            //         }
-            //     });
-            // }
 
             // Initialize database (handles first launch detection and conditional setup)
             tauri::async_runtime::block_on(async {

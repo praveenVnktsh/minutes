@@ -1,6 +1,22 @@
 export type OnboardingStep = 1 | 2 | 3 | 4 | 5;
 
-export type PermissionStatus = 'checking' | 'not_determined' | 'authorized' | 'denied';
+// 'not_determined' means nobody has asked for the permission yet. 'undetermined' means the app
+// asked, ran the check, and could not tell — which is a state with its own wording and its own
+// next action (re-check), not a synonym for "not asked".
+export type PermissionStatus = 'checking' | 'not_determined' | 'undetermined' | 'authorized' | 'denied';
+
+// PermissionVerdict mirrors a #[serde(rename_all = "snake_case")] enum from the Rust verifier
+// (frontend/src-tauri/src/audio/permission_check.rs). The wire verdict from one permission check.
+export type PermissionVerdict = 'authorized' | 'denied' | 'undetermined';
+
+// PermissionReport mirrors a #[serde(rename_all = "camelCase")] struct from the Rust verifier.
+// This is the full result of one permission check: the tri-state verdict plus optional detail.
+// PermissionStatus is the UI's own state for a row — they overlap but are not the same union,
+// and 'undetermined' on the wire maps to 'undetermined' in the UI.
+export interface PermissionReport {
+  verdict: PermissionVerdict;
+  detail: string | null;
+}
 
 export interface OnboardingPermissions {
   microphone: PermissionStatus;

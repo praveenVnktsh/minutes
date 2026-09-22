@@ -23,6 +23,7 @@ use super::{
     recording_manager::RecordingStartError,
     RecordingManager,
 };
+use crate::audio::permission_check::{PermissionVerdict, MICROPHONE_DENIED_MESSAGE};
 
 // Import transcription modules
 use super::transcription::{self, reset_speech_detected_flag};
@@ -524,12 +525,29 @@ fn resolve_system_or_default(requested_name: Option<&str>) -> Option<Arc<super::
     }
 }
 
-/// Wake idle audio hardware before checking microphone callbacks, and finish
-/// validation before creating any recording resources.
-#[cfg(target_os = "macos")]
+/// Verify the microphone and finish validation before creating any recording
+/// resources, on every platform. The wake below is macOS-specific; the
+/// verification is not, and used to inherit the macOS gate that wrapped both —
+/// which meant Windows and Linux started recording without ever establishing
+/// that audio reaches the app, so a denied or dead microphone became a meeting
+/// of silence.
 async fn prepare_audio_for_recording(
     system_device: Option<&super::AudioDevice>,
 ) -> Result<(), String> {
+    // Only macOS parks idle audio hardware, so only macOS has anything to wake;
+    // the device it would wake is of no use to the other platforms here.
+    #[cfg(target_os = "macos")]
+    wake_idle_audio_hardware(system_device).await;
+    #[cfg(not(target_os = "macos"))]
+    let _ = system_device;
+
+    verify_microphone_before_recording().await
+}
+
+/// Nudge idle audio hardware awake before the microphone is checked, so a
+/// sleeping interface does not read as a microphone producing nothing.
+#[cfg(target_os = "macos")]
+async fn wake_idle_audio_hardware(system_device: Option<&super::AudioDevice>) {
     use cpal::traits::{DeviceTrait, HostTrait};
 
     let wake_name = system_device.map(|s| s.name.clone()).or_else(|| {
@@ -547,12 +565,39 @@ async fn prepare_audio_for_recording(
     } else {
         info!("[AUDIO_WAKE] Built-in output selected; skipping unnecessary audio wake");
     }
+}
 
-    if let Err(e) = super::devices::verify_microphone_access().await {
-        error!("Microphone access verification failed: {}", e);
-        return Err(format!("Microphone access required: {}", e));
+/// Run the shared microphone verifier — the same one onboarding runs, so the
+/// two surfaces cannot reach different answers about the same grant — and
+/// decide whether the recording may start.
+///
+/// The verdict is tri-state rather than a bool because only a denial should
+/// stop a recording. A check that could not be made — no default input device,
+/// for instance — is the system-audio-only case the previous check explicitly
+/// let through, and blocking on it would refuse a recording this app supports.
+async fn verify_microphone_before_recording() -> Result<(), String> {
+    let report = crate::audio::permission_check::verify_microphone().await;
+    match report.verdict {
+        PermissionVerdict::Denied => {
+            let message = match report.detail.as_deref() {
+                Some(detail) => format!("{} ({})", MICROPHONE_DENIED_MESSAGE, detail),
+                None => MICROPHONE_DENIED_MESSAGE.to_string(),
+            };
+            error!("Microphone access verification failed: {}", message);
+            Err(format!("Microphone access required: {}", message))
+        }
+        PermissionVerdict::Undetermined => {
+            warn!(
+                "⚠️ Microphone access could not be verified: {} — starting anyway; device resolution handles the system-audio-only case",
+                report.detail.as_deref().unwrap_or("no further detail")
+            );
+            Ok(())
+        }
+        PermissionVerdict::Authorized => {
+            info!("✅ Microphone verified: audio reached the app before recording started");
+            Ok(())
+        }
     }
-    Ok(())
 }
 
 /// Validate the transcription engine is ready before any capture starts, on
@@ -671,7 +716,6 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
 
     let system_device = resolve_system_or_default(preferred_system_name.as_deref());
 
-    #[cfg(target_os = "macos")]
     prepare_audio_for_recording(system_device.as_deref()).await?;
 
     #[cfg(target_os = "macos")]
@@ -881,7 +925,6 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
 
     let system_device = resolve_system_or_default(system_device_name.as_deref());
 
-    #[cfg(target_os = "macos")]
     prepare_audio_for_recording(system_device.as_deref()).await?;
 
     #[cfg(target_os = "macos")]
