@@ -6,7 +6,9 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 use tokio::sync::Mutex;
 
-use super::model_manager::{DownloadProgress, ModelInfo, ModelManager};
+use super::model_manager::{
+    is_download_already_running, DownloadProgress, ModelInfo, ModelManager,
+};
 use super::models::get_model_by_name;
 
 pub(crate) fn summary_model_priority(model_name: &str) -> u8 {
@@ -198,6 +200,21 @@ pub async fn builtin_ai_download_model<R: Runtime>(
                     "eta_seconds": null,
                     "status": "completed"
                 }),
+            );
+            Ok(())
+        }
+        Err(error) if is_download_already_running(&error) => {
+            // A second caller (e.g. the download effect re-arming after the user steps
+            // back to Setup Overview and forward again) joined a transfer that is already
+            // in flight rather than starting or failing a new one. The in-flight download
+            // keeps emitting its own progress events, so there is nothing here to repaint
+            // and nothing for this caller to retry; emitting "status: error" would turn a
+            // perfectly healthy download into a false "Download Error" on screen. This is
+            // the same treatment the "CANCELLED:" prefix gets in the arm below, just
+            // reached through a typed error instead of a string match.
+            log::info!(
+                "Download already in progress for model '{}'; joining existing transfer",
+                model_name
             );
             Ok(())
         }

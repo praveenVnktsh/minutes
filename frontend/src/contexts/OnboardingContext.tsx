@@ -111,6 +111,8 @@ interface OnboardingContextType {
   completeOnboarding: (setupCheck?: SetupCheckRecord | null) => Promise<void>;
   startBackgroundDownloads: (options: StartBackgroundDownloadsOptions) => Promise<void>;
   retryParakeetDownload: () => Promise<void>;
+  // Same retry contract as retryParakeetDownload, for the summary model.
+  retrySummaryDownload: () => Promise<void>;
   // The Parakeet worker may not have noticed the request yet, so the outcome reaches the
   // caller instead of being swallowed: 'pending' needs a different message from 'cancelled'.
   cancelParakeetDownload: () => Promise<CancelDownloadOutcome>;
@@ -198,9 +200,6 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
     console.log('[OnboardingContext] Starting Summary Model download');
     invoke('builtin_ai_download_model', { modelName })
       .catch(err => {
-        if (String(err).includes('Download already in progress')) {
-          return;
-        }
         console.error('[OnboardingContext] Summary Model download failed:', err);
       });
   };
@@ -743,6 +742,23 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
     }
   };
 
+  const retrySummaryDownload = async () => {
+    if (!selectedSummaryModel) {
+      throw new Error('Summary model recommendation is not ready yet');
+    }
+
+    console.log('[OnboardingContext] Retrying Summary Model download');
+    activeDownloadsRef.current.add('summary');
+    setIsBackgroundDownloading(true);
+    try {
+      await invoke('builtin_ai_download_model', { modelName: selectedSummaryModel });
+    } catch (error) {
+      console.error('[OnboardingContext] Summary Model retry failed:', error);
+      releaseDownloadSlot('summary');
+      throw error;
+    }
+  };
+
   // Cancellation. The Parakeet backend answers 'pending' when the worker has not yet reached a
   // point where it can stop, so the outcome goes back to the caller unchanged: only 'cancelled'
   // means the transfer is really over and the progress readout can be cleared here. A 'pending'
@@ -834,6 +850,7 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
         completeOnboarding,
         startBackgroundDownloads,
         retryParakeetDownload,
+        retrySummaryDownload,
         cancelParakeetDownload,
         cancelSummaryDownload,
       }}
