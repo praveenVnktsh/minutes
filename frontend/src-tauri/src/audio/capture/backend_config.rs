@@ -5,16 +5,18 @@ use serde::{Deserialize, Serialize};
 use std::sync::{Arc, RwLock};
 
 /// Available audio capture backends
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AudioCaptureBackend {
     /// ScreenCaptureKit backend (macOS default)
     /// Uses CPAL with ScreenCaptureKit host for system audio
+    #[cfg_attr(not(target_os = "macos"), default)]
     ScreenCaptureKit,
 
     /// Core Audio backend (macOS only)
     /// Uses direct Core Audio API with aggregate device + tap
     #[cfg(target_os = "macos")]
+    #[default]
     CoreAudio,
 }
 
@@ -51,15 +53,6 @@ impl AudioCaptureBackend {
         }
     }
 
-    /// Convert to string (lowercase)
-    pub fn to_string(&self) -> String {
-        match self {
-            AudioCaptureBackend::ScreenCaptureKit => "screencapturekit".to_string(),
-            #[cfg(target_os = "macos")]
-            AudioCaptureBackend::CoreAudio => "coreaudio".to_string(),
-        }
-    }
-
     /// Get all available backends for current platform
     pub fn available_backends() -> Vec<Self> {
         #[cfg(target_os = "macos")]
@@ -75,26 +68,16 @@ impl AudioCaptureBackend {
             vec![AudioCaptureBackend::ScreenCaptureKit]
         }
     }
-
-    /// Get default backend for current platform
-    pub fn default() -> Self {
-        #[cfg(target_os = "macos")]
-        return AudioCaptureBackend::CoreAudio;
-
-        #[cfg(not(target_os = "macos"))]
-        return AudioCaptureBackend::ScreenCaptureKit;
-    }
-}
-
-impl Default for AudioCaptureBackend {
-    fn default() -> Self {
-        Self::default()
-    }
 }
 
 impl std::fmt::Display for AudioCaptureBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.name())
+        let value = match self {
+            AudioCaptureBackend::ScreenCaptureKit => "screencapturekit",
+            #[cfg(target_os = "macos")]
+            AudioCaptureBackend::CoreAudio => "coreaudio",
+        };
+        f.write_str(value)
     }
 }
 

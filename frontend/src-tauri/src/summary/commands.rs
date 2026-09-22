@@ -418,7 +418,7 @@ pub async fn api_get_summary<R: Runtime>(
             // Fetch meeting title from database
             let meeting_name = match MeetingsRepository::get_meeting(pool, &meeting_id).await {
                 Ok(Some(meeting_details)) => {
-                    log_info!("Fetched meeting title: {}", &meeting_details.title);
+                    log_info!("Fetched meeting title: {}", meeting_details.title);
                     Some(meeting_details.title)
                 }
                 Ok(None) => {
@@ -482,6 +482,8 @@ pub async fn api_get_summary<R: Runtime>(
 ///
 /// Spawns a background task and returns immediately with process_id
 #[tauri::command]
+// The argument list is the existing Tauri IPC contract used by the frontend.
+#[allow(clippy::too_many_arguments)]
 pub async fn api_process_transcript<R: Runtime>(
     app: AppHandle<R>,
     state: tauri::State<'_, AppState>,
@@ -501,12 +503,12 @@ pub async fn api_process_transcript<R: Runtime>(
     let m_id = meeting_id.unwrap_or_else(|| format!("meeting-{}", Uuid::new_v4()));
     log_info!(
         "api_process_transcript (native) called for meeting_id: {}, model: {}",
-        &m_id,
-        &model
+        m_id,
+        model
     );
 
     let pool = state.db_manager.pool().clone();
-    let final_prompt = custom_prompt.unwrap_or_else(|| "".to_string());
+    let final_prompt = custom_prompt.unwrap_or_default();
     let final_template_id = template_id.unwrap_or_else(|| "daily_standup".to_string());
 
     // Normalise empty / whitespace-only to None so "" and null behave identically
@@ -565,7 +567,7 @@ pub async fn api_process_transcript<R: Runtime>(
         .await;
     });
 
-    log_info!("🚀 Background task spawned for meeting_id: {}", &m_id);
+    log_info!("🚀 Background task spawned for meeting_id: {}", m_id);
     Ok(ProcessTranscriptResponse {
         message: "Summary generation started".to_string(),
         process_id: started_at.to_rfc3339_opts(SecondsFormat::Nanos, true),

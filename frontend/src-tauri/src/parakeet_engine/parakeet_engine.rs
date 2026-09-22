@@ -12,16 +12,11 @@ use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
 /// Quantization type for Parakeet models
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
 pub enum QuantizationType {
     FP32, // Full precision
+    #[default]
     Int8, // 8-bit integer quantization (faster)
-}
-
-impl Default for QuantizationType {
-    fn default() -> Self {
-        QuantizationType::Int8 // Default to int8 for best performance
-    }
 }
 
 /// Model status for Parakeet models
@@ -323,7 +318,7 @@ impl ParakeetEngine {
             } else {
                 // Production mode
                 dirs::data_dir()
-                    .or_else(|| dirs::home_dir())
+                    .or_else(dirs::home_dir)
                     .ok_or_else(|| anyhow!("Could not find system data directory"))?
                     .join("Meetily")
                     .join("models")

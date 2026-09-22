@@ -15,19 +15,26 @@ use uuid::Uuid;
 const ENGINE: &str = "sherpa-onnx-1.13.8";
 const SEGMENTATION_MODEL: &str = "pyannote-segmentation-3.0";
 const EMBEDDING_MODEL: &str = "wespeaker-en-voxceleb-resnet34-lm";
+#[cfg(target_os = "macos")]
 const SEGMENTATION_DIR: &str = "sherpa-onnx-pyannote-segmentation-3-0";
 // fp32 segmentation detects speaker boundaries more accurately than the int8
 // build; the extra ~4 MB on disk is a worthwhile trade for a local app.
+#[cfg(target_os = "macos")]
 const SEGMENTATION_FILE: &str = "model.onnx";
+#[cfg(target_os = "macos")]
 const SEGMENTATION_ARCHIVE_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2";
 // VoxCeleb ResNet34 with large-margin training. English-focused and a much
 // stronger speaker discriminator than NeMo titanet-small, at a smaller size.
+#[cfg(target_os = "macos")]
 const EMBEDDING_FILE: &str = "wespeaker_en_voxceleb_resnet34_LM.onnx";
+#[cfg(target_os = "macos")]
 const EMBEDDING_MODEL_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/wespeaker_en_voxceleb_resnet34_LM.onnx";
 // Fast clustering merges speakers above this cosine threshold. Override at
 // runtime with MEETILY_DIARIZATION_THRESHOLD to tune without rebuilding.
+#[cfg(target_os = "macos")]
 const DEFAULT_CLUSTER_THRESHOLD: f32 = 0.8;
 
+#[cfg(target_os = "macos")]
 fn cluster_threshold() -> f32 {
     std::env::var("MEETILY_DIARIZATION_THRESHOLD")
         .ok()
@@ -88,7 +95,9 @@ pub struct DiarizationResult {
 }
 
 struct ModelPaths {
+    #[cfg(target_os = "macos")]
     segmentation: PathBuf,
+    #[cfg(target_os = "macos")]
     embedding: PathBuf,
 }
 

@@ -105,10 +105,7 @@ impl SystemAudioCapture {
 
     pub fn check_system_audio_permissions() -> bool {
         // Check if we can enumerate audio devices
-        match cpal::default_host().output_devices() {
-            Ok(_) => true,
-            Err(_) => false,
-        }
+        cpal::default_host().output_devices().is_ok()
     }
 }
 

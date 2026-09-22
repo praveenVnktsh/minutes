@@ -688,10 +688,10 @@ pub async fn api_get_model_config<R: Runtime>(
         Ok(Some(config)) => {
             log_info!(
                 "✅ Found model config in database: provider={}, model={}, whisperModel={}, ollamaEndpoint={:?}",
-                &config.provider,
-                &config.model,
-                &config.whisper_model,
-                &config.ollama_endpoint
+                config.provider,
+                config.model,
+                config.whisper_model,
+                config.ollama_endpoint
             );
             Ok(Some(model_config_from_setting(config)))
         }
@@ -707,6 +707,7 @@ pub async fn api_get_model_config<R: Runtime>(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn api_save_model_config<R: Runtime>(
     _app: AppHandle<R>,
     state: tauri::State<'_, AppState>,
@@ -721,10 +722,10 @@ pub async fn api_save_model_config<R: Runtime>(
 ) -> Result<ModelConfig, String> {
     log_info!(
         "💾 api_save_model_config called (native): provider='{}', model='{}', whisperModel='{}', ollamaEndpoint={:?}",
-        &provider,
-        &model,
-        &whisper_model,
-        &ollama_endpoint
+        provider,
+        model,
+        whisper_model,
+        ollama_endpoint
     );
     let pool = state.db_manager.pool();
 
@@ -835,18 +836,18 @@ pub async fn api_get_api_key<R: Runtime>(
 ) -> Result<String, String> {
     log_info!(
         "api_get_api_key called (native) for provider '{}'",
-        &provider
+        provider
     );
-    match SettingsRepository::get_api_key(&state.db_manager.pool(), &provider).await {
+    match SettingsRepository::get_api_key(state.db_manager.pool(), &provider).await {
         Ok(key) => {
             log_info!(
                 "Successfully retrieved API key for provider '{}'.",
-                &provider
+                provider
             );
             Ok(key.unwrap_or_default())
         }
         Err(e) => {
-            log_error!("Failed to get API key for provider '{}': {}", &provider, e);
+            log_error!("Failed to get API key for provider '{}': {}", provider, e);
             Err(e.to_string())
         }
     }
@@ -865,8 +866,8 @@ pub async fn api_get_transcript_config<R: Runtime>(
         Ok(Some(config)) => {
             log_info!(
                 "Found transcript config: provider={}, model={}",
-                &config.provider,
-                &config.model
+                config.provider,
+                config.model
             );
             match SettingsRepository::get_transcript_api_key(pool, &config.provider).await {
                 Ok(api_key) => {
@@ -880,7 +881,7 @@ pub async fn api_get_transcript_config<R: Runtime>(
                 Err(e) => {
                     log_error!(
                         "Failed to get transcript API key for provider {}: {}",
-                        &config.provider,
+                        config.provider,
                         e
                     );
                     Err(e.to_string())
@@ -913,7 +914,7 @@ pub async fn api_save_transcript_config<R: Runtime>(
 ) -> Result<serde_json::Value, String> {
     log_info!(
         "api_save_transcript_config called (native) for provider '{}'",
-        &provider
+        provider
     );
     let pool = state.db_manager.pool();
 
@@ -948,20 +949,20 @@ pub async fn api_get_transcript_api_key<R: Runtime>(
 ) -> Result<String, String> {
     log_info!(
         "api_get_transcript_api_key called (native) for provider '{}'",
-        &provider
+        provider
     );
-    match SettingsRepository::get_transcript_api_key(&state.db_manager.pool(), &provider).await {
+    match SettingsRepository::get_transcript_api_key(state.db_manager.pool(), &provider).await {
         Ok(key) => {
             log_info!(
                 "Successfully retrieved transcript API key for provider '{}'.",
-                &provider
+                provider
             );
             Ok(key.unwrap_or_default())
         }
         Err(e) => {
             log_error!(
                 "Failed to get transcript API key for provider '{}': {}",
-                &provider,
+                provider,
                 e
             );
             Err(e.to_string())
@@ -978,17 +979,17 @@ pub async fn api_delete_api_key<R: Runtime>(
 ) -> Result<(), String> {
     log_info!(
         "log_api_delete_api_key called (native) for provider '{}'",
-        &provider
+        provider
     );
-    match SettingsRepository::delete_api_key(&state.db_manager.pool(), &provider).await {
+    match SettingsRepository::delete_api_key(state.db_manager.pool(), &provider).await {
         Ok(_) => {
-            log_info!("Successfully deleted API key for provider '{}'.", &provider);
+            log_info!("Successfully deleted API key for provider '{}'.", provider);
             Ok(())
         }
         Err(e) => {
             log_error!(
                 "Failed to delete API key for provider '{}': {}",
-                &provider,
+                provider,
                 e
             );
             Err(e.to_string())
@@ -1236,6 +1237,7 @@ pub async fn api_create_meeting<R: Runtime>(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn api_save_transcript<R: Runtime>(
     app: AppHandle<R>,
     state: tauri::State<'_, AppState>,
@@ -1411,7 +1413,7 @@ pub async fn test_backend_connection<R: Runtime>(
 
     log_debug!("Testing connection to: {}", server_url);
 
-    let mut request = client.get(&format!("{}/docs", server_url));
+    let mut request = client.get(format!("{}/docs", server_url));
 
     if let Some(token) = auth_token {
         request = request.header("Authorization", format!("Bearer {}", token));
@@ -1626,6 +1628,7 @@ pub async fn open_external_url(url: String) -> Result<(), String> {
 /// Saves the custom OpenAI configuration
 /// This configuration is stored as JSON and includes endpoint, apiKey, model, and optional parameters
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn api_save_custom_openai_config<R: Runtime>(
     _app: AppHandle<R>,
     state: tauri::State<'_, AppState>,
@@ -1638,8 +1641,8 @@ pub async fn api_save_custom_openai_config<R: Runtime>(
 ) -> Result<serde_json::Value, String> {
     log_info!(
         "api_save_custom_openai_config called: endpoint='{}', model='{}'",
-        &endpoint,
-        &model
+        endpoint,
+        model
     );
 
     // Validate required fields
@@ -1742,8 +1745,8 @@ pub async fn api_test_custom_openai_connection<R: Runtime>(
 ) -> Result<serde_json::Value, String> {
     log_info!(
         "api_test_custom_openai_connection called: endpoint='{}', model='{}'",
-        &endpoint,
-        &model
+        endpoint,
+        model
     );
 
     // Validate endpoint URL format
@@ -1795,7 +1798,7 @@ pub async fn api_test_custom_openai_connection<R: Runtime>(
                             if let Some(choices_array) = choices.as_array() {
                                 if !choices_array.is_empty() {
                                     // Verify the first choice has the required message structure
-                                    if let Some(first_choice) = choices_array.get(0) {
+                                    if let Some(first_choice) = choices_array.first() {
                                         // Check if message.content field exists (can be empty string)
                                         let has_message_structure = first_choice
                                             .get("message")

@@ -230,7 +230,12 @@ pub async fn get_or_init_transcription_engine<R: Runtime>(
                 ),
             }
         }
-        "localWhisper" | _ => {
+        "localWhisper" => {
+            info!("🎤 Initializing Whisper transcription engine");
+            let whisper_engine = get_or_init_whisper(app).await?;
+            Ok(TranscriptionEngine::Whisper(whisper_engine))
+        }
+        _ => {
             info!("🎤 Initializing Whisper transcription engine");
             let whisper_engine = get_or_init_whisper(app).await?;
             Ok(TranscriptionEngine::Whisper(whisper_engine))

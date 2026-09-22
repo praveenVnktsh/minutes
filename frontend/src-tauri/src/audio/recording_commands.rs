@@ -92,7 +92,7 @@ fn session_live(s: &Arc<super::RecordingState>) -> bool {
             .lock()
             .unwrap()
             .as_ref()
-            .map_or(false, |m| Arc::ptr_eq(m.get_state(), s))
+            .is_some_and(|m| Arc::ptr_eq(m.get_state(), s))
 }
 
 /// RAII guard for the stop-tail flag. Sets `IS_RECORDING_STOPPING` true on
@@ -423,6 +423,7 @@ fn map_recording_start_error<R: Runtime>(app: &AppHandle<R>, error: RecordingSta
 /// - `mic-unavailable` — no usable mic at all; recording proceeds with
 ///   system audio only. If system audio is also unavailable, start_streams'
 ///   own guard reports it.
+///
 /// Resolving `None` to the default is the user's actual choice, so it's silent.
 ///
 /// ponytail: sync pre-flight substitution (matches Pro), not catch-and-retry —

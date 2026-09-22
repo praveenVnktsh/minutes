@@ -39,28 +39,26 @@ impl ContinuousVadProcessor {
         crate::ensure_onnx_runtime_available()?;
 
         // Use STRICT settings to prevent silence from reaching Whisper
-        let mut config = VadConfig::default();
-        config.sample_rate = VAD_SAMPLE_RATE as usize;
-
         // CONTINUOUS SPEECH FIX: Tuned for capturing complete 5+ second utterances
         // Previous: 0.55/0.40 with 400ms redemption was fragmenting speech into 40ms segments
         // New: More lenient thresholds + longer redemption for continuous speech
-        config.positive_speech_threshold = 0.50; // Silero default - good for continuous speech
-        config.negative_speech_threshold = 0.35; // Silero default - allows natural pauses
-
         // Use the caller's redemption time without additional capping. The batch
         // paths (`import.rs`, `retranscription.rs`) pass 2000ms to bridge natural
         // pauses; the live path (`pipeline.rs`) passes 500ms to reduce pause-induced
         // latency. A qualifying silence is still required; bounded uninterrupted-
         // speech delivery is tracked in #756.
-        config.redemption_time = Duration::from_millis(redemption_time_ms as u64);
-        config.pre_speech_pad = Duration::from_millis(300); // Pre-speech padding for context
-        config.post_speech_pad = Duration::from_millis(400); // Increased: more context at end
-
         // CRITICAL FIX: Increased min_speech_time to prevent tiny 40ms fragments
         // Previous: 100ms allowed too-short segments that Whisper rejects
         // New: 250ms ensures segments are substantial enough for Whisper (>100ms requirement)
-        config.min_speech_time = Duration::from_millis(250); // Prevent tiny fragments
+        let config = VadConfig {
+            sample_rate: VAD_SAMPLE_RATE as usize,
+            positive_speech_threshold: 0.50,
+            negative_speech_threshold: 0.35,
+            redemption_time: Duration::from_millis(redemption_time_ms as u64),
+            pre_speech_pad: Duration::from_millis(300),
+            post_speech_pad: Duration::from_millis(400),
+            min_speech_time: Duration::from_millis(250),
+        };
 
         debug!("Creating VAD session with: sample_rate={}Hz, redemption={}ms, min_speech={}ms, input_rate={}Hz",
                VAD_SAMPLE_RATE, redemption_time_ms, 250, input_sample_rate);
@@ -183,10 +181,10 @@ impl ContinuousVadProcessor {
         // Simple moving average filter (basic low-pass)
         let filter_size =
             (self.sample_rate as f64 / (cutoff_freq * self.sample_rate as f64)) as usize;
-        let filter_size = std::cmp::max(1, std::cmp::min(filter_size, 5)); // Limit filter size
+        let filter_size = filter_size.clamp(1, 5); // Limit filter size
 
         for i in 0..samples.len() {
-            let start = if i >= filter_size { i - filter_size } else { 0 };
+            let start = i.saturating_sub(filter_size);
             let end = std::cmp::min(i + filter_size + 1, samples.len());
             let sum: f32 = samples[start..end].iter().sum();
             filtered_samples.push(sum / (end - start) as f32);
@@ -230,8 +228,7 @@ impl ContinuousVadProcessor {
 
         // Process any remaining buffered audio
         if !self.buffer.is_empty() {
-            let remaining = self.buffer.clone();
-            self.buffer.clear();
+            let remaining = std::mem::take(&mut self.buffer);
 
             // Pad to chunk size if needed
             let mut padded_chunk = remaining;
@@ -487,7 +484,7 @@ where
         let mut processed = 0;
         let mut last_progress = 0u32;
         let mut chunk_count = 0;
-        let total_chunks = (total_samples + CHUNK_SIZE - 1) / CHUNK_SIZE;
+        let total_chunks = total_samples.div_ceil(CHUNK_SIZE);
 
         for chunk in samples_mono_16k.chunks(CHUNK_SIZE) {
             chunk_count += 1;
@@ -567,7 +564,7 @@ mod tests {
         let speech_interval = 10.0; // seconds between speech starts
         let speech_duration = 5.0; // seconds of speech
 
-        for i in 0..total_samples {
+        for (i, sample) in samples.iter_mut().enumerate().take(total_samples) {
             let time = i as f32 / sample_rate as f32;
             let cycle_time = time % speech_interval;
 
@@ -579,7 +576,7 @@ mod tests {
                 let freq3 = freq1 * 3.0; // Another harmonic
 
                 let amplitude = 0.3 + 0.1 * (time * 5.0).sin(); // Amplitude modulation
-                samples[i] = amplitude
+                *sample = amplitude
                     * (0.5 * (2.0 * std::f32::consts::PI * freq1 * time).sin()
                         + 0.3 * (2.0 * std::f32::consts::PI * freq2 * time).sin()
                         + 0.2 * (2.0 * std::f32::consts::PI * freq3 * time).sin());
@@ -737,7 +734,7 @@ mod tests {
 
         // Should find speech segments
         assert!(
-            all_segments.len() >= 1,
+            !all_segments.is_empty(),
             "Expected at least 1 speech segment"
         );
     }

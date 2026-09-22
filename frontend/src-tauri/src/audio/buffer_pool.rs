@@ -86,15 +86,15 @@ impl PooledBuffer {
         }
     }
 
-    /// Get mutable access to the underlying buffer
-    pub fn as_mut(&mut self) -> &mut Vec<f32> {
+    /// Get mutable access to the underlying buffer.
+    fn buffer_mut(&mut self) -> &mut Vec<f32> {
         self.buffer
             .as_mut()
             .expect("Buffer should always be available")
     }
 
-    /// Get immutable access to the underlying buffer
-    pub fn as_ref(&self) -> &Vec<f32> {
+    /// Get immutable access to the underlying buffer.
+    fn buffer(&self) -> &Vec<f32> {
         self.buffer
             .as_ref()
             .expect("Buffer should always be available")
@@ -120,13 +120,25 @@ impl std::ops::Deref for PooledBuffer {
     type Target = Vec<f32>;
 
     fn deref(&self) -> &Self::Target {
-        self.as_ref()
+        self.buffer()
     }
 }
 
 impl std::ops::DerefMut for PooledBuffer {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.as_mut()
+        self.buffer_mut()
+    }
+}
+
+impl AsRef<Vec<f32>> for PooledBuffer {
+    fn as_ref(&self) -> &Vec<f32> {
+        self.buffer()
+    }
+}
+
+impl AsMut<Vec<f32>> for PooledBuffer {
+    fn as_mut(&mut self) -> &mut Vec<f32> {
+        self.buffer_mut()
     }
 }
 

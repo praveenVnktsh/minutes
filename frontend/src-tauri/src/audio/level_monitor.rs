@@ -27,15 +27,15 @@ pub struct AudioLevelUpdate {
 }
 
 pub struct AudioLevelMonitor {
-    monitored_devices: Arc<Mutex<Vec<String>>>,
-    streams: Arc<Mutex<Vec<cpal::Stream>>>,
+    monitored_devices: Mutex<Vec<String>>,
+    streams: Mutex<Vec<cpal::Stream>>,
 }
 
 impl AudioLevelMonitor {
     pub fn new() -> Self {
         Self {
-            monitored_devices: Arc::new(Mutex::new(Vec::new())),
-            streams: Arc::new(Mutex::new(Vec::new())),
+            monitored_devices: Mutex::new(Vec::new()),
+            streams: Mutex::new(Vec::new()),
         }
     }
 
@@ -63,10 +63,7 @@ impl AudioLevelMonitor {
         *self.monitored_devices.lock().await = device_names.clone();
 
         // Clear existing streams
-        {
-            let mut streams = self.streams.lock().await;
-            streams.clear();
-        }
+        self.streams.lock().await.clear();
 
         let host = cpal::default_host();
         let level_data = Arc::new(Mutex::new(Vec::<AudioLevelData>::new()));
@@ -78,8 +75,7 @@ impl AudioLevelMonitor {
                     .create_level_stream(&device, device_name, level_data.clone())
                     .await
                 {
-                    let mut streams = self.streams.lock().await;
-                    streams.push(stream);
+                    self.streams.lock().await.push(stream);
                 } else {
                     warn!("Failed to create audio stream for device: {}", device_name);
                 }
@@ -100,9 +96,7 @@ impl AudioLevelMonitor {
 
                 let levels = {
                     let mut data = level_data_clone.lock().await;
-                    let current_levels = data.clone();
-                    data.clear(); // Reset for next interval
-                    current_levels
+                    std::mem::take(&mut *data)
                 };
 
                 if !levels.is_empty() {
@@ -133,10 +127,7 @@ impl AudioLevelMonitor {
             .store(false, Ordering::SeqCst);
 
         // Stop all streams
-        {
-            let mut streams = self.streams.lock().await;
-            streams.clear(); // Dropping streams stops them
-        }
+        self.streams.lock().await.clear(); // Dropping streams stops them
 
         self.monitored_devices.lock().await.clear();
 
@@ -307,6 +298,12 @@ impl AudioLevelMonitor {
                 sample_format
             )),
         }
+    }
+}
+
+impl Default for AudioLevelMonitor {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

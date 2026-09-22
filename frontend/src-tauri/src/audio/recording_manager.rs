@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 use super::devices::AudioDevice;
 
 use super::device_monitor::{AudioDeviceMonitor, DeviceEvent};
-use super::pipeline::AudioPipelineManager;
+use super::pipeline::{AudioPipelineManager, AudioSourceInfo};
 use super::recording_saver::RecordingSaver;
 use super::recording_state::{AudioChunk, RecordingState};
 use super::stream::AudioStreamManager;
@@ -328,13 +328,16 @@ impl RecordingManager {
         if let Err(error) = self.pipeline_manager.start(
             self.state.clone(),
             transcription_sender,
-            0,                      // Ignored - using dynamic sizing internally
             48000,                  // 48kHz sample rate
             Some(recording_sender), // CRITICAL: Pass recording sender to receive pre-mixed audio
-            mic_name,
-            mic_kind,
-            sys_name,
-            sys_kind,
+            AudioSourceInfo {
+                name: mic_name,
+                kind: mic_kind,
+            },
+            AudioSourceInfo {
+                name: sys_name,
+                kind: sys_kind,
+            },
         ) {
             self.state.stop_recording();
             return Err(RecordingStartError::TranscriptionRuntime(error));
@@ -643,7 +646,7 @@ impl RecordingManager {
     /// Get the meeting folder path (if available)
     /// Returns None if no meeting name was set or folder structure not initialized
     pub fn get_meeting_folder(&self) -> Option<std::path::PathBuf> {
-        self.recording_saver.get_meeting_folder().map(|p| p.clone())
+        self.recording_saver.get_meeting_folder().cloned()
     }
 
     /// Take ownership of the device event receiver for use by a background processor.
@@ -687,6 +690,19 @@ impl RecordingManager {
     }
 }
 
+impl Default for RecordingManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for RecordingManager {
+    fn drop(&mut self) {
+        // Note: Can't call async cleanup in Drop, but streams have their own Drop implementations
+        self.state.cleanup();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{combine_shutdown_results, propagate_save_result};
@@ -719,19 +735,6 @@ mod tests {
         let result = propagate_save_result(Err("transcript write failed".to_string()));
 
         assert_eq!(result.unwrap_err().to_string(), "transcript write failed");
-    }
-}
-
-impl Default for RecordingManager {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Drop for RecordingManager {
-    fn drop(&mut self) {
-        // Note: Can't call async cleanup in Drop, but streams have their own Drop implementations
-        self.state.cleanup();
     }
 }
 

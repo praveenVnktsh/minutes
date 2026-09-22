@@ -50,7 +50,7 @@ pub async fn start_monitoring<R: Runtime>(
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
             counter += 0.1;
-            let fake_level = (counter.sin().abs() * 0.8) as f32; // Simulate varying levels
+            let fake_level = counter.sin().abs() * 0.8; // Simulate varying levels
 
             let levels: Vec<AudioLevelData> = device_names
                 .iter()

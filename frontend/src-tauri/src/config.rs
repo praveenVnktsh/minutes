@@ -1,7 +1,7 @@
-/// Application configuration constants
-///
-/// Centralized definitions for default models and settings.
-/// Used across database initialization, import, and retranscription.
+//! Application configuration constants.
+//!
+//! Centralized definitions for default models and settings used across database
+//! initialization, import, and retranscription.
 
 /// Default Whisper model for transcription when no preference is configured.
 /// This is the largest, highest-accuracy registered Whisper model.

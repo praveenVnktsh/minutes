@@ -424,6 +424,8 @@ impl AnalyticsClient {
             .await
     }
 
+    // This event intentionally keeps each analytics dimension explicit to preserve its schema.
+    #[allow(clippy::too_many_arguments)]
     pub async fn track_meeting_ended(
         &self,
         transcription_provider: &str,

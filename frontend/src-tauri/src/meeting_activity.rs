@@ -331,6 +331,8 @@ pub fn set_task_warning<R: Runtime>(app: &AppHandle<R>, task_id: &str, warning: 
     });
 }
 
+// This command-shaped helper keeps its scalar fields aligned with the activity payload.
+#[allow(clippy::too_many_arguments)]
 pub fn update_task<R: Runtime>(
     app: &AppHandle<R>,
     task_id: &str,
@@ -381,13 +383,15 @@ mod tests {
 
     #[test]
     fn stale_recording_binding_is_rejected() {
-        let mut store = ActivityStore::default();
-        store.recording = Some(RecordingActivity {
-            session_id: "current".to_string(),
-            meeting_id: None,
-            status: ActivityStatus::Recording,
-            error: None,
-        });
+        let mut store = ActivityStore {
+            recording: Some(RecordingActivity {
+                session_id: "current".to_string(),
+                meeting_id: None,
+                status: ActivityStatus::Recording,
+                error: None,
+            }),
+            ..Default::default()
+        };
         assert_eq!(
             store.bind_recording("stale", "meeting-1".to_string()),
             Err("Recording session is stale".to_string())
@@ -397,13 +401,15 @@ mod tests {
 
     #[test]
     fn recording_cannot_be_rebound_to_a_different_meeting() {
-        let mut store = ActivityStore::default();
-        store.recording = Some(RecordingActivity {
-            session_id: "current".to_string(),
-            meeting_id: None,
-            status: ActivityStatus::Recording,
-            error: None,
-        });
+        let mut store = ActivityStore {
+            recording: Some(RecordingActivity {
+                session_id: "current".to_string(),
+                meeting_id: None,
+                status: ActivityStatus::Recording,
+                error: None,
+            }),
+            ..Default::default()
+        };
         store
             .bind_recording("current", "meeting-1".to_string())
             .unwrap();
@@ -414,13 +420,15 @@ mod tests {
 
     #[test]
     fn stale_stop_cannot_clear_a_new_recording() {
-        let mut store = ActivityStore::default();
-        store.recording = Some(RecordingActivity {
-            session_id: "new-session".to_string(),
-            meeting_id: Some("meeting-2".to_string()),
-            status: ActivityStatus::Recording,
-            error: None,
-        });
+        let mut store = ActivityStore {
+            recording: Some(RecordingActivity {
+                session_id: "new-session".to_string(),
+                meeting_id: Some("meeting-2".to_string()),
+                status: ActivityStatus::Recording,
+                error: None,
+            }),
+            ..Default::default()
+        };
 
         assert!(!store.finish_recording("old-session", None));
         assert_eq!(store.recording.unwrap().session_id, "new-session");
@@ -428,13 +436,15 @@ mod tests {
 
     #[test]
     fn save_failure_is_retained_as_terminal_recording_activity() {
-        let mut store = ActivityStore::default();
-        store.recording = Some(RecordingActivity {
-            session_id: "session-1".to_string(),
-            meeting_id: Some("meeting-1".to_string()),
-            status: ActivityStatus::Saving,
-            error: None,
-        });
+        let mut store = ActivityStore {
+            recording: Some(RecordingActivity {
+                session_id: "session-1".to_string(),
+                meeting_id: Some("meeting-1".to_string()),
+                status: ActivityStatus::Saving,
+                error: None,
+            }),
+            ..Default::default()
+        };
 
         assert!(store.finish_recording("session-1", Some("disk full".to_string())));
         assert!(store.recording.is_none());

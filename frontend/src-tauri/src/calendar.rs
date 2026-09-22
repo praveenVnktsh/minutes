@@ -444,7 +444,7 @@ pub fn expand_ics(
         }
     }
 
-    output.sort_by(|a, b| a.start.cmp(&b.start));
+    output.sort_by_key(|event| event.start);
     Ok(output)
 }
 
