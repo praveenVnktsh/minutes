@@ -58,7 +58,7 @@ export function WelcomeStep() {
           >
             Get Started
           </Button>
-          <p className="text-xs text-center text-ink-muted">Takes less than 3 minutes</p>
+          <p className="text-xs text-center text-ink-muted">Setup will download AI models</p>
         </div>
       </div>
     </OnboardingContainer>

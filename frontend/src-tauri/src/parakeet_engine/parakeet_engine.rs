@@ -1,3 +1,4 @@
+use crate::download_eta::DownloadEta;
 use crate::parakeet_engine::model::ParakeetModel;
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
@@ -49,6 +50,8 @@ pub struct DownloadProgress {
     pub speed_mbps: f64,
     /// Percentage complete (0-100)
     pub percent: u8,
+    /// Estimated whole seconds remaining; None while the rate is unstable.
+    pub eta_seconds: Option<u64>,
 }
 
 impl DownloadProgress {
@@ -65,7 +68,13 @@ impl DownloadProgress {
             total_mb: total as f64 / (1024.0 * 1024.0),
             speed_mbps,
             percent,
+            eta_seconds: None,
         }
+    }
+
+    pub fn with_eta_seconds(mut self, eta_seconds: Option<u64>) -> Self {
+        self.eta_seconds = eta_seconds;
+        self
     }
 }
 
@@ -75,6 +84,8 @@ pub struct ModelInfo {
     pub name: String,
     pub path: PathBuf,
     pub size_mb: u32,
+    /// Exact download size in bytes, straight from the catalogue.
+    pub size_bytes: u64,
     pub quantization: QuantizationType,
     pub speed: String, // Performance description
     pub status: ModelStatus,
@@ -400,6 +411,7 @@ impl ParakeetEngine {
                     name: spec.name.to_string(),
                     path: model_path,
                     size_mb: spec.size_mb,
+                    size_bytes: spec.exact_bytes(),
                     quantization: spec.quantization,
                     speed: spec.speed.to_string(),
                     status,
@@ -927,6 +939,10 @@ impl ParakeetEngine {
         let mut bytes_since_report = 0u64;
         let mut last_report = Instant::now();
         let mut last_percent = 0u8;
+        // Tracks the whole-download rate across every artifact, so a resume that
+        // starts partway through does not read its first report as an
+        // instantaneous burst: the very first `observe` only sets a baseline.
+        let mut eta = DownloadEta::new();
 
         for artifact in artifacts {
             if active_download.cancellation.is_cancelled() {
@@ -952,14 +968,17 @@ impl ParakeetEngine {
                     .ok_or_else(|| {
                         anyhow!("Progress overflow while skipping {}", artifact.filename)
                     })?;
-                let progress = Self::in_flight_progress(confirmed_bytes, total_bytes, 0.0);
+                let now = Instant::now();
+                eta.observe(confirmed_bytes, now);
+                let progress = Self::in_flight_progress(confirmed_bytes, total_bytes, 0.0)
+                    .with_eta_seconds(eta.seconds_remaining(confirmed_bytes, total_bytes));
                 if let Some(callback) = &progress_callback {
                     callback(progress.clone());
                 }
                 self.set_downloading_status(model_name, progress.percent)
                     .await;
                 last_percent = progress.percent;
-                last_report = Instant::now();
+                last_report = now;
                 continue;
             }
 
@@ -982,14 +1001,17 @@ impl ParakeetEngine {
                             confirmed_bytes.checked_add(range_start).ok_or_else(|| {
                                 anyhow!("Progress overflow while resuming {}", artifact.filename)
                             })?;
-                        let progress = Self::in_flight_progress(confirmed_bytes, total_bytes, 0.0);
+                        let now = Instant::now();
+                        eta.observe(confirmed_bytes, now);
+                        let progress = Self::in_flight_progress(confirmed_bytes, total_bytes, 0.0)
+                            .with_eta_seconds(eta.seconds_remaining(confirmed_bytes, total_bytes));
                         if let Some(callback) = &progress_callback {
                             callback(progress.clone());
                         }
                         self.set_downloading_status(model_name, progress.percent)
                             .await;
                         last_percent = progress.percent;
-                        last_report = Instant::now();
+                        last_report = now;
                         (response, range_start, true)
                     }
                     reqwest::StatusCode::OK => {
@@ -1150,17 +1172,20 @@ impl ParakeetEngine {
                     } else {
                         0.0
                     };
+                    let now = Instant::now();
+                    eta.observe(confirmed_bytes, now);
                     if let Some(callback) = &progress_callback {
-                        callback(Self::in_flight_progress(
-                            confirmed_bytes,
-                            total_bytes,
-                            speed_mbps,
-                        ));
+                        callback(
+                            Self::in_flight_progress(confirmed_bytes, total_bytes, speed_mbps)
+                                .with_eta_seconds(
+                                    eta.seconds_remaining(confirmed_bytes, total_bytes),
+                                ),
+                        );
                     }
                     self.set_downloading_status(model_name, progress.percent)
                         .await;
                     last_percent = progress.percent;
-                    last_report = Instant::now();
+                    last_report = now;
                     bytes_since_report = 0;
                 }
             }
@@ -1446,6 +1471,10 @@ mod tests {
                 name: TEST_MODEL_NAME.to_string(),
                 path: model_dir.clone(),
                 size_mb: 1,
+                size_bytes: SMALL_ARTIFACTS
+                    .iter()
+                    .map(|artifact| artifact.exact_bytes)
+                    .sum(),
                 quantization: QuantizationType::Int8,
                 speed: "test".to_string(),
                 status: ModelStatus::Missing,
@@ -2207,5 +2236,32 @@ mod tests {
             .await
             .downloads
             .contains_key(TEST_MODEL_NAME));
+    }
+
+    #[test]
+    fn download_progress_carries_eta_seconds() {
+        let progress = DownloadProgress::new(10, 100, 1.0);
+        assert_eq!(progress.eta_seconds, None);
+
+        let progress = progress.with_eta_seconds(Some(42));
+        assert_eq!(progress.eta_seconds, Some(42));
+    }
+
+    #[tokio::test]
+    async fn model_info_size_bytes_matches_the_catalogue_exactly() {
+        let temp_dir = tempdir().expect("create temporary models directory");
+        let engine = ParakeetEngine::new_with_models_dir(Some(temp_dir.path().to_path_buf()))
+            .expect("create Parakeet engine");
+
+        let discovered = engine
+            .discover_models()
+            .await
+            .expect("discovery must succeed");
+        let v3 = discovered
+            .iter()
+            .find(|model| model.name == "parakeet-tdt-0.6b-v3-int8")
+            .expect("parakeet-tdt-0.6b-v3-int8 is catalogued");
+
+        assert_eq!(v3.size_bytes, 670_619_706);
     }
 }

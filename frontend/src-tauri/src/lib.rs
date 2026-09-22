@@ -48,6 +48,7 @@ pub mod config;
 pub mod console_utils;
 pub mod database;
 pub mod debug_mode;
+pub mod download_eta;
 pub mod groq;
 pub mod live_notes;
 pub mod meeting_activity;

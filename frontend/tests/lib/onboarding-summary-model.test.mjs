@@ -15,6 +15,17 @@ const modulePath = path.join(
   'onboarding-summary-model.ts'
 );
 const require = createRequire(import.meta.url);
+const srcRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'src');
+
+// The module under test imports '@/lib/download-display', the single formatter
+// every download size in the UI goes through. tsconfig resolves that alias;
+// a bare require inside the vm context does not, so map it here.
+function requireWithAlias(specifier) {
+  if (specifier.startsWith('@/')) {
+    return loadTsModule(path.join(srcRoot, `${specifier.slice(2)}.ts`));
+  }
+  return require(specifier);
+}
 
 function loadTsModule(filePath) {
   const source = fs.readFileSync(filePath, 'utf8');
@@ -29,15 +40,13 @@ function loadTsModule(filePath) {
   vm.runInNewContext(compiled, {
     exports: module.exports,
     module,
-    require,
+    require: requireWithAlias,
   });
   return module.exports;
 }
 
 const {
-  getDownloadTotalMb,
-  getSummaryModelSizeLabel,
-  getSummaryModelSizeMb,
+  formatSummaryModelSizeLabelFromMb,
   resolveOnboardingSummaryModelStatus,
 } = loadTsModule(modulePath);
 
@@ -80,15 +89,11 @@ assert.equal(
   'recommended Qwen should become the selected model when no model is selected yet'
 );
 
-assert.equal(getSummaryModelSizeMb('qwen3.5:2b'), 1221);
-assert.equal(getSummaryModelSizeMb('qwen3.5:4b'), 2614);
-assert.equal(getSummaryModelSizeMb('gemma3:1b'), 1019);
-assert.equal(getSummaryModelSizeMb('unknown:model'), 0);
-
-assert.equal(getSummaryModelSizeLabel('qwen3.5:2b'), '~1.2 GiB');
-assert.equal(getSummaryModelSizeLabel('qwen3.5:4b'), '~2.6 GiB');
-assert.equal(getSummaryModelSizeLabel('unknown:model'), '');
-
-assert.equal(getDownloadTotalMb(0, 'qwen3.5:4b'), 2614);
-assert.equal(getDownloadTotalMb(undefined, 'qwen3.5:2b'), 1221);
-assert.equal(getDownloadTotalMb(512, 'qwen3.5:4b'), 512);
+// The MB size table these lines used to assert is gone: sizes now reach the UI
+// as `size_bytes` from the Rust catalogue, so there is nothing here to drift.
+// What survives is the label helper the settings model list still calls, which
+// must format in the same binary base as every other size on screen.
+assert.equal(formatSummaryModelSizeLabelFromMb(2614), '~2.55 GiB');
+assert.equal(formatSummaryModelSizeLabelFromMb(1221), '~1.19 GiB');
+assert.equal(formatSummaryModelSizeLabelFromMb(512), '~512.0 MiB');
+assert.equal(formatSummaryModelSizeLabelFromMb(0), '');

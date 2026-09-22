@@ -4,8 +4,9 @@ import React, { useEffect, useState, useCallback } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { toast } from 'sonner';
 import { X, Download, Check, Loader2, ArrowBigDownDash } from 'lucide-react';
-import { getDownloadTotalMb } from '@/lib/onboarding-summary-model';
 import type { ParakeetDownloadProgressEvent } from '@/lib/parakeet';
+import { BUILTIN_AI_DOWNLOAD_PROGRESS_EVENT, type BuiltInAIDownloadProgressEvent } from '@/lib/builtin-ai';
+import { BYTES_PER_MIB } from '@/lib/download-display';
 
 interface DownloadProgress {
   modelName: string;
@@ -309,23 +310,19 @@ export function useDownloadProgressToast() {
 
   // Listen to Built-in AI summary model download events
   useEffect(() => {
-    const unlisten = listen<{
-      model: string;
-      progress: number;
-      downloaded_mb?: number;
-      total_mb?: number;
-      speed_mbps?: number;
-      status: string;
-      error?: string;
-    }>('builtin-ai-download-progress', (event) => {
-      const { model, progress, downloaded_mb, total_mb, speed_mbps, status, error } = event.payload;
+    const unlisten = listen<BuiltInAIDownloadProgressEvent>(BUILTIN_AI_DOWNLOAD_PROGRESS_EVENT, (event) => {
+      const { model, progress, downloaded_mb, total_mb, total_bytes, speed_mbps, status, error } = event.payload;
+
+      // The backend sends total_bytes on every emission including completion,
+      // so it takes priority over the decimal total_mb that can lag behind it.
+      const totalMb = total_bytes ? total_bytes / BYTES_PER_MIB : (total_mb ?? 0);
 
       const downloadData: DownloadProgress = {
         modelName: model,
         displayName: `Summary Model (${model})`,
         progress: progress ?? 0,
         downloadedMb: downloaded_mb ?? 0,
-        totalMb: getDownloadTotalMb(total_mb, model),
+        totalMb,
         speedMbps: speed_mbps ?? 0,
         unitLabel: 'MiB',
         status: status === 'completed' || progress >= 100

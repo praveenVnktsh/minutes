@@ -142,7 +142,8 @@ pub struct ModelDef {
     /// Download URL (HuggingFace or other source)
     pub download_url: String,
 
-    /// File size in MiB. The field name is kept for API compatibility.
+    /// File size in mebibytes (1 MiB = 1,048,576 bytes). The field name is kept
+    /// for API compatibility even though the unit is binary, not decimal.
     pub size_mb: u64,
 
     /// Context window size in tokens (configurable per model!)
@@ -216,6 +217,14 @@ pub fn get_available_models() -> Vec<ModelDef> {
             description: "Fastest model. Runs on any hardware with ~1GB RAM. Good for quick summaries.".to_string(),
         },
     ]
+}
+
+impl ModelDef {
+    /// Exact download size in bytes. `size_mb` is mebibytes, so this is the one
+    /// place the base is applied; every size shown to a user derives from it.
+    pub fn size_bytes(&self) -> u64 {
+        self.size_mb * 1024 * 1024
+    }
 }
 
 /// Get a specific model by name
@@ -331,6 +340,12 @@ mod tests {
     #[test]
     fn default_model_is_largest_qwen_model() {
         assert_eq!(get_default_model().name, "qwen3.5:4b");
+    }
+
+    #[test]
+    fn size_bytes_applies_the_mebibyte_base_to_the_catalogue_value() {
+        let qwen_4b = get_model_by_name("qwen3.5:4b").expect("qwen 4b model should exist");
+        assert_eq!(qwen_4b.size_bytes(), 2_740_977_664);
     }
 
     #[test]

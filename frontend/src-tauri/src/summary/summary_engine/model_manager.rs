@@ -14,6 +14,8 @@ use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::RwLock;
 use tokio::time::timeout;
 
+use crate::download_eta::DownloadEta;
+
 use super::models::{get_available_models, get_model_by_name};
 
 // ============================================================================
@@ -35,6 +37,8 @@ pub struct DownloadProgress {
     pub speed_mbps: f64,
     /// Percentage complete (0-100)
     pub percent: u8,
+    /// Estimated whole seconds remaining; None while the rate is unstable.
+    pub eta_seconds: Option<u64>,
 }
 
 impl DownloadProgress {
@@ -51,7 +55,13 @@ impl DownloadProgress {
             total_mb: total as f64 / (1024.0 * 1024.0),
             speed_mbps,
             percent,
+            eta_seconds: None,
         }
+    }
+
+    pub fn with_eta_seconds(mut self, eta_seconds: Option<u64>) -> Self {
+        self.eta_seconds = eta_seconds;
+        self
     }
 }
 
@@ -95,6 +105,9 @@ pub struct ModelInfo {
 
     /// Size in MB
     pub size_mb: u64,
+
+    /// Exact download size in bytes, straight from the catalogue.
+    pub size_bytes: u64,
 
     /// Context window size in tokens
     pub context_size: u32,
@@ -274,6 +287,7 @@ impl ModelManager {
                 status,
                 path: model_path,
                 size_mb: model_def.size_mb,
+                size_bytes: model_def.size_bytes(),
                 context_size: model_def.context_size,
                 description: model_def.description.clone(),
                 gguf_file: model_def.gguf_file.clone(),
@@ -553,6 +567,13 @@ impl ModelManager {
         let download_start_time = std::time::Instant::now();
         let start_downloaded = downloaded;
 
+        // Seed the estimator at the resumed position rather than letting the
+        // first in-loop report be its baseline: otherwise the bytes already on
+        // disk from a prior attempt would be counted as downloaded in whatever
+        // sliver of time elapses before the next report, reading as a burst.
+        let mut eta = DownloadEta::new();
+        eta.observe(start_downloaded, download_start_time);
+
         use futures_util::StreamExt;
         let mut stream = response.bytes_stream();
 
@@ -677,6 +698,10 @@ impl ModelManager {
                 || elapsed_since_report.as_millis() >= 500;
 
             if should_report {
+                let report_instant = std::time::Instant::now();
+                eta.observe(downloaded, report_instant);
+                let eta_seconds = eta.seconds_remaining(downloaded, total_size);
+
                 // Calculate speed based on bytes downloaded since last report
                 let speed_mbps = if elapsed_since_report.as_secs_f64() > 0.0 {
                     (bytes_since_last_report as f64 / (1024.0 * 1024.0))
@@ -714,11 +739,14 @@ impl ModelManager {
 
                 // Call progress callback with detailed info
                 if let Some(ref callback) = progress_callback {
-                    callback(DownloadProgress::new(downloaded, total_size, speed_mbps));
+                    callback(
+                        DownloadProgress::new(downloaded, total_size, speed_mbps)
+                            .with_eta_seconds(eta_seconds),
+                    );
                 }
 
                 last_progress_percent = progress_percent;
-                last_report_time = std::time::Instant::now();
+                last_report_time = report_instant;
                 bytes_since_last_report = 0;
             }
         }

@@ -5,7 +5,11 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import type { PermissionStatus, OnboardingPermissions, OnboardingStep, SetupCheckRecord } from '@/types/onboarding';
 import { resolveOnboardingSummaryModelStatus } from '@/lib/onboarding-summary-model';
-import type { ParakeetDownloadProgressEvent } from '@/lib/parakeet';
+import { ParakeetAPI } from '@/lib/parakeet';
+import type { CancelDownloadOutcome, ParakeetDownloadProgressEvent } from '@/lib/parakeet';
+import { BUILTIN_AI_DOWNLOAD_PROGRESS_EVENT, BuiltInAIAPI } from '@/lib/builtin-ai';
+import type { BuiltInAIDownloadProgressEvent } from '@/lib/builtin-ai';
+import { mibToBytes } from '@/lib/download-display';
 
 const PARAKEET_MODEL = 'parakeet-tdt-0.6b-v3-int8';
 
@@ -27,19 +31,49 @@ interface OnboardingStatus {
   setup_check?: SetupCheckRecord;
 }
 
-interface SummaryModelProgressInfo {
+export interface SummaryModelProgressInfo {
   percent: number;
   downloadedMb: number;
   totalMb: number;
+  downloadedBytes: number;
+  totalBytes: number;
   speedMbps: number;
+  /** Whole seconds left, or null while the backend rate is too unstable to name one. */
+  etaSeconds: number | null;
 }
 
-interface ParakeetProgressInfo {
+export interface ParakeetProgressInfo {
   percent: number;
   downloadedMb: number;
   totalMb: number;
+  downloadedBytes: number;
+  totalBytes: number;
   speedMbps: number;
+  /** Whole seconds left, or null while the backend rate is too unstable to name one. */
+  etaSeconds: number | null;
 }
+
+const IDLE_PROGRESS: ParakeetProgressInfo = {
+  percent: 0,
+  downloadedMb: 0,
+  totalMb: 0,
+  downloadedBytes: 0,
+  totalBytes: 0,
+  speedMbps: 0,
+  etaSeconds: null,
+};
+
+/**
+ * The byte counts are what the UI prints; the MB fields are the same number
+ * divided by 1024² upstream, so they are a lossy last resort for a payload that
+ * predates the byte fields rather than a reason to show zero.
+ */
+function progressBytes(bytes: number | undefined, mb: number | undefined): number {
+  return bytes ?? Math.round(mibToBytes(mb ?? 0));
+}
+
+/** Which transfer a slot belongs to, so cancelling one does not claim the other stopped. */
+type DownloadKind = 'parakeet' | 'summary';
 
 interface OnboardingContextType {
   currentStep: number;
@@ -51,6 +85,10 @@ interface OnboardingContextType {
   summaryModelProgressInfo: SummaryModelProgressInfo;
   selectedSummaryModel: string;
   recommendedSummaryModel: string;
+  // Exact catalogue sizes, known before a byte moves. null means "not known yet" — a screen
+  // showing a guessed size before the transfer starts is worse than one showing none.
+  parakeetSizeBytes: number | null;
+  summaryModelSizeBytes: number | null;
   databaseExists: boolean;
   isBackgroundDownloading: boolean;
   // Permissions
@@ -73,6 +111,10 @@ interface OnboardingContextType {
   completeOnboarding: (setupCheck?: SetupCheckRecord | null) => Promise<void>;
   startBackgroundDownloads: (options: StartBackgroundDownloadsOptions) => Promise<void>;
   retryParakeetDownload: () => Promise<void>;
+  // The Parakeet worker may not have noticed the request yet, so the outcome reaches the
+  // caller instead of being swallowed: 'pending' needs a different message from 'cancelled'.
+  cancelParakeetDownload: () => Promise<CancelDownloadOutcome>;
+  cancelSummaryDownload: () => Promise<void>;
 }
 
 interface StartBackgroundDownloadsOptions {
@@ -88,24 +130,28 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
   const [completed, setCompleted] = useState(false);
   const [parakeetDownloaded, setParakeetDownloaded] = useState(false);
   const [parakeetProgress, setParakeetProgress] = useState(0);
-  const [parakeetProgressInfo, setParakeetProgressInfo] = useState<ParakeetProgressInfo>({
-    percent: 0,
-    downloadedMb: 0,
-    totalMb: 0,
-    speedMbps: 0,
-  });
+  const [parakeetProgressInfo, setParakeetProgressInfo] = useState<ParakeetProgressInfo>(IDLE_PROGRESS);
   const [summaryModelDownloaded, setSummaryModelDownloaded] = useState(false);
   const [summaryModelProgress, setSummaryModelProgress] = useState(0);
-  const [summaryModelProgressInfo, setSummaryModelProgressInfo] = useState<SummaryModelProgressInfo>({
-    percent: 0,
-    downloadedMb: 0,
-    totalMb: 0,
-    speedMbps: 0,
-  });
+  const [summaryModelProgressInfo, setSummaryModelProgressInfo] =
+    useState<SummaryModelProgressInfo>(IDLE_PROGRESS);
   const [selectedSummaryModel, setSelectedSummaryModel] = useState<string>('');
   const [recommendedSummaryModel, setRecommendedSummaryModel] = useState<string>('');
+  const [parakeetSizeBytes, setParakeetSizeBytes] = useState<number | null>(null);
+  const [summaryModelSizeBytes, setSummaryModelSizeBytes] = useState<number | null>(null);
   const [databaseExists, setDatabaseExists] = useState(false);
   const [isBackgroundDownloading, setIsBackgroundDownloading] = useState(false);
+  // Transfers believed to be in flight. Cancelling or finishing one only lowers the
+  // downloading flag once the set is empty, so one model's cancel cannot hide the other's
+  // progress.
+  const activeDownloadsRef = useRef<Set<DownloadKind>>(new Set());
+
+  const releaseDownloadSlot = useCallback((kind: DownloadKind) => {
+    activeDownloadsRef.current.delete(kind);
+    if (activeDownloadsRef.current.size === 0) {
+      setIsBackgroundDownloading(false);
+    }
+  }, []);
 
   // Permissions state
   const [permissions, setPermissions] = useState<OnboardingPermissions>({
@@ -250,19 +296,24 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
     const unlisten = listen<ParakeetDownloadProgressEvent>(
       'parakeet-model-download-progress',
       (event) => {
-        const { modelName, progress, downloaded_mb, total_mb, speed_mbps, status } = event.payload;
+        const {
+          modelName,
+          progress,
+          downloaded_bytes,
+          total_bytes,
+          downloaded_mb,
+          total_mb,
+          speed_mbps,
+          eta_seconds,
+          status,
+        } = event.payload;
         if (modelName !== PARAKEET_MODEL) return;
 
         if (status === 'cancelled') {
-          setIsBackgroundDownloading(false);
+          releaseDownloadSlot('parakeet');
           setParakeetDownloaded(false);
           setParakeetProgress(0);
-          setParakeetProgressInfo({
-            percent: 0,
-            downloadedMb: 0,
-            totalMb: 0,
-            speedMbps: 0,
-          });
+          setParakeetProgressInfo(IDLE_PROGRESS);
           return;
         }
 
@@ -271,10 +322,15 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
           percent: progress,
           downloadedMb: downloaded_mb ?? 0,
           totalMb: total_mb ?? 0,
+          downloadedBytes: progressBytes(downloaded_bytes, downloaded_mb),
+          totalBytes: progressBytes(total_bytes, total_mb),
           speedMbps: speed_mbps ?? 0,
+          // Absent means indeterminate, never "no time left".
+          etaSeconds: eta_seconds ?? null,
         });
         if (status === 'completed') {
           setParakeetDownloaded(true);
+          releaseDownloadSlot('parakeet');
         }
       }
     );
@@ -286,6 +342,7 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
         if (modelName === PARAKEET_MODEL) {
           setParakeetDownloaded(true);
           setParakeetProgress(100);
+          releaseDownloadSlot('parakeet');
         }
       }
     );
@@ -296,6 +353,7 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
         const { modelName } = event.payload;
         if (modelName === PARAKEET_MODEL) {
           console.error('Parakeet download error:', event.payload.error);
+          releaseDownloadSlot('parakeet');
         }
       }
     );
@@ -305,31 +363,50 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
       unlistenComplete.then(fn => fn());
       unlistenError.then(fn => fn());
     };
-  }, []);
+  }, [releaseDownloadSlot]);
 
   // Listen to summary model (Built-in AI) download progress
   useEffect(() => {
-    const unlisten = listen<{
-      model: string;
-      progress: number;
-      downloaded_mb?: number;
-      total_mb?: number;
-      speed_mbps?: number;
-      status: string;
-    }>(
-      'builtin-ai-download-progress',
+    const unlisten = listen<BuiltInAIDownloadProgressEvent>(
+      BUILTIN_AI_DOWNLOAD_PROGRESS_EVENT,
       (event) => {
-        const { model, progress, downloaded_mb, total_mb, speed_mbps, status } = event.payload;
+        const {
+          model,
+          progress,
+          downloaded_bytes,
+          total_bytes,
+          downloaded_mb,
+          total_mb,
+          speed_mbps,
+          eta_seconds,
+          status,
+        } = event.payload;
         if (selectedSummaryModel && model === selectedSummaryModel) {
+          if (status === 'cancelled') {
+            releaseDownloadSlot('summary');
+            setSummaryModelDownloaded(false);
+            setSummaryModelProgress(0);
+            setSummaryModelProgressInfo(IDLE_PROGRESS);
+            return;
+          }
+
           setSummaryModelProgress(progress);
           setSummaryModelProgressInfo({
             percent: progress,
             downloadedMb: downloaded_mb ?? 0,
             totalMb: total_mb ?? 0,
+            downloadedBytes: progressBytes(downloaded_bytes, downloaded_mb),
+            totalBytes: progressBytes(total_bytes, total_mb),
             speedMbps: speed_mbps ?? 0,
+            // Absent means indeterminate, never "no time left".
+            etaSeconds: eta_seconds ?? null,
           });
           if (status === 'completed' || progress >= 100) {
             setSummaryModelDownloaded(true);
+            releaseDownloadSlot('summary');
+          } else if (status === 'error') {
+            console.error('[OnboardingContext] Summary Model download error:', event.payload.error);
+            releaseDownloadSlot('summary');
           }
         }
       }
@@ -337,6 +414,67 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
 
     return () => {
       unlisten.then(fn => fn());
+    };
+  }, [selectedSummaryModel, releaseDownloadSlot]);
+
+  // Catalogue sizes are read up front — before anything is downloaded — so the setup screen
+  // can say what the install costs while the user can still decide. A failure leaves the
+  // value null and the screen says nothing rather than something wrong.
+  useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      try {
+        await ParakeetAPI.init();
+        const models = await ParakeetAPI.getAvailableModels();
+        if (cancelled) return;
+
+        const model = models.find(m => m.name === PARAKEET_MODEL);
+        if (model && model.size_bytes > 0) {
+          setParakeetSizeBytes(model.size_bytes);
+        } else {
+          console.warn('[OnboardingContext] No catalogue size for Parakeet model:', PARAKEET_MODEL);
+        }
+      } catch (error) {
+        console.warn('[OnboardingContext] Failed to load Parakeet catalogue size:', error);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // The summary model is not known on mount - it arrives from the recommendation - so this
+  // follows the selection rather than running once.
+  useEffect(() => {
+    if (!selectedSummaryModel) {
+      setSummaryModelSizeBytes(null);
+      return;
+    }
+
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const info = await BuiltInAIAPI.getModelInfo(selectedSummaryModel);
+        if (cancelled) return;
+
+        if (info && info.size_bytes > 0) {
+          setSummaryModelSizeBytes(info.size_bytes);
+        } else {
+          setSummaryModelSizeBytes(null);
+          console.warn('[OnboardingContext] No catalogue size for summary model:', selectedSummaryModel);
+        }
+      } catch (error) {
+        if (cancelled) return;
+        setSummaryModelSizeBytes(null);
+        console.warn('[OnboardingContext] Failed to load summary model catalogue size:', error);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
     };
   }, [selectedSummaryModel]);
 
@@ -556,12 +694,14 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
       // Start Parakeet download first (speech recognition - always required)
       if (shouldStartParakeet) {
         console.log('[OnboardingContext] Starting Parakeet download');
+        activeDownloadsRef.current.add('parakeet');
         invoke('parakeet_download_model', { modelName: PARAKEET_MODEL })
           .catch(err => console.error('[OnboardingContext] Parakeet download failed:', err));
       }
 
       // Start selected Summary Model download immediately so completion cannot race the request.
       if (shouldStartSummary && summaryModel) {
+        activeDownloadsRef.current.add('summary');
         requestSummaryModelDownload(summaryModel);
       }
     } catch (error) {
@@ -579,6 +719,7 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
       
       if (isDownloading) {
         console.log('[OnboardingContext] Detected active background downloads on mount');
+        activeDownloadsRef.current.add('parakeet');
         setIsBackgroundDownloading(true);
       }
       
@@ -591,12 +732,48 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
 
   const retryParakeetDownload = async () => {
     console.log('[OnboardingContext] Retrying Parakeet download');
+    activeDownloadsRef.current.add('parakeet');
+    setIsBackgroundDownloading(true);
     try {
       await invoke('parakeet_retry_download', { modelName: PARAKEET_MODEL });
     } catch (error) {
       console.error('[OnboardingContext] Retry failed:', error);
+      releaseDownloadSlot('parakeet');
       throw error;
     }
+  };
+
+  // Cancellation. The Parakeet backend answers 'pending' when the worker has not yet reached a
+  // point where it can stop, so the outcome goes back to the caller unchanged: only 'cancelled'
+  // means the transfer is really over and the progress readout can be cleared here. A 'pending'
+  // cancel is finished by the cancelled progress event when the worker gets there.
+  const cancelParakeetDownload = async (): Promise<CancelDownloadOutcome> => {
+    console.log('[OnboardingContext] Cancelling Parakeet download');
+    const outcome = await ParakeetAPI.cancelDownload(PARAKEET_MODEL);
+
+    setParakeetDownloaded(false);
+    if (outcome === 'cancelled') {
+      setParakeetProgress(0);
+      setParakeetProgressInfo(IDLE_PROGRESS);
+      releaseDownloadSlot('parakeet');
+    }
+
+    return outcome;
+  };
+
+  const cancelSummaryDownload = async (): Promise<void> => {
+    if (!selectedSummaryModel) {
+      console.warn('[OnboardingContext] Summary Model cancel ignored: no model selected');
+      return;
+    }
+
+    console.log('[OnboardingContext] Cancelling Summary Model download:', selectedSummaryModel);
+    await BuiltInAIAPI.cancelDownload(selectedSummaryModel);
+
+    setSummaryModelDownloaded(false);
+    setSummaryModelProgress(0);
+    setSummaryModelProgressInfo(IDLE_PROGRESS);
+    releaseDownloadSlot('summary');
   };
 
   const setPermissionStatus = useCallback((permission: keyof OnboardingPermissions, status: PermissionStatus) => {
@@ -638,6 +815,8 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
         summaryModelProgressInfo,
         selectedSummaryModel,
         recommendedSummaryModel,
+        parakeetSizeBytes,
+        summaryModelSizeBytes,
         databaseExists,
         isBackgroundDownloading,
         permissions,
@@ -655,6 +834,8 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
         completeOnboarding,
         startBackgroundDownloads,
         retryParakeetDownload,
+        cancelParakeetDownload,
+        cancelSummaryDownload,
       }}
     >
       {children}
