@@ -68,6 +68,7 @@ export function DownloadProgressStep() {
     isBackgroundDownloading,
     startBackgroundDownloads,
     retryParakeetDownload,
+    retrySummaryDownload,
     cancelParakeetDownload,
     cancelSummaryDownload,
   } = useOnboarding();
@@ -147,12 +148,9 @@ export function DownloadProgressStep() {
     setSummaryStatus('downloading');
 
     try {
-      // Call download command directly (no retry command exists for built-in AI)
-      const modelName = selectedSummaryModel;
-      if (!modelName) {
-        throw new Error('Summary model recommendation is not ready yet');
-      }
-      await invoke('builtin_ai_download_model', { modelName });
+      // Routed through the context like the transcription engine retry above, for the
+      // same reason.
+      await retrySummaryDownload();
     } catch (error) {
       console.error('[DownloadProgressStep] Summary retry failed:', error);
       setSummaryStatus('error');
