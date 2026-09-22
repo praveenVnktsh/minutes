@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "minutes",
-  "version": "1.5.743",
+  "version": "1.5.751",
   "identifier": "com.meetily.ai",
   "build": {
     "frontendDist": "../out",
