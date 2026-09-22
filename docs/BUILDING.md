@@ -1,6 +1,6 @@
 # Building Minutes from Source
 
-This guide explains source builds on each supported platform. Start with the build notes below, then use the platform instructions that match your machine.
+This guide explains source builds on each supported platform: macOS and Windows. Linux instructions are included but unsupported. Start with the build notes below, then use the platform instructions that match your machine.
 
 ## Build Notes
 
@@ -14,14 +14,26 @@ pnpm install --frozen-lockfile
 
 Frozen installation keeps the lockfile and installed dependency set aligned. When intentionally changing dependencies, update and commit `pnpm-lock.yaml`.
 
-- **Linux:** Minutes is built from source; choose acceleration for the environment where you build.
+- **Linux:** Unsupported. Minutes ships installers for macOS and Windows only; the release pipeline publishes no Linux artifact, and the audio capture layer (ALSA/PulseAudio) is not regularly tested. The Linux notes below are kept for contributors who want to build from source, and they may be out of date.
 - **Windows packages:** Distribution builds use Vulkan-enabled Whisper and require an AVX2-capable x64 CPU. AVX-512 is not required.
 - **CUDA:** NVIDIA CUDA support requires a compatible source build and CUDA toolchain; the standard Windows installer does not select it automatically.
 
 <details>
-<summary>Linux</summary>
+<summary>Linux (unsupported)</summary>
 
 ## 🐧 Building on Linux
+
+> 💡 **Unsupported:** Minutes ships installers for macOS and Windows only. Linux is unsupported: the release pipeline publishes no Linux artifact, and the audio capture layer (ALSA/PulseAudio) is not regularly tested. The notes below are kept for contributors who want to build from source, and they may be out of date.
+>
+> Minutes no longer bundles Linux packages: "deb" and "appimage" are not in `bundle.targets` in `frontend/src-tauri/tauri.conf.json`. `./build-gpu.sh` and `pnpm tauri:build` still compile the app and stage the llama-helper sidecar, but they produce no `.deb` and no `.AppImage`. To get a package, name the bundle on the Tauri CLI yourself, after `./build-gpu.sh` has staged the sidecar:
+>
+> ```bash
+> cd frontend
+> pnpm exec tauri build --bundles deb
+> pnpm exec tauri build --bundles appimage -- --features vulkan
+> ```
+>
+> (`pnpm exec` passes the arguments through verbatim, including the `--` that forwards `--features` to cargo.)
 
 This guide helps you build Minutes on Linux with **automatic GPU acceleration**. The build system detects your hardware and configures the best performance automatically.
 
@@ -240,10 +252,16 @@ TAURI_GPU_FEATURE=openblas ./build-gpu.sh
 
 #### Build Output Location
 
-After successful build:
+A plain build (no `--bundles` flag) produces no bundle directory — only the compiled binary. This is a Cargo workspace rooted at the repository, so build output lands in `target/` at the repository root, not under `frontend/src-tauri/`:
 
 ```
-src-tauri/target/release/bundle/appimage/minutes_<version>_amd64.AppImage
+target/release/
+```
+
+If you passed `--bundles appimage`, the AppImage lands here instead:
+
+```
+target/release/bundle/appimage/minutes_<version>_amd64.AppImage
 ```
 
 ---

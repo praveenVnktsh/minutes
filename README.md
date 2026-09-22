@@ -65,7 +65,7 @@
 
 ### Transcription and models
 - **Whisper.cpp / whisper-rs** and **NVIDIA Parakeet** paths, running locally.
-- **GPU acceleration**: Metal + CoreML (macOS), CUDA/Vulkan (Windows/Linux), CPU fallback.
+- **GPU acceleration**: Metal + CoreML (macOS), CUDA/Vulkan (Windows), CPU fallback.
 - **Built-in AI** summary models plus **Ollama** for local summarization.
 - Optional external providers (**Claude, Groq, OpenRouter**) when you configure them.
 - **Speaker diarization** with an editable speaker manager and reassignment.
@@ -86,7 +86,7 @@ Click to download the latest version directly:
 | **Windows** (x64) | [**minutes-windows-x64-setup.exe**](https://github.com/praveenvnktsh/minutes/releases/latest/download/minutes-windows-x64-setup.exe) · [.msi](https://github.com/praveenvnktsh/minutes/releases/latest/download/minutes-windows-x64.msi) |
 
 All releases and notes: [github.com/praveenvnktsh/minutes/releases/latest](https://github.com/praveenvnktsh/minutes/releases/latest).
-Linux is supported via source builds (see below).
+Minutes ships installers for macOS and Windows only. Linux is unsupported: the release pipeline publishes no Linux artifact, and the audio capture layer (ALSA/PulseAudio) is not regularly tested. Building from source on Linux still works and is documented below, for contributors.
 
 > **macOS first launch:** Minutes isn't notarized yet, so macOS may warn that it "could not verify it is free of malware". To open it, **right-click the app → Open → Open**, or run `xattr -dr com.apple.quarantine /Applications/minutes.app` once.
 
@@ -108,7 +108,7 @@ cd frontend
 pnpm tauri:build:local:mac
 ```
 
-See [docs/BUILDING.md](docs/BUILDING.md) and [docs/building_in_linux.md](docs/building_in_linux.md) for platform details.
+See [docs/BUILDING.md](docs/BUILDING.md) for platform details, and [docs/building_in_linux.md](docs/building_in_linux.md) for the unsupported, source-only Linux build.
 
 ## Architecture
 

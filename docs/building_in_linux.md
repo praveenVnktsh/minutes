@@ -1,3 +1,7 @@
+# Building on Linux (unsupported)
+
+> ⚠️ **Linux is not a supported platform.** Minutes ships installers for macOS and Windows only. Linux is unsupported: the release pipeline publishes no Linux artifact, and the audio capture layer (ALSA/PulseAudio) is not regularly tested. The notes below are kept for contributors who want to build from source, and they may be out of date.
+
 ## 🐧 Building on Linux
 
 This guide helps you build Minutes on Linux with **automatic GPU acceleration**. The build system detects your hardware and configures the best performance automatically.
@@ -33,6 +37,8 @@ sudo pacman -S base-devel cmake git
 ```
 
 **That's it!** The scripts automatically detect your GPU and configure acceleration.
+
+> 📦 **No package by default.** `./build-gpu.sh` (and `pnpm tauri:build`) compile the app and stage the llama-helper sidecar, but they produce no `.deb` and no `.AppImage`. See [Build Output Location](#build-output-location) below to produce a package.
 
 ### What Happens Automatically?
 
@@ -211,10 +217,28 @@ TAURI_GPU_FEATURE=openblas ./build-gpu.sh
 
 ### Build Output Location
 
-After successful build:
+Minutes no longer bundles Linux packages: `deb` and `appimage` are not in `bundle.targets` in `frontend/src-tauri/tauri.conf.json`. `./build-gpu.sh` and `pnpm tauri:build` still compile the app and stage the llama-helper sidecar, but they produce no `.deb` and no `.AppImage`.
+
+This is a Cargo workspace rooted at the repository, so build output lands in `target/` at the repository root, not under `frontend/src-tauri/`. After a plain `./build-gpu.sh`, the compiled binary lands in:
 
 ```
-src-tauri/target/release/bundle/appimage/minutes_<version>_amd64.AppImage
+target/release/
+```
+
+To get a package, name the bundle on the Tauri CLI yourself, after `./build-gpu.sh` has staged the sidecar:
+
+```bash
+cd frontend
+pnpm exec tauri build --bundles deb
+pnpm exec tauri build --bundles appimage -- --features vulkan
+```
+
+(`pnpm exec` passes the arguments through verbatim, including the `--` that forwards `--features` to cargo.)
+
+With `--bundles appimage`, the AppImage lands at:
+
+```
+target/release/bundle/appimage/minutes_<version>_amd64.AppImage
 ```
 
 ---
