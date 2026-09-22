@@ -572,9 +572,17 @@ async fn wake_idle_audio_hardware(system_device: Option<&super::AudioDevice>) {
 /// decide whether the recording may start.
 ///
 /// The verdict is tri-state rather than a bool because only a denial should
-/// stop a recording. A check that could not be made — no default input device,
-/// for instance — is the system-audio-only case the previous check explicitly
-/// let through, and blocking on it would refuse a recording this app supports.
+/// stop a recording, and a denial is narrow: the stream ran and delivered not
+/// one callback, so there would be nothing in the recording either way.
+///
+/// Everything else proceeds. A machine with no default input device is the
+/// system-audio-only case the previous check explicitly let through. A
+/// microphone that delivered callbacks of pure silence is a muted input, or a
+/// virtual loopback device left selected as the default, as easily as it is a
+/// denial — and refusing to record would turn a silent track into no meeting at
+/// all, for a setup that recorded before this check existed. The warning below
+/// is the breadcrumb for that case; the setup check in `mic_check.rs` is where
+/// a user is told about it in advance.
 async fn verify_microphone_before_recording() -> Result<(), String> {
     let report = crate::audio::permission_check::verify_microphone().await;
     match report.verdict {
@@ -588,7 +596,7 @@ async fn verify_microphone_before_recording() -> Result<(), String> {
         }
         PermissionVerdict::Undetermined => {
             warn!(
-                "⚠️ Microphone access could not be verified: {} — starting anyway; device resolution handles the system-audio-only case",
+                "⚠️ Microphone access could not be verified: {} — starting the recording anyway, so the microphone track may come out silent",
                 report.detail.as_deref().unwrap_or("no further detail")
             );
             Ok(())

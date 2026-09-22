@@ -13,7 +13,7 @@ import {
   verdictToStatus,
   type PermissionPane,
 } from '@/lib/permissions';
-import type { OnboardingPermissions, PermissionReport } from '@/types/onboarding';
+import type { OnboardingPermissions, PermissionReport, PermissionStatus } from '@/types/onboarding';
 
 // The one place this screen writes a settings path in words. `PERMISSION_PANES` holds the
 // identifiers `open_system_settings` understands; these are the same two panes spelled the way
@@ -135,17 +135,23 @@ export function PermissionsStep() {
     handleContinueToMicCheck();
   };
 
-  // The microphone is the channel the app cannot record anything without, and its verdict is
-  // decisive in both directions: the verifier reports 'authorized' only once a sample has
-  // actually arrived, so a grant here is evidence and not an assumption.
+  // Both rows have to have been asked, and neither may have come back denied.
   //
-  // System audio is not symmetric, so this gate does not treat it as if it were. A silent tap
-  // is reported 'undetermined' rather than denied, and a correctly configured Mac with nothing
-  // playing is silent every single time — demanding 'authorized' there would strand exactly the
-  // users whose setup is fine. Only an outright 'denied', the operating system saying no in as
-  // many words, holds Continue back.
+  // Only a denial holds Continue back, on either row, because only a denial is the operating
+  // system saying no in as many words. 'undetermined' is not a weaker denial, it is the absence
+  // of a verdict, and on both channels it is what a working setup routinely produces: a Mac with
+  // nothing playing gives a silent tap, and a muted microphone — or a virtual input like
+  // BlackHole left selected as the default, which this app's own system-audio instructions ask
+  // users to install — gives callbacks of pure silence. Demanding 'authorized' would leave those
+  // users on this screen permanently, since re-checking cannot produce a sample that does not
+  // exist. The next step is a live mic check with a meter and a transcript, which is a far better
+  // place to find out the microphone is silent than a row that can only keep saying so.
+  const asked = (status: PermissionStatus) => status !== 'not_determined' && status !== 'checking';
   const canContinue =
-    permissions.microphone === 'authorized' && permissions.systemAudio !== 'denied';
+    asked(permissions.microphone) &&
+    asked(permissions.systemAudio) &&
+    permissions.microphone !== 'denied' &&
+    permissions.systemAudio !== 'denied';
 
   return (
     <OnboardingContainer
@@ -193,14 +199,16 @@ export function PermissionsStep() {
             I'll do this later
           </button>
 
-          {/* Only two states close the gate, and they need different sentences: without the
-              microphone nothing records at all, while a denied system audio still leaves a
-              recording of this side of the call. */}
+          {/* Three ways the gate stays shut, each needing its own sentence. Telling someone
+              their microphone is blocked when it is merely unasked sends them to a settings
+              screen with nothing wrong in it. */}
           {!canContinue && (
             <p className="text-xs text-center text-muted-foreground">
-              {permissions.microphone === 'authorized'
-                ? 'System audio is blocked, so meetings would capture your voice but not the people you are talking to. Fix it above, or skip and grant it later in settings.'
-                : 'Minutes cannot record without the microphone. Grant it above, or skip and grant it later in settings.'}
+              {permissions.microphone === 'denied'
+                ? 'Minutes cannot record without the microphone. Grant it above, or skip and grant it later in settings.'
+                : permissions.systemAudio === 'denied'
+                  ? 'System audio is blocked, so meetings would capture your voice but not the people you are talking to. Fix it above, or skip and grant it later in settings.'
+                  : 'Check both permissions above to continue. You can also skip and grant them later in settings.'}
             </p>
           )}
         </div>

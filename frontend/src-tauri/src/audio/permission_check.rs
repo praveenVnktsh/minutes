@@ -15,13 +15,16 @@
 //
 // The third verdict is the whole point of the tri-state. A check that could not
 // be made — no input device, a platform where system audio is not captured at
-// all, a tap that was silent because nothing was playing — is reported as
-// undetermined, never as a grant and never as a denial. Either guess sends a
-// user somewhere they did not need to go.
+// all, a tap that was silent because nothing was playing, a microphone that
+// delivered callbacks of pure silence — is reported as undetermined, never as a
+// grant and never as a denial. A wrong grant is the lie this module deletes; a
+// wrong denial refuses a recording the user asked for. Only the third verdict
+// is safe to be wrong about.
 //
-// What silence means, per channel and per platform, is not decided here a
-// second time: `mic_check.rs` documents the same rules for the setup check, and
-// the comments below say so wherever they restate one.
+// What silence means per channel is mostly settled in `mic_check.rs` already,
+// and the comments below point at it wherever they restate one of its rules.
+// They also mark the one rule where the two deliberately differ, because this
+// verifier gates recording and that report only describes a capture.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -59,13 +62,17 @@ const UNNAMED_DEVICE: &str = "the default microphone";
 ///
 /// It names no platform's settings app: this check now runs on Windows and
 /// Linux too, where the macOS wording the record-start check used to print
-/// would be a direction to a screen that does not exist. It also names the
-/// muted input, because on macOS an all-zero capture is read as a denial and a
-/// muted microphone produces exactly that — the message must not insist on a
-/// permission problem the check cannot distinguish.
+/// would be a direction to a screen that does not exist.
+///
+/// A denial means the stream opened, ran for its whole window and delivered not
+/// one callback, so the permission is the first thing to check but not the only
+/// one — a device that has stopped delivering looks the same. A muted input does
+/// not reach this message: that produces callbacks full of zeroes, which
+/// `microphone_verdict` reports as undetermined precisely so it cannot be
+/// mistaken for the operating system saying no.
 pub const MICROPHONE_DENIED_MESSAGE: &str =
     "No audio reached the app from the microphone. Allow microphone access for this app in \
-     your system's privacy settings, check the input is not muted, then try again.";
+     your system's privacy settings, check the input device is still connected, then try again.";
 
 /// What one permission check concluded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -249,27 +256,38 @@ fn microphone_verdict(evidence: MicrophoneEvidence, device_name: &str) -> Permis
         )));
     }
 
-    // Callbacks that carry nothing but bit-exact zeroes. macOS hands a denied
-    // app a stream of digital silence rather than refusing to open the
-    // microphone, so zeroes there indict the permission; everywhere else they
-    // are a muted or wrong input and nothing to do with a grant.
-    // `mic_check.rs` documents the same rule on `digital_silence_outcome`.
-    #[cfg(target_os = "macos")]
-    {
-        PermissionReport::denied(format!(
-            "'{}' delivered {} callbacks of digital silence, which is what macOS gives an app \
-             that was denied the microphone",
-            device_name, evidence.callbacks
-        ))
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        PermissionReport::authorized(Some(format!(
-            "'{}' delivered audio, though every sample was silent; on this platform that is a \
-             muted or wrong input rather than a permission problem",
-            device_name
-        )))
-    }
+    // Callbacks that carry nothing but bit-exact zeroes, which is the one case
+    // the evidence genuinely cannot settle, on any platform.
+    //
+    // macOS does hand a denied app a stream of digital silence, so a denial is
+    // one thing this looks like. It is not the only thing: a hardware or
+    // Control Center mic mute produces the same zeroes, and so does a virtual
+    // loopback input such as BlackHole 2ch with nothing routed into it — which
+    // this repository's own setup instructions tell users to install, and which
+    // an unlucky default-input selection can leave as the microphone. Off macOS
+    // the ambiguity is the same minus the TCC case.
+    //
+    // So this is `Undetermined` rather than either verdict, and the choice is
+    // load-bearing in a way the other two are not. `verify_microphone_before_recording`
+    // refuses to start a recording on `Denied`, and a wrong denial here would
+    // refuse to record at all for a muted or virtual input that recorded fine
+    // before this check existed — turning a silent track into no track. A wrong
+    // `Authorized` would be the lie this module was written to delete. Only the
+    // third verdict is safe to be wrong about: it warns, records anyway, and
+    // asks onboarding to re-check.
+    //
+    // This is the one rule where `mic_check.rs` deliberately says something
+    // else: its `digital_silence_outcome` calls macOS zeroes `PermissionDenied`.
+    // That report is advisory — it is read after a capture, next to a transcript,
+    // where naming the likeliest cause costs the user nothing. This verifier
+    // gates recording, where the same guess costs them the recording. Same
+    // evidence, different consequence, so a different default.
+    PermissionReport::undetermined(format!(
+        "'{}' delivered {} callbacks of digital silence; that is a denied microphone, a muted \
+         one, or an input with nothing routed into it, and the three are indistinguishable from \
+         here",
+        device_name, evidence.callbacks
+    ))
 }
 
 /// Verify system audio the same way.
@@ -483,16 +501,34 @@ mod tests {
     }
 
     #[test]
-    fn microphone_digital_silence_indicts_the_permission_on_macos_only() {
-        // The platform split is mic_check.rs's, not a second opinion: macOS
-        // hands a denied app zeroes, everywhere else zeroes are a muted input.
+    fn microphone_digital_silence_settles_nothing_on_any_platform() {
+        // A denied mic on macOS delivers zeroes — but so does a muted one, and
+        // so does a virtual loopback input such as BlackHole with nothing
+        // routed into it. This verdict gates recording, so it must not guess:
+        // `Denied` here would refuse to record at all for a setup that used to
+        // record a silent track, and `Authorized` would certify a channel
+        // nothing was heard on.
         let report = microphone_verdict(evidence(40, 0.0), DEVICE);
 
-        #[cfg(target_os = "macos")]
-        assert_eq!(report.verdict, PermissionVerdict::Denied);
+        assert_eq!(report.verdict, PermissionVerdict::Undetermined);
+        assert!(!report.is_authorized());
+        assert!(!report.is_denied());
+        assert!(report.detail.unwrap().contains(DEVICE));
+    }
 
-        #[cfg(not(target_os = "macos"))]
-        assert_eq!(report.verdict, PermissionVerdict::Authorized);
+    #[test]
+    fn a_silent_microphone_never_blocks_the_start_of_a_recording() {
+        // The finding this pins: only `Denied` stops a recording, so every
+        // other way a microphone can disappoint has to land elsewhere. A
+        // device that delivered callbacks — of anything at all, silence
+        // included — is not the operating system saying no.
+        for callbacks in [1, 40, 4096] {
+            assert!(!microphone_verdict(evidence(callbacks, 0.0), DEVICE).is_denied());
+        }
+
+        // Not one callback in the whole window stays a denial: nothing was
+        // captured, so a recording would have nothing in it either.
+        assert!(microphone_verdict(evidence(0, 0.0), DEVICE).is_denied());
     }
 
     #[test]
@@ -536,11 +572,13 @@ mod tests {
     #[test]
     fn the_denied_message_holds_on_every_platform_this_check_now_runs_on() {
         // It is shown on Windows and Linux too, so it may not send anyone to a
-        // macOS settings pane, and it has to allow for the muted input that
-        // looks identical to a denial on macOS.
+        // macOS settings pane. It also may not blame a mute: a muted input
+        // delivers zeroes and is reported undetermined, so a user who reads
+        // this sentence has a device that delivered nothing at all.
         assert!(!MICROPHONE_DENIED_MESSAGE.contains("System Settings"));
         assert!(!MICROPHONE_DENIED_MESSAGE.contains("Privacy & Security"));
-        assert!(MICROPHONE_DENIED_MESSAGE.contains("muted"));
+        assert!(!MICROPHONE_DENIED_MESSAGE.contains("muted"));
+        assert!(MICROPHONE_DENIED_MESSAGE.contains("privacy settings"));
     }
 
     #[test]
