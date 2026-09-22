@@ -22,6 +22,12 @@ impl ParallelProcessorState {
     }
 }
 
+impl Default for ParallelProcessorState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[tauri::command]
 pub async fn initialize_parallel_processor(
     state: State<'_, ParallelProcessorState>,
@@ -67,7 +73,7 @@ pub async fn start_parallel_processing(
 ) -> Result<String, String> {
     let chunks: Vec<AudioChunk> = audio_chunks
         .into_iter()
-        .map(|v| serde_json::from_value(v))
+        .map(serde_json::from_value)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("Failed to parse audio chunks: {}", e))?;
 
@@ -194,14 +200,13 @@ pub async fn prepare_audio_chunks(
     let samples_per_chunk = ((sample_rate as f64 * duration_ms) / 1000.0) as usize;
 
     let mut chunks = Vec::new();
-    let mut chunk_id = 0;
 
     for (i, chunk_samples) in audio_data.chunks(samples_per_chunk).enumerate() {
         let start_time_ms = i as f64 * duration_ms;
         let actual_duration_ms = (chunk_samples.len() as f64 / sample_rate as f64) * 1000.0;
 
         let chunk = AudioChunk {
-            id: chunk_id,
+            id: i as u32,
             data: chunk_samples.to_vec(),
             sample_rate,
             start_time_ms,
@@ -209,7 +214,6 @@ pub async fn prepare_audio_chunks(
         };
 
         chunks.push(chunk);
-        chunk_id += 1;
     }
 
     Ok(chunks)

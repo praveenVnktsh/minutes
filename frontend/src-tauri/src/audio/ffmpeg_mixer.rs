@@ -530,7 +530,7 @@ mod tests {
 
         // All values should be clamped to 1.0
         for sample in mixed {
-            assert!(sample <= 1.0 && sample >= -1.0);
+            assert!((-1.0..=1.0).contains(&sample));
         }
     }
 }

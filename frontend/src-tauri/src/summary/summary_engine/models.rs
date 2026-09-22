@@ -3,7 +3,7 @@
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 // ============================================================================
 // Model Definitions
@@ -229,7 +229,7 @@ pub fn get_default_model() -> ModelDef {
 }
 
 /// Resolve model name to full file path in the models directory
-pub fn get_model_path(app_data_dir: &PathBuf, model_name: &str) -> Result<PathBuf> {
+pub fn get_model_path(app_data_dir: &Path, model_name: &str) -> Result<PathBuf> {
     let model =
         get_model_by_name(model_name).ok_or_else(|| anyhow!("Unknown model: {}", model_name))?;
 
@@ -240,7 +240,7 @@ pub fn get_model_path(app_data_dir: &PathBuf, model_name: &str) -> Result<PathBu
 }
 
 /// Get the models directory path for built-in AI
-pub fn get_models_directory(app_data_dir: &PathBuf) -> PathBuf {
+pub fn get_models_directory(app_data_dir: &Path) -> PathBuf {
     app_data_dir.join("models").join("summary")
 }
 

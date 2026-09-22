@@ -228,6 +228,8 @@ pub enum LLMProvider {
 
 impl LLMProvider {
     /// Parse provider from string (case-insensitive)
+    // Keep this inherent API because callers outside the summary module use it directly.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Result<Self, String> {
         match s.to_lowercase().as_str() {
             "openai" => Ok(Self::OpenAI),
@@ -260,6 +262,8 @@ impl LLMProvider {
 /// * `cancellation_token` - Optional token to cancel the request
 ///
 /// The generated visible content and whether private reasoning was removed.
+// Provider-specific request options make this shared dispatch boundary inherently wide.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn generate_summary(
     client: &Client,
     provider: &LLMProvider,
@@ -520,6 +524,19 @@ pub(crate) async fn generate_summary(
 
         info!("🐞 LLM Response received from {}", provider_name(provider));
         chat_response.completion()
+    }
+}
+
+/// Helper function to get provider name for logging
+fn provider_name(provider: &LLMProvider) -> &str {
+    match provider {
+        LLMProvider::OpenAI => "OpenAI",
+        LLMProvider::Claude => "Claude",
+        LLMProvider::Groq => "Groq",
+        LLMProvider::Ollama => "Ollama",
+        LLMProvider::BuiltInAI => "Built-in AI",
+        LLMProvider::OpenRouter => "OpenRouter",
+        LLMProvider::CustomOpenAI => "Custom OpenAI",
     }
 }
 
@@ -947,18 +964,5 @@ mod tests {
                 reasoning_stripped: true,
             })
         );
-    }
-}
-
-/// Helper function to get provider name for logging
-fn provider_name(provider: &LLMProvider) -> &str {
-    match provider {
-        LLMProvider::OpenAI => "OpenAI",
-        LLMProvider::Claude => "Claude",
-        LLMProvider::Groq => "Groq",
-        LLMProvider::Ollama => "Ollama",
-        LLMProvider::BuiltInAI => "Built-in AI",
-        LLMProvider::OpenRouter => "OpenRouter",
-        LLMProvider::CustomOpenAI => "Custom OpenAI",
     }
 }

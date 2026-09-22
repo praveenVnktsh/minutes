@@ -1,3 +1,6 @@
+// Public provider and engine paths intentionally mirror their implementation filenames.
+#![allow(clippy::module_inception)]
+
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex as StdMutex;
@@ -695,7 +698,7 @@ pub fn run() {
             });
 
             // Set models directory to use app_data_dir (unified storage location)
-            whisper_engine::commands::set_models_directory(&_app.handle());
+            whisper_engine::commands::set_models_directory(_app.handle());
 
             // Initialize Whisper engine on startup
             tauri::async_runtime::spawn(async {
@@ -705,7 +708,7 @@ pub fn run() {
             });
 
             // Set Parakeet models directory
-            parakeet_engine::commands::set_models_directory(&_app.handle());
+            parakeet_engine::commands::set_models_directory(_app.handle());
 
             // Initialize Parakeet engine on startup
             tauri::async_runtime::spawn(async {
@@ -742,18 +745,18 @@ pub fn run() {
 
             // Initialize database (handles first launch detection and conditional setup)
             tauri::async_runtime::block_on(async {
-                database::setup::initialize_database_on_startup(&_app.handle()).await
+                database::setup::initialize_database_on_startup(_app.handle()).await
             })
             .expect("Failed to initialize database");
 
             // Initialize transcription queue worker (processes import/retranscribe tasks sequentially)
-            audio::transcription_queue::init_queue_worker(&_app.handle());
+            audio::transcription_queue::init_queue_worker(_app.handle());
 
             // Deliver durable transcription-complete webhooks in the background.
-            webhooks::init_worker(&_app.handle());
+            webhooks::init_worker(_app.handle());
 
             // Poll the subscribed calendar feed and raise meeting reminders.
-            calendar::init_worker(&_app.handle());
+            calendar::init_worker(_app.handle());
 
             // Initialize bundled templates directory for dynamic template discovery
             log::info!("Initializing bundled templates directory...");

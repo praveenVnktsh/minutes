@@ -50,7 +50,7 @@ impl SummaryProcessesRepository {
         let update = sqlx::query(
             "UPDATE summary_processes SET result = ?, updated_at = ? WHERE meeting_id = ?",
         )
-        .bind(&result_json.unwrap())
+        .bind(result_json.unwrap())
         .bind(now)
         .bind(meeting_id)
         .execute(&mut *transaction)

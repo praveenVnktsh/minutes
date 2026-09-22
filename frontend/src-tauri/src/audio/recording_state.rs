@@ -111,7 +111,7 @@ pub struct RecordingState {
     error_count: AtomicU32,
     recoverable_error_count: AtomicU32,
     last_error: Mutex<Option<AudioError>>,
-    error_callback: Mutex<Option<Box<dyn Fn(&AudioError) + Send + Sync>>>,
+    error_callback: Mutex<Option<AudioErrorCallback>>,
 
     // Statistics
     stats: Mutex<RecordingStats>,
@@ -122,6 +122,8 @@ pub struct RecordingState {
     pause_start: Mutex<Option<Instant>>,
     total_pause_duration: Mutex<std::time::Duration>,
 }
+
+type AudioErrorCallback = Box<dyn Fn(&AudioError) + Send + Sync>;
 
 impl RecordingState {
     pub fn new() -> Arc<Self> {

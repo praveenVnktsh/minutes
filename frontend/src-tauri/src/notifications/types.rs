@@ -25,18 +25,20 @@ pub enum NotificationType {
     Test, // For testing notifications
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub enum NotificationPriority {
     Low,
+    #[default]
     Normal,
     High,
     Critical,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub enum NotificationTimeout {
     Never,
     Seconds(u64),
+    #[default]
     Default,
 }
 
@@ -100,18 +102,6 @@ impl Notification {
     pub fn add_action(mut self, action: NotificationAction) -> Self {
         self.actions.push(action);
         self
-    }
-}
-
-impl Default for NotificationPriority {
-    fn default() -> Self {
-        NotificationPriority::Normal
-    }
-}
-
-impl Default for NotificationTimeout {
-    fn default() -> Self {
-        NotificationTimeout::Default
     }
 }
 

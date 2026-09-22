@@ -14,7 +14,7 @@ pub fn default_output_device() -> Result<AudioDevice> {
         let device = host
             .default_output_device()
             .ok_or_else(|| anyhow!("No default output device found"))?;
-        return Ok(AudioDevice::new(device.name()?, DeviceType::Output));
+        Ok(AudioDevice::new(device.name()?, DeviceType::Output))
     }
 
     #[cfg(target_os = "windows")]
@@ -32,7 +32,7 @@ pub fn default_output_device() -> Result<AudioDevice> {
         let device = host
             .default_output_device()
             .ok_or_else(|| anyhow!("No default output device found"))?;
-        return Ok(AudioDevice::new(device.name()?, DeviceType::Output));
+        Ok(AudioDevice::new(device.name()?, DeviceType::Output))
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -41,7 +41,7 @@ pub fn default_output_device() -> Result<AudioDevice> {
         let device = host
             .default_output_device()
             .ok_or_else(|| anyhow!("No default output device found"))?;
-        return Ok(AudioDevice::new(device.name()?, DeviceType::Output));
+        Ok(AudioDevice::new(device.name()?, DeviceType::Output))
     }
 }
 

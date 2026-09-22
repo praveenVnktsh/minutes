@@ -176,8 +176,10 @@ pub struct AudioDeviceMonitor {
     /// the new device names are written here. The monitor loop reads it on
     /// its next poll cycle and updates its tracked device list.
     /// Format: (new_mic_name, optional_new_system_name)
-    device_update_mailbox: Arc<std::sync::Mutex<Option<(String, Option<String>)>>>,
+    device_update_mailbox: DeviceUpdateMailbox,
 }
+
+type DeviceUpdateMailbox = Arc<std::sync::Mutex<Option<(String, Option<String>)>>>;
 
 impl AudioDeviceMonitor {
     /// Create a new device monitor
@@ -289,7 +291,7 @@ impl AudioDeviceMonitor {
         event_sender: mpsc::UnboundedSender<DeviceEvent>,
         stop_signal: Arc<tokio::sync::Notify>,
         device_change_notify: Arc<tokio::sync::Notify>,
-        device_update_mailbox: Arc<std::sync::Mutex<Option<(String, Option<String>)>>>,
+        device_update_mailbox: DeviceUpdateMailbox,
     ) {
         let mut last_device_list = Vec::new();
         let check_interval = Duration::from_secs(2); // Poll every 2 seconds

@@ -953,7 +953,7 @@ pub async fn start_retranscription_command<R: Runtime>(
     let task = TranscriptionTask {
         task_id: String::new(), // Will be assigned by queue
         task_type: TaskType::Retranscribe,
-        title: format!("Retranscribe"),
+        title: "Retranscribe".to_string(),
         status: TaskStatus::Pending,
         source_path: None,
         meeting_id: Some(meeting_id.clone()),

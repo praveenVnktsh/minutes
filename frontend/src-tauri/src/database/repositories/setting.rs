@@ -44,9 +44,10 @@ impl SettingsRepository {
             "groq" => Ok(Some("groqApiKey")),
             "openrouter" => Ok(Some("openRouterApiKey")),
             "builtin-ai" | "custom-openai" => Ok(None),
-            _ => Err(sqlx::Error::Protocol(
-                format!("Invalid provider: {}", provider).into(),
-            )),
+            _ => Err(sqlx::Error::Protocol(format!(
+                "Invalid provider: {}",
+                provider
+            ))),
         }
     }
 
@@ -107,7 +108,7 @@ impl SettingsRepository {
         let custom_config_json = custom_openai_config
             .map(serde_json::to_string)
             .transpose()
-            .map_err(|error| sqlx::Error::Protocol(error.to_string().into()))?;
+            .map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
         let mut transaction = pool.begin().await?;
 
         Self::upsert_model_config(
@@ -225,9 +226,10 @@ impl SettingsRepository {
             "openrouter" => "openRouterApiKey",
             "builtin-ai" => return Ok(None), // No API key needed
             _ => {
-                return Err(sqlx::Error::Protocol(
-                    format!("Invalid provider: {}", provider).into(),
-                ))
+                return Err(sqlx::Error::Protocol(format!(
+                    "Invalid provider: {}",
+                    provider
+                )))
             }
         };
 
@@ -284,9 +286,10 @@ impl SettingsRepository {
             "groq" => "groqApiKey",
             "openai" => "openaiApiKey",
             _ => {
-                return Err(sqlx::Error::Protocol(
-                    format!("Invalid provider: {}", provider).into(),
-                ))
+                return Err(sqlx::Error::Protocol(format!(
+                    "Invalid provider: {}",
+                    provider
+                )))
             }
         };
 
@@ -318,9 +321,10 @@ impl SettingsRepository {
             "groq" => "groqApiKey",
             "openai" => "openaiApiKey",
             _ => {
-                return Err(sqlx::Error::Protocol(
-                    format!("Invalid provider: {}", provider).into(),
-                ))
+                return Err(sqlx::Error::Protocol(format!(
+                    "Invalid provider: {}",
+                    provider
+                )))
             }
         };
 
@@ -352,9 +356,10 @@ impl SettingsRepository {
             "openrouter" => "openRouterApiKey",
             "builtin-ai" => return Ok(()), // No API key needed
             _ => {
-                return Err(sqlx::Error::Protocol(
-                    format!("Invalid provider: {}", provider).into(),
-                ))
+                return Err(sqlx::Error::Protocol(format!(
+                    "Invalid provider: {}",
+                    provider
+                )))
             }
         };
 
@@ -398,9 +403,7 @@ impl SettingsRepository {
                 if let Some(json) = config_json {
                     // Parse JSON into CustomOpenAIConfig
                     let config: CustomOpenAIConfig = serde_json::from_str(&json).map_err(|e| {
-                        sqlx::Error::Protocol(
-                            format!("Invalid JSON in customOpenAIConfig: {}", e).into(),
-                        )
+                        sqlx::Error::Protocol(format!("Invalid JSON in customOpenAIConfig: {}", e))
                     })?;
 
                     Ok(Some(config))
@@ -427,7 +430,7 @@ impl SettingsRepository {
     ) -> std::result::Result<(), sqlx::Error> {
         // Serialize config to JSON
         let config_json = serde_json::to_string(config).map_err(|e| {
-            sqlx::Error::Protocol(format!("Failed to serialize config to JSON: {}", e).into())
+            sqlx::Error::Protocol(format!("Failed to serialize config to JSON: {}", e))
         })?;
 
         // Upsert into settings table

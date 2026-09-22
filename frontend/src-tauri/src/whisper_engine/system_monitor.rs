@@ -40,6 +40,12 @@ pub struct SystemMonitor {
     monitoring_enabled: bool,
 }
 
+impl Default for SystemMonitor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SystemMonitor {
     pub fn new() -> Self {
         info!("Initializing system monitor");

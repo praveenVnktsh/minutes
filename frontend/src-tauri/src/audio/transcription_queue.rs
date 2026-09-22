@@ -2,6 +2,7 @@
 // Prevents Whisper/Parakeet engine contention by ensuring only one task runs at a time
 
 use log::{error, info, warn};
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -114,13 +115,11 @@ struct TaskFlags {
     controls_available: Arc<AtomicBool>,
 }
 
-static TASK_FLAGS: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<String, TaskFlags>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+static TASK_FLAGS: Lazy<std::sync::Mutex<std::collections::HashMap<String, TaskFlags>>> =
+    Lazy::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
 /// Global notify used to wake paused tasks when resume is called
-static RESUME_NOTIFY: std::sync::LazyLock<Arc<Notify>> =
-    std::sync::LazyLock::new(|| Arc::new(Notify::new()));
+static RESUME_NOTIFY: Lazy<Arc<Notify>> = Lazy::new(|| Arc::new(Notify::new()));
 
 fn create_task_flags(task_id: &str) {
     let mut flags = TASK_FLAGS.lock().unwrap_or_else(|e| e.into_inner());
@@ -267,8 +266,8 @@ pub async fn enter_non_cancellable_stage<R: Runtime>(app: &AppHandle<R>) -> bool
 
 /// ID of the currently active task (if any). Used by import/retranscription
 /// to check pause state between segments.
-static ACTIVE_TASK_ID: std::sync::LazyLock<std::sync::Mutex<Option<String>>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+static ACTIVE_TASK_ID: Lazy<std::sync::Mutex<Option<String>>> =
+    Lazy::new(|| std::sync::Mutex::new(None));
 
 fn set_active_task_id(task_id: Option<&str>) {
     let mut id = ACTIVE_TASK_ID.lock().unwrap_or_else(|e| e.into_inner());
@@ -503,6 +502,12 @@ impl TranscriptionQueue {
                 }
             }
         });
+    }
+}
+
+impl Default for TranscriptionQueue {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -940,8 +945,8 @@ fn emit_error<R: Runtime>(app: &AppHandle<R>, task: &TranscriptionTask, error: &
 // Global queue instance
 // ============================================================================
 
-static TRANSCRIPTION_QUEUE: std::sync::LazyLock<Arc<TranscriptionQueue>> =
-    std::sync::LazyLock::new(|| Arc::new(TranscriptionQueue::new()));
+static TRANSCRIPTION_QUEUE: Lazy<Arc<TranscriptionQueue>> =
+    Lazy::new(|| Arc::new(TranscriptionQueue::new()));
 
 /// Get the global transcription queue
 pub fn get_queue() -> Arc<TranscriptionQueue> {

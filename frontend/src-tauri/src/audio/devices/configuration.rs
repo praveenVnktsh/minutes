@@ -13,11 +13,12 @@ lazy_static! {
     );
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub enum AudioTranscriptionEngine {
     Deepgram,
     WhisperTiny,
     WhisperDistilLargeV3,
+    #[default]
     WhisperLargeV3Turbo,
     WhisperLargeV3,
 }
@@ -31,12 +32,6 @@ impl fmt::Display for AudioTranscriptionEngine {
             AudioTranscriptionEngine::WhisperLargeV3Turbo => write!(f, "WhisperLargeV3Turbo"),
             AudioTranscriptionEngine::WhisperLargeV3 => write!(f, "WhisperLargeV3"),
         }
-    }
-}
-
-impl Default for AudioTranscriptionEngine {
-    fn default() -> Self {
-        AudioTranscriptionEngine::WhisperLargeV3Turbo
     }
 }
 

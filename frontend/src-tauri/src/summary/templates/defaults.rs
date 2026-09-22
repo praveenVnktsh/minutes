@@ -1,7 +1,7 @@
-/// Embedded default templates using compile-time inclusion
-///
-/// These templates are bundled into the binary and serve as fallbacks
-/// when custom templates are not available.
+//! Embedded default templates using compile-time inclusion.
+//!
+//! These templates are bundled into the binary and serve as fallbacks
+//! when custom templates are not available.
 
 /// Daily standup template for engineering/product teams
 pub const DAILY_STANDUP: &str = include_str!("../../../templates/daily_standup.json");

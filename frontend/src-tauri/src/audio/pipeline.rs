@@ -770,39 +770,41 @@ pub struct AudioPipeline {
     recording_sender_for_mixed: Option<mpsc::UnboundedSender<AudioChunk>>,
 }
 
+pub struct AudioSourceInfo {
+    pub name: String,
+    pub kind: super::device_detection::InputDeviceKind,
+}
+
 impl AudioPipeline {
     pub fn new(
         receiver: mpsc::UnboundedReceiver<AudioChunk>,
         transcription_sender: mpsc::UnboundedSender<AudioChunk>,
-        target_chunk_duration_ms: u32,
         sample_rate: u32,
-        mic_device_name: String,
-        mic_device_kind: super::device_detection::InputDeviceKind,
-        system_device_name: String,
-        system_device_kind: super::device_detection::InputDeviceKind,
+        microphone: AudioSourceInfo,
+        system_audio: AudioSourceInfo,
     ) -> Result<Self> {
         // Log device characteristics for adaptive buffering
         info!("🎛️ AudioPipeline initializing with device characteristics:");
         info!(
             "   Mic: '{}' ({:?}) - Buffer: {:?}",
-            mic_device_name,
-            mic_device_kind,
-            mic_device_kind.buffer_timeout()
+            microphone.name,
+            microphone.kind,
+            microphone.kind.buffer_timeout()
         );
         info!(
             "   System: '{}' ({:?}) - Buffer: {:?}",
-            system_device_name,
-            system_device_kind,
-            system_device_kind.buffer_timeout()
+            system_audio.name,
+            system_audio.kind,
+            system_audio.kind.buffer_timeout()
         );
 
         // Device kind information can be used for adaptive buffering in the future
         // For now, we log it for monitoring and potential optimization
         let _ = (
-            mic_device_name,
-            mic_device_kind,
-            system_device_name,
-            system_device_kind,
+            microphone.name,
+            microphone.kind,
+            system_audio.name,
+            system_audio.kind,
         );
 
         // Create VAD processor. The VAD processor handles 48kHz->16kHz resampling
@@ -844,9 +846,6 @@ impl AudioPipeline {
         // Initialize professional audio mixing components
         let ring_buffer = AudioMixerRingBuffer::new(sample_rate);
         let mixer = ProfessionalAudioMixer::new(sample_rate);
-
-        // Note: target_chunk_duration_ms is ignored - VAD controls segmentation now
-        let _ = target_chunk_duration_ms;
 
         Ok(Self {
             receiver,
@@ -961,7 +960,7 @@ impl AudioPipeline {
                             // STEP 4: Send mixed audio for recording (WAV file)
                             if let Some(ref sender) = self.recording_sender_for_mixed {
                                 let recording_chunk = AudioChunk {
-                                    data: mixed_with_gain.clone(),
+                                    data: mixed_with_gain,
                                     sample_rate: self.sample_rate,
                                     timestamp: chunk.timestamp,
                                     chunk_id: self.chunk_id_counter,
@@ -1092,23 +1091,20 @@ impl AudioPipelineManager {
         &mut self,
         state: Arc<RecordingState>,
         transcription_sender: mpsc::UnboundedSender<AudioChunk>,
-        target_chunk_duration_ms: u32,
         sample_rate: u32,
         recording_sender: Option<mpsc::UnboundedSender<AudioChunk>>,
-        mic_device_name: String,
-        mic_device_kind: super::device_detection::InputDeviceKind,
-        system_device_name: String,
-        system_device_kind: super::device_detection::InputDeviceKind,
+        microphone: AudioSourceInfo,
+        system_audio: AudioSourceInfo,
     ) -> Result<()> {
         // Log device information for adaptive buffering
         info!("🎙️ Starting pipeline with device info:");
         info!(
             "   Microphone: '{}' ({:?})",
-            mic_device_name, mic_device_kind
+            microphone.name, microphone.kind
         );
         info!(
             "   System Audio: '{}' ({:?})",
-            system_device_name, system_device_kind
+            system_audio.name, system_audio.kind
         );
 
         // Create audio processing channel
@@ -1118,12 +1114,9 @@ impl AudioPipelineManager {
         let mut pipeline = AudioPipeline::new(
             audio_receiver,
             transcription_sender,
-            target_chunk_duration_ms,
             sample_rate,
-            mic_device_name,
-            mic_device_kind,
-            system_device_name,
-            system_device_kind,
+            microphone,
+            system_audio,
         )?;
         state.set_audio_sender(audio_sender.clone());
 
