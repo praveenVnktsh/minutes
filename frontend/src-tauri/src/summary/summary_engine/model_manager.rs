@@ -130,6 +130,22 @@ pub(crate) fn is_download_already_running(error: &anyhow::Error) -> bool {
     error.downcast_ref::<DownloadAlreadyRunning>().is_some()
 }
 
+/// Where a transfer's bytes live until it has finished and validated.
+///
+/// Publishing by rename is what keeps the size-band check at the top of
+/// `download_reserved_model` honest - and `scan_models` with it, after a
+/// restart. Both decide a file is a finished model by its size being within
+/// ten percent of the catalogue figure, which a transfer truncated late is
+/// too. Staging the bytes elsewhere means the model's real path only ever
+/// holds a transfer some attempt completed, so there is nothing at that path
+/// for the band to misread.
+fn partial_download_path(file_path: &Path) -> PathBuf {
+    let mut file_name = file_path.file_name().unwrap_or_default().to_os_string();
+    file_name.push(".download");
+
+    file_path.with_file_name(file_name)
+}
+
 // ============================================================================
 // Model Manager
 // ============================================================================
@@ -465,6 +481,8 @@ impl ModelManager {
             }
         }
 
+        let partial_path = partial_download_path(file_path);
+
         // Check if model already exists and is valid (skip re-download)
         if file_path.exists() {
             if let Ok(metadata) = fs::metadata(file_path).await {
@@ -507,21 +525,35 @@ impl ModelManager {
                         log::warn!("Failed to delete oversized model file: {}", e);
                     }
                 } else {
-                    // File is SMALLER than expected - likely partial download
-                    // DON'T DELETE - let resume logic handle it
+                    // File is SMALLER than expected - a partial download. Don't
+                    // delete it; move it to where the resume logic below looks.
+                    // A partial only sits at the real path when an older version
+                    // wrote it there, and leaving it would hand the size band
+                    // something to misread once enough of it had arrived.
                     log::info!(
                         "Model '{}' exists but is incomplete ({} MB, expected min {} MB), will resume download",
                         model_name,
                         file_size_mb,
                         expected_min
                     );
-                    // Continue to download/resume logic below
+                    if !partial_path.exists() {
+                        if let Err(e) = fs::rename(file_path, &partial_path).await {
+                            log::warn!(
+                                "Failed to stage the existing partial download for resume: {}",
+                                e
+                            );
+                        }
+                    }
                 }
             }
         }
 
         log::info!("Downloading from: {}", download_url);
-        log::info!("Saving to: {}", file_path.display());
+        log::info!(
+            "Staging to: {} (published to {} once complete)",
+            partial_path.display(),
+            file_path.display()
+        );
 
         // Create models directory if needed
         if !self.models_dir.exists() {
@@ -529,8 +561,11 @@ impl ModelManager {
         }
 
         // Check for existing partial download to resume
-        let existing_size: u64 = if file_path.exists() {
-            fs::metadata(file_path).await.map(|m| m.len()).unwrap_or(0)
+        let existing_size: u64 = if partial_path.exists() {
+            fs::metadata(&partial_path)
+                .await
+                .map(|m| m.len())
+                .unwrap_or(0)
         } else {
             0
         };
@@ -589,11 +624,11 @@ impl ModelManager {
             OpenOptions::new()
                 .write(true)
                 .append(true)
-                .open(file_path)
+                .open(&partial_path)
                 .await
                 .map_err(|e| anyhow!("Failed to open file for append: {}", e))?
         } else {
-            fs::File::create(file_path)
+            fs::File::create(&partial_path)
                 .await
                 .map_err(|e| anyhow!("Failed to create file: {}", e))?
         };
@@ -804,12 +839,13 @@ impl ModelManager {
         // number, so validate_gguf_file would wave it through. The check belongs
         // here rather than next to that validation so a truncated transfer never
         // paints 100% on the user's screen and only then fails. A response with
-        // no Content-Length makes total_size 0 and so lands here too; that is
-        // deliberate, because with no declared size there is nothing to verify
-        // the transfer against, and it is safe, because the next attempt finds a
-        // complete file on disk and takes the "already exists and is valid"
-        // shortcut. The partial file stays put either way: the resume logic at
-        // the top of the next attempt is what recovers it.
+        // no Content-Length makes total_size 0 and so lands here too: with no
+        // declared size there is nothing to verify the transfer against, and
+        // trusting it is what this check exists to stop.
+        // The bytes stay on disk for the next attempt to resume from. They are
+        // safe to keep because they are still at partial_path - the size band at
+        // the top of this function never sees them, so failing here cannot be
+        // undone by the retry it asks the user for.
         if downloaded != total_size {
             let error_msg =
                 format!("Download stopped at {downloaded} bytes, expected {total_size} bytes");
@@ -841,11 +877,11 @@ impl ModelManager {
         // Small delay to ensure UI receives 100% event
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-        if let Err(e) = self.validate_gguf_file(file_path).await {
+        if let Err(e) = self.validate_gguf_file(&partial_path).await {
             log::error!("Downloaded file failed validation: {}", e);
 
             // Clean up invalid file
-            let _ = fs::remove_file(file_path).await;
+            let _ = fs::remove_file(&partial_path).await;
 
             // Update status
             {
@@ -856,6 +892,23 @@ impl ModelManager {
             }
 
             return Err(anyhow!("File validation failed: {}", e));
+        }
+
+        // Publish. Everything above ran against partial_path, so this rename is
+        // the single moment the model becomes readable to the rest of the app -
+        // and the reason a file at file_path can be trusted to be whole.
+        if let Err(e) = fs::rename(&partial_path, file_path).await {
+            log::error!("Failed to publish the downloaded model: {}", e);
+
+            {
+                let mut models = self.available_models.write().await;
+                if let Some(model_info) = models.get_mut(model_name) {
+                    model_info.status =
+                        ModelStatus::Error(format!("Failed to store the download: {}", e));
+                }
+            }
+
+            return Err(anyhow!("Failed to store the downloaded model: {}", e));
         }
 
         // Update status to available
@@ -935,6 +988,17 @@ impl ModelManager {
             log::info!("Deleted model file: {}", file_path.display());
         }
 
+        // An abandoned transfer's bytes are invisible to every status check, so
+        // nothing else would ever clear them.
+        let partial_path = partial_download_path(&file_path);
+        if partial_path.exists() {
+            if let Err(e) = fs::remove_file(&partial_path).await {
+                log::warn!("Failed to delete partial download file: {}", e);
+            } else {
+                log::info!("Deleted partial download: {}", partial_path.display());
+            }
+        }
+
         // Update status
         {
             let mut models = self.available_models.write().await;
@@ -969,6 +1033,10 @@ mod tests {
     struct TestResponse {
         status: &'static str,
         content_length: Option<u64>,
+        /// The Range header this request must carry, or None for no Range at
+        /// all. Asserted, because "did the retry resume or start over?" is the
+        /// question several of these tests exist to answer.
+        expected_range: Option<&'static str>,
         head: &'static [u8],
         rest: &'static [u8],
         /// Holds the response open after `head`, so a test can act on a download
@@ -976,14 +1044,26 @@ mod tests {
         release_before_rest: Option<oneshot::Receiver<()>>,
     }
 
-    fn complete_response(body: &'static [u8]) -> TestResponse {
-        TestResponse {
-            status: "200 OK",
-            content_length: Some(body.len() as u64),
-            head: body,
-            rest: b"",
-            release_before_rest: None,
+    impl TestResponse {
+        fn new(status: &'static str, content_length: Option<u64>, body: &'static [u8]) -> Self {
+            Self {
+                status,
+                content_length,
+                expected_range: None,
+                head: body,
+                rest: b"",
+                release_before_rest: None,
+            }
         }
+
+        fn resuming_from(mut self, range: &'static str) -> Self {
+            self.expected_range = Some(range);
+            self
+        }
+    }
+
+    fn complete_response(body: &'static [u8]) -> TestResponse {
+        TestResponse::new("200 OK", Some(body.len() as u64), body)
     }
 
     async fn read_request(socket: &mut tokio::net::TcpStream) -> String {
@@ -1000,44 +1080,75 @@ mod tests {
     }
 
     async fn serve_one_download(expected: TestResponse) -> (String, tokio::task::JoinHandle<()>) {
+        serve_downloads(vec![expected]).await
+    }
+
+    /// Answer one request per entry, in order. The client sends
+    /// `Connection: close`, so each attempt arrives on its own connection.
+    async fn serve_downloads(
+        expected_requests: Vec<TestResponse>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind loopback test server");
         let address = listener.local_addr().expect("read loopback address");
         let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.expect("accept test request");
-            let request = read_request(&mut socket).await;
-            assert!(
-                request.starts_with("GET /model.gguf HTTP/"),
-                "unexpected request path: {request}"
-            );
+            for expected in expected_requests {
+                let (mut socket, _) = listener.accept().await.expect("accept test request");
+                let request = read_request(&mut socket).await;
+                assert!(
+                    request.starts_with("GET /model.gguf HTTP/"),
+                    "unexpected request path: {request}"
+                );
+                match expected.expected_range {
+                    Some(range) => assert!(
+                        request.contains(&format!("range: bytes={range}"))
+                            || request.contains(&format!("Range: bytes={range}")),
+                        "expected a request resuming from {range}, got: {request}"
+                    ),
+                    None => assert!(
+                        !request.to_lowercase().contains("range:"),
+                        "expected a request with no Range header, got: {request}"
+                    ),
+                }
 
-            let mut headers = format!("HTTP/1.1 {}\r\nConnection: close\r\n", expected.status);
-            if let Some(content_length) = expected.content_length {
-                headers.push_str(&format!("Content-Length: {content_length}\r\n"));
-            }
-            headers.push_str("\r\n");
-            socket
-                .write_all(headers.as_bytes())
-                .await
-                .expect("write response headers");
-            socket
-                .write_all(expected.head)
-                .await
-                .expect("write start of response body");
-            socket.flush().await.expect("flush start of response body");
-            if let Some(release_before_rest) = expected.release_before_rest {
-                release_before_rest
+                let mut headers = format!("HTTP/1.1 {}\r\nConnection: close\r\n", expected.status);
+                if let Some(content_length) = expected.content_length {
+                    headers.push_str(&format!("Content-Length: {content_length}\r\n"));
+                }
+                headers.push_str("\r\n");
+                socket
+                    .write_all(headers.as_bytes())
                     .await
-                    .expect("release the held response");
+                    .expect("write response headers");
+                socket
+                    .write_all(expected.head)
+                    .await
+                    .expect("write start of response body");
+                socket.flush().await.expect("flush start of response body");
+                if let Some(release_before_rest) = expected.release_before_rest {
+                    release_before_rest
+                        .await
+                        .expect("release the held response");
+                }
+                socket
+                    .write_all(expected.rest)
+                    .await
+                    .expect("write rest of response body");
             }
-            socket
-                .write_all(expected.rest)
-                .await
-                .expect("write rest of response body");
         });
 
         (format!("http://{address}/model.gguf"), server)
+    }
+
+    /// Join with a deadline. A regression that stops the client making a request
+    /// the server is still waiting for - the retry taking a shortcut instead of
+    /// going to the network, say - then fails the test instead of hanging it.
+    async fn join_server(server: tokio::task::JoinHandle<()>) {
+        tokio::time::timeout(Duration::from_secs(10), server)
+            .await
+            .expect("the test server received every request it was set up to answer")
+            .expect("join test server");
     }
 
     /// A loopback address with nothing listening on it, so connecting fails the
@@ -1123,11 +1234,9 @@ mod tests {
         let (first_chunk_tx, first_chunk_rx) = oneshot::channel();
         let first_chunk_tx = Arc::new(Mutex::new(Some(first_chunk_tx)));
         let (url, server) = serve_one_download(TestResponse {
-            status: "200 OK",
-            content_length: Some(8),
-            head: b"GGUF",
             rest: b"TAIL",
             release_before_rest: Some(release_rx),
+            ..TestResponse::new("200 OK", Some(8), b"GGUF")
         })
         .await;
 
@@ -1177,7 +1286,7 @@ mod tests {
             .await
             .expect("join download task")
             .expect("the first download still completes");
-        server.await.expect("join test server");
+        join_server(server).await;
 
         assert!(!is_reserved(&manager).await);
         assert_eq!(fs::read(&file_path).await.unwrap(), b"GGUFTAIL");
@@ -1187,14 +1296,7 @@ mod tests {
     #[tokio::test]
     async fn transfer_without_a_declared_length_fails_instead_of_completing() {
         let (_temp_dir, manager, file_path) = test_manager().await;
-        let (url, server) = serve_one_download(TestResponse {
-            status: "200 OK",
-            content_length: None,
-            head: b"GGUF",
-            rest: b"",
-            release_before_rest: None,
-        })
-        .await;
+        let (url, server) = serve_one_download(TestResponse::new("200 OK", None, b"GGUF")).await;
 
         let error = manager
             .download_model_detailed_from_source(
@@ -1206,7 +1308,7 @@ mod tests {
             )
             .await
             .expect_err("a transfer with nothing to verify it against must not be trusted");
-        server.await.expect("join test server");
+        join_server(server).await;
 
         assert!(error
             .to_string()
@@ -1215,8 +1317,13 @@ mod tests {
             test_model_status(&manager).await,
             ModelStatus::Error(_)
         ));
-        // The bytes stay on disk for the next attempt to resume from.
-        assert_eq!(fs::read(&file_path).await.unwrap(), b"GGUF");
+        // The bytes stay on disk for the next attempt to resume from - staged,
+        // not published, so nothing can mistake them for a finished model.
+        assert!(!file_path.exists());
+        assert_eq!(
+            fs::read(partial_download_path(&file_path)).await.unwrap(),
+            b"GGUF"
+        );
         assert!(!is_reserved(&manager).await);
     }
 
@@ -1225,14 +1332,7 @@ mod tests {
         let (_temp_dir, manager, file_path) = test_manager().await;
         let events = Arc::new(Mutex::new(Vec::new()));
         let callback_events = Arc::clone(&events);
-        let (url, server) = serve_one_download(TestResponse {
-            status: "200 OK",
-            content_length: Some(8),
-            head: b"GGUF",
-            rest: b"",
-            release_before_rest: None,
-        })
-        .await;
+        let (url, server) = serve_one_download(TestResponse::new("200 OK", Some(8), b"GGUF")).await;
 
         let error = manager
             .download_model_detailed_from_source(
@@ -1249,7 +1349,7 @@ mod tests {
             )
             .await
             .expect_err("half a file must not pass as a download");
-        server.await.expect("join test server");
+        join_server(server).await;
 
         // The four bytes that did arrive are a valid GGUF magic number, so the
         // failure has to come from the byte count rather than from validation.
@@ -1263,8 +1363,94 @@ mod tests {
             test_model_status(&manager).await,
             ModelStatus::Error(_)
         ));
-        assert_eq!(fs::read(&file_path).await.unwrap(), b"GGUF");
+        assert!(!file_path.exists());
+        assert_eq!(
+            fs::read(partial_download_path(&file_path)).await.unwrap(),
+            b"GGUF"
+        );
         assert!(!is_reserved(&manager).await);
+    }
+
+    /// The size band accepts anything within ten percent of the catalogue
+    /// figure, and integer-truncated megabytes make a 1 MiB model's band
+    /// [0, 1] MB - so four bytes stand in here for the 1150 MB of a 1221 MB
+    /// model that a proxy cut short. Same branch, same arithmetic, no
+    /// multi-megabyte fixture.
+    const BAND_ACCEPTS_ANY_SMALL_FILE_MB: u64 = 1;
+
+    #[tokio::test]
+    async fn truncated_transfer_is_not_mistaken_for_a_finished_model_on_the_next_attempt() {
+        let (_temp_dir, manager, file_path) = test_manager().await;
+        let (url, server) = serve_downloads(vec![
+            TestResponse::new("200 OK", Some(8), b"GGUF"),
+            TestResponse::new("206 Partial Content", Some(4), b"TAIL").resuming_from("4-"),
+        ])
+        .await;
+
+        manager
+            .download_model_detailed_from_source(
+                TEST_MODEL_NAME,
+                &file_path,
+                &url,
+                BAND_ACCEPTS_ANY_SMALL_FILE_MB,
+                None,
+            )
+            .await
+            .expect_err("a transfer cut short must fail");
+
+        // Nothing was published, so the size band at the top of the next attempt
+        // has nothing to accept - which is what stops the retry below from
+        // undoing the failure above.
+        assert!(!file_path.exists());
+        assert_eq!(
+            fs::read(partial_download_path(&file_path)).await.unwrap(),
+            b"GGUF"
+        );
+
+        manager
+            .download_model_detailed_from_source(
+                TEST_MODEL_NAME,
+                &file_path,
+                &url,
+                BAND_ACCEPTS_ANY_SMALL_FILE_MB,
+                None,
+            )
+            .await
+            .expect("the retry resumes the staged bytes and finishes the file");
+
+        assert_eq!(fs::read(&file_path).await.unwrap(), b"GGUFTAIL");
+        join_server(server).await;
+        assert!(!partial_download_path(&file_path).exists());
+        assert_eq!(test_model_status(&manager).await, ModelStatus::Available);
+        assert!(!is_reserved(&manager).await);
+    }
+
+    #[tokio::test]
+    async fn partial_left_at_the_published_path_by_an_older_version_is_staged_and_resumed() {
+        let (_temp_dir, manager, file_path) = test_manager().await;
+        fs::write(&file_path, b"GGUF")
+            .await
+            .expect("seed a partial written straight to the published path");
+        let (url, server) = serve_one_download(
+            TestResponse::new("206 Partial Content", Some(4), b"TAIL").resuming_from("4-"),
+        )
+        .await;
+
+        manager
+            .download_model_detailed_from_source(
+                TEST_MODEL_NAME,
+                &file_path,
+                &url,
+                TEST_MODEL_SIZE_MB,
+                None,
+            )
+            .await
+            .expect("the staged partial is resumed rather than re-fetched");
+        join_server(server).await;
+
+        assert_eq!(fs::read(&file_path).await.unwrap(), b"GGUFTAIL");
+        assert!(!partial_download_path(&file_path).exists());
+        assert_eq!(test_model_status(&manager).await, ModelStatus::Available);
     }
 
     #[tokio::test]
@@ -1282,7 +1468,7 @@ mod tests {
             )
             .await
             .expect("a complete transfer succeeds");
-        server.await.expect("join test server");
+        join_server(server).await;
 
         assert_eq!(test_model_status(&manager).await, ModelStatus::Available);
         assert!(!is_reserved(&manager).await);
