@@ -3,6 +3,9 @@ export interface ParakeetModelInfo {
   name: string;
   path: string;
   size_mb: number;
+  /** Exact download size in bytes, straight from the Rust catalogue. This is
+   * what the UI must display for download sizes — don't reach for size_mb. */
+  size_bytes: number;
   accuracy: ModelAccuracy;
   speed: ProcessingSpeed;
   status: ModelStatus;
@@ -33,6 +36,7 @@ export interface ParakeetDownloadProgressEvent {
   total_mb?: number;
   speed_mbps?: number;
   status: ParakeetDownloadEventStatus;
+  eta_seconds?: number | null;
 }
 
 export interface ParakeetEngineState {
@@ -76,6 +80,10 @@ export const MODEL_DISPLAY_CONFIG: Record<string, ModelDisplayInfo> = {
 // Model configuration for Parakeet models (matching Rust implementation)
 // Supported models: parakeet-tdt-0.6b in v2 and v3 variants
 // Source: https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx
+//
+// Display-only fallback: size_mb here is a hand-maintained restatement of the
+// Rust catalogue and drifts from it. Never use it for download sizes — use
+// the size_bytes the backend serves on ParakeetModelInfo instead.
 export const PARAKEET_MODEL_CONFIGS: Record<string, Partial<ParakeetModelInfo>> = {
   'parakeet-tdt-0.6b-v3-int8': {
     description: 'Real time on M4 Max, optimized for speed',
@@ -129,6 +137,10 @@ export function getStatusColor(status: ModelStatus): string {
   return 'gray';
 }
 
+/** @deprecated Decimal MB/GB formatter kept only for existing callers
+ * (ParakeetModelManager, WhisperModelManager). New code should use
+ * formatBytes from frontend/src/lib/download-display.ts instead, which is
+ * the single binary-unit formatter for sizes shown in the UI. */
 export function formatFileSize(sizeMb: number): string {
   if (sizeMb >= 1000) {
     return `${(sizeMb / 1000).toFixed(1)}GB`;

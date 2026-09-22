@@ -401,12 +401,16 @@ pub async fn parakeet_download_model<R: Runtime>(
 
         let progress_callback = Box::new(move |progress: DownloadProgress| {
             log::info!(
-                "Parakeet download progress for {}: {:.1} MB / {:.1} MB ({:.1} MB/s) - {}%",
+                "Parakeet download progress for {}: {:.1} MB / {:.1} MB ({:.1} MB/s) - {}% - ETA: {}",
                 model_name_clone,
                 progress.downloaded_mb,
                 progress.total_mb,
                 progress.speed_mbps,
-                progress.percent
+                progress.percent,
+                progress
+                    .eta_seconds
+                    .map(|s| format!("{}s", s))
+                    .unwrap_or_else(|| "unknown".to_string())
             );
 
             // Emit download progress event with detailed info
@@ -420,6 +424,7 @@ pub async fn parakeet_download_model<R: Runtime>(
                     "downloaded_mb": progress.downloaded_mb,
                     "total_mb": progress.total_mb,
                     "speed_mbps": progress.speed_mbps,
+                    "eta_seconds": progress.eta_seconds,
                     "status": if progress.percent == 100 { "completed" } else { "downloading" }
                 }),
             ) {
@@ -462,6 +467,7 @@ pub async fn parakeet_download_model<R: Runtime>(
                     serde_json::json!({
                         "modelName": model_name,
                         "progress": 0,
+                        "eta_seconds": null,
                         "status": "cancelled"
                     }),
                 ) {

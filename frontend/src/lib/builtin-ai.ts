@@ -5,6 +5,8 @@ export interface BuiltInModelInfo {
   status: BuiltInModelStatus;
   path: string;
   size_mb: number;
+  // Exact download size in bytes, straight from the Rust catalogue — the value the UI must display.
+  size_bytes: number;
   context_size: number;
   description: string;
   gguf_file: string;
@@ -60,6 +62,28 @@ export function getStatusLabel(status: BuiltInModelStatus): string {
   }
 }
 
+// Status strings emitted by the Rust side on the download progress event.
+export type BuiltInDownloadEventStatus =
+  | 'downloading' | 'completed' | 'cancelled' | 'error';
+
+// Payload of the `builtin-ai-download-progress` Tauri event. `status` stays permissive
+// (not narrowed to BuiltInDownloadEventStatus) because the Rust side emits it as a bare
+// string, and narrowing it here would be a lie that breaks the listeners.
+export interface BuiltInAIDownloadProgressEvent {
+  model: string;
+  progress: number;
+  downloaded_bytes?: number;
+  total_bytes?: number;
+  downloaded_mb?: number;
+  total_mb?: number;
+  speed_mbps?: number;
+  eta_seconds?: number | null;
+  status: BuiltInDownloadEventStatus | string;
+  error?: string;
+}
+
+export const BUILTIN_AI_DOWNLOAD_PROGRESS_EVENT = 'builtin-ai-download-progress';
+
 // Tauri command wrappers for Built-in AI backend
 import { invoke } from '@tauri-apps/api/core';
 
@@ -78,6 +102,10 @@ export class BuiltInAIAPI {
 
   static async getAvailableModel(): Promise<string | null> {
     return await invoke('builtin_ai_get_available_summary_model');
+  }
+
+  static async getRecommendedModel(): Promise<string | null> {
+    return await invoke('builtin_ai_get_recommended_model');
   }
 
   static async downloadModel(modelName: string): Promise<void> {

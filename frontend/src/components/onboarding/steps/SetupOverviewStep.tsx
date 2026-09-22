@@ -3,6 +3,7 @@ import { Info } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { OnboardingContainer } from '../OnboardingContainer';
 import { useOnboarding } from '@/contexts/OnboardingContext';
+import { formatBytes } from '@/lib/download-display';
 import {
   Tooltip,
   TooltipContent,
@@ -10,8 +11,17 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 
+/** Shown until the catalogue answers; a guessed size on a metered connection is worse than none. */
+const SIZE_UNKNOWN = 'Checking size…';
+
 export function SetupOverviewStep() {
-  const { goNext } = useOnboarding();
+  const {
+    goNext,
+    parakeetSizeBytes,
+    summaryModelSizeBytes,
+    selectedSummaryModel,
+    startBackgroundDownloads,
+  } = useOnboarding();
   const [isMac, setIsMac] = useState(false);
 
   useEffect(() => {
@@ -31,15 +41,36 @@ export function SetupOverviewStep() {
       number: 1,
       type: 'transcription',
       title: 'Download Transcription Engine',
+      sizeBytes: parakeetSizeBytes,
+      note: 'Required — setup waits for this one.',
     },
     {
       number: 2,
       type: 'summarization',
       title: 'Download Summarization Engine',
+      sizeBytes: summaryModelSizeBytes,
+      note: 'Continues in the background — you can start using Minutes before it finishes.',
     },
   ];
 
+  // A total is only honest once both numbers are real, so a half-known total is no total.
+  const totalLabel =
+    parakeetSizeBytes !== null && summaryModelSizeBytes !== null
+      ? formatBytes(parakeetSizeBytes + summaryModelSizeBytes)
+      : SIZE_UNKNOWN;
+
   const handleContinue = () => {
+    // This click is where the transfer is authorised, but nothing about it should hold the
+    // user here: fire the downloads and move on. A missing recommendation only delays the
+    // summary model, which the next screen picks up, and the next screen also reports and
+    // retries failures — so navigate either way.
+    startBackgroundDownloads({
+      includeParakeet: true,
+      includeSummary: true,
+      summaryModel: selectedSummaryModel,
+    }).catch((error) => {
+      console.error('[SetupOverviewStep] Failed to start downloads:', error);
+    });
     goNext();
   };
 
@@ -80,10 +111,19 @@ export function SetupOverviewStep() {
                             </TooltipProvider>
                         )}
                         </h3>
+                    <p className="mt-1 text-sm text-ink-muted">
+                      {step.sizeBytes !== null ? formatBytes(step.sizeBytes) : SIZE_UNKNOWN} ·{' '}
+                      {step.note}
+                    </p>
                   </div>
                 </div>
               );
             })}
+          </div>
+
+          <div className="mt-4 pt-3 border-t border-hairline flex items-baseline justify-between px-1">
+            <span className="text-sm text-ink-muted">Total download</span>
+            <span className="text-sm font-medium text-ink">{totalLabel}</span>
           </div>
         </div>
 
@@ -94,7 +134,7 @@ export function SetupOverviewStep() {
             onClick={handleContinue}
             className="w-full h-11 bg-brand hover:bg-brand text-brand-foreground"
           >
-            Let's Go
+            Start Download
           </Button>
           <div className="text-center">
             <a

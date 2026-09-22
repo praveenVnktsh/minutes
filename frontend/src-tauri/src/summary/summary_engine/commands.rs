@@ -7,6 +7,7 @@ use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 use tokio::sync::Mutex;
 
 use super::model_manager::{DownloadProgress, ModelInfo, ModelManager};
+use super::models::get_model_by_name;
 
 pub(crate) fn summary_model_priority(model_name: &str) -> u8 {
     match model_name {
@@ -157,7 +158,10 @@ pub async fn builtin_ai_download_model<R: Runtime>(
                 "progress": progress.percent,
                 "downloaded_mb": progress.downloaded_mb,
                 "total_mb": progress.total_mb,
+                "downloaded_bytes": progress.downloaded_bytes,
+                "total_bytes": progress.total_bytes,
                 "speed_mbps": progress.speed_mbps,
+                "eta_seconds": progress.eta_seconds,
                 "status": "downloading"  // Always "downloading", never "completed" from progress callback
             }),
         );
@@ -168,15 +172,30 @@ pub async fn builtin_ai_download_model<R: Runtime>(
         .await
     {
         Ok(_) => {
-            // Download task completed successfully (validation passed, status set to Available)
+            // Download task completed successfully (validation passed, status set to Available).
+            // Report the model's real catalogue size so listeners (toast, onboarding) show
+            // the finished download's actual size instead of "0 / 0".
+            let (downloaded_bytes, total_bytes, downloaded_mb, total_mb) =
+                match get_model_by_name(&model_name) {
+                    Some(model) => (
+                        model.size_bytes(),
+                        model.size_bytes(),
+                        model.size_mb as f64,
+                        model.size_mb as f64,
+                    ),
+                    None => (0, 0, 0.0, 0.0),
+                };
             let _ = app.emit(
                 "builtin-ai-download-progress",
                 serde_json::json!({
                     "model": model_name,
                     "progress": 100,
-                    "downloaded_mb": 0,  // Not used by completion handler
-                    "total_mb": 0,       // Not used by completion handler
-                    "speed_mbps": 0,     // Not used by completion handler
+                    "downloaded_mb": downloaded_mb,
+                    "total_mb": total_mb,
+                    "downloaded_bytes": downloaded_bytes,
+                    "total_bytes": total_bytes,
+                    "speed_mbps": 0,
+                    "eta_seconds": null,
                     "status": "completed"
                 }),
             );
@@ -196,7 +215,10 @@ pub async fn builtin_ai_download_model<R: Runtime>(
                         "progress": 0,
                         "downloaded_mb": 0,
                         "total_mb": 0,
+                        "downloaded_bytes": 0,
+                        "total_bytes": 0,
                         "speed_mbps": 0,
+                        "eta_seconds": null,
                         "status": "error",
                         "error": error_msg
                     }),
@@ -232,6 +254,12 @@ pub async fn builtin_ai_cancel_download<R: Runtime>(
         serde_json::json!({
             "model": model_name,
             "progress": 0,
+            "downloaded_mb": 0,
+            "total_mb": 0,
+            "downloaded_bytes": 0,
+            "total_bytes": 0,
+            "speed_mbps": 0,
+            "eta_seconds": null,
             "status": "cancelled"
         }),
     );
