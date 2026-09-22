@@ -555,6 +555,52 @@ async fn prepare_audio_for_recording(
     Ok(())
 }
 
+/// Validate the transcription engine is ready before any capture starts, on
+/// both start paths and in both live and deferred transcription modes. A
+/// corrupt model, a missing ONNX runtime, or an allocation failure has to be
+/// caught here, while the meeting can still be re-run — not discovered later
+/// in the deferred-transcription queue after the meeting has already ended
+/// and the recording can no longer be redone. Live transcription still
+/// decides whether the engine stays resident once recording is underway;
+/// this check runs the same way either way.
+async fn validate_transcription_engine_before_capture<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<(), String> {
+    let live_transcription_enabled =
+        super::pipeline::LIVE_TRANSCRIPTION_ENABLED.load(Ordering::SeqCst);
+    info!(
+        "🔍 Validating transcription engine before capture ({} mode)...",
+        if live_transcription_enabled {
+            "live"
+        } else {
+            "deferred"
+        }
+    );
+
+    if let Err(error) = crate::ensure_onnx_runtime_available() {
+        return Err(map_recording_start_error(
+            app,
+            RecordingStartError::TranscriptionRuntime(error),
+        ));
+    }
+
+    if let Err(validation_error) = transcription::validate_transcription_model_ready(app).await {
+        error!("Model validation failed: {}", validation_error);
+        let _ = app.emit(
+            "transcription-error",
+            serde_json::json!({
+                "error": validation_error,
+                "userMessage": format!("Recording cannot start: {}", validation_error),
+                "actionable": false,
+                "phase": "startup"
+            }),
+        );
+        return Err(validation_error);
+    }
+    info!("✅ Transcription engine validation passed");
+    Ok(())
+}
+
 // ============================================================================
 // RECORDING COMMANDS
 // ============================================================================
@@ -588,33 +634,7 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
         return Err("Recording already in progress".to_string());
     }
 
-    if super::pipeline::LIVE_TRANSCRIPTION_ENABLED.load(Ordering::SeqCst) {
-        if let Err(error) = crate::ensure_onnx_runtime_available() {
-            return Err(map_recording_start_error(
-                &app,
-                RecordingStartError::TranscriptionRuntime(error),
-            ));
-        }
-
-        info!("🔍 Validating transcription model availability before starting recording...");
-        if let Err(validation_error) = transcription::validate_transcription_model_ready(&app).await
-        {
-            error!("Model validation failed: {}", validation_error);
-            let _ = app.emit(
-                "transcription-error",
-                serde_json::json!({
-                    "error": validation_error,
-                    "userMessage": format!("Recording cannot start: {}", validation_error),
-                    "actionable": false,
-                    "phase": "startup"
-                }),
-            );
-            return Err(validation_error);
-        }
-        info!("✅ Transcription model validation passed");
-    } else {
-        info!("⏺️ Deferred transcription mode: skipping startup model validation");
-    }
+    validate_transcription_engine_before_capture(&app).await?;
 
     // Notify frontend that startup has begun (surfaces STARTING state)
     app.emit(
@@ -845,33 +865,7 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
         return Err("Recording already in progress".to_string());
     }
 
-    if super::pipeline::LIVE_TRANSCRIPTION_ENABLED.load(Ordering::SeqCst) {
-        if let Err(error) = crate::ensure_onnx_runtime_available() {
-            return Err(map_recording_start_error(
-                &app,
-                RecordingStartError::TranscriptionRuntime(error),
-            ));
-        }
-
-        info!("🔍 Validating transcription model availability before starting recording...");
-        if let Err(validation_error) = transcription::validate_transcription_model_ready(&app).await
-        {
-            error!("Model validation failed: {}", validation_error);
-            let _ = app.emit(
-                "transcription-error",
-                serde_json::json!({
-                    "error": validation_error,
-                    "userMessage": format!("Recording cannot start: {}", validation_error),
-                    "actionable": false,
-                    "phase": "startup"
-                }),
-            );
-            return Err(validation_error);
-        }
-        info!("✅ Transcription model validation passed");
-    } else {
-        info!("⏺️ Deferred transcription mode: skipping startup model validation");
-    }
+    validate_transcription_engine_before_capture(&app).await?;
 
     // Notify frontend that startup has begun (surfaces STARTING state)
     app.emit(

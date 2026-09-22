@@ -8,6 +8,17 @@ import { toast } from 'sonner';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
 import { useConfig } from '@/contexts/ConfigContext';
 import { SaveFeedback, StatusFeedback, type SaveFeedbackState } from '@/components/ui/status-feedback';
+import { SetupCheckPanel } from '@/components/SetupCheckPanel';
+import {
+  CHANNEL_OUTCOMES,
+  MODEL_CHECK_OUTCOMES,
+  describeChannelOutcome,
+  describeModelOutcome,
+  type ChannelReport,
+  type ModelReport,
+  type SetupCheckDescription,
+  type SetupCheckRecord,
+} from '@/lib/micCheck';
 
 export interface RecordingPreferences {
   save_folder: string;
@@ -21,6 +32,51 @@ export interface RecordingPreferences {
 
 interface RecordingSettingsProps {
   onSave?: (preferences: RecordingPreferences) => void;
+}
+
+/**
+ * The pieces of OnboardingStatus (frontend/src-tauri/src/onboarding.rs) this settings pane
+ * actually reads and rewrites. The full shape belongs to OnboardingContext, not here — this is
+ * typed just narrowly enough to reach `setup_check` while the rest of whatever the store hands
+ * back passes through the read-merge-save round trip untouched.
+ */
+interface OnboardingStatusRecord {
+  setup_check?: SetupCheckRecord | null;
+  [key: string]: unknown;
+}
+
+/** Guards a persisted outcome string against a value this build of the app does not recognise. */
+function knownModelOutcome(outcome: string): outcome is ModelReport['outcome'] {
+  return (MODEL_CHECK_OUTCOMES as readonly string[]).includes(outcome);
+}
+function knownChannelOutcome(outcome: string): outcome is ChannelReport['outcome'] {
+  return (CHANNEL_OUTCOMES as readonly string[]).includes(outcome);
+}
+
+/**
+ * Builds the minimal ModelReport / ChannelReport the wording helpers in '@/lib/micCheck' take.
+ * The persisted record keeps only the bare outcome strings (never the device name, transcript or
+ * raw error detail), so the rest of each report is filled with the "nothing more is known" values
+ * those helpers already treat as empty — this is a summary of a past run, not the run itself.
+ */
+function describePersistedModelOutcome(outcome: string): SetupCheckDescription | null {
+  if (!knownModelOutcome(outcome)) return null;
+  return describeModelOutcome({ outcome, modelName: null, detail: null });
+}
+function describePersistedChannelOutcome(
+  channel: ChannelReport['channel'],
+  outcome: string,
+): SetupCheckDescription | null {
+  if (!knownChannelOutcome(outcome)) return null;
+  return describeChannelOutcome({
+    channel,
+    outcome,
+    transcript: null,
+    deviceName: '',
+    peakLevel: 0,
+    durationMs: 0,
+    detail: null,
+  });
 }
 
 export function RecordingSettings({ onSave }: RecordingSettingsProps) {
@@ -45,6 +101,9 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
   const notificationSaving = useRef(false);
   const { isRecording } = useRecordingState();
   const { setSelectedDevices } = useConfig();
+  const [setupCheckRecord, setSetupCheckRecord] = useState<SetupCheckRecord | null>(null);
+  const [setupCheckLoading, setSetupCheckLoading] = useState(true);
+  const [showSetupCheck, setShowSetupCheck] = useState(false);
 
   // Load recording preferences on component mount
   useEffect(() => {
@@ -87,6 +146,22 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
       }
     };
     loadNotificationPref();
+  }, []);
+
+  // Load whatever the onboarding setup check last found, so re-offering it from settings can
+  // show what is already known instead of asking the user to run it blind.
+  useEffect(() => {
+    const loadSetupCheckRecord = async () => {
+      try {
+        const status = await invoke<OnboardingStatusRecord | null>('get_onboarding_status');
+        setSetupCheckRecord(status?.setup_check ?? null);
+      } catch (error) {
+        console.error('Failed to load the saved setup check result:', error);
+      } finally {
+        setSetupCheckLoading(false);
+      }
+    };
+    loadSetupCheckRecord();
   }, []);
 
   const handleAutoSaveToggle = async (enabled: boolean) => {
@@ -221,6 +296,49 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
     } finally {
       setSaving(false);
     }
+  };
+
+  /**
+   * Persists a fresh setup check result without clobbering the rest of the onboarding status —
+   * the version, completion flag and model download state all live on the same record. A user
+   * who somehow has no saved onboarding status yet has nothing here to attach the check to; that
+   * is an onboarding bookkeeping problem, not something a settings pane should raise, so this
+   * logs it and quietly skips the save instead of inventing a status to write.
+   */
+  const handleSetupCheckOutcome = async (record: SetupCheckRecord) => {
+    try {
+      const status = await invoke<OnboardingStatusRecord | null>('get_onboarding_status');
+      if (!status) {
+        console.warn('[RecordingSettings] No onboarding status exists yet; skipping setup check save.');
+        return;
+      }
+      await invoke('save_onboarding_status_cmd', {
+        status: { ...status, setup_check: record },
+      });
+      setSetupCheckRecord(record);
+    } catch (error) {
+      console.error('Failed to save the setup check result:', error);
+    }
+  };
+
+  /**
+   * The panel writes its own device choice to disk, but the start path does not
+   * read disk: it sends what ConfigContext holds, and that is loaded once at app
+   * mount. Syncing it here is what keeps the promise the check makes — the
+   * device the user just watched work is the device the next meeting opens —
+   * instead of deferring it to the next launch. This is the same reason
+   * handleDeviceChange above calls setSelectedDevices.
+   *
+   * The preferences this screen renders are updated too, so its own device
+   * picker does not sit there naming the device the panel just replaced.
+   */
+  const handleSetupCheckDevicesChanged = (devices: SelectedDevices) => {
+    setSelectedDevices(devices);
+    setPreferences((previous) => ({
+      ...previous,
+      preferred_mic_device: devices.micDevice,
+      preferred_system_device: devices.systemDevice,
+    }));
   };
 
   if (loading) {
@@ -399,6 +517,78 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
           </div>
         </div>
       </div>
+
+      {/* Setup Check */}
+      <div className="space-y-4">
+        <div className="border-t pt-6">
+          <h4 className="text-base font-medium text-ink mb-4">Check your setup</h4>
+          <p className="text-sm text-ink-muted mb-4">
+            Run the same microphone, system audio and transcription model check onboarding ends
+            with, any time you want to be sure a meeting will actually be heard.
+          </p>
+
+          {setupCheckLoading ? (
+            <p className="text-sm text-ink-muted mb-4">Loading your last check...</p>
+          ) : setupCheckRecord ? (
+            <div className="space-y-3 p-4 border rounded-lg bg-surface-2 mb-4">
+              <p className="text-xs text-ink-muted">
+                Last checked {new Date(setupCheckRecord.checked_at).toLocaleString()}
+              </p>
+              <SetupCheckSummaryRow
+                label="Transcription model"
+                description={describePersistedModelOutcome(setupCheckRecord.model)}
+              />
+              <SetupCheckSummaryRow
+                label="Microphone"
+                description={describePersistedChannelOutcome('microphone', setupCheckRecord.microphone)}
+              />
+              <SetupCheckSummaryRow
+                label="System audio"
+                description={describePersistedChannelOutcome('system_audio', setupCheckRecord.system_audio)}
+              />
+            </div>
+          ) : (
+            <p className="text-sm text-ink-muted mb-4">The setup check has not been run yet.</p>
+          )}
+
+          <button
+            onClick={() => setShowSetupCheck((previous) => !previous)}
+            className="flex items-center gap-2 px-3 py-2 text-sm border border-hairline rounded-md hover:bg-surface-2 transition-colors"
+          >
+            {showSetupCheck ? 'Hide the check' : setupCheckRecord ? 'Run the check again' : 'Run the check'}
+          </button>
+
+          {/* No autoStart: unlike onboarding, opening this settings tab should never grab the
+              microphone on its own. No onRetryDownload either — settings has no download step to
+              route back to, so the panel falls back to its own written instructions. */}
+          {showSetupCheck && (
+            <div className="mt-4">
+              <SetupCheckPanel
+                onOutcome={handleSetupCheckOutcome}
+                onDevicesChanged={handleSetupCheckDevicesChanged}
+              />
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+interface SetupCheckSummaryRowProps {
+  label: string;
+  description: SetupCheckDescription | null;
+}
+
+/** One line of the persisted summary. Each of the three outcomes reads as its own result, never
+ * rolled into a single pass/fail line for the whole check. */
+function SetupCheckSummaryRow({ label, description }: SetupCheckSummaryRowProps) {
+  return (
+    <div>
+      <div className="text-sm font-medium text-ink">
+        {label}: {description ? description.title : 'Unknown result'}
+      </div>
+      {description && <div className="text-xs text-ink-muted">{description.message}</div>}
     </div>
   );
 }

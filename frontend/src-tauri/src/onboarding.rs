@@ -14,6 +14,26 @@ pub struct OnboardingStatus {
     pub current_step: u8,
     pub model_status: ModelStatus,
     pub last_updated: String,
+    // The setup check (mic + system audio) is optional: older statuses never had one,
+    // and a user who skips the check still completes onboarding without it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup_check: Option<SetupCheckRecord>,
+}
+
+/// Persisted outcome of the setup check (model load + microphone + system audio capture),
+/// recorded so the app can re-offer the check from settings and so a user who already
+/// proved their audio setup works is not asked to redo it every time they open the app.
+///
+/// This record has no serde rename attribute, matching every other field on
+/// `OnboardingStatus`: its keys stay snake_case on the wire, unlike the camelCase
+/// `SetupCheckResult` the `mic_check_start` command returns.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SetupCheckRecord {
+    pub status: String,       // "passed" | "issues" | "skipped"
+    pub model: String,        // the ModelReport outcome, verbatim
+    pub microphone: String,   // the microphone ChannelOutcome, verbatim
+    pub system_audio: String, // the system audio ChannelOutcome, verbatim
+    pub checked_at: String,   // RFC3339
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
@@ -36,6 +56,7 @@ impl Default for OnboardingStatus {
                 selected_summary_model: None,
             },
             last_updated: chrono::Utc::now().to_rfc3339(),
+            setup_check: None,
         }
     }
 }
@@ -95,6 +116,20 @@ pub async fn save_onboarding_status<R: Runtime>(
     // Update last_updated timestamp
     let mut status = status.clone();
     status.last_updated = chrono::Utc::now().to_rfc3339();
+
+    // The frontend's debounced auto-save rebuilds the whole OnboardingStatus from React
+    // state on every save, and that React state does not always carry the setup check
+    // result forward. If we saved `status` as given, a save that happens to omit
+    // setup_check would silently erase a result the user already earned by running the
+    // check. So: only overwrite the stored setup_check when this call actually supplies
+    // one; otherwise keep whatever is already on disk.
+    if status.setup_check.is_none() {
+        if let Some(existing_value) = store.get("status") {
+            if let Ok(existing) = serde_json::from_value::<OnboardingStatus>(existing_value) {
+                status.setup_check = existing.setup_check;
+            }
+        }
+    }
 
     // Serialize status to JSON value
     let status_value = serde_json::to_value(&status)
@@ -176,6 +211,7 @@ pub async fn complete_onboarding<R: Runtime>(
     app: AppHandle<R>,
     state: tauri::State<'_, AppState>,
     model: String,
+    setup_check: Option<SetupCheckRecord>,
 ) -> Result<(), String> {
     info!("Completing onboarding with builtin-ai model: {}", model);
 
@@ -217,6 +253,12 @@ pub async fn complete_onboarding<R: Runtime>(
     status.model_status.parakeet = "downloaded".to_string();
     status.model_status.summary = "downloaded".to_string();
     status.model_status.selected_summary_model = Some(model.clone());
+    // A user finishing setup without having run the check must not erase an earlier
+    // result, so we only touch setup_check when the caller actually supplies one; the
+    // status we just loaded already carries forward whatever was stored before.
+    if let Some(setup_check) = setup_check {
+        status.setup_check = Some(setup_check);
+    }
 
     save_onboarding_status(&app, &status)
         .await
@@ -247,5 +289,79 @@ mod tests {
         .expect("old onboarding status should remain compatible");
 
         assert_eq!(status.model_status.selected_summary_model, None);
+        assert_eq!(status.setup_check.is_none(), true);
+    }
+
+    #[test]
+    fn setup_check_record_round_trips_with_snake_case_keys() {
+        let record = SetupCheckRecord {
+            status: "issues".to_string(),
+            model: "loaded".to_string(),
+            microphone: "transcribed".to_string(),
+            system_audio: "no_audio_detected".to_string(),
+            checked_at: "2026-05-30T00:00:00Z".to_string(),
+        };
+
+        let value = serde_json::to_value(&record).expect("SetupCheckRecord should serialize");
+        let object = value
+            .as_object()
+            .expect("SetupCheckRecord serializes to an object");
+
+        assert_eq!(
+            object.get("status").and_then(|v| v.as_str()),
+            Some("issues")
+        );
+        assert_eq!(object.get("model").and_then(|v| v.as_str()), Some("loaded"));
+        assert_eq!(
+            object.get("microphone").and_then(|v| v.as_str()),
+            Some("transcribed")
+        );
+        assert_eq!(
+            object.get("system_audio").and_then(|v| v.as_str()),
+            Some("no_audio_detected")
+        );
+        assert_eq!(
+            object.get("checked_at").and_then(|v| v.as_str()),
+            Some("2026-05-30T00:00:00Z")
+        );
+        // system_audio must stay snake_case: this is the key that would slip past
+        // review, since everything else in this feature is camelCase on the wire.
+        assert!(!object.contains_key("systemAudio"));
+
+        let round_tripped: SetupCheckRecord =
+            serde_json::from_value(value).expect("SetupCheckRecord should round-trip");
+        assert_eq!(round_tripped.status, record.status);
+        assert_eq!(round_tripped.model, record.model);
+        assert_eq!(round_tripped.microphone, record.microphone);
+        assert_eq!(round_tripped.system_audio, record.system_audio);
+        assert_eq!(round_tripped.checked_at, record.checked_at);
+    }
+
+    #[test]
+    fn onboarding_status_serializes_a_present_setup_check() {
+        let mut status = OnboardingStatus::default();
+        status.setup_check = Some(SetupCheckRecord {
+            status: "passed".to_string(),
+            model: "loaded".to_string(),
+            microphone: "transcribed".to_string(),
+            system_audio: "no_audio_detected".to_string(),
+            checked_at: "2026-05-30T00:00:00Z".to_string(),
+        });
+
+        let value = serde_json::to_value(&status).expect("OnboardingStatus should serialize");
+        let setup_check = value
+            .get("setup_check")
+            .expect("setup_check key should be present when Some")
+            .as_object()
+            .expect("setup_check serializes to an object");
+
+        assert_eq!(
+            setup_check.get("status").and_then(|v| v.as_str()),
+            Some("passed")
+        );
+        assert_eq!(
+            setup_check.get("system_audio").and_then(|v| v.as_str()),
+            Some("no_audio_detected")
+        );
     }
 }

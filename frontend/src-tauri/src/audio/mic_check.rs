@@ -1,90 +1,158 @@
 // audio/mic_check.rs
 //
-// The microphone check that closes onboarding: record a few seconds from one
-// input device, show the user a meter driven by their own voice, and prove the
-// downloaded Parakeet model can turn it into text. Every way this can go wrong
-// gets its own outcome, because the frontend has a specific fix to offer for
-// each one and a generic failure here teaches the user nothing.
+// The setup check that closes onboarding: prove the downloaded model loads,
+// then record a few seconds of the microphone and of the system audio at the
+// same time, show the user a meter per channel, and turn each capture into text
+// on its own.
+//
+// The three things it checks are reported separately and never rolled into a
+// single verdict. A Mac with no meeting running is supposed to finish with a
+// working microphone and a silent system-audio channel, and the user has to
+// read that as one good result and one neutral one; a composite pass/fail would
+// turn the expected outcome into a failure. For the same reason every way a
+// channel can go wrong gets its own outcome, because the frontend has a
+// specific fix to offer for each one and a generic failure teaches the user
+// nothing.
+//
+// Capturing a channel — the cpal thread, the meter, the platform paths for
+// system audio — belongs to `capture_probe`. This module owns the order the
+// check runs in, the classification of what came back, and the wire shapes.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use cpal::traits::{DeviceTrait, StreamTrait};
-use cpal::{Stream, SupportedStreamConfig};
 use log::{error, info, warn};
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Runtime};
+use tauri::{AppHandle, Runtime};
 
 use super::audio_processing::{audio_to_mono, resample_audio};
-use super::devices::{
-    default_input_device, get_device_and_config, parse_audio_device, AudioDevice, DeviceType,
-};
+use super::capture_probe::{peak_of, probe_channel, ProbeCapture, ProbeChannel, ProbeError};
 use crate::parakeet_engine::commands::{parakeet_init, PARAKEET_ENGINE};
 use crate::parakeet_engine::{ModelStatus, ParakeetEngine};
-
-/// Level updates ride the same 60fps budget as the rest of the app's metering.
-const LEVEL_INTERVAL: Duration = Duration::from_millis(33);
-const LEVEL_EVENT: &str = "mic-check-level";
 
 const DEFAULT_DURATION_SECS: f64 = 8.0;
 const MIN_DURATION_SECS: f64 = 3.0;
 const MAX_DURATION_SECS: f64 = 15.0;
 
-/// A peak under this is indistinguishable from a muted device or an input
-/// nobody is talking into — roughly -40 dBFS.
+/// A peak under this is indistinguishable from a muted device or a channel
+/// nobody is putting sound into — roughly -40 dBFS.
 const SILENCE_FLOOR: f32 = 0.01;
-/// RMS above this is a signal the user would describe as "the meter moved".
-const ACTIVE_RMS_FLOOR: f32 = 0.01;
 
 /// Parakeet wants mono f32 at this rate.
 const TRANSCRIBE_SAMPLE_RATE: u32 = 16_000;
 /// The model onboarding downloads, and so the one most likely to be on disk.
 const PREFERRED_MODEL: &str = "parakeet-tdt-0.6b-v3-int8";
 
-/// Stands in for a device we never managed to open, so the frontend still has
-/// something to name in its message.
-const UNNAMED_DEVICE: &str = "the default microphone";
-
-/// Only one check may own the input device at a time.
+/// Only one check may own the audio devices at a time.
 static CHECK_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
-/// Raised by `mic_check_cancel`, cleared when a check takes the flag above.
-static CANCEL_REQUESTED: AtomicBool = AtomicBool::new(false);
 
-/// Everything the frontend can react to. Note that `command_failed` from the
-/// TypeScript union has no variant here: it is synthesized in the frontend when
-/// the invoke itself throws, which is precisely the case Rust cannot report.
+/// Raised by `mic_check_cancel`, cleared when a check takes the flag above.
+///
+/// It lives behind an `Arc` because both probes of a check hold a clone of it:
+/// stopping the check has to reach two captures running concurrently, not one.
+static CANCEL_REQUESTED: OnceLock<Arc<AtomicBool>> = OnceLock::new();
+
+fn cancel_flag() -> Arc<AtomicBool> {
+    CANCEL_REQUESTED
+        .get_or_init(|| Arc::new(AtomicBool::new(false)))
+        .clone()
+}
+
+/// How the model step ended. It is a first-class step of its own, not a
+/// footnote on a channel: the user can retry it or re-download the weights, and
+/// those fixes have nothing to do with a microphone.
+///
+/// The TypeScript union carries one more variant, `command_failed`, which is
+/// synthesized in the frontend when the invoke itself throws — precisely the
+/// case Rust cannot report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum MicCheckOutcome {
-    Transcribed,
-    NoSpeechDetected,
-    NoAudioDetected,
-    PermissionDenied,
-    DeviceUnavailable,
-    ModelUnavailable,
-    ModelFailed,
-    TranscriptionFailed,
-    Cancelled,
+pub enum ModelCheckOutcome {
+    /// The weights are loaded and the engine answered.
+    Loaded,
+    /// There is no model on disk to load.
+    Unavailable,
+    /// Initialising, discovering or loading a model errored.
+    Failed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct MicCheckResult {
-    pub outcome: MicCheckOutcome,
-    /// Only set when the check actually produced words.
-    pub transcript: Option<String>,
-    pub device_name: String,
-    pub peak_level: f32,
-    pub duration_ms: u64,
+pub struct ModelReport {
+    pub outcome: ModelCheckOutcome,
+    /// The model that was loaded, when one was.
+    pub model_name: Option<String>,
     /// The underlying error, for the log and a details line. Never the whole
     /// message shown to the user — the outcome decides that.
     pub detail: Option<String>,
 }
 
-impl MicCheckResult {
-    fn new(outcome: MicCheckOutcome, device_name: String) -> Self {
+impl ModelReport {
+    fn loaded(model_name: Option<String>) -> Self {
         Self {
+            outcome: ModelCheckOutcome::Loaded,
+            model_name,
+            detail: None,
+        }
+    }
+
+    fn failed(outcome: ModelCheckOutcome, detail: Option<String>) -> Self {
+        Self {
+            outcome,
+            model_name: None,
+            detail,
+        }
+    }
+}
+
+/// How one channel of the check ended. Every variant is a different sentence
+/// with a different fix in the frontend, which switches on all of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelOutcome {
+    /// Words came back.
+    Transcribed,
+    /// Audible signal, but the model returned nothing.
+    NoSpeechDetected,
+    /// The channel opened fine and sent silence.
+    NoAudioDetected,
+    /// The OS withheld the audio.
+    PermissionDenied,
+    /// The device could not be resolved or opened.
+    DeviceUnavailable,
+    /// The model errored on this channel's buffer.
+    TranscriptionFailed,
+    /// The user stopped the check.
+    Cancelled,
+    /// This platform cannot capture this channel here.
+    Unsupported,
+    /// The model never loaded, so nothing was captured on this channel.
+    NotRun,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelReport {
+    /// Reused from the probe rather than redeclared, so the `channel` in a
+    /// report and the `channel` in a level event can never drift apart.
+    pub channel: ProbeChannel,
+    pub outcome: ChannelOutcome,
+    /// Only set when this channel actually produced words.
+    pub transcript: Option<String>,
+    /// The device this channel opened, or the name that was asked for when it
+    /// never opened. Left empty rather than filled with an invented label: the
+    /// frontend already has per-channel wording for a device it cannot name.
+    pub device_name: String,
+    pub peak_level: f32,
+    pub duration_ms: u64,
+    pub detail: Option<String>,
+}
+
+impl ChannelReport {
+    fn new(channel: ProbeChannel, outcome: ChannelOutcome, device_name: String) -> Self {
+        Self {
+            channel,
             outcome,
             transcript: None,
             device_name,
@@ -106,34 +174,23 @@ impl MicCheckResult {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct MicCheckLevel {
-    rms: f32,
-    peak: f32,
-    is_active: bool,
-    elapsed_ms: u64,
-    duration_ms: u64,
+pub struct SetupCheckResult {
+    pub model: ModelReport,
+    pub microphone: ChannelReport,
+    pub system_audio: ChannelReport,
+    /// How long the capture window actually ran, which is shorter than the
+    /// requested duration when the user stopped it.
+    pub duration_ms: u64,
+    pub cancelled: bool,
 }
 
-/// Samples as they arrive, plus enough bookkeeping to tell "the device gave us
-/// nothing" apart from "the device gave us silence".
-#[derive(Default)]
-struct CaptureBuffer {
-    samples: Vec<f32>,
-    callbacks: u64,
+/// Clears `CHECK_IN_FLIGHT` however the command exits, and owns the cancel flag
+/// the probes share for the length of one check.
+struct InFlightGuard {
+    cancelled: Arc<AtomicBool>,
 }
-
-/// What the capture thread hands back once the stream is torn down.
-struct Capture {
-    samples: Vec<f32>,
-    channels: u16,
-    sample_rate: u32,
-    cancelled: bool,
-}
-
-/// Clears `CHECK_IN_FLIGHT` however the command exits.
-struct InFlightGuard;
 
 impl InFlightGuard {
     fn acquire() -> Option<Self> {
@@ -141,131 +198,136 @@ impl InFlightGuard {
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .ok()
             .map(|_| {
+                let cancelled = cancel_flag();
                 // A cancel that arrived between two checks must not kill this one.
-                CANCEL_REQUESTED.store(false, Ordering::SeqCst);
-                Self
+                cancelled.store(false, Ordering::SeqCst);
+                Self { cancelled }
             })
     }
 }
 
 impl Drop for InFlightGuard {
     fn drop(&mut self) {
-        CANCEL_REQUESTED.store(false, Ordering::SeqCst);
+        self.cancelled.store(false, Ordering::SeqCst);
         CHECK_IN_FLIGHT.store(false, Ordering::SeqCst);
     }
 }
 
-/// Record from one input device, transcribe what came back, and report which of
-/// the many ways this can fail actually happened.
+/// Load the model, record the microphone and the system audio over one window,
+/// and report each of the three on its own.
 #[tauri::command]
 pub async fn mic_check_start<R: Runtime>(
     app: AppHandle<R>,
-    device_name: Option<String>,
+    mic_device_name: Option<String>,
+    system_device_name: Option<String>,
     duration_secs: Option<f64>,
-) -> Result<MicCheckResult, String> {
-    let _guard = match InFlightGuard::acquire() {
+) -> Result<SetupCheckResult, String> {
+    let guard = match InFlightGuard::acquire() {
         Some(guard) => guard,
-        None => return Err("A microphone check is already running".to_string()),
+        None => return Err("A setup check is already running".to_string()),
     };
+    let cancelled = guard.cancelled.clone();
 
     let duration = capture_duration(duration_secs);
-    let device = match resolve_device(device_name.as_deref()) {
-        Ok(device) => device,
-        Err(error) => {
-            warn!("Mic check could not resolve an input device: {}", error);
-            let name = device_name.unwrap_or_else(|| UNNAMED_DEVICE.to_string());
-            return Ok(
-                MicCheckResult::new(MicCheckOutcome::DeviceUnavailable, name)
-                    .with_detail(Some(error)),
+
+    // The model comes first, and once. Loading it is the first time in the
+    // app's life these weights are exercised, so the log line below is what a
+    // support thread will ask for.
+    let (engine, model) = match ready_engine().await {
+        Ok((engine, model_name)) => {
+            info!(
+                "Setup check loaded the transcription model: {}",
+                model_name.as_deref().unwrap_or("unnamed model")
             );
+            (engine, ModelReport::loaded(model_name))
+        }
+        Err((outcome, detail)) => {
+            warn!(
+                "Setup check has no usable Parakeet model: {:?} ({:?})",
+                outcome, detail
+            );
+            // Nothing is captured when the model did not load. A microphone
+            // verdict the user cannot act on, stacked under a model failure
+            // they can, is noise at the moment they most need one clear
+            // instruction.
+            return Ok(nothing_captured(
+                ModelReport::failed(outcome, detail),
+                mic_device_name.as_deref(),
+                system_device_name.as_deref(),
+            ));
         }
     };
 
     info!(
-        "Mic check starting on '{}' for {} ms",
-        device.name,
+        "Setup check capturing the microphone and system audio for {} ms",
         duration.as_millis()
     );
 
-    let capture = match capture_audio(app, device.clone(), duration).await? {
-        Ok(capture) => capture,
-        Err(error) => {
-            error!("Mic check could not open '{}': {}", device.name, error);
-            return Ok(
-                MicCheckResult::new(MicCheckOutcome::DeviceUnavailable, device.name)
-                    .with_detail(Some(error)),
-            );
-        }
-    };
-
-    let peak = peak_of(&capture.samples);
-    let duration_ms = captured_duration_ms(&capture);
-    let result =
-        |outcome| MicCheckResult::new(outcome, device.name.clone()).with_capture(peak, duration_ms);
-
-    if capture.cancelled {
-        info!("Mic check cancelled after {} ms of audio", duration_ms);
-        return Ok(result(MicCheckOutcome::Cancelled));
-    }
-
-    // Silence is diagnosed from the samples alone; there is nothing in it for
-    // the model to work with and its verdict would only muddy the message.
-    if let Some(outcome) = classify_capture(&capture.samples, peak) {
-        warn!(
-            "Mic check on '{}' captured no usable audio: {:?} (peak {:.4}, {} ms)",
-            device.name, outcome, peak, duration_ms
-        );
-        return Ok(result(outcome));
-    }
-
-    let engine = match ready_engine().await {
-        Ok(engine) => engine,
-        Err((outcome, detail)) => {
-            warn!(
-                "Mic check has no usable Parakeet model: {:?} ({:?})",
-                outcome, detail
-            );
-            return Ok(result(outcome).with_detail(detail));
-        }
-    };
-
-    if CANCEL_REQUESTED.load(Ordering::SeqCst) {
-        return Ok(result(MicCheckOutcome::Cancelled));
-    }
-
-    let mono = audio_to_mono(&capture.samples, capture.channels);
-    let resampled = resample_audio(&mono, capture.sample_rate, TRANSCRIBE_SAMPLE_RATE);
-
-    let transcript = match engine.transcribe_audio(resampled).await {
-        Ok(transcript) => transcript,
-        Err(error) => {
-            error!("Mic check transcription failed: {}", error);
-            return Ok(
-                result(MicCheckOutcome::TranscriptionFailed).with_detail(Some(error.to_string()))
-            );
-        }
-    };
-
-    let outcome = classify(&capture.samples, peak, &transcript);
-    info!(
-        "Mic check on '{}' finished: {:?} ({} ms, peak {:.4})",
-        device.name, outcome, duration_ms, peak
+    // Both channels share one window so the user waits once and watches two
+    // meters, rather than sitting through two consecutive eight-second stares.
+    let started = Instant::now();
+    let (microphone_probe, system_probe) = tokio::join!(
+        probe_channel(
+            app.clone(),
+            ProbeChannel::Microphone,
+            mic_device_name.clone(),
+            duration,
+            cancelled.clone(),
+        ),
+        probe_channel(
+            app,
+            ProbeChannel::SystemAudio,
+            system_device_name.clone(),
+            duration,
+            cancelled.clone(),
+        ),
     );
+    let window_ms = started.elapsed().as_millis() as u64;
 
-    let mut final_result = result(outcome);
-    if outcome == MicCheckOutcome::Transcribed {
-        final_result.transcript = Some(transcript.trim().to_string());
-    }
-    Ok(final_result)
+    // The two transcriptions run one after another rather than joined: there is
+    // a single engine behind them, and letting two few-second buffers contend
+    // for it buys nothing worth the contention.
+    let microphone = report_channel(
+        &engine,
+        ProbeChannel::Microphone,
+        mic_device_name.as_deref(),
+        microphone_probe,
+        &cancelled,
+    )
+    .await;
+    let system_audio = report_channel(
+        &engine,
+        ProbeChannel::SystemAudio,
+        system_device_name.as_deref(),
+        system_probe,
+        &cancelled,
+    )
+    .await;
+
+    let result = SetupCheckResult {
+        model,
+        microphone,
+        system_audio,
+        duration_ms: window_ms,
+        cancelled: cancelled.load(Ordering::SeqCst),
+    };
+    info!(
+        "Setup check finished in {} ms: model {:?}, microphone {:?}, system audio {:?}",
+        result.duration_ms,
+        result.model.outcome,
+        result.microphone.outcome,
+        result.system_audio.outcome
+    );
+    Ok(result)
 }
 
-/// Stop a capture that is still running; the pending `mic_check_start` then
-/// resolves with `cancelled`.
+/// Stop a check that is still running; the pending `mic_check_start` then
+/// resolves with both channels cancelled.
 #[tauri::command]
 pub async fn mic_check_cancel() -> Result<(), String> {
     if CHECK_IN_FLIGHT.load(Ordering::SeqCst) {
-        info!("Mic check cancellation requested");
-        CANCEL_REQUESTED.store(true, Ordering::SeqCst);
+        info!("Setup check cancellation requested");
+        cancel_flag().store(true, Ordering::SeqCst);
     }
     Ok(())
 }
@@ -280,259 +342,181 @@ fn capture_duration(duration_secs: Option<f64>) -> Duration {
     Duration::from_secs_f64(seconds)
 }
 
-/// The frontend sends the display form ("MacBook Pro Microphone (input)"), but
-/// a bare device name is worth trying as an input rather than failing outright.
-fn resolve_device(device_name: Option<&str>) -> Result<AudioDevice, String> {
-    match device_name {
-        Some(name) => Ok(parse_audio_device(name)
-            .unwrap_or_else(|_| AudioDevice::new(name.to_string(), DeviceType::Input))),
-        None => default_input_device().map_err(|error| error.to_string()),
+/// The result when the model never loaded: both channels say they were never
+/// run, and the model report carries the one thing the user can act on.
+fn nothing_captured(
+    model: ModelReport,
+    mic_device_name: Option<&str>,
+    system_device_name: Option<&str>,
+) -> SetupCheckResult {
+    SetupCheckResult {
+        model,
+        microphone: ChannelReport::new(
+            ProbeChannel::Microphone,
+            ChannelOutcome::NotRun,
+            requested_name(mic_device_name),
+        ),
+        system_audio: ChannelReport::new(
+            ProbeChannel::SystemAudio,
+            ChannelOutcome::NotRun,
+            requested_name(system_device_name),
+        ),
+        duration_ms: 0,
+        cancelled: false,
     }
 }
 
-/// Run the cpal capture on its own thread: `Stream` is not `Send` on every
-/// platform and nothing !Send may live across an await in a Tauri command.
-///
-/// The outer `Result` is a thread that died on us; the inner one is a device
-/// that would not open.
-async fn capture_audio<R: Runtime>(
-    app: AppHandle<R>,
-    device: AudioDevice,
-    duration: Duration,
-) -> Result<Result<Capture, String>, String> {
-    let (sender, receiver) = tokio::sync::oneshot::channel();
-    let runtime = tokio::runtime::Handle::current();
-
-    std::thread::Builder::new()
-        .name("mic-check-capture".to_string())
-        .spawn(move || {
-            let _ = sender.send(run_capture(app, device, duration, runtime));
-        })
-        .map_err(|error| format!("Failed to start microphone check thread: {}", error))?;
-
-    receiver
-        .await
-        .map_err(|_| "Microphone check thread ended without a result".to_string())
+/// The name the caller asked for, for a channel that never opened a device. An
+/// empty string is deliberate: the frontend words an unnamed channel itself.
+fn requested_name(device_name: Option<&str>) -> String {
+    device_name.unwrap_or_default().to_string()
 }
 
-fn run_capture<R: Runtime>(
-    app: AppHandle<R>,
-    device: AudioDevice,
-    duration: Duration,
-    runtime: tokio::runtime::Handle,
-) -> Result<Capture, String> {
-    // Device lookup is synchronous under its async signature, so borrowing the
-    // runtime for it costs the app nothing.
-    let (cpal_device, config) = runtime
-        .block_on(get_device_and_config(&device))
-        .map_err(|error| error.to_string())?;
-
-    let channels = config.channels();
-    let sample_rate = config.sample_rate().0;
-    info!(
-        "Mic check capturing from '{}' - {} Hz, {} channels, {:?}",
-        device.name,
-        sample_rate,
-        channels,
-        config.sample_format()
-    );
-
-    let buffer = Arc::new(Mutex::new(CaptureBuffer::default()));
-    let stream = build_capture_stream(&cpal_device, &config, buffer.clone())
-        .map_err(|error| error.to_string())?;
-    stream.play().map_err(|error| error.to_string())?;
-
-    let cancelled = emit_levels(&app, &buffer, duration);
-
-    // Pause before dropping so the callback stops touching the buffer first.
-    if let Err(error) = stream.pause() {
-        warn!("Mic check could not pause the stream cleanly: {}", error);
-    }
-    drop(stream);
-
-    let captured = std::mem::take(&mut *buffer.lock().unwrap());
-    info!(
-        "Mic check captured {} samples over {} callbacks (cancelled: {})",
-        captured.samples.len(),
-        captured.callbacks,
-        cancelled
-    );
-
-    Ok(Capture {
-        samples: captured.samples,
-        channels,
-        sample_rate,
-        cancelled,
-    })
-}
-
-fn build_capture_stream(
-    device: &cpal::Device,
-    config: &SupportedStreamConfig,
-    buffer: Arc<Mutex<CaptureBuffer>>,
-) -> anyhow::Result<Stream> {
-    let stream_config: cpal::StreamConfig = config.clone().into();
-    let on_error = |error: cpal::StreamError| error!("Mic check stream error: {}", error);
-
-    let stream = match config.sample_format() {
-        cpal::SampleFormat::F32 => device.build_input_stream(
-            &stream_config,
-            move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                collect_samples(&buffer, data.iter().copied());
-            },
-            on_error,
-            None,
-        )?,
-        cpal::SampleFormat::I16 => device.build_input_stream(
-            &stream_config,
-            move |data: &[i16], _: &cpal::InputCallbackInfo| {
-                collect_samples(
-                    &buffer,
-                    data.iter().map(|&sample| sample as f32 / i16::MAX as f32),
+/// Everything one channel is guilty of, decided from its own samples and its
+/// own transcription. Neither channel's verdict depends on the other's.
+async fn report_channel(
+    engine: &ParakeetEngine,
+    channel: ProbeChannel,
+    device_name: Option<&str>,
+    probe: Result<ProbeCapture, ProbeError>,
+    cancelled: &AtomicBool,
+) -> ChannelReport {
+    let capture = match probe {
+        Ok(capture) => capture,
+        Err(error) => {
+            // A capture the user stopped while the device was still opening is
+            // their doing, not the device's; calling it unavailable would send
+            // them chasing a fault they created.
+            if cancelled.load(Ordering::SeqCst) {
+                return ChannelReport::new(
+                    channel,
+                    ChannelOutcome::Cancelled,
+                    requested_name(device_name),
                 );
-            },
-            on_error,
-            None,
-        )?,
-        cpal::SampleFormat::I32 => device.build_input_stream(
-            &stream_config,
-            move |data: &[i32], _: &cpal::InputCallbackInfo| {
-                collect_samples(
-                    &buffer,
-                    data.iter().map(|&sample| sample as f32 / i32::MAX as f32),
-                );
-            },
-            on_error,
-            None,
-        )?,
-        cpal::SampleFormat::I8 => device.build_input_stream(
-            &stream_config,
-            move |data: &[i8], _: &cpal::InputCallbackInfo| {
-                collect_samples(
-                    &buffer,
-                    data.iter().map(|&sample| sample as f32 / i8::MAX as f32),
-                );
-            },
-            on_error,
-            None,
-        )?,
-        format => return Err(anyhow::anyhow!("Unsupported sample format: {:?}", format)),
+            }
+
+            let outcome = match error {
+                ProbeError::Unsupported(_) => ChannelOutcome::Unsupported,
+                ProbeError::DeviceUnavailable(_) => ChannelOutcome::DeviceUnavailable,
+            };
+            warn!("Setup check could not capture {}: {}", channel, error);
+            return ChannelReport::new(channel, outcome, requested_name(device_name))
+                .with_detail(Some(error.to_string()));
+        }
     };
 
-    Ok(stream)
-}
-
-/// The audio callback only accumulates; the level loop does the arithmetic.
-fn collect_samples(buffer: &Mutex<CaptureBuffer>, data: impl IntoIterator<Item = f32>) {
-    let mut buffer = match buffer.lock() {
-        Ok(buffer) => buffer,
-        Err(poisoned) => poisoned.into_inner(),
+    let peak = peak_of(&capture.samples);
+    let duration_ms = capture.duration_ms();
+    let report = |outcome| {
+        ChannelReport::new(channel, outcome, capture.device_name.clone())
+            .with_capture(peak, duration_ms)
     };
-    buffer.callbacks += 1;
-    buffer.samples.extend(data);
-}
 
-/// Wait out the capture, publishing a level for every window of samples that
-/// arrived since the last one. Returns true if the user cancelled.
-fn emit_levels<R: Runtime>(
-    app: &AppHandle<R>,
-    buffer: &Mutex<CaptureBuffer>,
-    duration: Duration,
-) -> bool {
-    let started = Instant::now();
-    let duration_ms = duration.as_millis() as u64;
-    let mut reported = 0usize;
+    if capture.cancelled || cancelled.load(Ordering::SeqCst) {
+        info!(
+            "Setup check cancelled after {} ms of {} audio",
+            duration_ms, channel
+        );
+        return report(ChannelOutcome::Cancelled);
+    }
 
-    while started.elapsed() < duration {
-        std::thread::sleep(LEVEL_INTERVAL);
+    // Silence is diagnosed from the samples alone; there is nothing in it for
+    // the model to work with and its verdict would only muddy the message.
+    if let Some(outcome) = classify_capture(channel, &capture.samples, peak) {
+        info!(
+            "Setup check captured no usable {} audio from '{}': {:?} (peak {:.4}, {} ms)",
+            channel, capture.device_name, outcome, peak, duration_ms
+        );
+        return report(outcome);
+    }
 
-        let (rms, peak, total) = {
-            let buffer = buffer
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let window = &buffer.samples[reported..];
-            (rms_of(window), peak_of(window), buffer.samples.len())
-        };
-        reported = total;
+    let mono = audio_to_mono(&capture.samples, capture.channels);
+    let resampled = resample_audio(&mono, capture.sample_rate, TRANSCRIBE_SAMPLE_RATE);
 
-        let level = MicCheckLevel {
-            rms: rms.min(1.0),
-            peak: peak.min(1.0),
-            is_active: rms > ACTIVE_RMS_FLOOR,
-            elapsed_ms: (started.elapsed().as_millis() as u64).min(duration_ms),
-            duration_ms,
-        };
-        if let Err(error) = app.emit(LEVEL_EVENT, &level) {
-            warn!("Failed to emit mic check level: {}", error);
+    let transcript = match engine.transcribe_audio(resampled).await {
+        Ok(transcript) => transcript,
+        Err(error) => {
+            error!("Setup check {} transcription failed: {}", channel, error);
+            return report(ChannelOutcome::TranscriptionFailed)
+                .with_detail(Some(error.to_string()));
         }
+    };
 
-        if CANCEL_REQUESTED.load(Ordering::SeqCst) {
-            return true;
-        }
+    let transcript = transcript.trim().to_string();
+    if transcript.is_empty() {
+        info!(
+            "Setup check heard {} audio but no speech (peak {:.4}, {} ms)",
+            channel, peak, duration_ms
+        );
+        return report(ChannelOutcome::NoSpeechDetected);
     }
 
-    false
+    info!(
+        "Setup check transcribed {} audio from '{}' ({} ms, peak {:.4})",
+        channel, capture.device_name, duration_ms, peak
+    );
+    let mut transcribed = report(ChannelOutcome::Transcribed);
+    transcribed.transcript = Some(transcript);
+    transcribed
 }
 
-/// How much audio actually arrived, which is what the user is told about — not
-/// how long we sat waiting for it.
-fn captured_duration_ms(capture: &Capture) -> u64 {
-    let channels = capture.channels.max(1) as u64;
-    let frames = capture.samples.len() as u64 / channels;
-    frames * 1000 / capture.sample_rate.max(1) as u64
-}
-
-fn peak_of(samples: &[f32]) -> f32 {
-    samples
-        .iter()
-        .fold(0.0f32, |peak, sample| peak.max(sample.abs()))
-}
-
-fn rms_of(samples: &[f32]) -> f32 {
+/// The verdict this channel's captured audio alone supports. `None` means it is
+/// worth sending to the model, which then decides between speech and silence.
+fn classify_capture(channel: ProbeChannel, samples: &[f32], peak: f32) -> Option<ChannelOutcome> {
+    // A channel that handed back not one callback and a channel that handed
+    // back bit-exact zeroes look alike on screen but are different faults, so
+    // they are diagnosed apart.
     if samples.is_empty() {
-        return 0.0;
-    }
-    let sum: f32 = samples.iter().map(|sample| sample * sample).sum();
-    (sum / samples.len() as f32).sqrt()
-}
-
-/// macOS hands a denied app a stream of digital silence instead of refusing to
-/// open it, so bit-exact zeroes there indict the permission, not the device.
-fn digital_silence_outcome() -> MicCheckOutcome {
-    #[cfg(target_os = "macos")]
-    {
-        MicCheckOutcome::PermissionDenied
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        MicCheckOutcome::NoAudioDetected
-    }
-}
-
-/// The verdict the captured audio alone supports. `None` means it is worth
-/// sending to the model, which then decides between speech and silence.
-fn classify_capture(samples: &[f32], peak: f32) -> Option<MicCheckOutcome> {
-    if samples.is_empty() {
-        return Some(MicCheckOutcome::PermissionDenied);
+        return Some(no_capture_outcome(channel));
     }
     if samples.iter().all(|sample| *sample == 0.0) {
-        return Some(digital_silence_outcome());
+        return Some(digital_silence_outcome(channel));
     }
     if peak < SILENCE_FLOOR {
-        return Some(MicCheckOutcome::NoAudioDetected);
+        return Some(ChannelOutcome::NoAudioDetected);
     }
     None
 }
 
-/// The whole classification, once the model has had its say.
-fn classify(samples: &[f32], peak: f32, transcript: &str) -> MicCheckOutcome {
-    classify_capture(samples, peak).unwrap_or_else(|| {
-        if transcript.trim().is_empty() {
-            MicCheckOutcome::NoSpeechDetected
-        } else {
-            MicCheckOutcome::Transcribed
-        }
-    })
+/// What a channel that produced no samples at all is guilty of.
+///
+/// A microphone stream that opened, ran for the whole window and delivered not
+/// one callback is the operating system withholding the audio, on every
+/// platform — a quiet room still produces samples. System audio is the
+/// exception, for the reason given on [`digital_silence_outcome`].
+fn no_capture_outcome(channel: ProbeChannel) -> ChannelOutcome {
+    if matches!(channel, ProbeChannel::SystemAudio) {
+        return ChannelOutcome::NoAudioDetected;
+    }
+
+    ChannelOutcome::PermissionDenied
+}
+
+/// What a channel that produced nothing but bit-exact zeroes is guilty of.
+///
+/// macOS hands a denied app a stream of digital silence instead of refusing to
+/// open the microphone, so zeroes there indict the permission rather than the
+/// device. Everywhere else they are simply a muted or wrong input.
+///
+/// System audio is the exception on every platform: a Mac with nothing playing
+/// through its speakers produces exactly this, and it is the expected clean
+/// outcome of the check rather than a fault. Calling it a permission problem
+/// would send a user whose setup is fine into System Settings. The frontend's
+/// wording for `no_audio_detected` on this channel names both possibilities —
+/// nothing was playing, or the tap is not permitted.
+fn digital_silence_outcome(channel: ProbeChannel) -> ChannelOutcome {
+    if matches!(channel, ProbeChannel::SystemAudio) {
+        return ChannelOutcome::NoAudioDetected;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        ChannelOutcome::PermissionDenied
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        ChannelOutcome::NoAudioDetected
+    }
 }
 
 fn parakeet_engine() -> Option<Arc<ParakeetEngine>> {
@@ -544,27 +528,32 @@ fn parakeet_engine() -> Option<Arc<ParakeetEngine>> {
 }
 
 /// Bring the shared Parakeet engine up with a model loaded, or say which kind
-/// of model problem the user has.
-async fn ready_engine() -> Result<Arc<ParakeetEngine>, (MicCheckOutcome, Option<String>)> {
+/// of model problem the user has. The name that comes back is the model that is
+/// now loaded, which is what the frontend shows.
+async fn ready_engine(
+) -> Result<(Arc<ParakeetEngine>, Option<String>), (ModelCheckOutcome, Option<String>)> {
     if parakeet_engine().is_none() {
         parakeet_init()
             .await
-            .map_err(|error| (MicCheckOutcome::ModelFailed, Some(error)))?;
+            .map_err(|error| (ModelCheckOutcome::Failed, Some(error)))?;
     }
 
     let engine = parakeet_engine().ok_or((
-        MicCheckOutcome::ModelFailed,
+        ModelCheckOutcome::Failed,
         Some("Parakeet engine not initialized".to_string()),
     ))?;
 
+    // A model the app already loaded is the one the user will record with, so
+    // the check exercises that rather than reloading weights for its own sake.
     if engine.is_model_loaded().await {
-        return Ok(engine);
+        let name = engine.get_current_model().await;
+        return Ok((engine, name));
     }
 
     let models = engine
         .discover_models()
         .await
-        .map_err(|error| (MicCheckOutcome::ModelFailed, Some(error.to_string())))?;
+        .map_err(|error| (ModelCheckOutcome::Failed, Some(error.to_string())))?;
     let available: Vec<_> = models
         .iter()
         .filter(|model| matches!(model.status, ModelStatus::Available))
@@ -574,20 +563,25 @@ async fn ready_engine() -> Result<Arc<ParakeetEngine>, (MicCheckOutcome, Option<
         .iter()
         .find(|model| model.name == PREFERRED_MODEL)
         .or_else(|| available.first())
-        .ok_or((MicCheckOutcome::ModelUnavailable, None))?;
+        .ok_or((ModelCheckOutcome::Unavailable, None))?;
 
-    info!("Mic check loading Parakeet model '{}'", model.name);
+    info!("Setup check loading Parakeet model '{}'", model.name);
     engine
         .load_model(&model.name)
         .await
-        .map_err(|error| (MicCheckOutcome::ModelFailed, Some(error.to_string())))?;
+        .map_err(|error| (ModelCheckOutcome::Failed, Some(error.to_string())))?;
 
-    Ok(engine)
+    Ok((engine, Some(model.name.clone())))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn channel_report(channel: ProbeChannel, outcome: ChannelOutcome) -> ChannelReport {
+        ChannelReport::new(channel, outcome, "MacBook Pro Microphone".to_string())
+            .with_capture(0.5, 8000)
+    }
 
     #[test]
     fn duration_defaults_to_eight_seconds() {
@@ -604,92 +598,152 @@ mod tests {
     }
 
     #[test]
-    fn no_samples_at_all_means_the_os_withheld_the_audio() {
-        assert_eq!(
-            classify(&[], 0.0, "anything"),
-            MicCheckOutcome::PermissionDenied
-        );
+    fn a_microphone_that_handed_back_nothing_means_the_os_withheld_the_audio() {
+        // On every platform, not just macOS: a quiet room still produces
+        // samples, so an empty buffer is the OS holding the audio back rather
+        // than a microphone with nothing to hear.
+        let outcome = classify_capture(ProbeChannel::Microphone, &[], 0.0);
+        assert_eq!(outcome, Some(ChannelOutcome::PermissionDenied));
     }
 
     #[test]
-    fn digital_silence_indicts_the_permission_on_macos_only() {
-        let outcome = classify(&[0.0; 4096], 0.0, "");
+    fn microphone_digital_silence_indicts_the_permission_on_macos_only() {
+        let outcome = classify_capture(ProbeChannel::Microphone, &[0.0; 4096], 0.0);
 
         #[cfg(target_os = "macos")]
-        assert_eq!(outcome, MicCheckOutcome::PermissionDenied);
+        assert_eq!(outcome, Some(ChannelOutcome::PermissionDenied));
 
         #[cfg(not(target_os = "macos"))]
-        assert_eq!(outcome, MicCheckOutcome::NoAudioDetected);
+        assert_eq!(outcome, Some(ChannelOutcome::NoAudioDetected));
     }
 
     #[test]
-    fn a_signal_under_the_silence_floor_is_no_audio() {
+    fn system_audio_silence_is_never_a_permission_problem_on_any_platform() {
+        // Nothing playing through the speakers is the expected clean outcome of
+        // the check, not a fault, and it looks the same on every platform.
+        assert_eq!(
+            classify_capture(ProbeChannel::SystemAudio, &[0.0; 4096], 0.0),
+            Some(ChannelOutcome::NoAudioDetected)
+        );
+        assert_eq!(
+            classify_capture(ProbeChannel::SystemAudio, &[], 0.0),
+            Some(ChannelOutcome::NoAudioDetected)
+        );
+    }
+
+    #[test]
+    fn a_signal_under_the_silence_floor_is_no_audio_on_either_channel() {
         let samples = [0.0004, -0.0009, 0.0002];
+        let peak = peak_of(&samples);
         assert_eq!(
-            classify(&samples, peak_of(&samples), ""),
-            MicCheckOutcome::NoAudioDetected
+            classify_capture(ProbeChannel::Microphone, &samples, peak),
+            Some(ChannelOutcome::NoAudioDetected)
         );
-    }
-
-    #[test]
-    fn audible_audio_with_an_empty_transcript_is_no_speech() {
-        let samples = [0.4, -0.35, 0.2];
         assert_eq!(
-            classify(&samples, peak_of(&samples), "   \n"),
-            MicCheckOutcome::NoSpeechDetected
-        );
-    }
-
-    #[test]
-    fn audible_audio_with_words_passes() {
-        let samples = [0.4, -0.35, 0.2];
-        assert_eq!(
-            classify(&samples, peak_of(&samples), "testing one two three"),
-            MicCheckOutcome::Transcribed
+            classify_capture(ProbeChannel::SystemAudio, &samples, peak),
+            Some(ChannelOutcome::NoAudioDetected)
         );
     }
 
     #[test]
     fn audio_worth_transcribing_is_not_classified_before_the_model_runs() {
         let samples = [0.4, -0.35, 0.2];
-        assert_eq!(classify_capture(&samples, peak_of(&samples)), None);
+        let peak = peak_of(&samples);
+        assert_eq!(
+            classify_capture(ProbeChannel::Microphone, &samples, peak),
+            None
+        );
+        assert_eq!(
+            classify_capture(ProbeChannel::SystemAudio, &samples, peak),
+            None
+        );
+    }
+
+    #[test]
+    fn a_model_that_never_loaded_captures_nothing_on_either_channel() {
+        let result = nothing_captured(
+            ModelReport::failed(ModelCheckOutcome::Unavailable, None),
+            Some("MacBook Pro Microphone (input)"),
+            None,
+        );
+
+        assert_eq!(result.microphone.outcome, ChannelOutcome::NotRun);
+        assert_eq!(result.system_audio.outcome, ChannelOutcome::NotRun);
+        assert_eq!(result.microphone.peak_level, 0.0);
+        assert_eq!(result.system_audio.peak_level, 0.0);
+        assert_eq!(result.microphone.duration_ms, 0);
+        assert_eq!(result.system_audio.duration_ms, 0);
+        assert_eq!(result.duration_ms, 0);
+        assert!(!result.cancelled);
+        assert_eq!(
+            result.microphone.device_name,
+            "MacBook Pro Microphone (input)"
+        );
+        // Nothing was asked for and nothing was opened, so there is no name to
+        // report; the frontend words that case itself.
+        assert_eq!(result.system_audio.device_name, "");
     }
 
     #[test]
     fn result_serialises_with_the_camel_case_keys_the_frontend_reads() {
-        let result = MicCheckResult {
-            outcome: MicCheckOutcome::Transcribed,
-            transcript: Some("testing one two three".to_string()),
-            device_name: "MacBook Pro Microphone".to_string(),
-            peak_level: 0.5,
+        let mut microphone = channel_report(ProbeChannel::Microphone, ChannelOutcome::Transcribed);
+        microphone.transcript = Some("testing one two three".to_string());
+
+        let result = SetupCheckResult {
+            model: ModelReport::loaded(Some(PREFERRED_MODEL.to_string())),
+            microphone,
+            system_audio: ChannelReport::new(
+                ProbeChannel::SystemAudio,
+                ChannelOutcome::NoAudioDetected,
+                "MacBook Pro Speakers".to_string(),
+            )
+            .with_capture(0.0, 8000),
             duration_ms: 8000,
-            detail: None,
+            cancelled: false,
         };
 
         let json = serde_json::to_value(&result).unwrap();
-        assert_eq!(json["outcome"], "transcribed");
-        assert_eq!(json["transcript"], "testing one two three");
-        assert_eq!(json["deviceName"], "MacBook Pro Microphone");
-        assert_eq!(json["peakLevel"], 0.5);
         assert_eq!(json["durationMs"], 8000);
-        assert!(json["detail"].is_null());
-        assert!(json.get("device_name").is_none());
-        assert!(json.get("peak_level").is_none());
+        assert_eq!(json["cancelled"], false);
         assert!(json.get("duration_ms").is_none());
+        assert!(json.get("system_audio").is_none());
+
+        assert_eq!(json["model"]["outcome"], "loaded");
+        assert_eq!(json["model"]["modelName"], PREFERRED_MODEL);
+        assert!(json["model"]["detail"].is_null());
+        assert!(json["model"].get("model_name").is_none());
+
+        assert_eq!(json["microphone"]["channel"], "microphone");
+        assert_eq!(json["microphone"]["outcome"], "transcribed");
+        assert_eq!(json["microphone"]["transcript"], "testing one two three");
+        assert_eq!(json["microphone"]["deviceName"], "MacBook Pro Microphone");
+        assert_eq!(json["microphone"]["peakLevel"], 0.5);
+        assert_eq!(json["microphone"]["durationMs"], 8000);
+        assert!(json["microphone"].get("device_name").is_none());
+        assert!(json["microphone"].get("peak_level").is_none());
+
+        assert_eq!(json["systemAudio"]["channel"], "system_audio");
+        assert_eq!(json["systemAudio"]["outcome"], "no_audio_detected");
+        assert!(json["systemAudio"]["transcript"].is_null());
+        assert_eq!(json["systemAudio"]["deviceName"], "MacBook Pro Speakers");
+        assert_eq!(json["systemAudio"]["peakLevel"], 0.0);
+        assert!(json["systemAudio"].get("duration_ms").is_none());
     }
 
     #[test]
-    fn outcome_strings_match_the_frontend_union() {
+    fn channel_outcome_strings_match_the_frontend_union() {
+        // The frontend switches on every one of these by name, so a variant
+        // renamed here is a blank screen at runtime rather than a type error.
         let expected = [
-            (MicCheckOutcome::Transcribed, "transcribed"),
-            (MicCheckOutcome::NoSpeechDetected, "no_speech_detected"),
-            (MicCheckOutcome::NoAudioDetected, "no_audio_detected"),
-            (MicCheckOutcome::PermissionDenied, "permission_denied"),
-            (MicCheckOutcome::DeviceUnavailable, "device_unavailable"),
-            (MicCheckOutcome::ModelUnavailable, "model_unavailable"),
-            (MicCheckOutcome::ModelFailed, "model_failed"),
-            (MicCheckOutcome::TranscriptionFailed, "transcription_failed"),
-            (MicCheckOutcome::Cancelled, "cancelled"),
+            (ChannelOutcome::Transcribed, "transcribed"),
+            (ChannelOutcome::NoSpeechDetected, "no_speech_detected"),
+            (ChannelOutcome::NoAudioDetected, "no_audio_detected"),
+            (ChannelOutcome::PermissionDenied, "permission_denied"),
+            (ChannelOutcome::DeviceUnavailable, "device_unavailable"),
+            (ChannelOutcome::TranscriptionFailed, "transcription_failed"),
+            (ChannelOutcome::Cancelled, "cancelled"),
+            (ChannelOutcome::Unsupported, "unsupported"),
+            (ChannelOutcome::NotRun, "not_run"),
         ];
 
         for (outcome, name) in expected {
@@ -698,40 +752,39 @@ mod tests {
     }
 
     #[test]
-    fn level_payload_serialises_with_camel_case_keys() {
-        let level = MicCheckLevel {
-            rms: 0.25,
-            peak: 0.75,
-            is_active: true,
-            elapsed_ms: 1320,
-            duration_ms: 8000,
-        };
+    fn model_outcome_strings_match_the_frontend_union() {
+        let expected = [
+            (ModelCheckOutcome::Loaded, "loaded"),
+            (ModelCheckOutcome::Unavailable, "unavailable"),
+            (ModelCheckOutcome::Failed, "failed"),
+        ];
 
-        let json = serde_json::to_value(&level).unwrap();
-        assert_eq!(json["rms"], 0.25);
-        assert_eq!(json["peak"], 0.75);
-        assert_eq!(json["isActive"], true);
-        assert_eq!(json["elapsedMs"], 1320);
+        for (outcome, name) in expected {
+            assert_eq!(serde_json::to_value(outcome).unwrap(), name);
+        }
+    }
+
+    #[test]
+    fn a_cancelled_check_keeps_what_each_channel_measured() {
+        let report = channel_report(ProbeChannel::SystemAudio, ChannelOutcome::Cancelled);
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["outcome"], "cancelled");
+        assert_eq!(json["peakLevel"], 0.5);
         assert_eq!(json["durationMs"], 8000);
-        assert!(json.get("is_active").is_none());
     }
 
     #[test]
-    fn levels_are_measured_from_the_samples_that_arrived() {
-        assert_eq!(peak_of(&[0.1, -0.7, 0.3]), 0.7);
-        assert_eq!(peak_of(&[]), 0.0);
-        assert_eq!(rms_of(&[]), 0.0);
-        assert!((rms_of(&[0.5, -0.5]) - 0.5).abs() < f32::EPSILON);
-    }
+    fn a_detail_carries_the_error_text_without_becoming_the_outcome() {
+        let report = ChannelReport::new(
+            ProbeChannel::Microphone,
+            ChannelOutcome::DeviceUnavailable,
+            "Missing USB Mic".to_string(),
+        )
+        .with_detail(Some("Device not found".to_string()));
 
-    #[test]
-    fn captured_duration_counts_frames_not_samples() {
-        let capture = Capture {
-            samples: vec![0.0; 32_000],
-            channels: 2,
-            sample_rate: 16_000,
-            cancelled: false,
-        };
-        assert_eq!(captured_duration_ms(&capture), 1000);
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["outcome"], "device_unavailable");
+        assert_eq!(json["detail"], "Device not found");
+        assert!(json["transcript"].is_null());
     }
 }

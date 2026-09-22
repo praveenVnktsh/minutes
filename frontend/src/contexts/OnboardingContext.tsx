@@ -3,7 +3,7 @@
 import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import type { PermissionStatus, OnboardingPermissions, OnboardingStep } from '@/types/onboarding';
+import type { PermissionStatus, OnboardingPermissions, OnboardingStep, SetupCheckRecord } from '@/types/onboarding';
 import { resolveOnboardingSummaryModelStatus } from '@/lib/onboarding-summary-model';
 import type { ParakeetDownloadProgressEvent } from '@/lib/parakeet';
 
@@ -24,6 +24,7 @@ interface OnboardingStatus {
     selected_summary_model?: string;
   };
   last_updated: string;
+  setup_check?: SetupCheckRecord;
 }
 
 interface SummaryModelProgressInfo {
@@ -55,6 +56,9 @@ interface OnboardingContextType {
   // Permissions
   permissions: OnboardingPermissions;
   permissionsSkipped: boolean;
+  // The last recorded setup check outcome, restored from disk so a user who re-enters the flow
+  // is not told nothing is known when something is.
+  setupCheck: SetupCheckRecord | null;
   // Navigation
   goToStep: (step: number) => void;
   goNext: () => void;
@@ -66,7 +70,7 @@ interface OnboardingContextType {
   setDatabaseExists: (value: boolean) => void;
   setPermissionStatus: (permission: keyof OnboardingPermissions, status: PermissionStatus) => void;
   setPermissionsSkipped: (skipped: boolean) => void;
-  completeOnboarding: () => Promise<void>;
+  completeOnboarding: (setupCheck?: SetupCheckRecord | null) => Promise<void>;
   startBackgroundDownloads: (options: StartBackgroundDownloadsOptions) => Promise<void>;
   retryParakeetDownload: () => Promise<void>;
 }
@@ -110,6 +114,9 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
     screenRecording: 'not_determined',
   });
   const [permissionsSkipped, setPermissionsSkipped] = useState(false);
+
+  // The last recorded setup check outcome, restored from the saved status on load.
+  const [setupCheck, setSetupCheck] = useState<SetupCheckRecord | null>(null);
 
   const saveTimeoutRef = useRef<NodeJS.Timeout>();
 
@@ -358,6 +365,7 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
           if (status.model_status.selected_summary_model) {
             setSelectedSummaryModel(status.model_status.selected_summary_model);
           }
+          setSetupCheck(status.setup_check ?? null);
           console.log('[OnboardingContext] Restored completed onboarding status without model verification');
           return;
         }
@@ -372,6 +380,7 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
         if (verifiedStatus.selectedSummaryModel) {
           setSelectedSummaryModel(verifiedStatus.selectedSummaryModel);
         }
+        setSetupCheck(status.setup_check ?? null);
 
         console.log('[OnboardingContext] Verified status:', verifiedStatus);
 
@@ -466,6 +475,9 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
             selected_summary_model: selectedSummaryModel || undefined,
           },
           last_updated: new Date().toISOString(),
+          // The Rust side also preserves a stored record when the incoming one is None - belt and
+          // braces, since the settings surface writes this field too, from outside this context.
+          setup_check: setupCheck ?? undefined,
         },
       });
     } catch (error) {
@@ -473,7 +485,7 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
     }
   };
 
-  const completeOnboarding = async () => {
+  const completeOnboarding = async (setupCheck?: SetupCheckRecord | null) => {
     try {
       // Set completion flag to prevent race conditions with auto-save
       isCompletingRef.current = true;
@@ -502,6 +514,7 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
       // Onboarding always uses builtin-ai with selected model
       await invoke('complete_onboarding', {
         model: modelToSave,
+        setupCheck,
       });
       setCompleted(true);
       console.log('[OnboardingContext] Onboarding completed with model:', modelToSave);
@@ -629,6 +642,7 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
         isBackgroundDownloading,
         permissions,
         permissionsSkipped,
+        setupCheck,
         goToStep,
         goNext,
         goPrevious,
