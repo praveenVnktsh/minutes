@@ -57,6 +57,22 @@ export interface SetupCheckPanelProps {
    * panel then writes the fix out as instructions instead.
    */
   onRetryDownload?: () => void;
+  /**
+   * Fired whenever the user picks a device here, with BOTH channels' current
+   * selections — the in-memory selection it feeds replaces the pair, so sending
+   * only the one that changed would clear the other.
+   *
+   * Saving a preference to disk is not enough on its own: ConfigContext reads
+   * those preferences once, at app mount, and the recording start path sends
+   * what that context holds. Without this, a device chosen here is validated by
+   * the check and then not used by the very next meeting, which is the one
+   * outcome this whole step exists to rule out.
+   *
+   * Onboarding omits it and must: the flow renders outside ConfigProvider, so
+   * there is no in-memory selection to correct there, and finishing setup
+   * reloads the window, which remounts the context from disk.
+   */
+  onDevicesChanged?: (devices: { micDevice: string | null; systemDevice: string | null }) => void;
   autoStart?: boolean;
   className?: string;
 }
@@ -157,6 +173,7 @@ const MANUAL_FIX_INSTRUCTIONS: Partial<Record<SetupCheckFixKind, string>> = {
 export function SetupCheckPanel({
   onOutcome,
   onRetryDownload,
+  onDevicesChanged,
   autoStart = false,
   className,
 }: SetupCheckPanelProps) {
@@ -353,12 +370,18 @@ export function SetupCheckPanel({
     const device = value === 'default' ? null : value;
     setSelectedMic(device);
     savePreferredDevice('preferred_mic_device', device);
+    // Announced whether or not that write reaches disk. The in-memory selection
+    // is what this session's recording actually opens, so it has to name the
+    // device the check is about to test even when the preference cannot be
+    // saved for next launch.
+    onDevicesChanged?.({ micDevice: device, systemDevice: selectedSystem });
   };
 
   const handleSystemChange = (value: string) => {
     const device = value === 'default' ? null : value;
     setSelectedSystem(device);
     savePreferredDevice('preferred_system_device', device);
+    onDevicesChanged?.({ micDevice: selectedMic, systemDevice: device });
   };
 
   const focusPicker = (channel: SetupCheckChannel) => {

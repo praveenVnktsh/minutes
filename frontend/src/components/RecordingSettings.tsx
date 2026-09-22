@@ -321,6 +321,26 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
     }
   };
 
+  /**
+   * The panel writes its own device choice to disk, but the start path does not
+   * read disk: it sends what ConfigContext holds, and that is loaded once at app
+   * mount. Syncing it here is what keeps the promise the check makes — the
+   * device the user just watched work is the device the next meeting opens —
+   * instead of deferring it to the next launch. This is the same reason
+   * handleDeviceChange above calls setSelectedDevices.
+   *
+   * The preferences this screen renders are updated too, so its own device
+   * picker does not sit there naming the device the panel just replaced.
+   */
+  const handleSetupCheckDevicesChanged = (devices: SelectedDevices) => {
+    setSelectedDevices(devices);
+    setPreferences((previous) => ({
+      ...previous,
+      preferred_mic_device: devices.micDevice,
+      preferred_system_device: devices.systemDevice,
+    }));
+  };
+
   if (loading) {
     return (
       <div className="animate-pulse">
@@ -543,7 +563,10 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
               route back to, so the panel falls back to its own written instructions. */}
           {showSetupCheck && (
             <div className="mt-4">
-              <SetupCheckPanel onOutcome={handleSetupCheckOutcome} />
+              <SetupCheckPanel
+                onOutcome={handleSetupCheckOutcome}
+                onDevicesChanged={handleSetupCheckDevicesChanged}
+              />
             </div>
           )}
         </div>
