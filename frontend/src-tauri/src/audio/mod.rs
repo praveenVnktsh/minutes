@@ -65,10 +65,22 @@ pub mod mic_check;
 // by the same code, so neither channel is a special case of the other.
 pub mod capture_probe;
 
+// The one verifier per permission that both onboarding and the start of a
+// recording ask, so the two surfaces cannot reach opposite conclusions about
+// the same grant. It answers from audio observed arriving rather than from a
+// stream or a tap having been built, because a denial lets both be built.
+pub mod permission_check;
+
 pub use devices::{
     default_input_device, default_output_device, get_device_and_config, list_audio_devices,
-    parse_audio_device, trigger_audio_permission, AudioDevice, AudioTranscriptionEngine,
-    DeviceControl, DeviceType, LAST_AUDIO_CAPTURE,
+    parse_audio_device, AudioDevice, AudioTranscriptionEngine, DeviceControl, DeviceType,
+    LAST_AUDIO_CAPTURE,
+};
+
+// Export the shared permission verifiers
+pub use permission_check::{
+    verify_microphone, verify_system_audio, PermissionReport, PermissionVerdict,
+    MICROPHONE_DENIED_MESSAGE,
 };
 
 // Export system audio capture functionality

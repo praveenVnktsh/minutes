@@ -12,6 +12,6 @@ pub use configuration::{
     get_device_and_config, parse_audio_device, AudioDevice, AudioTranscriptionEngine,
     DeviceControl, DeviceType, LAST_AUDIO_CAPTURE,
 };
-pub use discovery::{list_audio_devices, trigger_audio_permission, verify_microphone_access};
+pub use discovery::list_audio_devices;
 pub use microphone::{default_input_device, find_builtin_input_device};
 pub use speakers::{default_output_device, find_builtin_output_device};
