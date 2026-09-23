@@ -10,7 +10,7 @@ import { useUpdateCheckContext } from './UpdateCheckProvider';
  * Settings section for manually checking for app updates.
  */
 export function UpdateSettings() {
-  const { updateInfo, isChecking, checkForUpdates, showUpdateDialog } = useUpdateCheckContext();
+  const { updateInfo, isChecking, checkError, checkForUpdates, showUpdateDialog } = useUpdateCheckContext();
   const [version, setVersion] = useState('');
 
   useEffect(() => {
@@ -40,7 +40,13 @@ export function UpdateSettings() {
       ) : (
         <div className="flex items-center justify-between gap-4">
           <span className="text-sm text-ink-muted">
-            {updateInfo && !isChecking ? 'You are up to date.' : ''}
+            {isChecking
+              ? ''
+              : checkError
+                ? "Couldn't check for updates. Try again later."
+                : updateInfo
+                  ? 'You are up to date.'
+                  : ''}
           </span>
           <Button
             size="sm"

@@ -101,6 +101,13 @@ jobs:
           workspaces: ". -> target"
           key: macos-latest-aarch64-apple-darwin
 
+      # See build.yml: rust-cache prunes sherpa-onnx-sys's downloaded libs but
+      # keeps its build-script output, so force the build script to re-run.
+      - name: Reset sherpa-onnx build-script state
+        run: |
+          rm -rf target/release/build/sherpa-onnx-sys-* target/*/release/build/sherpa-onnx-sys-* \
+            target/release/.fingerprint/sherpa-onnx-sys-* target/*/release/.fingerprint/sherpa-onnx-sys-*
+
       - name: Install frontend dependencies
         run: |
           cd frontend

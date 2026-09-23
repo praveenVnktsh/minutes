@@ -17,6 +17,7 @@ export function useUpdateCheck(options: UseUpdateCheckOptions = {}) {
 
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [isChecking, setIsChecking] = useState(false);
+  const [checkError, setCheckError] = useState<string | null>(null);
 
   const checkForUpdates = async (force = false) => {
     // Skip if checked recently (unless forced)
@@ -28,6 +29,7 @@ export function useUpdateCheck(options: UseUpdateCheckOptions = {}) {
     try {
       const info = await updateService.checkForUpdates(force);
       setUpdateInfo(info);
+      setCheckError(null);
 
       if (info.available) {
         if (onUpdateAvailable) {
@@ -40,7 +42,10 @@ export function useUpdateCheck(options: UseUpdateCheckOptions = {}) {
       }
     } catch (error) {
       console.error('Failed to check for updates:', error);
-      // Silently fail on startup checks to avoid disrupting user experience
+      // Silently fail on startup checks to avoid disrupting user experience,
+      // but drop the previous result so nothing claims the app is up to date.
+      setUpdateInfo(null);
+      setCheckError(error instanceof Error ? error.message : String(error));
     } finally {
       setIsChecking(false);
     }
@@ -60,6 +65,7 @@ export function useUpdateCheck(options: UseUpdateCheckOptions = {}) {
   return {
     updateInfo,
     isChecking,
+    checkError,
     checkForUpdates,
   };
 }
