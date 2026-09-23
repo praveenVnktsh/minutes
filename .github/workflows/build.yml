@@ -173,15 +173,14 @@ jobs:
           key: ${{ inputs.platform }}-${{ inputs.target }}-vulkan-v2
 
       # sherpa-onnx-sys downloads its prebuilt libs into
-      # target/<triple>/release/sherpa-onnx-prebuilt/, which rust-cache prunes
-      # while keeping the build-script output that points at it. After a
-      # partial cache hit cargo recompiles the crate against that stale output
-      # and fails to link `sherpa-onnx-c-api`. Dropping the build-script state
-      # makes it re-run and download the libs again.
+      # target/sherpa-onnx-prebuilt/ and skips the download whenever
+      # <archive>/lib/ exists. The restored cache brings that directory back
+      # without the .a files, so the build fails to link `sherpa-onnx-c-api`.
+      # Drop the prebuilt dir and the build-script state so it downloads again.
       - name: Reset sherpa-onnx build-script state
         shell: bash
         run: |
-          rm -rf target/release/build/sherpa-onnx-sys-* target/*/release/build/sherpa-onnx-sys-* \
+          rm -rf target/sherpa-onnx-prebuilt target/release/build/sherpa-onnx-sys-* target/*/release/build/sherpa-onnx-sys-* \
             target/release/.fingerprint/sherpa-onnx-sys-* target/*/release/.fingerprint/sherpa-onnx-sys-*
 
       - name: install dependencies (ubuntu 24.04)
