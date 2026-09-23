@@ -9,6 +9,12 @@ import { cn } from '@/lib/utils';
 import { Download, RefreshCw, BadgeAlert, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { formatSummaryModelSizeLabelFromMb } from '@/lib/onboarding-summary-model';
+import { listenAll, useModelDownload, type ModelDownloadSource } from '@/hooks/useModelDownload';
+import {
+  BuiltInAIAPI,
+  BUILTIN_AI_DOWNLOAD_PROGRESS_EVENT,
+  type BuiltInAIDownloadProgressEvent,
+} from '@/lib/builtin-ai';
 
 interface ModelInfo {
   name: string;
@@ -23,17 +29,43 @@ interface ModelInfo {
   gguf_file: string;
 }
 
-interface DownloadProgressInfo {
-  downloadedMb: number;
-  totalMb: number;
-  speedMbps: number;
-}
-
 interface BuiltInModelManagerProps {
   selectedModel: string;
   onModelSelect: (model: string) => void;
   layout?: 'inline' | 'dialog';
 }
+
+// Module-level so it is referentially stable across renders.
+const builtInDownloadSource: ModelDownloadSource = {
+  subscribe: (emit) =>
+    listenAll([
+      listen<BuiltInAIDownloadProgressEvent>(BUILTIN_AI_DOWNLOAD_PROGRESS_EVENT, (event) => {
+        const payload = event.payload;
+        const { model, progress, status } = payload;
+
+        if (status === 'completed') {
+          emit({ kind: 'complete', model });
+        } else if (status === 'cancelled') {
+          emit({ kind: 'cancelled', model });
+        } else if (status === 'error') {
+          emit({ kind: 'error', model, error: payload.error ?? '' });
+        } else {
+          emit({
+            kind: 'progress',
+            model,
+            progress,
+            detail: {
+              downloadedMb: payload.downloaded_mb ?? 0,
+              totalMb: payload.total_mb ?? 0,
+              speedMbps: payload.speed_mbps ?? 0,
+            },
+          });
+        }
+      }),
+    ]),
+  start: (model) => BuiltInAIAPI.downloadModel(model),
+  cancel: (model) => BuiltInAIAPI.cancelDownload(model),
+};
 
 export function BuiltInModelManager({
   selectedModel,
@@ -43,9 +75,6 @@ export function BuiltInModelManager({
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [hasFetched, setHasFetched] = useState<boolean>(false);
-  const [downloadProgress, setDownloadProgress] = useState<Record<string, number>>({});
-  const [downloadProgressInfo, setDownloadProgressInfo] = useState<Record<string, DownloadProgressInfo>>({});
-  const [downloadingModels, setDownloadingModels] = useState<Set<string>>(new Set());
 
   const fetchModels = async () => {
     try {
@@ -73,171 +102,63 @@ export function BuiltInModelManager({
     fetchModels();
   }, []);
 
-  // Listen for download progress events
-  useEffect(() => {
-    let unlisten: (() => void) | undefined;
+  const modelDownload = useModelDownload({
+    source: builtInDownloadSource,
+    onComplete: (model) => {
+      fetchModels();
+      toast.success(`Model ${model} downloaded successfully`);
+    },
+    onCancelled: () => {
+      fetchModels();
+    },
+    onError: (model) => {
+      // Update model status to error locally instead of fetching from backend
+      // Backend doesn't persist error status, so fetchModels() would return not_downloaded
+      setModels((prevModels) =>
+        prevModels.map((m) =>
+          m.name === model
+            ? {
+                ...m,
+                status: {
+                  type: 'error',
+                  progress: 0,
+                } as any,
+              }
+            : m
+        )
+      );
 
-    const setupListener = async () => {
-      unlisten = await listen('builtin-ai-download-progress', (event: any) => {
-        const { model, progress, downloaded_mb, total_mb, speed_mbps, status } = event.payload;
-
-        // Update percentage progress
-        setDownloadProgress((prev) => ({
-          ...prev,
-          [model]: progress,
-        }));
-
-        // Update detailed progress info (MB, speed)
-        setDownloadProgressInfo((prev) => ({
-          ...prev,
-          [model]: {
-            downloadedMb: downloaded_mb ?? 0,
-            totalMb: total_mb ?? 0,
-            speedMbps: speed_mbps ?? 0,
-          },
-        }));
-
-        // Handle downloading status - restore downloadingModels state on modal reopen
-        if (status === 'downloading') {
-          setDownloadingModels((prev) => {
-            if (!prev.has(model)) {
-              const newSet = new Set(prev);
-              newSet.add(model);
-              return newSet;
-            }
-            return prev;
-          });
-        }
-
-        // Handle completed status
-        if (status === 'completed') {
-          setDownloadingModels((prev) => {
-            const newSet = new Set(prev);
-            newSet.delete(model);
-            return newSet;
-          });
-          // Clean up progress state
-          setDownloadProgress((prev) => {
-            const { [model]: _, ...rest } = prev;
-            return rest;
-          });
-          setDownloadProgressInfo((prev) => {
-            const { [model]: _, ...rest } = prev;
-            return rest;
-          });
-          // Refresh models list
-          fetchModels();
-          toast.success(`Model ${model} downloaded successfully`);
-        }
-
-        // Handle cancelled status
-        if (status === 'cancelled') {
-          setDownloadingModels((prev) => {
-            const newSet = new Set(prev);
-            newSet.delete(model);
-            return newSet;
-          });
-          // Clean up progress state
-          setDownloadProgress((prev) => {
-            const { [model]: _, ...rest } = prev;
-            return rest;
-          });
-          setDownloadProgressInfo((prev) => {
-            const { [model]: _, ...rest } = prev;
-            return rest;
-          });
-          // Refresh models list
-          fetchModels();
-        }
-
-        // Handle error status
-        if (status === 'error') {
-          setDownloadingModels((prev) => {
-            const newSet = new Set(prev);
-            newSet.delete(model);
-            return newSet;
-          });
-          // Clean up progress state
-          setDownloadProgress((prev) => {
-            const { [model]: _, ...rest } = prev;
-            return rest;
-          });
-          setDownloadProgressInfo((prev) => {
-            const { [model]: _, ...rest } = prev;
-            return rest;
-          });
-
-          // Update model status to error locally instead of fetching from backend
-          // Backend doesn't persist error status, so fetchModels() would return not_downloaded
-          setModels((prevModels) =>
-            prevModels.map((m) =>
-              m.name === model
-                ? {
-                    ...m,
-                    status: {
-                      type: 'error',
-                      progress: 0,
-                    } as any,
-                  }
-                : m
-            )
-          );
-
-          // Don't show error toast here - DownloadProgressToast already handles it
-          // Don't call fetchModels() - it would overwrite error status with not_downloaded
-        }
-      });
-    };
-
-    setupListener();
-
-    return () => {
-      if (unlisten) {
-        unlisten();
-      }
-    };
-  }, []);
-
-  const downloadModel = async (modelName: string) => {
-    try {
-      // Optimistically add to downloadingModels for immediate UI feedback
-      setDownloadingModels((prev) => new Set([...prev, modelName]));
-
-      await invoke('builtin_ai_download_model', { modelName });
-    } catch (error) {
+      // Don't show error toast here - DownloadProgressToast already handles it
+      // Don't call fetchModels() - it would overwrite error status with not_downloaded
+    },
+    onStartFailed: (model, error) => {
       console.error('Failed to download model:', error);
 
       // Check if this is a cancellation error (starts with "CANCELLED:")
       const errorMsg = String(error);
       if (errorMsg.startsWith('CANCELLED:')) {
-        // Cancel handler already removed from downloadingModels
+        // Cancel handler already removed the model from downloading
         // Don't show error toast for cancellations - cancel function already shows info toast
         return;
       }
 
-      // For real errors, show toast and remove from downloading
-      toast.error(`Failed to download ${modelName}`);
-
-      setDownloadingModels((prev) => {
-        const newSet = new Set(prev);
-        newSet.delete(modelName);
-        return newSet;
-      });
+      // For real errors, show toast
+      toast.error(`Failed to download ${model}`);
 
       // Refresh model list to get updated Error status from backend
       fetchModels();
-    }
+    },
+  });
+
+  const downloadModel = (modelName: string) => {
+    modelDownload.download(modelName);
   };
 
   const cancelDownload = async (modelName: string) => {
     try {
-      await invoke('builtin_ai_cancel_download', { modelName });
+      await modelDownload.cancel(modelName);
       toast.info(`Download of ${modelName} cancelled`);
-      setDownloadingModels((prev) => {
-        const newSet = new Set(prev);
-        newSet.delete(modelName);
-        return newSet;
-      });
+      modelDownload.settle(modelName);
     } catch (error) {
       console.error('Failed to cancel download:', error);
     }
@@ -255,7 +176,7 @@ export function BuiltInModelManager({
   };
 
   // Don't show loading spinner if we have downloads in progress - show the model list instead
-  if (isLoading && downloadingModels.size === 0) {
+  if (isLoading && modelDownload.downloading.size === 0) {
     return (
       <div className="text-center py-8 text-muted-foreground">
         <RefreshCw className="mx-auto h-8 w-8 animate-spin mb-2" />
@@ -288,9 +209,9 @@ export function BuiltInModelManager({
         )}
       >
         {models.map((model) => {
-          const progress = downloadProgress[model.name];
-          const progressInfo = downloadProgressInfo[model.name];
-          const modelIsDownloading = downloadingModels.has(model.name);
+          const progress = modelDownload.progress[model.name];
+          const progressInfo = modelDownload.detail[model.name];
+          const modelIsDownloading = modelDownload.downloading.has(model.name);
           const isAvailable = model.status.type === 'available';
           const isNotDownloaded = model.status.type === 'not_downloaded';
           const isCorrupted = model.status.type === 'corrupted';
