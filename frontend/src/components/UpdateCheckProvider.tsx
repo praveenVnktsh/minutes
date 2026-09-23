@@ -9,6 +9,7 @@ import { setUpdateDialogCallback, showUpdateNotification } from './UpdateNotific
 interface UpdateCheckContextType {
   updateInfo: UpdateInfo | null;
   isChecking: boolean;
+  checkError: string | null;
   checkForUpdates: (force?: boolean) => Promise<void>;
   showUpdateDialog: () => void;
 }
@@ -22,7 +23,7 @@ export function UpdateCheckProvider({ children }: { children: React.ReactNode })
     setShowDialog(true);
   }, []);
 
-  const { updateInfo, isChecking, checkForUpdates } = useUpdateCheck({
+  const { updateInfo, isChecking, checkError, checkForUpdates } = useUpdateCheck({
     checkOnMount: true,
     showNotification: true,
     onUpdateAvailable: (info) => {
@@ -55,6 +56,7 @@ export function UpdateCheckProvider({ children }: { children: React.ReactNode })
       value={{
         updateInfo,
         isChecking,
+        checkError,
         checkForUpdates,
         showUpdateDialog: handleShowDialog,
       }}

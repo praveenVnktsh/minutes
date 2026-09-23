@@ -48,6 +48,15 @@ jobs:
             echo "Unexpected canary version '$VERSION'; refusing to promote."
             exit 1
           fi
+          # A canary whose macOS build failed still carries a Windows-only
+          # manifest. Promoting it would mark a release "Latest" that macOS
+          # clients can never install.
+          for platform in darwin-aarch64 windows-x86_64; do
+            if ! jq -e --arg p "$platform" '.platforms | has($p)' "$workdir/latest.json" >/dev/null; then
+              echo "Canary $VERSION has no $platform build; refusing to promote."
+              exit 1
+            fi
+          done
           echo "Canary version: $VERSION"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "workdir=$workdir" >> "$GITHUB_OUTPUT"
