@@ -48,6 +48,16 @@ pub struct DeviceInfo {
     pub system_audio: Option<String>,
 }
 
+/// An already-saved meeting that a new recording session continues into.
+///
+/// When set, the saver reopens `meeting_folder` instead of creating a new one,
+/// so the new audio and transcripts are appended to the existing meeting.
+#[derive(Debug, Clone)]
+pub struct ResumeTarget {
+    pub meeting_folder: PathBuf,   // existing meeting folder on disk
+    pub audio_offset_seconds: f64, // length of audio already recorded for this meeting
+}
+
 /// New recording saver using incremental saving strategy
 pub struct RecordingSaver {
     incremental_saver: Option<Arc<AsyncMutex<IncrementalAudioSaver>>>,
@@ -56,6 +66,12 @@ pub struct RecordingSaver {
     metadata: Option<MeetingMetadata>,
     transcript_segments: Arc<Mutex<Vec<TranscriptSegment>>>,
     is_saving: Arc<Mutex<bool>>,
+    resume_target: Option<ResumeTarget>,
+    // Segments already in transcripts.json of a resumed meeting. Written ahead of
+    // the new ones but never returned to callers (they are already in the DB).
+    prior_segments: Vec<TranscriptSegment>,
+    // Added to every new segment's sequence_id so it cannot collide with prior ones.
+    sequence_offset: u64,
 }
 
 impl RecordingSaver {
@@ -67,7 +83,16 @@ impl RecordingSaver {
             metadata: None,
             transcript_segments: Arc::new(Mutex::new(Vec::new())),
             is_saving: Arc::new(Mutex::new(false)),
+            resume_target: None,
+            prior_segments: Vec::new(),
+            sequence_offset: 0,
         }
+    }
+
+    /// Continue an existing meeting instead of starting a new one.
+    /// Must be called before `start_accumulation`.
+    pub fn set_resume_target(&mut self, target: Option<ResumeTarget>) {
+        self.resume_target = target;
     }
 
     /// Set the meeting name for this recording session
@@ -93,7 +118,14 @@ impl RecordingSaver {
 
     /// Add or update a structured transcript segment (upserts based on sequence_id)
     /// Also saves incrementally to disk
-    pub fn add_transcript_segment(&self, segment: TranscriptSegment) {
+    pub fn add_transcript_segment(&self, mut segment: TranscriptSegment) {
+        // Resumed meeting: move the new session's numbering past the prior segments.
+        // Audio times are already shifted by the transcription worker.
+        if self.resume_target.is_some() {
+            segment.sequence_id += self.sequence_offset;
+            segment.id = format!("seg_{}", segment.sequence_id);
+        }
+
         if let Ok(mut segments) = self.transcript_segments.lock() {
             // Check if segment with same sequence_id exists (update it)
             if let Some(existing) = segments
@@ -166,7 +198,19 @@ impl RecordingSaver {
         }
 
         // Initialize meeting folder and incremental saver ONLY if auto_save is enabled
-        if auto_save {
+        if let Some(target) = self.resume_target.clone() {
+            match self.reopen_meeting_folder(&target, auto_save) {
+                Ok(()) => info!(
+                    "Reopened meeting folder to resume recording: {}",
+                    target.meeting_folder.display()
+                ),
+                Err(e) => error!(
+                    "Failed to reopen meeting folder {}: {}",
+                    target.meeting_folder.display(),
+                    e
+                ),
+            }
+        } else if auto_save {
             if let Some(name) = self.meeting_name.clone() {
                 match self.initialize_meeting_folder(&name, true) {
                     Ok(()) => info!("Successfully initialized meeting folder with checkpoints"),
@@ -297,6 +341,57 @@ impl RecordingSaver {
         Ok(())
     }
 
+    /// Reopen an existing meeting folder so a new session records into it
+    ///
+    /// Loads the prior transcripts.json segments and metadata.json, and (when
+    /// `create_checkpoints` is true) sets up an incremental saver that appends
+    /// the new audio to the existing audio.mp4 on finalize.
+    fn reopen_meeting_folder(
+        &mut self,
+        target: &ResumeTarget,
+        create_checkpoints: bool,
+    ) -> Result<()> {
+        let meeting_folder = target.meeting_folder.clone();
+        if !meeting_folder.exists() {
+            warn!(
+                "Resume folder {} does not exist - recreating it",
+                meeting_folder.display()
+            );
+            std::fs::create_dir_all(&meeting_folder)?;
+        }
+
+        if create_checkpoints {
+            std::fs::create_dir_all(meeting_folder.join(".checkpoints"))?;
+            let incremental_saver =
+                IncrementalAudioSaver::new_resuming(meeting_folder.clone(), 48000)?;
+            self.incremental_saver = Some(Arc::new(AsyncMutex::new(incremental_saver)));
+            info!("✅ Incremental audio saver initialized to resume meeting");
+        } else {
+            info!("⚠️  Skipped incremental audio saver (auto-save disabled) - existing audio left as-is");
+        }
+
+        self.prior_segments = load_prior_segments(&meeting_folder);
+        self.sequence_offset = next_sequence_offset(&self.prior_segments);
+        info!(
+            "Resuming with {} prior transcript segments (sequence offset {}, audio offset {:.2}s)",
+            self.prior_segments.len(),
+            self.sequence_offset,
+            target.audio_offset_seconds
+        );
+
+        let metadata = resumed_metadata(
+            &meeting_folder,
+            self.meeting_name.as_deref(),
+            create_checkpoints,
+        );
+        self.write_metadata(&meeting_folder, &metadata)?;
+
+        self.meeting_folder = Some(meeting_folder);
+        self.metadata = Some(metadata);
+
+        Ok(())
+    }
+
     /// Write metadata.json to disk (atomic write with temp file)
     fn write_metadata(&self, folder: &Path, metadata: &MeetingMetadata) -> Result<()> {
         let metadata_path = folder.join("metadata.json");
@@ -313,7 +408,13 @@ impl RecordingSaver {
     fn write_transcripts_json(&self, folder: &Path) -> Result<()> {
         // Clone segments to avoid holding lock during I/O
         let segments_clone = if let Ok(segments) = self.transcript_segments.lock() {
-            segments.clone()
+            if self.prior_segments.is_empty() {
+                segments.clone()
+            } else {
+                let mut all = self.prior_segments.clone();
+                all.extend(segments.iter().cloned());
+                all
+            }
         } else {
             error!("Failed to lock transcript segments for writing");
             return Err(anyhow::anyhow!("Failed to lock transcript segments"));
@@ -467,13 +568,22 @@ impl RecordingSaver {
 
             // Use actual recording duration from RecordingState (more accurate than transcript segments)
             // Falls back to last transcript segment if duration not provided
-            metadata.duration_seconds = recording_duration.or_else(|| {
-                if let Ok(segments) = self.transcript_segments.lock() {
-                    segments.last().map(|seg| seg.audio_end_time)
-                } else {
-                    None
-                }
-            });
+            // A resumed meeting's duration covers the audio recorded before it too.
+            // Segment times are already shifted by that offset, so the fallback isn't.
+            let audio_offset = self
+                .resume_target
+                .as_ref()
+                .map_or(0.0, |target| target.audio_offset_seconds);
+            metadata.duration_seconds = recording_duration
+                .map(|duration| audio_offset + duration)
+                .or_else(|| {
+                    if let Ok(segments) = self.transcript_segments.lock() {
+                        segments.last().map(|seg| seg.audio_end_time)
+                    } else {
+                        None
+                    }
+                })
+                .or_else(|| self.prior_segments.last().map(|seg| seg.audio_end_time));
 
             if let Err(e) = self.write_metadata(folder, &metadata) {
                 error!("❌ Failed to update metadata to completed: {}", e);
@@ -537,6 +647,98 @@ impl RecordingSaver {
     }
 }
 
+/// Read the segments of an existing transcripts.json (`{"segments": [...]}`).
+/// A missing or unparseable file yields no prior segments.
+fn load_prior_segments(folder: &Path) -> Vec<TranscriptSegment> {
+    #[derive(Deserialize)]
+    struct TranscriptsFile {
+        segments: Vec<TranscriptSegment>,
+    }
+
+    let path = folder.join("transcripts.json");
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(e) => {
+            warn!("No prior transcripts loaded from {}: {}", path.display(), e);
+            return Vec::new();
+        }
+    };
+
+    match serde_json::from_str::<TranscriptsFile>(&contents) {
+        Ok(file) => file.segments,
+        Err(e) => {
+            warn!(
+                "Could not parse prior transcripts at {}: {}",
+                path.display(),
+                e
+            );
+            Vec::new()
+        }
+    }
+}
+
+/// First sequence_id free for a new session after the prior segments.
+fn next_sequence_offset(prior: &[TranscriptSegment]) -> u64 {
+    prior
+        .iter()
+        .map(|seg| seg.sequence_id + 1)
+        .max()
+        .unwrap_or(0)
+}
+
+/// Metadata for a resumed meeting: the existing metadata.json marked as recording
+/// again, or fresh metadata when there is none to reuse.
+fn resumed_metadata(
+    folder: &Path,
+    meeting_name: Option<&str>,
+    saves_audio: bool,
+) -> MeetingMetadata {
+    let path = folder.join("metadata.json");
+    let existing = std::fs::read_to_string(&path)
+        .map_err(anyhow::Error::from)
+        .and_then(|contents| {
+            serde_json::from_str::<MeetingMetadata>(&contents).map_err(anyhow::Error::from)
+        });
+
+    let mut metadata = match existing {
+        Ok(metadata) => metadata,
+        Err(e) => {
+            warn!(
+                "Could not reuse metadata at {} ({}) - writing fresh metadata",
+                path.display(),
+                e
+            );
+            MeetingMetadata {
+                version: "1.0".to_string(),
+                meeting_id: None,
+                meeting_name: meeting_name.map(str::to_string),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                completed_at: None,
+                duration_seconds: None,
+                devices: DeviceInfo {
+                    microphone: None,
+                    system_audio: None,
+                },
+                audio_file: if folder.join("audio.mp4").exists() {
+                    "audio.mp4".to_string()
+                } else {
+                    "".to_string()
+                },
+                transcript_file: "transcripts.json".to_string(),
+                sample_rate: 48000,
+                status: "recording".to_string(),
+            }
+        }
+    };
+
+    metadata.status = "recording".to_string();
+    metadata.completed_at = None;
+    if saves_audio {
+        metadata.audio_file = "audio.mp4".to_string();
+    }
+    metadata
+}
+
 impl Default for RecordingSaver {
     fn default() -> Self {
         Self::new()
@@ -545,7 +747,200 @@ impl Default for RecordingSaver {
 
 #[cfg(test)]
 mod tests {
-    use super::{RecordingSaver, TranscriptSegment};
+    use super::{
+        load_prior_segments, next_sequence_offset, resumed_metadata, RecordingSaver, ResumeTarget,
+        TranscriptSegment,
+    };
+    use std::path::PathBuf;
+
+    fn segment(sequence_id: u64, text: &str, start: f64) -> TranscriptSegment {
+        TranscriptSegment {
+            id: format!("seg_{}", sequence_id),
+            text: text.to_string(),
+            audio_start_time: start,
+            audio_end_time: start + 1.0,
+            duration: 1.0,
+            display_time: "[00:00]".to_string(),
+            confidence: 0.9,
+            sequence_id,
+            speaker: None,
+        }
+    }
+
+    fn temp_meeting_folder(label: &str) -> PathBuf {
+        let unique = format!(
+            "meetily-recording-saver-{}-{}-{}",
+            label,
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        );
+        let folder = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&folder).unwrap();
+        folder
+    }
+
+    fn write_prior_transcripts(folder: &std::path::Path, segments: &[TranscriptSegment]) {
+        let json = serde_json::json!({
+            "version": "1.0",
+            "segments": segments,
+            "last_updated": "2026-09-22T10:00:00Z",
+            "total_segments": segments.len()
+        });
+        std::fs::write(
+            folder.join("transcripts.json"),
+            serde_json::to_string_pretty(&json).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn read_written_transcripts(folder: &std::path::Path) -> serde_json::Value {
+        let contents = std::fs::read_to_string(folder.join("transcripts.json")).unwrap();
+        serde_json::from_str(&contents).unwrap()
+    }
+
+    fn resuming_saver(folder: &std::path::Path) -> RecordingSaver {
+        let target = ResumeTarget {
+            meeting_folder: folder.to_path_buf(),
+            audio_offset_seconds: 90.0,
+        };
+        let mut saver = RecordingSaver::new();
+        saver.set_meeting_name(Some("Standup".to_string()));
+        saver.set_resume_target(Some(target.clone()));
+        saver.reopen_meeting_folder(&target, false).unwrap();
+        saver
+    }
+
+    #[test]
+    fn next_sequence_offset_starts_after_the_highest_prior_sequence_id() {
+        assert_eq!(next_sequence_offset(&[]), 0);
+        let prior = vec![
+            segment(4, "b", 4.0),
+            segment(0, "a", 0.0),
+            segment(2, "c", 2.0),
+        ];
+        assert_eq!(next_sequence_offset(&prior), 5);
+    }
+
+    #[test]
+    fn resumed_segments_are_shifted_past_prior_ones_and_still_upsert() {
+        let folder = temp_meeting_folder("shift");
+        write_prior_transcripts(
+            &folder,
+            &[segment(0, "old a", 0.0), segment(1, "old b", 1.0)],
+        );
+        let saver = resuming_saver(&folder);
+
+        saver.add_transcript_segment(segment(0, "partial", 90.0));
+        saver.add_transcript_segment(segment(1, "next", 91.0));
+        // Same raw sequence_id again: must replace, not duplicate.
+        saver.add_transcript_segment(segment(0, "final", 90.0));
+
+        let new_segments = saver.get_transcript_segments();
+        assert_eq!(new_segments.len(), 2);
+        assert_eq!(new_segments[0].sequence_id, 2);
+        assert_eq!(new_segments[0].id, "seg_2");
+        assert_eq!(new_segments[0].text, "final");
+        assert_eq!(new_segments[1].sequence_id, 3);
+        assert_eq!(new_segments[1].id, "seg_3");
+        // Audio times are left alone; the transcription worker already shifted them.
+        assert_eq!(new_segments[0].audio_start_time, 90.0);
+
+        std::fs::remove_dir_all(&folder).ok();
+    }
+
+    #[test]
+    fn resumed_transcripts_json_keeps_prior_segments_ahead_of_new_ones() {
+        let folder = temp_meeting_folder("order");
+        write_prior_transcripts(
+            &folder,
+            &[segment(0, "old a", 0.0), segment(1, "old b", 1.0)],
+        );
+        let saver = resuming_saver(&folder);
+
+        saver.add_transcript_segment(segment(0, "new a", 90.0));
+
+        let written = read_written_transcripts(&folder);
+        let texts: Vec<&str> = written["segments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|seg| seg["text"].as_str().unwrap())
+            .collect();
+        assert_eq!(texts, vec!["old a", "old b", "new a"]);
+        assert_eq!(written["total_segments"], 3);
+        // Only the new session's segments go back to the caller for the DB append.
+        let taken = saver.take_transcript_segments();
+        assert_eq!(taken.len(), 1);
+        assert_eq!(taken[0].text, "new a");
+
+        std::fs::remove_dir_all(&folder).ok();
+    }
+
+    #[test]
+    fn reopening_a_meeting_folder_loads_prior_transcripts_and_metadata() {
+        let folder = temp_meeting_folder("reopen");
+        write_prior_transcripts(
+            &folder,
+            &[segment(0, "old a", 0.0), segment(3, "old b", 3.0)],
+        );
+        std::fs::write(
+            folder.join("metadata.json"),
+            r#"{
+                "version": "1.0",
+                "meeting_id": "meeting-42",
+                "meeting_name": "Original name",
+                "created_at": "2026-09-22T09:00:00Z",
+                "completed_at": "2026-09-22T09:30:00Z",
+                "duration_seconds": 90.0,
+                "devices": { "microphone": "Built-in", "system_audio": null },
+                "audio_file": "audio.mp4",
+                "transcript_file": "transcripts.json",
+                "sample_rate": 48000,
+                "status": "completed"
+            }"#,
+        )
+        .unwrap();
+
+        let saver = resuming_saver(&folder);
+
+        assert_eq!(saver.prior_segments.len(), 2);
+        assert_eq!(saver.sequence_offset, 4);
+        assert!(saver.get_transcript_segments().is_empty());
+        assert_eq!(saver.get_meeting_folder(), Some(&folder));
+
+        let metadata = saver.metadata.clone().unwrap();
+        assert_eq!(metadata.meeting_id.as_deref(), Some("meeting-42"));
+        assert_eq!(metadata.meeting_name.as_deref(), Some("Original name"));
+        assert_eq!(metadata.created_at, "2026-09-22T09:00:00Z");
+        assert_eq!(metadata.devices.microphone.as_deref(), Some("Built-in"));
+        assert_eq!(metadata.status, "recording");
+        assert!(metadata.completed_at.is_none());
+        // Written back to disk as well.
+        let on_disk: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(folder.join("metadata.json")).unwrap())
+                .unwrap();
+        assert_eq!(on_disk["status"], "recording");
+        assert_eq!(on_disk["meeting_id"], "meeting-42");
+
+        std::fs::remove_dir_all(&folder).ok();
+    }
+
+    #[test]
+    fn missing_or_corrupt_prior_files_fall_back_to_empty_and_fresh() {
+        let folder = temp_meeting_folder("corrupt");
+        assert!(load_prior_segments(&folder).is_empty());
+
+        std::fs::write(folder.join("transcripts.json"), "{ not json").unwrap();
+        std::fs::write(folder.join("metadata.json"), "{ not json").unwrap();
+        assert!(load_prior_segments(&folder).is_empty());
+
+        let metadata = resumed_metadata(&folder, Some("Standup"), true);
+        assert_eq!(metadata.meeting_name.as_deref(), Some("Standup"));
+        assert_eq!(metadata.audio_file, "audio.mp4");
+        assert_eq!(metadata.status, "recording");
+
+        std::fs::remove_dir_all(&folder).ok();
+    }
 
     #[test]
     fn successful_autosave_cleanup_keeps_the_captured_transcript_snapshot() {

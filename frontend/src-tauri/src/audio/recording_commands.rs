@@ -21,6 +21,7 @@ use super::{
     default_output_device, // Get default system audio
     parse_audio_device,
     recording_manager::RecordingStartError,
+    recording_saver::ResumeTarget,
     RecordingManager,
 };
 use crate::audio::permission_check::{PermissionVerdict, MICROPHONE_DENIED_MESSAGE};
@@ -655,22 +656,207 @@ async fn validate_transcription_engine_before_capture<R: Runtime>(
 }
 
 // ============================================================================
+// RESUMING A SAVED MEETING
+// ============================================================================
+
+/// Where the new audio of a resumed meeting starts on the meeting's timeline:
+/// the larger of the saved recording duration and the last transcript's end.
+/// Missing, NaN, infinite or negative values are ignored, so the result is
+/// always a finite value >= 0.0.
+fn resume_audio_offset(metadata_duration: Option<f64>, max_transcript_end: Option<f64>) -> f64 {
+    [metadata_duration, max_transcript_end]
+        .into_iter()
+        .flatten()
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .fold(0.0, f64::max)
+}
+
+/// `duration_seconds` from the meeting folder's metadata.json, if it parses.
+fn read_metadata_duration_seconds(meeting_folder: &std::path::Path) -> Option<f64> {
+    let contents = std::fs::read_to_string(meeting_folder.join("metadata.json")).ok()?;
+    let metadata: serde_json::Value = serde_json::from_str(&contents).ok()?;
+    metadata.get("duration_seconds")?.as_f64()
+}
+
+/// True when `.checkpoints/` still holds audio chunks from an interrupted
+/// recording. A clean stop removes the directory, so any leftover .mp4 is audio
+/// that was never merged into audio.mp4 — and a resumed session would overwrite it.
+fn has_unrecovered_checkpoints(meeting_folder: &std::path::Path) -> bool {
+    std::fs::read_dir(meeting_folder.join(".checkpoints"))
+        .map(|entries| {
+            entries.flatten().any(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("mp4"))
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// Look up a saved meeting and work out where a resumed session should record
+/// into (its existing folder) and how far to shift the new audio timestamps.
+/// Returns the target and the meeting's title.
+async fn resolve_resume_target<R: Runtime>(
+    app: &AppHandle<R>,
+    meeting_id: &str,
+) -> Result<(ResumeTarget, String), String> {
+    let state = app
+        .try_state::<crate::state::AppState>()
+        .ok_or_else(|| "App state not available".to_string())?;
+    let pool = state.db_manager.pool();
+
+    let row: Option<(String, Option<String>)> =
+        sqlx::query_as("SELECT title, folder_path FROM meetings WHERE id = ?")
+            .bind(meeting_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| {
+                error!("Failed to look up meeting {} for resume: {}", meeting_id, e);
+                format!("Failed to load the meeting: {}", e)
+            })?;
+    let (title, folder_path) = row.ok_or_else(|| "Meeting not found".to_string())?;
+
+    let missing_folder =
+        || "This meeting's recording folder is missing, so it cannot be resumed".to_string();
+    let meeting_folder = folder_path
+        .filter(|path| !path.trim().is_empty())
+        .map(std::path::PathBuf::from)
+        .ok_or_else(missing_folder)?;
+    if !meeting_folder.is_dir() {
+        warn!(
+            "Cannot resume meeting {}: folder {} does not exist",
+            meeting_id,
+            meeting_folder.display()
+        );
+        return Err(missing_folder());
+    }
+
+    if has_unrecovered_checkpoints(&meeting_folder) {
+        warn!(
+            "Cannot resume meeting {}: unrecovered checkpoints in {}",
+            meeting_id,
+            meeting_folder.display()
+        );
+        return Err(
+            "This meeting has unrecovered audio from an interrupted recording. Recover it before resuming the meeting."
+                .to_string(),
+        );
+    }
+
+    let max_transcript_end: Option<f64> =
+        sqlx::query_scalar("SELECT MAX(audio_end_time) FROM transcripts WHERE meeting_id = ?")
+            .bind(meeting_id)
+            .fetch_one(pool)
+            .await
+            .map_err(|e| {
+                error!(
+                    "Failed to read transcript timings for meeting {}: {}",
+                    meeting_id, e
+                );
+                format!("Failed to load the meeting's transcript: {}", e)
+            })?;
+    let metadata_duration = read_metadata_duration_seconds(&meeting_folder);
+    let audio_offset_seconds = resume_audio_offset(metadata_duration, max_transcript_end);
+
+    info!(
+        "Resuming meeting {} in {} at offset {:.2}s (metadata duration: {:?}, last transcript end: {:?})",
+        meeting_id,
+        meeting_folder.display(),
+        audio_offset_seconds,
+        metadata_duration,
+        max_transcript_end
+    );
+
+    Ok((
+        ResumeTarget {
+            meeting_folder,
+            audio_offset_seconds,
+        },
+        title,
+    ))
+}
+
+#[cfg(test)]
+mod resume_tests {
+    use super::{has_unrecovered_checkpoints, read_metadata_duration_seconds, resume_audio_offset};
+
+    #[test]
+    fn resume_offset_takes_the_larger_known_length() {
+        assert_eq!(resume_audio_offset(Some(120.5), Some(118.0)), 120.5);
+        assert_eq!(resume_audio_offset(Some(90.0), Some(95.25)), 95.25);
+        assert_eq!(resume_audio_offset(None, Some(42.0)), 42.0);
+        assert_eq!(resume_audio_offset(Some(42.0), None), 42.0);
+    }
+
+    #[test]
+    fn resume_offset_ignores_unusable_values() {
+        assert_eq!(resume_audio_offset(None, None), 0.0);
+        assert_eq!(resume_audio_offset(Some(f64::NAN), Some(10.0)), 10.0);
+        assert_eq!(resume_audio_offset(Some(-5.0), None), 0.0);
+        assert_eq!(resume_audio_offset(Some(f64::INFINITY), Some(3.0)), 3.0);
+        assert_eq!(resume_audio_offset(Some(f64::NAN), Some(f64::NAN)), 0.0);
+    }
+
+    #[test]
+    fn metadata_duration_is_read_when_the_file_parses() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(read_metadata_duration_seconds(dir.path()), None);
+
+        std::fs::write(dir.path().join("metadata.json"), "not json").unwrap();
+        assert_eq!(read_metadata_duration_seconds(dir.path()), None);
+
+        std::fs::write(
+            dir.path().join("metadata.json"),
+            r#"{"meeting_name":"Standup","duration_seconds":61.5}"#,
+        )
+        .unwrap();
+        assert_eq!(read_metadata_duration_seconds(dir.path()), Some(61.5));
+
+        std::fs::write(
+            dir.path().join("metadata.json"),
+            r#"{"duration_seconds":null}"#,
+        )
+        .unwrap();
+        assert_eq!(read_metadata_duration_seconds(dir.path()), None);
+    }
+
+    #[test]
+    fn only_leftover_mp4_checkpoints_block_a_resume() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!has_unrecovered_checkpoints(dir.path()));
+
+        let checkpoints = dir.path().join(".checkpoints");
+        std::fs::create_dir(&checkpoints).unwrap();
+        assert!(!has_unrecovered_checkpoints(dir.path()));
+
+        std::fs::write(checkpoints.join("concat_list.txt"), "").unwrap();
+        assert!(!has_unrecovered_checkpoints(dir.path()));
+
+        std::fs::write(checkpoints.join("audio_chunk_000.mp4"), b"x").unwrap();
+        assert!(has_unrecovered_checkpoints(dir.path()));
+    }
+}
+
+// ============================================================================
 // RECORDING COMMANDS
 // ============================================================================
 
 /// Start recording with default devices
 pub async fn start_recording<R: Runtime>(app: AppHandle<R>) -> Result<String, String> {
-    start_recording_with_meeting_name(app, None).await
+    start_recording_with_meeting_name(app, None, None).await
 }
 
-/// Start recording with default devices and optional meeting name
+/// Start recording with default devices and optional meeting name.
+/// With `resume_meeting_id`, records into that saved meeting instead of a new one.
 pub async fn start_recording_with_meeting_name<R: Runtime>(
     app: AppHandle<R>,
     meeting_name: Option<String>,
+    resume_meeting_id: Option<String>,
 ) -> Result<String, String> {
     info!(
-        "Starting recording with default devices, meeting: {:?}",
-        meeting_name
+        "Starting recording with default devices, meeting: {:?}, resume: {:?}",
+        meeting_name, resume_meeting_id
     );
 
     cleanup_stopped_capture(&app).await?;
@@ -686,6 +872,13 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     if current_recording_state {
         return Err("Recording already in progress".to_string());
     }
+
+    // Resolve the saved meeting before any startup side effects, so a meeting
+    // that cannot be resumed fails without flashing the STARTING state.
+    let resume = match resume_meeting_id.as_deref() {
+        Some(meeting_id) => Some(resolve_resume_target(&app, meeting_id).await?),
+        None => None,
+    };
 
     validate_transcription_engine_before_capture(&app).await?;
 
@@ -737,13 +930,20 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     let session_id = crate::meeting_activity::new_recording_session_id();
     crate::meeting_activity::start_recording(&app, session_id.clone());
 
-    // Always ensure a meeting name is set so incremental saver initializes
-    let effective_meeting_name = meeting_name.clone().unwrap_or_else(|| {
-        // Example: Meeting 2025-10-03_08-25-23
-        let now = chrono::Local::now();
-        format!("Meeting {}", now.format("%Y-%m-%d_%H-%M-%S"))
-    });
+    // Always ensure a meeting name is set so incremental saver initializes.
+    // A resumed meeting keeps its saved title and records into its own folder.
+    let (resume_target, resumed_title) = resume.unzip();
+    let effective_meeting_name = resumed_title
+        .or_else(|| meeting_name.clone())
+        .unwrap_or_else(|| {
+            // Example: Meeting 2025-10-03_08-25-23
+            let now = chrono::Local::now();
+            format!("Meeting {}", now.format("%Y-%m-%d_%H-%M-%S"))
+        });
     manager.set_meeting_name(Some(effective_meeting_name));
+    if resume_target.is_some() {
+        manager.set_resume_target(resume_target);
+    }
 
     // Set up error callback
     let app_for_error = app.clone();
@@ -888,19 +1088,22 @@ pub async fn start_recording_with_devices<R: Runtime>(
     mic_device_name: Option<String>,
     system_device_name: Option<String>,
 ) -> Result<String, String> {
-    start_recording_with_devices_and_meeting(app, mic_device_name, system_device_name, None).await
+    start_recording_with_devices_and_meeting(app, mic_device_name, system_device_name, None, None)
+        .await
 }
 
-/// Start recording with specific devices and optional meeting name
+/// Start recording with specific devices and optional meeting name.
+/// With `resume_meeting_id`, records into that saved meeting instead of a new one.
 pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     app: AppHandle<R>,
     mic_device_name: Option<String>,
     system_device_name: Option<String>,
     meeting_name: Option<String>,
+    resume_meeting_id: Option<String>,
 ) -> Result<String, String> {
     info!(
-        "Starting recording with specific devices: mic={:?}, system={:?}, meeting={:?}",
-        mic_device_name, system_device_name, meeting_name
+        "Starting recording with specific devices: mic={:?}, system={:?}, meeting={:?}, resume={:?}",
+        mic_device_name, system_device_name, meeting_name, resume_meeting_id
     );
 
     cleanup_stopped_capture(&app).await?;
@@ -916,6 +1119,13 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     if current_recording_state {
         return Err("Recording already in progress".to_string());
     }
+
+    // Resolve the saved meeting before any startup side effects, so a meeting
+    // that cannot be resumed fails without flashing the STARTING state.
+    let resume = match resume_meeting_id.as_deref() {
+        Some(meeting_id) => Some(resolve_resume_target(&app, meeting_id).await?),
+        None => None,
+    };
 
     validate_transcription_engine_before_capture(&app).await?;
 
@@ -964,12 +1174,19 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
         }
     };
 
-    // Always ensure a meeting name is set so incremental saver initializes
-    let effective_meeting_name = meeting_name.clone().unwrap_or_else(|| {
-        let now = chrono::Local::now();
-        format!("Meeting {}", now.format("%Y-%m-%d_%H-%M-%S"))
-    });
+    // Always ensure a meeting name is set so incremental saver initializes.
+    // A resumed meeting keeps its saved title and records into its own folder.
+    let (resume_target, resumed_title) = resume.unzip();
+    let effective_meeting_name = resumed_title
+        .or_else(|| meeting_name.clone())
+        .unwrap_or_else(|| {
+            let now = chrono::Local::now();
+            format!("Meeting {}", now.format("%Y-%m-%d_%H-%M-%S"))
+        });
     manager.set_meeting_name(Some(effective_meeting_name));
+    if resume_target.is_some() {
+        manager.set_resume_target(resume_target);
+    }
 
     // Set up error callback
     let app_for_error = app.clone();

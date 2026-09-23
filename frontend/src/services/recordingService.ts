@@ -96,19 +96,24 @@ export class RecordingService {
    * @param micDeviceName - Microphone device name (null for default)
    * @param systemDeviceName - System audio device name (null for default)
    * @param meetingName - Meeting name/title
+   * @param requestId - Correlation id for the start request
+   * @param resumeMeetingId - When resuming a previously stopped meeting, the id
+   *   of the existing meeting to record into (null/undefined starts a new meeting)
    * @returns Exact native recording session identity
    */
   async startRecordingWithDevices(
     micDeviceName: string | null,
     systemDeviceName: string | null,
     meetingName: string,
-    requestId?: string
+    requestId?: string,
+    resumeMeetingId?: string
   ): Promise<RecordingCommandResult> {
     return withStartTimeout(invoke<RecordingCommandResult>('start_recording_with_devices_and_meeting', {
       micDeviceName,
       systemDeviceName,
       meetingName,
       requestId,
+      resumeMeetingId: resumeMeetingId ?? null,
     }));
   }
 

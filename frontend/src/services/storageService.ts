@@ -39,6 +39,11 @@ export class StorageService {
    * @param meetingTitle - Title of the meeting
    * @param transcripts - Array of transcript segments
    * @param folderPath - Optional folder path for audio file
+   * @param webhookOnComplete - Whether to fire the completion webhook
+   * @param meetingId - Existing meeting id to save into, or null for a new meeting
+   * @param append - When true and meetingId is set, keep existing transcript rows
+   *   and append these segments instead of replacing them (used when resuming a
+   *   previously stopped meeting)
    * @returns Promise with { meeting_id: string }
    */
   async saveMeeting(
@@ -46,7 +51,8 @@ export class StorageService {
     transcripts: Transcript[],
     folderPath: string | null,
     webhookOnComplete = false,
-    meetingId: string | null = null
+    meetingId: string | null = null,
+    append = false
   ): Promise<SaveMeetingResponse> {
     return invoke<SaveMeetingResponse>('api_save_transcript', {
       meetingTitle,
@@ -54,6 +60,7 @@ export class StorageService {
       folderPath,
       meetingId,
       webhookOnComplete,
+      append,
     });
   }
 

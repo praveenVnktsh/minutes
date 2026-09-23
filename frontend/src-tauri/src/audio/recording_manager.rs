@@ -259,6 +259,10 @@ impl RecordingManager {
         let pipeline_manager = AudioPipelineManager::new();
         let (device_monitor, device_event_receiver) = AudioDeviceMonitor::new();
 
+        // Reset the process-wide resume offset so a stale value from a
+        // previous resumed session never leaks into a fresh meeting.
+        super::recording_state::set_audio_time_offset_seconds(0.0);
+
         Self {
             state,
             stream_manager,
@@ -598,6 +602,27 @@ impl RecordingManager {
     /// Set the meeting name for this recording session
     pub fn set_meeting_name(&mut self, name: Option<String>) {
         self.recording_saver.set_meeting_name(name);
+    }
+
+    /// Set (or clear) the resume target for this recording session: the
+    /// existing meeting folder and audio offset to resume into, so the new
+    /// session's audio is appended to the meeting's audio.mp4 and its
+    /// transcript segments line up with the concatenated audio.
+    ///
+    /// Must be called before `start_recording()`. Forwards the offset (or
+    /// 0.0 when `target` is `None`) to the process-wide offset used by the
+    /// transcription worker, and forwards the target itself to the
+    /// recording saver so it resumes writing into the existing folder.
+    pub fn set_resume_target(
+        &mut self,
+        target: Option<crate::audio::recording_saver::ResumeTarget>,
+    ) {
+        let offset = target
+            .as_ref()
+            .map(|t| t.audio_offset_seconds)
+            .unwrap_or(0.0);
+        super::recording_state::set_audio_time_offset_seconds(offset);
+        self.recording_saver.set_resume_target(target);
     }
 
     /// Add a structured transcript segment to be saved later

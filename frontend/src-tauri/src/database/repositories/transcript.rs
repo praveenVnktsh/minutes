@@ -10,12 +10,22 @@ impl TranscriptsRepository {
     /// Saves a new meeting and its associated transcript segments.
     /// This function uses a transaction to ensure that either both the meeting
     /// and all its transcripts are saved, or none of them are.
+    ///
+    /// When `meeting_id` is `Some` and `append` is `true`, the existing meeting
+    /// row is updated (title/folder) as usual, but its existing transcript rows
+    /// are kept and the new segments are inserted alongside them. This supports
+    /// resuming a previously stopped meeting, where the new segments' audio
+    /// timing has already been shifted to line up with the concatenated audio.
+    /// When `append` is `false` (or `meeting_id` is `None`), behavior is
+    /// unchanged from before: an existing meeting's transcript rows are
+    /// replaced, and a missing `meeting_id` creates a brand new meeting.
     pub async fn save_transcript(
         pool: &SqlitePool,
         meeting_title: &str,
         transcripts: &[TranscriptSegment],
         folder_path: Option<String>,
         meeting_id: Option<&str>,
+        append: bool,
     ) -> Result<String, SqlxError> {
         let mut conn = pool.acquire().await?;
         let mut transaction = conn.begin().await?;
@@ -42,12 +52,19 @@ impl TranscriptsRepository {
                     return Err(SqlxError::RowNotFound);
                 }
 
-                sqlx::query("DELETE FROM transcripts WHERE meeting_id = ?")
-                    .bind(existing_id)
-                    .execute(&mut *transaction)
-                    .await?;
+                if append {
+                    info!(
+                        "Appending transcripts to existing meeting with id: {}",
+                        existing_id
+                    );
+                } else {
+                    sqlx::query("DELETE FROM transcripts WHERE meeting_id = ?")
+                        .bind(existing_id)
+                        .execute(&mut *transaction)
+                        .await?;
 
-                info!("Updating existing meeting with id: {}", existing_id);
+                    info!("Updating existing meeting with id: {}", existing_id);
+                }
                 existing_id.to_string()
             }
             None => {
@@ -175,5 +192,133 @@ impl TranscriptsRepository {
             }
             None => transcript.chars().take(200).collect(), // Fallback to the start of the transcript
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn test_pool() -> SqlitePool {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::query(
+            "CREATE TABLE meetings (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                folder_path TEXT
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "CREATE TABLE transcripts (
+                id TEXT PRIMARY KEY,
+                meeting_id TEXT NOT NULL,
+                transcript TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                speaker TEXT,
+                audio_start_time REAL,
+                audio_end_time REAL,
+                duration REAL,
+                FOREIGN KEY (meeting_id) REFERENCES meetings(id) ON DELETE CASCADE
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        pool
+    }
+
+    fn segment(text: &str, start: f64, end: f64) -> TranscriptSegment {
+        TranscriptSegment {
+            id: format!("seg-{}", Uuid::new_v4()),
+            text: text.to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+            speaker: Some("mic".to_string()),
+            audio_start_time: Some(start),
+            audio_end_time: Some(end),
+            duration: Some(end - start),
+        }
+    }
+
+    async fn transcript_count(pool: &SqlitePool, meeting_id: &str) -> i64 {
+        sqlx::query_as::<_, (i64,)>("SELECT COUNT(*) FROM transcripts WHERE meeting_id = ?")
+            .bind(meeting_id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+            .0
+    }
+
+    #[tokio::test]
+    async fn append_keeps_old_rows_and_adds_new_ones() {
+        let pool = test_pool().await;
+
+        let first_batch = [segment("hello", 0.0, 1.0)];
+        let meeting_id = TranscriptsRepository::save_transcript(
+            &pool,
+            "Standup",
+            &first_batch,
+            None,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(transcript_count(&pool, &meeting_id).await, 1);
+
+        let second_batch = [segment("world", 10.0, 11.0)];
+        let resumed_id = TranscriptsRepository::save_transcript(
+            &pool,
+            "Standup",
+            &second_batch,
+            None,
+            Some(&meeting_id),
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(resumed_id, meeting_id);
+        assert_eq!(transcript_count(&pool, &meeting_id).await, 2);
+    }
+
+    #[tokio::test]
+    async fn non_append_replaces_existing_rows() {
+        let pool = test_pool().await;
+
+        let first_batch = [segment("hello", 0.0, 1.0), segment("there", 1.0, 2.0)];
+        let meeting_id = TranscriptsRepository::save_transcript(
+            &pool,
+            "Standup",
+            &first_batch,
+            None,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(transcript_count(&pool, &meeting_id).await, 2);
+
+        let second_batch = [segment("world", 10.0, 11.0)];
+        TranscriptsRepository::save_transcript(
+            &pool,
+            "Standup",
+            &second_batch,
+            None,
+            Some(&meeting_id),
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(transcript_count(&pool, &meeting_id).await, 1);
     }
 }

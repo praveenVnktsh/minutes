@@ -98,6 +98,14 @@ pub fn start_transcription_task<R: Runtime>(
     tokio::spawn(async move {
         info!("🚀 Starting optimized parallel transcription task - guaranteeing zero chunk loss");
 
+        // Read the resume offset once for this session. When resuming a
+        // previously-stopped meeting, this is the length of audio already
+        // recorded for it, and is added to every emitted segment's
+        // recording-relative times so they line up with the concatenated
+        // audio.mp4. 0.0 for a fresh (non-resuming) recording, leaving
+        // behaviour unchanged.
+        let audio_time_offset = crate::audio::recording_state::audio_time_offset_seconds();
+
         // Initialize transcription engine (Whisper or Parakeet based on config)
         let transcription_engine = match super::engine::get_or_init_transcription_engine(&app).await
         {
@@ -258,6 +266,11 @@ pub fn start_transcription_task<R: Runtime>(
 
                                         // Calculate timestamps FIRST - the duplicate check below needs the
                                         // audio window before a sequence id is ever drawn for it.
+                                        // `audio_time_offset` shifts recording-relative times by the length
+                                        // of audio already recorded when resuming a previously-stopped
+                                        // meeting, so these segments line up with the concatenated
+                                        // audio.mp4; it is 0.0 for a fresh recording.
+                                        let chunk_timestamp = chunk_timestamp + audio_time_offset;
                                         let audio_start_time = chunk_timestamp; // Already in seconds from recording start
                                         let audio_end_time = chunk_timestamp + chunk_duration;
 
