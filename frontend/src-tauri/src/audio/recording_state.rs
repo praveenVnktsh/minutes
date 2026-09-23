@@ -1,11 +1,36 @@
 use anyhow::Result;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::sync::mpsc;
 
 use super::buffer_pool::AudioBufferPool;
 use super::devices::AudioDevice;
+
+/// Process-wide offset (in seconds) applied to transcript audio times for a
+/// meeting being resumed: the length of audio already recorded for that
+/// meeting before this session started. Added to every transcript segment's
+/// audio_start_time / audio_end_time / chunk_start_time so segments from the
+/// resumed session line up with the concatenated audio.mp4. Stored as raw
+/// f64 bits since there is no stable `AtomicF64`.
+static AUDIO_TIME_OFFSET_BITS: AtomicU64 = AtomicU64::new(0);
+
+/// Set the process-wide audio time offset (seconds) for a resumed recording.
+/// Non-finite or negative values are stored as 0.0. Must be set (or reset to
+/// 0.0) before a recording session starts producing transcript updates.
+pub fn set_audio_time_offset_seconds(offset: f64) {
+    let value = if offset.is_finite() && offset >= 0.0 {
+        offset
+    } else {
+        0.0
+    };
+    AUDIO_TIME_OFFSET_BITS.store(value.to_bits(), Ordering::SeqCst);
+}
+
+/// Get the process-wide audio time offset (seconds) for the current recording.
+pub fn audio_time_offset_seconds() -> f64 {
+    f64::from_bits(AUDIO_TIME_OFFSET_BITS.load(Ordering::SeqCst))
+}
 
 /// Device type for audio chunks
 #[derive(Debug, Clone, PartialEq)]
@@ -460,5 +485,24 @@ mod tests {
 
         assert!(!state.is_recording());
         assert!(callback_observed_stop.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn audio_time_offset_round_trips() {
+        super::set_audio_time_offset_seconds(42.5);
+        assert_eq!(super::audio_time_offset_seconds(), 42.5);
+
+        // Non-finite and negative values are clamped to 0.0.
+        super::set_audio_time_offset_seconds(f64::NAN);
+        assert_eq!(super::audio_time_offset_seconds(), 0.0);
+
+        super::set_audio_time_offset_seconds(-5.0);
+        assert_eq!(super::audio_time_offset_seconds(), 0.0);
+
+        super::set_audio_time_offset_seconds(f64::INFINITY);
+        assert_eq!(super::audio_time_offset_seconds(), 0.0);
+
+        // Reset for other tests sharing this process-wide static.
+        super::set_audio_time_offset_seconds(0.0);
     }
 }

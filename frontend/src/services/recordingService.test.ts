@@ -35,6 +35,25 @@ describe('RecordingService identity contract', () => {
       systemDeviceName: null,
       meetingName: 'Planning',
       requestId: 'request-1',
+      resumeMeetingId: null,
+    });
+  });
+
+  test('forwards a resume meeting id when resuming a previously stopped meeting', async () => {
+    await new RecordingService().startRecordingWithDevices(
+      null,
+      null,
+      'Planning',
+      'request-1',
+      'meeting-42'
+    );
+
+    expect(invoke).toHaveBeenCalledWith('start_recording_with_devices_and_meeting', {
+      micDeviceName: null,
+      systemDeviceName: null,
+      meetingName: 'Planning',
+      requestId: 'request-1',
+      resumeMeetingId: 'meeting-42',
     });
   });
 

@@ -1247,14 +1247,16 @@ pub async fn api_save_transcript<R: Runtime>(
     meeting_id: Option<String>,
     webhook_on_complete: Option<bool>,
     auth_token: Option<String>,
+    append: Option<bool>,
 ) -> Result<serde_json::Value, String> {
     log_info!(
-        "api_save_transcript called for meeting: {}, transcripts: {}, folder_path: {:?}, meeting_id: {:?}, auth_token: {}",
+        "api_save_transcript called for meeting: {}, transcripts: {}, folder_path: {:?}, meeting_id: {:?}, auth_token: {}, append: {}",
         meeting_title,
         transcripts.len(),
         folder_path,
         meeting_id,
-        auth_token.is_some()
+        auth_token.is_some(),
+        append.unwrap_or(false)
     );
 
     // Log first transcript for debugging
@@ -1296,6 +1298,7 @@ pub async fn api_save_transcript<R: Runtime>(
         &transcripts_to_save,
         folder_path,
         meeting_id.as_deref(),
+        append.unwrap_or(false),
     )
     .await
     {

@@ -73,6 +73,8 @@ export interface RecordingFeedbackState {
 export interface StartRecordingOptions {
   requestId?: string;
   source?: string;
+  /** Record into this saved meeting instead of creating a new one. */
+  resumeMeetingId?: string;
 }
 
 export interface StopRecordingOptions {
@@ -88,6 +90,7 @@ export interface RecordingControllerValue {
   feedback: RecordingFeedbackState | null;
   feedbackManagedGlobally: boolean;
   startRecording: (options?: StartRecordingOptions) => Promise<void>;
+  resumeMeeting: (meetingId: string) => Promise<void>;
   stopRecording: (options?: StopRecordingOptions) => Promise<void>;
   pauseRecording: () => Promise<void>;
   resumeRecording: () => Promise<void>;
@@ -110,6 +113,8 @@ interface SessionRecord {
   recordingSeconds: number | null;
   recoveryMeetingId?: string | null;
   finalization?: PersistedFinalizationRecord;
+  /** The session records into an existing meeting; saving appends rather than replaces. */
+  resumed?: boolean;
 }
 
 interface PersistedFinalizationRecord {
@@ -144,6 +149,33 @@ interface TranscriptConfig {
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** A resumed meeting keeps its saved title; a timestamp title covers a row that has none. */
+export function resumedMeetingTitle(savedTitle: string | null | undefined, fallback: () => string): string {
+  return savedTitle?.trim() ? savedTitle : fallback();
+}
+
+export interface ShortMeetingCheck {
+  resumed: boolean;
+  minimumSeconds: number;
+  recordingSeconds: number | null;
+  transcriptSeconds: number;
+  hasNotes: boolean;
+  hasTranscript: boolean;
+}
+
+/**
+ * Whether a finished session is too short and empty to keep. A resumed session
+ * never qualifies: discarding it would delete the whole earlier meeting.
+ */
+export function shouldDiscardShortMeeting(check: ShortMeetingCheck): boolean {
+  return !check.resumed
+    && check.minimumSeconds > 0
+    && check.recordingSeconds !== null
+    && Math.max(check.recordingSeconds, check.transcriptSeconds) < check.minimumSeconds
+    && !check.hasNotes
+    && !check.hasTranscript;
 }
 
 function meetingTitleNow(): string {
@@ -326,6 +358,7 @@ export function RecordingControllerProvider({
       recoveryMeetingId: current?.recoveryMeetingId
         ?? sessionStorage.getItem('indexeddb_current_meeting_id'),
       finalization: current?.finalization,
+      resumed: current?.resumed,
     });
     persistSessions(sessionsRef.current);
   }, [recording]);
@@ -352,14 +385,17 @@ export function RecordingControllerProvider({
           : recordingService.getRecordingMeetingName().catch(() => null),
       ]);
       if (disposed) return;
-      current.meetingId = recording.meeting_id ?? current.meetingId;
-      current.folderPath = folderPath ?? current.folderPath;
-      current.title = title ?? current.title;
-      current.recordingSeconds = nativeState.recording_duration ?? current.recordingSeconds;
-      sessionsRef.current.set(sessionId, current);
+      // performStart may have replaced the record while this ran; update the
+      // latest one so fields it set (such as `resumed`) are not lost.
+      const latest = sessionsRef.current.get(sessionId) ?? current;
+      latest.meetingId = recording.meeting_id ?? latest.meetingId;
+      latest.folderPath = folderPath ?? latest.folderPath;
+      latest.title = title ?? latest.title;
+      latest.recordingSeconds = nativeState.recording_duration ?? latest.recordingSeconds;
+      sessionsRef.current.set(sessionId, latest);
       persistSessions(sessionsRef.current);
-      if (current.meetingId && !recording.meeting_id) {
-        await meetingActivityService.bindActiveRecordingMeeting(sessionId, current.meetingId).catch(() => {});
+      if (latest.meetingId && !recording.meeting_id) {
+        await meetingActivityService.bindActiveRecordingMeeting(sessionId, latest.meetingId).catch(() => {});
         if (!disposed) await rehydrate().catch(() => {});
       }
     })();
@@ -410,25 +446,31 @@ export function RecordingControllerProvider({
       session.recoveryMeetingId ??= sessionStorage.getItem('indexeddb_current_meeting_id');
       sessionsRef.current.set(session.sessionId, session);
       persistSessions(sessionsRef.current);
-      const created = await storageService.createMeeting(
-        session.title,
-        session.folderPath,
-        cachedDebugMode(),
-      );
-      if (!created.meeting_id) throw new Error('The meeting row was not created.');
-      session.meetingId = created.meeting_id;
+      let meetingId = session.resumed ? session.meetingId : null;
+      if (!meetingId) {
+        const created = await storageService.createMeeting(
+          session.title,
+          session.folderPath,
+          cachedDebugMode(),
+        );
+        if (!created.meeting_id) throw new Error('The meeting row was not created.');
+        meetingId = created.meeting_id;
+      }
+      session.meetingId = meetingId;
       sessionsRef.current.set(session.sessionId, session);
-      sessionStorage.setItem(ACTIVE_MEETING_KEY, created.meeting_id);
+      sessionStorage.setItem(ACTIVE_MEETING_KEY, meetingId);
       persistSessions(sessionsRef.current);
-      await meetingActivityService.bindActiveRecordingMeeting(session.sessionId, created.meeting_id);
-      setCurrentMeeting({ id: created.meeting_id, title: session.title });
+      await meetingActivityService.bindActiveRecordingMeeting(session.sessionId, meetingId);
+      setCurrentMeeting({ id: meetingId, title: session.title });
       await refetchMeetings();
       await flushNotes();
-      router.push(`/meeting-details?id=${encodeURIComponent(created.meeting_id)}`);
+      router.push(`/meeting-details?id=${encodeURIComponent(meetingId)}`);
     } catch (error) {
       reportError(
         'persistence',
-        'Recording started, but its meeting could not be prepared',
+        session.resumed
+          ? 'Recording resumed, but its meeting could not be prepared'
+          : 'Recording started, but its meeting could not be prepared',
         `${messageOf(error)} Recording is still active and can be stopped safely.`,
       );
     }
@@ -469,7 +511,10 @@ export function RecordingControllerProvider({
         }
       }
 
-      const title = meetingTitleNow();
+      const resumeMeetingId = options.resumeMeetingId ?? null;
+      const title = resumeMeetingId
+        ? resumedMeetingTitle((await storageService.getMeeting(resumeMeetingId)).title, meetingTitleNow)
+        : meetingTitleNow();
       setMeetingTitle(title);
       recordingState.setStatus(RecordingStatus.STARTING, 'Initializing recording...');
       nativeStartInvoked = true;
@@ -478,21 +523,26 @@ export function RecordingControllerProvider({
         selectedDevices?.systemDevice ?? null,
         title,
         options.requestId,
+        resumeMeetingId ?? undefined,
       );
       const session: SessionRecord = {
         sessionId: result.session_id,
-        meetingId: null,
+        meetingId: resumeMeetingId,
         title,
         folderPath: null,
         recordingSeconds: null,
         recoveryMeetingId: sessionStorage.getItem('indexeddb_current_meeting_id'),
+        ...(resumeMeetingId ? { resumed: true } : {}),
       };
       latestSessionIdRef.current = result.session_id;
       sessionsRef.current.set(result.session_id, session);
       persistSessions(sessionsRef.current);
       clearTranscripts();
       setIsMeetingActive(true);
-      Analytics.trackButtonClick('start_recording', options.source ?? 'recording_controller');
+      Analytics.trackButtonClick(
+        resumeMeetingId ? 'resume_meeting' : 'start_recording',
+        options.source ?? 'recording_controller',
+      );
       await showRecordingNotification().catch((error) => {
         console.warn('Could not show the recording notification:', error);
       });
@@ -504,7 +554,7 @@ export function RecordingControllerProvider({
       const runtimeError = text === RUNTIME_ERROR_CODE;
       reportError(
         runtimeError ? 'setup' : 'capture',
-        'Recording could not start',
+        options.resumeMeetingId ? 'Recording could not resume' : 'Recording could not start',
         runtimeError ? RUNTIME_ERROR_MESSAGE : text,
         runtimeError ? 'transcription' : 'recording',
       );
@@ -552,6 +602,10 @@ export function RecordingControllerProvider({
     return runLifecycle('start', null, () => performStart(options));
   }, [performStart, runLifecycle]);
   startHandlerRef.current = startRecording;
+
+  const resumeMeeting = useCallback((meetingId: string): Promise<void> => (
+    startRecording({ resumeMeetingId: meetingId, source: 'resume_meeting' })
+  ), [startRecording]);
 
   const finalizeRecording = useCallback((sessionId: string, saveMeeting = true): Promise<void> => {
     const session = sessionsRef.current.get(sessionId);
@@ -616,6 +670,7 @@ export function RecordingControllerProvider({
             session.folderPath,
             !deferred,
             session.meetingId,
+            Boolean(session.resumed),
           );
           if (!saved.meeting_id) throw new Error('No meeting ID was returned while saving.');
           finalization.savedMeetingId = saved.meeting_id;
@@ -666,13 +721,14 @@ export function RecordingControllerProvider({
         );
         const hasNotes = Boolean(originalNotesMarkdown(notes.document).trim());
         const hasTranscript = freshTranscripts.some((transcript) => transcript.text.trim());
-        if (
-          minimumSeconds > 0
-          && session.recordingSeconds !== null
-          && Math.max(session.recordingSeconds, transcriptSeconds) < minimumSeconds
-          && !hasNotes
-          && !hasTranscript
-        ) {
+        if (shouldDiscardShortMeeting({
+          resumed: Boolean(session.resumed),
+          minimumSeconds,
+          recordingSeconds: session.recordingSeconds,
+          transcriptSeconds,
+          hasNotes,
+          hasTranscript,
+        })) {
           if (!finalization.discarded) {
             await invoke('api_discard_meeting', { meetingId: savedMeetingId });
             finalization.discarded = true;
@@ -1150,6 +1206,7 @@ export function RecordingControllerProvider({
     feedback,
     feedbackManagedGlobally,
     startRecording,
+    resumeMeeting,
     stopRecording,
     pauseRecording,
     resumeRecording,
@@ -1176,6 +1233,7 @@ export function RecordingControllerProvider({
     recording?.session_id,
     recovery,
     retryFeedback,
+    resumeMeeting,
     resumeRecording,
     returnToRecording,
     startRecording,

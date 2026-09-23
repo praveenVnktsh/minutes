@@ -12,11 +12,13 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { Copy, FolderOpen, Link2, Loader2, MoreHorizontal, RefreshCw, UserRoundCog, Users } from 'lucide-react';
+import { Copy, FolderOpen, Link2, Loader2, Mic, MoreHorizontal, RefreshCw, UserRoundCog, Users } from 'lucide-react';
 import { toast } from 'sonner';
 import Analytics from '@/lib/analytics';
 import { RetranscribeDialog } from './RetranscribeDialog';
 import { useConfig } from '@/contexts/ConfigContext';
+import { useOptionalRecordingController } from '@/contexts/RecordingControllerContext';
+import { useRecordingState } from '@/contexts/RecordingStateContext';
 
 
 interface TranscriptButtonGroupProps {
@@ -44,10 +46,28 @@ export function TranscriptButtonGroup({
   isEnhancing = false,
 }: TranscriptButtonGroupProps) {
   const { betaFeatures } = useConfig();
+  const recordingController = useOptionalRecordingController();
+  const { isRecording, isStopping, isProcessing, isSaving, isStartingRecording } = useRecordingState();
   const [showRetranscribeDialog, setShowRetranscribeDialog] = useState(false);
   const [isIdentifyingSpeakers, setIsIdentifyingSpeakers] = useState(false);
   // "Copy meeting link" only needs meetingId, so it alone keeps the menu non-empty.
   const hasMoreActions = !locked && Boolean(meetingId);
+  // No recording in progress anywhere in the app (this meeting or any other) — a resume would
+  // otherwise collide with the recording that's already running.
+  const isRecordingIdle = !isRecording && !isStopping && !isProcessing && !isSaving && !isStartingRecording;
+  const canResumeMeeting = Boolean(meetingId) && !locked && Boolean(recordingController) && isRecordingIdle;
+
+  const handleResumeMeeting = useCallback(async () => {
+    if (!meetingId || !recordingController) return;
+    Analytics.trackButtonClick('resume_meeting', 'transcript_panel');
+    try {
+      await recordingController.resumeMeeting(meetingId);
+    } catch (error) {
+      // The controller already surfaces user-facing feedback for a failed resume
+      // (its feedback banner), so we only log here to avoid double-reporting.
+      console.warn('Resume meeting failed:', error);
+    }
+  }, [meetingId, recordingController]);
 
   const handleIdentifySpeakers = useCallback(async (numSpeakers: number | null) => {
     if (!meetingId || isIdentifyingSpeakers) return;
@@ -132,6 +152,20 @@ export function TranscriptButtonGroup({
           >
             <UserRoundCog className="@[22rem]:mr-2" size={18} />
             <span className="hidden @[22rem]:inline">Speakers</span>
+          </Button>
+        )}
+
+        {canResumeMeeting && (
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-8 rounded-full bg-[var(--surface-2)] px-3 text-[var(--ink-muted)] hover:bg-[var(--surface-2)]"
+            onClick={() => void handleResumeMeeting()}
+            disabled={recordingController?.isCommandPending || isEnhancing}
+            title="Resume meeting"
+          >
+            <Mic className="@[22rem]:mr-2" size={18} />
+            <span className="hidden @[22rem]:inline">Resume</span>
           </Button>
         )}
 
