@@ -73,6 +73,35 @@ async fn save_chat_message(
     Ok(message)
 }
 
+/// Loads `meeting_notes.notes_markdown` and `summary_processes.result` for a meeting.
+/// Both columns are nullable, and either row may not exist yet (no notes saved, summary still
+/// pending/failed), so a missing row and a NULL column both come back as an empty string
+/// instead of failing the chat turn.
+async fn load_notes_context(
+    pool: &sqlx::SqlitePool,
+    meeting_id: &str,
+) -> Result<(String, String), String> {
+    let raw_notes = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT notes_markdown FROM meeting_notes WHERE meeting_id = ?",
+    )
+    .bind(meeting_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("Could not load raw notes: {error}"))?
+    .flatten()
+    .unwrap_or_default();
+    let stored_summary = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT result FROM summary_processes WHERE meeting_id = ?",
+    )
+    .bind(meeting_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("Could not load enhanced notes: {error}"))?
+    .flatten()
+    .unwrap_or_default();
+    Ok((raw_notes, stored_summary))
+}
+
 #[tauri::command]
 pub async fn get_meeting_chat(
     meeting_id: String,
@@ -155,22 +184,7 @@ pub async fn chat_with_meeting<R: Runtime>(
             .collect::<Vec<_>>(),
     )
     .map_err(|error| error.to_string())?;
-    let raw_notes = sqlx::query_scalar::<_, String>(
-        "SELECT notes_markdown FROM meeting_notes WHERE meeting_id = ?",
-    )
-    .bind(&meeting_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| format!("Could not load raw notes: {error}"))?
-    .unwrap_or_default();
-    let stored_summary = sqlx::query_scalar::<_, String>(
-        "SELECT result FROM summary_processes WHERE meeting_id = ?",
-    )
-    .bind(&meeting_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| format!("Could not load enhanced notes: {error}"))?
-    .unwrap_or_default();
+    let (raw_notes, stored_summary) = load_notes_context(pool, &meeting_id).await?;
     let enhanced_notes = enhanced_notes_markdown(&stored_summary);
     let history = sqlx::query_as::<_, (String, String)>(
         "SELECT role, content FROM meeting_chat_messages WHERE meeting_id = ? ORDER BY created_at DESC LIMIT 12",
@@ -221,6 +235,69 @@ pub async fn chat_with_meeting<R: Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sqlx::SqlitePool;
+
+    async fn test_pool() -> SqlitePool {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::query(
+            "CREATE TABLE meeting_notes (meeting_id TEXT PRIMARY KEY, notes_markdown TEXT)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("CREATE TABLE summary_processes (meeting_id TEXT PRIMARY KEY, result TEXT)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool
+    }
+
+    #[tokio::test]
+    async fn treats_a_missing_row_as_empty_notes() {
+        let pool = test_pool().await;
+        let (raw_notes, stored_summary) =
+            load_notes_context(&pool, "no-such-meeting").await.unwrap();
+        assert_eq!(raw_notes, "");
+        assert_eq!(stored_summary, "");
+    }
+
+    #[tokio::test]
+    async fn treats_a_null_column_as_empty_notes() {
+        let pool = test_pool().await;
+        sqlx::query("INSERT INTO meeting_notes (meeting_id, notes_markdown) VALUES (?, NULL)")
+            .bind("meeting-1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO summary_processes (meeting_id, result) VALUES (?, NULL)")
+            .bind("meeting-1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (raw_notes, stored_summary) = load_notes_context(&pool, "meeting-1").await.unwrap();
+        assert_eq!(raw_notes, "");
+        assert_eq!(stored_summary, "");
+    }
+
+    #[tokio::test]
+    async fn reads_present_notes_normally() {
+        let pool = test_pool().await;
+        sqlx::query("INSERT INTO meeting_notes (meeting_id, notes_markdown) VALUES (?, ?)")
+            .bind("meeting-2")
+            .bind("# Raw notes")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO summary_processes (meeting_id, result) VALUES (?, ?)")
+            .bind("meeting-2")
+            .bind(r##"{"markdown":"# Enhanced","summary_json":[]}"##)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (raw_notes, stored_summary) = load_notes_context(&pool, "meeting-2").await.unwrap();
+        assert_eq!(raw_notes, "# Raw notes");
+        assert_eq!(enhanced_notes_markdown(&stored_summary), "# Enhanced");
+    }
 
     #[test]
     fn reads_enhanced_notes_from_the_stored_summary_object() {
