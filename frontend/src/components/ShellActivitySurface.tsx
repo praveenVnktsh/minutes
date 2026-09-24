@@ -2,7 +2,7 @@
 
 import { useState } from 'react'
 import { usePathname } from 'next/navigation'
-import { Square } from 'lucide-react'
+import { Pause, Play, Square } from 'lucide-react'
 import { MeetingActivityFeedback } from '@/app/_components/StatusOverlays'
 import { useSidebar } from '@/components/Sidebar/SidebarProvider'
 import { Button } from '@/components/ui/button'
@@ -56,6 +56,16 @@ export function ShellActivitySurface() {
             <span className="text-sm font-semibold text-ink">{recordingState.isPaused ? 'Recording paused' : 'Recording in progress'}</span>
             <div className="ml-auto flex gap-2">
               {controller.activeMeetingId && <Button size="sm" variant="ghost" disabled={controller.isCommandPending} onClick={() => void controller.returnToRecording().catch(() => {})}>Return</Button>}
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={controller.isCommandPending}
+                aria-label={recordingState.isPaused ? 'Resume recording' : 'Pause recording'}
+                onClick={() => void (recordingState.isPaused ? controller.resumeRecording() : controller.pauseRecording()).catch(() => {})}
+              >
+                {recordingState.isPaused ? <Play className="h-3 w-3" /> : <Pause className="h-3 w-3" />}
+                {recordingState.isPaused ? 'Resume' : 'Pause'}
+              </Button>
               <Button size="sm" variant="recording" disabled={controller.isCommandPending} onClick={() => void controller.stopRecording().catch(() => {})}><Square className="h-3 w-3" /> Stop</Button>
             </div>
           </div>

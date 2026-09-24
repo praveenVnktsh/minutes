@@ -82,7 +82,8 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
             <>
               <div className="flex min-w-[104px] items-center gap-2 px-3 text-sm font-medium text-[var(--ink-muted)]">
                 <span className={`h-2 w-2 rounded-full ${recordingState.isPaused ? 'bg-paused' : 'animate-pulse bg-recording'}`} />
-                {formatTime(recordingState.recordingDuration ?? 0)}
+                {formatTime(recordingState.activeDuration ?? recordingState.recordingDuration ?? 0)}
+                {recordingState.isPaused ? <span className="sr-only">Paused</span> : null}
               </div>
               <button
                 type="button"

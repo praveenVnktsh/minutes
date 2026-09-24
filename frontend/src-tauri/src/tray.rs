@@ -316,6 +316,27 @@ pub(crate) fn toggle_recording_handler<R: Runtime>(app: &AppHandle<R>) {
     });
 }
 
+/// Toggle pause/resume for the active recording (used by the global shortcut).
+///
+/// Does nothing when no recording is active. Otherwise reuses the existing
+/// pause/resume tray handlers, so the tray menu updates the same way either
+/// path already does.
+pub fn toggle_pause_handler<R: Runtime>(app: &AppHandle<R>) {
+    let app_clone = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if !crate::audio::recording_commands::is_recording().await {
+            log::info!("Toggle pause shortcut: no active recording, ignoring");
+            return;
+        }
+
+        if crate::audio::recording_commands::is_recording_paused().await {
+            resume_recording_handler(&app_clone);
+        } else {
+            pause_recording_handler(&app_clone);
+        }
+    });
+}
+
 fn pause_recording_handler<R: Runtime>(app: &AppHandle<R>) {
     // Immediately show pausing state
     set_tray_state(app, RecordingState::Pausing);
