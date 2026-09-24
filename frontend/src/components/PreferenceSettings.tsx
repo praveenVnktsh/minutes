@@ -61,16 +61,16 @@ export function PreferenceSettings() {
   const hasTrackedViewRef = useRef(false);
   const platform = usePlatform();
   const isMac = platform === 'macos';
-  const [shortcuts, setShortcuts] = useState<{ recording: string; window: string } | null>(null);
-  const [recordingKey, setRecordingKey] = useState<'recording' | 'window' | null>(null);
+  const [shortcuts, setShortcuts] = useState<{ recording: string; window: string; pause: string } | null>(null);
+  const [recordingKey, setRecordingKey] = useState<'recording' | 'window' | 'pause' | null>(null);
   const [shortcutSaveState, setShortcutSaveState] = useState<SaveFeedbackState | null>(null);
   const [notificationSaveState, setNotificationSaveState] = useState<SaveFeedbackState | null>(null);
   const [folderError, setFolderError] = useState('');
   const shortcutSavingRef = useRef(false);
 
   const saveShortcuts = useCallback(async (
-    previous: { recording: string; window: string },
-    next: { recording: string; window: string },
+    previous: { recording: string; window: string; pause: string },
+    next: { recording: string; window: string; pause: string },
     successMessage: string,
   ) => {
     if (shortcutSavingRef.current) return;
@@ -78,7 +78,7 @@ export function PreferenceSettings() {
     setShortcuts(next);
     setShortcutSaveState('saving');
     try {
-      await invoke('set_global_shortcuts', { recording: next.recording, window: next.window });
+      await invoke('set_global_shortcuts', { recording: next.recording, window: next.window, pause: next.pause });
       setShortcutSaveState('saved');
       toast.success(successMessage);
     } catch {
@@ -90,8 +90,8 @@ export function PreferenceSettings() {
   }, []);
 
   useEffect(() => {
-    invoke<{ recording: string; window: string }>('get_global_shortcuts')
-      .then(setShortcuts)
+    invoke<{ recording: string; window: string; pause?: string }>('get_global_shortcuts')
+      .then((loaded) => setShortcuts({ ...loaded, pause: loaded.pause ?? '' }))
       .catch((error) => console.warn('Could not load shortcuts:', error));
   }, []);
 
@@ -115,7 +115,7 @@ export function PreferenceSettings() {
     return () => window.removeEventListener('keydown', onKeyDown, true);
   }, [recordingKey, shortcuts, isMac, saveShortcuts]);
 
-  const clearShortcut = (which: 'recording' | 'window') => {
+  const clearShortcut = (which: 'recording' | 'window' | 'pause') => {
     if (!shortcuts) return;
     void saveShortcuts(shortcuts, { ...shortcuts, [which]: '' }, 'Shortcut disabled');
   };
@@ -274,6 +274,7 @@ export function PreferenceSettings() {
             [
               { key: 'recording', label: 'Start or stop recording' },
               { key: 'window', label: 'Show or hide Minutes' },
+              { key: 'pause', label: 'Pause / resume recording' },
             ] as const
           ).map(({ key, label }) => (
             <li key={key} className="flex items-center justify-between gap-4">

@@ -530,9 +530,19 @@ impl RecordingManager {
     }
 
     /// Pause the current recording session
+    ///
+    /// Once paused, new chunks are dropped, so the pipeline is flushed to transcribe
+    /// speech in progress now instead of holding it until resume. Stays synchronous:
+    /// the command layer calls it while holding a std Mutex guard.
     pub fn pause_recording(&self) -> Result<()> {
         info!("Pausing recording");
-        self.state.pause_recording()
+        self.state.pause_recording()?;
+
+        // The pause is already in effect; a failed flush only delays transcription.
+        if let Err(e) = self.pipeline_manager.flush() {
+            warn!("Failed to flush audio pipeline on pause: {}", e);
+        }
+        Ok(())
     }
 
     /// Resume the current recording session
@@ -730,7 +740,47 @@ impl Drop for RecordingManager {
 
 #[cfg(test)]
 mod tests {
-    use super::{combine_shutdown_results, propagate_save_result};
+    use super::{
+        combine_shutdown_results, propagate_save_result, AudioDeviceMonitor, AudioPipelineManager,
+        AudioStreamManager, RecordingManager, RecordingSaver, RecordingState,
+    };
+
+    /// A manager with no streams or pipeline started. Built directly rather than via
+    /// `new()`, which resets the process-wide audio time offset other tests use.
+    fn idle_manager() -> RecordingManager {
+        let state = RecordingState::new();
+        let (device_monitor, device_event_receiver) = AudioDeviceMonitor::new();
+        RecordingManager {
+            stream_manager: AudioStreamManager::new(state.clone()),
+            state,
+            pipeline_manager: AudioPipelineManager::new(),
+            recording_saver: RecordingSaver::new(),
+            device_monitor: Some(device_monitor),
+            device_event_receiver: Some(device_event_receiver),
+        }
+    }
+
+    #[test]
+    fn pause_succeeds_even_when_the_pipeline_flush_fails() {
+        let manager = idle_manager();
+        manager.state.start_recording().unwrap();
+
+        // The pipeline was never started, so its flush fails; the pause must still hold.
+        manager.pause_recording().unwrap();
+        assert!(manager.is_paused());
+
+        manager.resume_recording().unwrap();
+        assert!(!manager.is_paused());
+    }
+
+    #[test]
+    fn pause_reports_the_state_error_when_not_recording() {
+        let manager = idle_manager();
+
+        let error = manager.pause_recording().unwrap_err();
+        assert_eq!(error.to_string(), "Cannot pause when not recording");
+        assert!(!manager.is_paused());
+    }
 
     #[test]
     fn force_flush_failure_propagates_to_the_stop_gate() {

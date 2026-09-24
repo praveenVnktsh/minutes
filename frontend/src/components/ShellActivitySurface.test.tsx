@@ -1,6 +1,6 @@
-import { afterAll, describe, expect, mock, test } from 'bun:test'
+import { afterAll, beforeEach, describe, expect, mock, test } from 'bun:test'
 import React from 'react'
-import { create } from 'react-test-renderer'
+import { act, create } from 'react-test-renderer'
 
 const originalActivity = { ...await import('@/contexts/MeetingActivityContext') }
 const originalController = { ...await import('@/contexts/RecordingControllerContext') }
@@ -13,6 +13,14 @@ const failedActivities = Array.from({ length: 4 }, (_, index) => ({
   title: `Retained failure ${index}`, stage: null, progress_percentage: null, message: null,
   error: 'failed', warning: null, controls_available: false, revision: index + 1,
 }))
+
+const pauseRecording = mock(async () => {})
+const resumeRecording = mock(async () => {})
+let isRecording = false
+let isPaused = false
+let isCommandPending = true
+let controllerCommand: string | null = 'finalize'
+
 mock.module('@/contexts/MeetingActivityContext', () => ({
   ...originalActivity,
   useMeetingActivity: () => ({
@@ -37,13 +45,25 @@ mock.module('@/contexts/MeetingActivityContext', () => ({
 }))
 mock.module('@/contexts/RecordingControllerContext', () => ({
   ...originalController,
-  useRecordingController: () => ({ command: 'finalize', activeMeetingId: null, isCommandPending: true, returnToRecording: async () => {}, stopRecording: async () => {} }),
+  useRecordingController: () => ({
+    command: controllerCommand, activeMeetingId: null, isCommandPending, returnToRecording: async () => {},
+    stopRecording: async () => {}, pauseRecording, resumeRecording,
+  }),
 }))
-mock.module('@/contexts/RecordingStateContext', () => ({ ...originalRecording, useRecordingState: () => ({ isRecording: false, isPaused: false, isProcessing: false, isSaving: true }) }))
+mock.module('@/contexts/RecordingStateContext', () => ({ ...originalRecording, useRecordingState: () => ({ isRecording, isPaused, isProcessing: false, isSaving: !isRecording }) }))
 mock.module('@/components/Sidebar/SidebarProvider', () => ({ ...originalSidebar, useSidebar: () => ({ currentMeeting: null }) }))
 mock.module('next/navigation', () => ({ ...originalNavigation, usePathname: () => '/settings' }))
 
 const { ShellActivitySurface } = await import('./ShellActivitySurface')
+
+beforeEach(() => {
+  isRecording = false
+  isPaused = false
+  isCommandPending = true
+  controllerCommand = 'finalize'
+  pauseRecording.mockClear()
+  resumeRecording.mockClear()
+})
 
 afterAll(() => {
   mock.module('@/contexts/MeetingActivityContext', () => originalActivity)
@@ -63,6 +83,32 @@ describe('ShellActivitySurface', () => {
     expect(rendered).toContain('Quarterly review')
     expect(rendered).toContain('more activities')
     expect(rendered).not.toContain('Duplicate recording failure')
+    renderer.unmount()
+  })
+
+  test('pause button calls pauseRecording when recording is active and not paused', async () => {
+    isRecording = true
+    isPaused = false
+    isCommandPending = false
+    controllerCommand = null
+    const renderer = create(<ShellActivitySurface />)
+    const button = renderer.root.findByProps({ 'aria-label': 'Pause recording' })
+    await act(async () => button.props.onClick())
+    expect(pauseRecording).toHaveBeenCalledTimes(1)
+    expect(resumeRecording).not.toHaveBeenCalled()
+    renderer.unmount()
+  })
+
+  test('resume button calls resumeRecording when recording is paused', async () => {
+    isRecording = true
+    isPaused = true
+    isCommandPending = false
+    controllerCommand = null
+    const renderer = create(<ShellActivitySurface />)
+    const button = renderer.root.findByProps({ 'aria-label': 'Resume recording' })
+    await act(async () => button.props.onClick())
+    expect(resumeRecording).toHaveBeenCalledTimes(1)
+    expect(pauseRecording).not.toHaveBeenCalled()
     renderer.unmount()
   })
 })
