@@ -56,6 +56,10 @@ pub mod transcription_queue;
 
 // Offline, local speaker diarization for completed recordings.
 pub mod diarization;
+
+// Nemotron-3 (streaming Sortformer) speaker diarization model runner.
+pub mod sortformer;
+
 pub mod speaker_corrections;
 
 // Onboarding's microphone check: record, meter and transcribe a short sample.
