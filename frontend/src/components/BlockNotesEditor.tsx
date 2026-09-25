@@ -129,7 +129,7 @@ export function BlockNotesEditor({
   }, [document.rawMarkdown, editable, editor, onChange]);
 
   return (
-    <div className="raw-notes-editor min-h-full text-[15px] text-ink">
+    <div className="raw-notes-editor min-h-full text-ink">
       <BlockNoteView editor={editor} editable={editable} theme="light" />
     </div>
   );
