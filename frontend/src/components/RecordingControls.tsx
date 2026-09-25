@@ -74,7 +74,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
               className="flex h-11 min-w-[174px] items-center justify-center gap-2 rounded-xl bg-brand px-5 text-sm font-semibold text-brand-foreground transition hover:opacity-90 disabled:opacity-40"
             >
               {controller.command === 'start' ? (
-                <div className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white" />
+                <div className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
               ) : <Mic className="h-4 w-4" />}
               {controller.command === 'start' ? 'Starting...' : 'Start meeting'}
             </button>

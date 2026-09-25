@@ -9,6 +9,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { LoaderIcon } from "lucide-react";
 import { usePaginatedTranscripts } from "@/hooks/usePaginatedTranscripts";
 import { parseSummaryContent } from "@/lib/summary-content";
+import { Button } from "@/components/ui/button";
+import { toneText } from "@/lib/theme-classes";
 
 interface MeetingDetailsResponse {
   id: string;
@@ -139,13 +141,12 @@ function MeetingDetailsContent() {
     return (
       <div className="flex items-center justify-center h-screen">
         <div className="text-center">
-          <p className="text-red-500 mb-4">{error}</p>
-          <button
+          <p className={`${toneText.error} mb-4`}>{error}</p>
+          <Button
             onClick={() => router.push('/')}
-            className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
           >
             Go Back
-          </button>
+          </Button>
         </div>
       </div>
     );

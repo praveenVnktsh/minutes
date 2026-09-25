@@ -13,6 +13,8 @@ import { updateService, UpdateInfo, UpdateProgress } from '@/services/updateServ
 import { check, Update } from '@tauri-apps/plugin-updater';
 import { relaunch } from '@tauri-apps/plugin-process';
 import { toast } from 'sonner';
+import { cn } from '@/lib/utils';
+import { panel, progress as progressBar, toneText } from '@/lib/theme-classes';
 
 interface UpdateDialogProps {
   open: boolean;
@@ -189,17 +191,17 @@ export function UpdateDialog({ open, onOpenChange, updateInfo }: UpdateDialogPro
           <DialogTitle className="flex items-center gap-2">
             {isDownloading ? (
               <>
-                <Loader2 className="h-5 w-5 animate-spin text-blue-600" />
+                <Loader2 className={cn('h-5 w-5 animate-spin', toneText.info)} />
                 Downloading Update
               </>
             ) : error ? (
               <>
-                <AlertCircle className="h-5 w-5 text-red-600" />
+                <AlertCircle className={cn('h-5 w-5', toneText.error)} />
                 Update Error
               </>
             ) : (
               <>
-                <Download className="h-5 w-5 text-blue-600" />
+                <Download className="h-5 w-5 text-ink-muted" />
                 Update Available
               </>
             )}
@@ -223,7 +225,7 @@ export function UpdateDialog({ open, onOpenChange, updateInfo }: UpdateDialogPro
                 </div>
                 <div className="flex justify-between text-sm">
                   <span className="text-muted-foreground">New Version:</span>
-                  <span className="font-medium text-blue-600">{updateInfo.version}</span>
+                  <span className="font-medium text-ink">{updateInfo.version}</span>
                 </div>
                 {updateInfo.date && (
                   <div className="flex justify-between text-sm">
@@ -246,9 +248,9 @@ export function UpdateDialog({ open, onOpenChange, updateInfo }: UpdateDialogPro
           {isDownloading && progress && (
             <div className="space-y-2">
               <div className="relative">
-                <div className="w-full bg-surface-2 rounded-full h-3">
+                <div className={cn('w-full rounded-full h-3', progressBar.track)}>
                   <div
-                    className="bg-blue-600 h-3 rounded-full transition-all duration-300 ease-out"
+                    className={cn('h-3 rounded-full transition-all duration-300 ease-out', progressBar.fill)}
                     style={{ width: `${Math.min(progress.percentage, 100)}%` }}
                   />
                 </div>
@@ -268,8 +270,8 @@ export function UpdateDialog({ open, onOpenChange, updateInfo }: UpdateDialogPro
           )}
 
           {error && (
-            <div className="bg-red-50 border border-red-200 rounded-lg p-3">
-              <p className="text-sm text-red-800">{error}</p>
+            <div className={cn('rounded-lg p-3', panel.error)}>
+              <p className="text-sm">{error}</p>
             </div>
           )}
         </div>
@@ -280,7 +282,7 @@ export function UpdateDialog({ open, onOpenChange, updateInfo }: UpdateDialogPro
               <Button variant="outline" onClick={() => handleOpenChange(false)}>
                 Later
               </Button>
-              <Button onClick={handleDownloadAndInstall} className="bg-blue-600 hover:bg-blue-700">
+              <Button onClick={handleDownloadAndInstall}>
                 <Download className="h-4 w-4 mr-2" />
                 Download & Install
               </Button>

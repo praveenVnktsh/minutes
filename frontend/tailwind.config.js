@@ -5,6 +5,8 @@ module.exports = {
     './src/pages/**/*.{js,ts,jsx,tsx,mdx}',
     './src/components/**/*.{js,ts,jsx,tsx,mdx}',
     './src/app/**/*.{js,ts,jsx,tsx,mdx}',
+    // Class recipes shared across the app (theme-classes.ts) live here.
+    './src/lib/**/*.{js,ts,jsx,tsx}',
   ],
   theme: {
   	extend: {

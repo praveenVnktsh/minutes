@@ -12,6 +12,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover";
 import { Button } from "./ui/button";
 import { motion, AnimatePresence } from "framer-motion";
 import { TranscriptSegmentData } from "@/types";
+import { recordingFill, speakerPalette, transcriptHighlight } from "@/lib/theme-classes";
 
 export interface VirtualizedTranscriptViewProps {
     /** Transcript segments to display */
@@ -55,24 +56,12 @@ export interface VirtualizedTranscriptViewProps {
 // Threshold for enabling virtualization (below this, use simple rendering)
 const VIRTUALIZATION_THRESHOLD = 10;
 
-// Stable per-speaker chip colors that read well in both themes.
-const SPEAKER_CHIP_COLORS = [
-    'bg-blue-100 text-blue-700 dark:bg-blue-500/15 dark:text-blue-300',
-    'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300',
-    'bg-violet-100 text-violet-700 dark:bg-violet-500/15 dark:text-violet-300',
-    'bg-amber-100 text-amber-800 dark:bg-amber-500/15 dark:text-amber-300',
-    'bg-rose-100 text-rose-700 dark:bg-rose-500/15 dark:text-rose-300',
-    'bg-cyan-100 text-cyan-700 dark:bg-cyan-500/15 dark:text-cyan-300',
-    'bg-orange-100 text-orange-700 dark:bg-orange-500/15 dark:text-orange-300',
-    'bg-pink-100 text-pink-700 dark:bg-pink-500/15 dark:text-pink-300',
-];
-
 function speakerChipClass(key: string): string {
     let hash = 0;
     for (let i = 0; i < key.length; i += 1) {
         hash = (hash * 31 + key.charCodeAt(i)) >>> 0;
     }
-    return SPEAKER_CHIP_COLORS[hash % SPEAKER_CHIP_COLORS.length];
+    return speakerPalette[hash % speakerPalette.length];
 }
 
 // Helper function to format seconds as recording-relative time [MM:SS]
@@ -301,11 +290,11 @@ const TranscriptSegment = memo(function TranscriptSegment({
     }, [onSeek, timestamp]);
 
     const highlightClass = isActiveMatch
-        ? 'bg-amber-400/25 ring-1 ring-amber-400/60'
+        ? transcriptHighlight.activeMatch
         : isMatch
-            ? 'bg-amber-400/10'
+            ? transcriptHighlight.match
             : isActive
-                ? 'bg-blue-500/15 shadow-[inset_3px_0_0_0_rgb(59,130,246)] ring-1 ring-inset ring-blue-500/35'
+                ? transcriptHighlight.playing
                 : '';
 
     const renderText = (value: string) => {
@@ -322,7 +311,7 @@ const TranscriptSegment = memo(function TranscriptSegment({
             }
             if (found > cursor) nodes.push(value.slice(cursor, found));
             nodes.push(
-                <mark key={`${found}-${cursor}`} className="rounded bg-amber-300/60 px-0.5 text-inherit">
+                <mark key={`${found}-${cursor}`} className={transcriptHighlight.matchText}>
                     {value.slice(found, found + needle.length)}
                 </mark>,
             );
@@ -555,7 +544,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                     {isRecording ? (
                         <>
                             <div className="flex items-center justify-center mb-3">
-                                <div className={`w-3 h-3 rounded-full ${isPaused ? 'bg-orange-500' : 'bg-blue-500 animate-pulse'}`}></div>
+                                <div className={`w-3 h-3 rounded-full ${isPaused ? recordingFill.paused : `${recordingFill.live} animate-pulse`}`}></div>
                             </div>
                             <p className="text-sm text-ink-muted">
                                 {isPaused ? 'Recording paused' : 'Listening for speech...'}
@@ -645,7 +634,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                             exit={{ opacity: 0 }}
                             className="flex items-center gap-2 mt-4 text-ink-muted"
                         >
-                            <div className="w-2 h-2 bg-blue-500 rounded-full animate-pulse"></div>
+                            <div className={`w-2 h-2 ${recordingFill.live} rounded-full animate-pulse`}></div>
                             <span className="text-sm">Listening...</span>
                         </motion.div>
                     )}
@@ -711,7 +700,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                             exit={{ opacity: 0 }}
                             className="flex items-center gap-2 mt-4 text-ink-muted"
                         >
-                            <div className="w-2 h-2 bg-blue-500 rounded-full animate-pulse"></div>
+                            <div className={`w-2 h-2 ${recordingFill.live} rounded-full animate-pulse`}></div>
                             <span className="text-sm">Listening...</span>
                         </motion.div>
                     )}

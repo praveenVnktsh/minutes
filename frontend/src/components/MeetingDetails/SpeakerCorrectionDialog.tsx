@@ -113,7 +113,7 @@ export function SpeakerCorrectionDialog({
                     <input
                       value={names[speaker.speaker_id] ?? speaker.display_name}
                       onChange={(event) => setNames((current) => ({ ...current, [speaker.speaker_id]: event.target.value }))}
-                      className="h-9 min-w-0 flex-1 rounded-md border border-hairline px-3 text-sm focus:border-blue-400 focus:outline-none"
+                      className="h-9 min-w-0 flex-1 rounded-md border border-hairline px-3 text-sm focus:border-focus focus:outline-none"
                       aria-label={`Name for ${speaker.speaker_id}`}
                     />
                     <Button

@@ -37,6 +37,8 @@ import { useRouter } from 'next/navigation';
 import { useSidebar } from '../Sidebar/SidebarProvider';
 import { LANGUAGES } from '@/constants/languages';
 import { useTranscriptionModels, ModelOption } from '@/hooks/useTranscriptionModels';
+import { cn } from '@/lib/utils';
+import { panel, progress as progressClasses, toneText } from '@/lib/theme-classes';
 
 
 interface ImportAudioDialogProps {
@@ -235,22 +237,22 @@ export function ImportAudioDialog({
           <DialogTitle className="flex items-center gap-2">
             {isProcessing ? (
               <>
-                <Loader2 className="h-5 w-5 animate-spin text-blue-600" />
+                <Loader2 className={cn('h-5 w-5 animate-spin', toneText.info)} />
                 Importing Audio...
               </>
             ) : error ? (
               <>
-                <AlertCircle className="h-5 w-5 text-red-600" />
+                <AlertCircle className={cn('h-5 w-5', toneText.error)} />
                 Import Failed
               </>
             ) : status === 'complete' ? (
               <>
-                <CheckCircle2 className="h-5 w-5 text-green-600" />
+                <CheckCircle2 className={cn('h-5 w-5', toneText.success)} />
                 Import Complete
               </>
             ) : (
               <>
-                <Upload className="h-5 w-5 text-blue-600" />
+                <Upload className="h-5 w-5 text-ink-muted" />
                 Import Audio File
               </>
             )}
@@ -271,7 +273,7 @@ export function ImportAudioDialog({
               {fileInfo ? (
                 <div className="bg-surface-2 rounded-lg p-4 space-y-3">
                   <div className="flex items-start gap-3">
-                    <FileAudio className="h-8 w-8 text-blue-600 flex-shrink-0" />
+                    <FileAudio className="h-8 w-8 text-ink-muted flex-shrink-0" />
                     <div className="flex-1 min-w-0">
                       <p className="font-medium text-ink truncate">{fileInfo.filename}</p>
                       <div className="flex items-center gap-4 text-sm text-ink-muted mt-1">
@@ -283,7 +285,7 @@ export function ImportAudioDialog({
                           <HardDrive className="h-3.5 w-3.5" />
                           {formatFileSize(fileInfo.size_bytes)}
                         </span>
-                        <span className="text-blue-600 font-medium">{fileInfo.format}</span>
+                        <span className="font-medium text-ink">{fileInfo.format}</span>
                       </div>
                     </div>
                   </div>
@@ -413,9 +415,9 @@ export function ImportAudioDialog({
           {isProcessing && progress && (
             <div className="space-y-2">
               <div className="relative">
-                <div className="w-full bg-surface-2 rounded-full h-3">
+                <div className={cn('w-full rounded-full h-3', progressClasses.track)}>
                   <div
-                    className="bg-blue-600 h-3 rounded-full transition-all duration-300 ease-out"
+                    className={cn(progressClasses.fill, 'h-3 rounded-full transition-all duration-300 ease-out')}
                     style={{ width: `${Math.min(progress.progress_percentage, 100)}%` }}
                   />
                 </div>
@@ -430,8 +432,8 @@ export function ImportAudioDialog({
 
           {/* Error display */}
           {error && (
-            <div className="bg-red-50 border border-red-200 rounded-lg p-3">
-              <p className="text-sm text-red-800">{error}</p>
+            <div className={cn(panel.error, 'rounded-lg p-3')}>
+              <p className="text-sm">{error}</p>
             </div>
           )}
         </div>
@@ -444,7 +446,6 @@ export function ImportAudioDialog({
               </Button>
               <Button
                 onClick={handleStartImport}
-                className="bg-blue-600 hover:bg-blue-700"
                 disabled={!fileInfo}
               >
                 <Upload className="h-4 w-4 mr-2" />

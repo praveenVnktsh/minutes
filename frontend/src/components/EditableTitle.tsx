@@ -1,6 +1,7 @@
 'use client';
 
 import { useRef, useEffect } from 'react';
+import { toneText } from '@/lib/theme-classes';
 
 interface EditableTitleProps {
   title: string;
@@ -49,7 +50,7 @@ export const EditableTitle: React.FC<EditableTitleProps> = ({
             onFinishEditing();
           }
         }}
-        className="text-2xl font-bold bg-surface-2 border border-hairline focus:outline-none focus:ring-2 focus:ring-blue-500 rounded px-3 py-1 w-full resize-none overflow-hidden"
+        className="text-2xl font-bold bg-surface-2 border border-hairline focus:outline-none focus:ring-2 focus:ring-focus rounded px-3 py-1 w-full resize-none overflow-hidden"
         style={{ minWidth: '300px', minHeight: '40px' }}
         autoFocus
         rows={1}
@@ -86,7 +87,7 @@ export const EditableTitle: React.FC<EditableTitleProps> = ({
         {onDelete && (
           <button 
             onClick={onDelete}
-            className="opacity-0 group-hover:opacity-100 transition-opacity duration-200 p-1 hover:bg-surface-2 rounded text-red-600"
+            className={`opacity-0 group-hover:opacity-100 transition-opacity duration-200 p-1 hover:bg-surface-2 rounded ${toneText.error}`}
             title="Delete section"
           >
             <svg 

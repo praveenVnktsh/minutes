@@ -287,7 +287,7 @@ export function PreferenceSettings() {
                   aria-label={`Change shortcut for ${label}`}
                   className={`rounded border px-2 py-1 text-xs font-medium ${
                     recordingKey === key
-                      ? 'border-blue-400 text-blue-500'
+                      ? 'border-focus text-ink'
                       : 'border-hairline bg-surface-2 text-ink-muted hover:text-ink'
                   }`}
                 >

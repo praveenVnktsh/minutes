@@ -3,6 +3,7 @@
 import { motion } from 'framer-motion';
 import { FileQuestion, Sparkles } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { panel, toneText } from '@/lib/theme-classes';
 import {
   Tooltip,
   TooltipContent,
@@ -39,7 +40,7 @@ export function EmptyStateSummary({
       </p>
 
       {error && (
-        <p role="alert" className="mb-4 max-w-md rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">
+        <p role="alert" className={`mb-4 max-w-md rounded-md ${panel.error} px-3 py-2 text-sm`}>
           {error}
         </p>
       )}
@@ -67,7 +68,7 @@ export function EmptyStateSummary({
       </TooltipProvider>
 
       {!hasModel && (
-        <p className="text-xs text-amber-600 mt-3">
+        <p className={`text-xs ${toneText.warning} mt-3`}>
           Please select a model in Settings first
         </p>
       )}

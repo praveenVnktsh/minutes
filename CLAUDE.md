@@ -371,6 +371,7 @@ $env:RUST_LOG="debug"; ./clean_run_windows.bat
 - **Logging Format**: Rust logs should include enough module context to diagnose app behavior
 - **Error Handling**: Rust uses `anyhow::Result`, frontend uses try-catch with user-friendly messages
 - **Naming**: Audio devices use "microphone" and "system" consistently (not "input"/"output")
+- **Colours**: The theme's colours are CSS variables in `frontend/src/app/globals.css`, exposed as Tailwind tokens (`surface-*`, `ink-*`, `hairline`, `selected`, `info`, `success`, `warning`, `error`, …). Shared patterns such as status boxes, badges, selected cards and progress bars are recipes in `frontend/src/lib/theme-classes.ts`. Use those, never Tailwind palette classes like `bg-red-50` or `text-blue-600`: palette classes don't switch with light/dark mode, and lint rejects them outside `theme-classes.ts` and `components/ui`
 - **Git Branches**:
   - `main`: Stable releases
   - `fix/*`: Bug fixes

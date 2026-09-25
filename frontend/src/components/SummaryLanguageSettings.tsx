@@ -6,6 +6,7 @@ import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover
 import { LanguagePickerPopover } from '@/components/LanguagePickerPopover';
 import { useRecentLanguages } from '@/hooks/useRecentLanguages';
 import { labelForCode } from '@/lib/summary-languages';
+import { selection } from '@/lib/theme-classes';
 
 export function SummaryLanguageSettings() {
   const { recents, pinned, addRecent, removeRecent, setPinned } = useRecentLanguages();
@@ -34,7 +35,7 @@ export function SummaryLanguageSettings() {
               key={code}
               className={`inline-flex items-center rounded-full border text-sm overflow-hidden ${
                 isPinned
-                  ? 'bg-blue-50 border-blue-200 text-blue-800'
+                  ? `${selection.pill} border-selected`
                   : 'bg-surface-2 border-hairline text-ink'
               }`}
             >
@@ -45,12 +46,12 @@ export function SummaryLanguageSettings() {
                 title={isPinned ? 'Click to unset as default' : 'Click to set as default'}
                 onClick={() => togglePin(code)}
                 className={`flex items-center gap-1.5 pl-3 pr-2 py-1 hover:brightness-95 active:brightness-90 ${
-                  isPinned ? 'text-blue-800' : 'text-ink'
+                  isPinned ? 'text-selected-foreground' : 'text-ink'
                 }`}
               >
                 <Pin
                   size={14}
-                  className={isPinned ? 'text-blue-600' : 'text-ink-subtle'}
+                  className={isPinned ? 'text-selected-foreground' : 'text-ink-subtle'}
                   fill={isPinned ? 'currentColor' : 'none'}
                 />
                 {labelForCode(code)}
@@ -59,7 +60,7 @@ export function SummaryLanguageSettings() {
                 type="button"
                 aria-label={`Remove ${labelForCode(code)}`}
                 onClick={() => removeRecent(code)}
-                className={`pr-2.5 pl-0.5 py-1 leading-none ${isPinned ? 'text-blue-400 hover:text-blue-700' : 'text-ink-subtle hover:text-ink'}`}
+                className={`pr-2.5 pl-0.5 py-1 leading-none ${isPinned ? 'text-selected-foreground/70 hover:text-selected-foreground' : 'text-ink-subtle hover:text-ink'}`}
               >
                 ×
               </button>

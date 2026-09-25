@@ -1,6 +1,7 @@
 import React from 'react';
 import { AlertCircle, CheckCircle2, Loader2, XCircle } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { badge, toneText } from '@/lib/theme-classes';
 import { Button } from '@/components/ui/button';
 import type { PermissionRowProps } from '@/types/onboarding';
 
@@ -30,7 +31,7 @@ export function PermissionRow({ icon, title, description, status, isPending = fa
         isAuthorized
           ? 'border-ink bg-surface-2'
           : isDenied
-            ? 'border-red-300 bg-red-50'
+            ? 'border-error bg-error-subtle'
             : isUndetermined
               ? 'border-warning bg-warning-subtle'
               : 'bg-surface-raised border-hairline'
@@ -45,15 +46,15 @@ export function PermissionRow({ icon, title, description, status, isPending = fa
             isAuthorized
               ? 'bg-surface-2'
               : isDenied
-                ? 'bg-red-100'
+                ? 'bg-error-subtle'
                 : isUndetermined
                   ? 'bg-warning-subtle'
-                  : 'bg-neutral-50'
+                  : 'bg-surface-2'
           )}
         >
           <div
             className={cn(
-              isAuthorized ? 'text-ink' : isDenied ? 'text-red-500' : isUndetermined ? 'text-warning' : 'text-neutral-500'
+              isAuthorized ? 'text-ink' : isDenied ? toneText.error : isUndetermined ? 'text-warning' : 'text-ink-muted'
             )}
           >
             {icon}
@@ -65,12 +66,12 @@ export function PermissionRow({ icon, title, description, status, isPending = fa
           <div className="font-medium truncate text-ink">{title}</div>
           <div className="text-sm text-muted-foreground">
             {isAuthorized ? (
-              <span className="text-green-600 flex items-center gap-1">
+              <span className={cn(toneText.success, 'flex items-center gap-1')}>
                 <CheckCircle2 className="w-3.5 h-3.5" />
                 Access Granted
               </span>
             ) : isDenied ? (
-              <span className="text-red-500 flex items-center gap-1">
+              <span className={cn(toneText.error, 'flex items-center gap-1')}>
                 <XCircle className="w-3.5 h-3.5" />
                 Access Denied - Please grant in System Settings
               </span>
@@ -101,8 +102,8 @@ export function PermissionRow({ icon, title, description, status, isPending = fa
           </Button>
         )}
         {isAuthorized && (
-          <div className="flex size-8 items-center justify-center rounded-full bg-green-100">
-            <CheckCircle2 className="w-4 h-4 text-green-600" />
+          <div className={cn('flex size-8 items-center justify-center rounded-full', badge.success)}>
+            <CheckCircle2 className="w-4 h-4" />
           </div>
         )}
       </div>

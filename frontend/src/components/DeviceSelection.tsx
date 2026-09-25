@@ -7,6 +7,8 @@ import { AudioBackendSelector } from './AudioBackendSelector';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Label } from '@/components/ui/label';
 import Analytics from '@/lib/analytics';
+import { cn } from '@/lib/utils';
+import { badge, panel } from '@/lib/theme-classes';
 
 export interface AudioDevice {
   name: string;
@@ -287,8 +289,8 @@ export function DeviceSelection({ selectedDevices, onDeviceChange, disabled = fa
             disabled={disabled || inputDevices.length === 0}
             className={`px-3 py-1 text-xs font-medium rounded-md transition-colors ${
               isMonitoring
-                ? 'bg-red-100 text-red-700 hover:bg-red-200'
-                : 'bg-green-100 text-green-700 hover:bg-green-200'
+                ? `${badge.error} hover:opacity-80`
+                : `${badge.success} hover:opacity-80`
             } disabled:pointer-events-none disabled:opacity-50`}
             title={inputDevices.length === 0 ? 'No microphones available to test' : 'Test microphone levels'}
           >
@@ -305,7 +307,7 @@ export function DeviceSelection({ selectedDevices, onDeviceChange, disabled = fa
       </div>
 
       {error && (
-        <div className="p-3 text-sm text-red-700 bg-red-50 border border-red-200 rounded-md">
+        <div className={cn('p-3 text-sm rounded-md', panel.error)}>
           {error}
         </div>
       )}
