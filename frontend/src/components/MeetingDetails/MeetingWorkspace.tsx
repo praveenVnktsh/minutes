@@ -23,6 +23,10 @@ const DEFAULT_DOCK_WIDTH = 520;
  *  notes fall below MIN_NOTES_WIDTH. */
 const MIN_NOTES_WIDTH = 520;
 
+/** Below this workspace width the notes and the dock no longer fit side by
+ *  side, so the dock becomes an overlay and panels open one at a time. */
+const OVERLAY_WORKSPACE_WIDTH = 760;
+
 function clampDockWidth(value: number, viewportWidth: number, sidebarWidth: number): number {
   const max = Math.max(360, viewportWidth - sidebarWidth - MIN_NOTES_WIDTH);
   return Math.min(max, Math.max(320, value));
@@ -82,9 +86,9 @@ export function MeetingWorkspace({
   titlePending?: boolean;
   titleError?: string | null;
 }) {
-  const { compact, collapsed } = useShell();
+  const { collapsed } = useShell();
   const sidebarWidth = collapsed ? SIDEBAR_COLLAPSED_WIDTH : SIDEBAR_WIDTH;
-  const [transcriptOpen, setTranscriptOpen] = useState(() => !compact);
+  const [transcriptOpen, setTranscriptOpen] = useState(true);
   const [chatOpen, setChatOpen] = useState(false);
   const [ratio, setRatio] = useState(62);
   const [dockWidth, setDockWidth] = useState(DEFAULT_DOCK_WIDTH);
@@ -226,25 +230,27 @@ export function MeetingWorkspace({
   }, [dockWidth, sidebarWidth]);
 
   const dateSubtitle = useMemo(() => formatDateSubtitle(createdAt), [createdAt]);
-  const narrow = compact || (workspaceWidth > 0 && workspaceWidth < 900);
+  // Only a genuinely tight workspace overlays the dock; a non-maximized
+  // (compact) window still keeps the transcript as a side rail.
+  const narrow = workspaceWidth > 0 && workspaceWidth < OVERLAY_WORKSPACE_WIDTH;
   const dockVisible = transcriptOpen || (chatOpen && showAssistant);
 
-  // Compact mode defaults to everything closed; the user opens a panel on demand.
-  // Entering compact closes both, leaving compact restores both.
-  const prevCompactRef = useRef(compact);
+  // The overlay layout defaults to everything closed; the user opens a panel on
+  // demand. Entering it closes both, leaving it restores the transcript.
+  const prevNarrowRef = useRef(narrow);
   useEffect(() => {
-    if (narrow && !prevCompactRef.current) {
+    if (narrow && !prevNarrowRef.current) {
       setTranscriptOpen(false);
       setChatOpen(false);
-    } else if (!narrow && prevCompactRef.current) {
+    } else if (!narrow && prevNarrowRef.current) {
       setTranscriptOpen(true);
       setChatOpen(false);
     }
-    prevCompactRef.current = narrow;
+    prevNarrowRef.current = narrow;
   }, [narrow]);
 
-  // In compact mode there is only room for one panel, so transcript and chat
-  // become mutually exclusive.
+  // In the overlay layout there is only room for one panel, so transcript and
+  // chat become mutually exclusive.
   useEffect(() => {
     if (narrow && transcriptOpen && chatOpen) setChatOpen(false);
   }, [narrow, transcriptOpen, chatOpen]);
@@ -378,7 +384,7 @@ export function MeetingWorkspace({
           />
         )}
 
-        {/* Transcript / chat dock: always a right-side rail; collapsed by default in compact */}
+        {/* Transcript / chat dock: always a right-side rail; overlay when the workspace is too tight */}
         <section
           aria-hidden={!dockVisible}
           className={`${dockVisible ? 'flex' : 'hidden'} min-h-0 min-w-0 shrink-0 flex-col overflow-hidden border-l border-hairline bg-surface-1 ${narrow ? 'absolute inset-x-0 bottom-0 top-[76px] z-20' : ''}`}
