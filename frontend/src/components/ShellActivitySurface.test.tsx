@@ -16,6 +16,8 @@ const failedActivities = Array.from({ length: 4 }, (_, index) => ({
 
 const pauseRecording = mock(async () => {})
 const resumeRecording = mock(async () => {})
+const dismissSummary = mock(() => {})
+let summaries: Array<Record<string, unknown>> = []
 let isRecording = false
 let isPaused = false
 let isCommandPending = true
@@ -37,12 +39,8 @@ mock.module('@/contexts/MeetingActivityContext', () => ({
         { task_id: 'active-job', meeting_id: 'active-meeting', kind: 'import', status: 'transcribing', title: 'Active transcription', stage: 'transcribing', progress_percentage: 42, message: null, error: null, warning: null, controls_available: true, revision: 19 },
       ],
     },
-    summaries: [{
-      activityId: 'summary-meeting:process', revision: 4, meetingId: 'summary-meeting', processId: 'process', status: 'processing',
-      response: { status: 'processing', meetingName: 'Quarterly review', meeting_id: 'summary-meeting', start: 'process', end: null, data: null, error: null },
-      error: null, reconciliationError: null,
-    }],
-    retrySummary: async () => {}, cancelSummary: async () => true,
+    summaries,
+    retrySummary: async () => {}, cancelSummary: async () => true, dismissSummary,
     cancelTranscription: async () => true, pauseTranscription: async () => true, resumeTranscription: async () => true,
   }),
 }))
@@ -67,8 +65,14 @@ beforeEach(() => {
   activeMeetingId = null
   pathname = '/settings'
   currentMeeting = null
+  summaries = [{
+    activityId: 'summary-meeting:process', revision: 4, meetingId: 'summary-meeting', processId: 'process', status: 'processing',
+    response: { status: 'processing', meetingName: 'Quarterly review', meeting_id: 'summary-meeting', start: 'process', end: null, data: null, error: null },
+    error: null, reconciliationError: null,
+  }]
   pauseRecording.mockClear()
   resumeRecording.mockClear()
+  dismissSummary.mockClear()
 })
 
 afterAll(() => {
@@ -140,6 +144,50 @@ describe('ShellActivitySurface', () => {
     currentMeeting = { id: 'other-meeting' }
     const renderer = create(<ShellActivitySurface />)
     expect(renderer.root.findAllByProps({ 'aria-label': 'Pause recording' })).not.toHaveLength(0)
+    renderer.unmount()
+  })
+
+  test('dismissing an activity card hides it and reveals the next queued card', async () => {
+    const renderer = create(<ShellActivitySurface />)
+    expect(JSON.stringify(renderer.toJSON())).toContain('Show 4 more activities')
+    const dismissButton = renderer.root.findByProps({ 'aria-label': 'Dismiss Preparing early import' })
+    await act(async () => dismissButton.props.onClick())
+    const rendered = JSON.stringify(renderer.toJSON())
+    expect(rendered).not.toContain('Preparing early import')
+    expect(rendered).toContain('Retained failure 3')
+    expect(rendered).toContain('Show 3 more activities')
+    renderer.unmount()
+  })
+
+  test('a dismissed card stays hidden across progress revisions and returns on a status change', async () => {
+    const processing = summaries[0]
+    const renderer = create(<ShellActivitySurface />)
+    const dismissButton = renderer.root.findByProps({ 'aria-label': 'Dismiss Quarterly review' })
+    await act(async () => dismissButton.props.onClick())
+    expect(JSON.stringify(renderer.toJSON())).not.toContain('Quarterly review')
+    summaries = [{ ...processing, revision: 5 }]
+    await act(async () => renderer.update(<ShellActivitySurface />))
+    expect(JSON.stringify(renderer.toJSON())).not.toContain('Quarterly review')
+    expect(JSON.stringify(renderer.toJSON())).toContain('Show 3 more activities')
+    expect(dismissSummary).not.toHaveBeenCalled()
+    summaries = [{ ...processing, revision: 6, status: 'failed', error: 'Summary failed' }]
+    await act(async () => renderer.update(<ShellActivitySurface />))
+    expect(JSON.stringify(renderer.toJSON())).toContain('Show 4 more activities')
+    renderer.unmount()
+  })
+
+  test('dismissing a failed summary hides it locally and calls dismissSummary', async () => {
+    summaries = [{
+      activityId: 'failed-summary:process-2', revision: 7, meetingId: 'failed-meeting', processId: 'process-2', status: 'failed',
+      response: null, error: 'boom', reconciliationError: null,
+    }]
+    const renderer = create(<ShellActivitySurface />)
+    const showMoreButton = renderer.root.findByProps({ className: 'w-full rounded-lg bg-surface-raised px-3 py-2 text-xs font-semibold text-ink-muted shadow' })
+    await act(async () => showMoreButton.props.onClick())
+    const dismissButton = renderer.root.findByProps({ 'aria-label': 'Dismiss Meeting summary' })
+    await act(async () => dismissButton.props.onClick())
+    expect(dismissSummary).toHaveBeenCalledWith('failed-meeting', 'process-2')
+    expect(JSON.stringify(renderer.toJSON())).not.toContain('Meeting summary')
     renderer.unmount()
   })
 })
