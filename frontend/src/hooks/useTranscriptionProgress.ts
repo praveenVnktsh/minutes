@@ -37,6 +37,11 @@ export interface TranscriptionProgress {
   message: string | null;
   /** True while the run can still be cancelled (activity.controls_available). */
   cancellable: boolean;
+  /**
+   * True once the pass has moved on to identifying speakers. The new transcript
+   * is already saved by then, so callers should keep it readable.
+   */
+  isDiarization: boolean;
 }
 
 const RETRANSCRIPTION_STAGES: Record<string, string> = {
@@ -106,6 +111,7 @@ export function useTranscriptionProgress(
       stageLabel,
       message: activity.message,
       cancellable: activity.controls_available,
+      isDiarization,
     };
   }, [meetingId, snapshot.activities]);
 }

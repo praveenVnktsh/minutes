@@ -6,6 +6,7 @@ import type { MeetingActivity, MeetingActivityStatus } from '@/types/meetingActi
 import { useSidebar } from '@/components/Sidebar/SidebarProvider';
 import Analytics from '@/lib/analytics';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { Download, Loader2, MoreHorizontal } from 'lucide-react';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { TranscriptPanel } from '@/components/MeetingDetails/TranscriptPanel';
@@ -41,6 +42,7 @@ export default function PageContent({
   onRetryInitialSummary,
   onMeetingUpdated,
   onRefetchTranscripts,
+  onRefreshTranscripts,
   // Pagination props for efficient transcript loading
   segments,
   hasMore,
@@ -56,6 +58,8 @@ export default function PageContent({
   onRetryInitialSummary?: () => void;
   onMeetingUpdated?: () => Promise<void>;
   onRefetchTranscripts?: () => Promise<void>;
+  /** Reload transcript rows in place, without clearing the panel. */
+  onRefreshTranscripts?: () => Promise<void>;
   // Pagination props
   segments?: any[];
   hasMore?: boolean;
@@ -218,6 +222,24 @@ export default function PageContent({
     }
     if (hasNewlyReadyTask) void onRefetchTranscripts?.();
   }, [meeting.id, meetingActivities, onRefetchTranscripts]);
+
+  // The Rust core saves a pass's transcript before it starts diarizing, and saves
+  // speaker labels when diarization finishes. Show each as soon as it lands.
+  useEffect(() => {
+    const reload = onRefreshTranscripts ?? onRefetchTranscripts;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listen<{ meeting_id: string }>('transcripts-updated', ({ payload }) => {
+      if (payload.meeting_id === meeting.id) void reload?.();
+    }).then((fn) => {
+      if (disposed) fn();
+      else unlisten = fn;
+    }).catch((error) => console.warn('Could not listen for transcript updates:', error));
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [meeting.id, onRefreshTranscripts, onRefetchTranscripts]);
 
   useEffect(() => {
     const handleFinalized = (event: Event) => {

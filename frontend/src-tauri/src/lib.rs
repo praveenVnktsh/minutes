@@ -766,6 +766,9 @@ pub fn run() {
             // Initialize transcription queue worker (processes import/retranscribe tasks sequentially)
             audio::transcription_queue::init_queue_worker(_app.handle());
 
+            // Finish speaker identification that was cut off when the app last quit.
+            audio::diarization::init_resume_worker(_app.handle());
+
             // Deliver durable transcription-complete webhooks in the background.
             webhooks::init_worker(_app.handle());
 
@@ -1047,6 +1050,7 @@ pub fn run() {
             audio::retranscription::cancel_retranscription_command,
             audio::retranscription::is_retranscription_in_progress_command,
             audio::diarization::run_speaker_diarization,
+            audio::diarization::get_diarization_status,
             audio::speaker_corrections::get_speaker_identities,
             audio::speaker_corrections::rename_speaker,
             audio::speaker_corrections::merge_speakers,

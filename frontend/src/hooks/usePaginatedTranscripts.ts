@@ -26,6 +26,8 @@ interface UsePaginatedTranscriptsReturn {
     loadMore: () => Promise<void>;
     reset: () => void;
     refetch: () => Promise<void>;
+    /** Reload rows in place, keeping the current list on screen until the new one arrives. */
+    refresh: () => Promise<void>;
 }
 
 /**
@@ -229,6 +231,22 @@ export function usePaginatedTranscripts({
         }
     }, [meetingId, reset, loadMetadata, loadAllTranscripts, isCurrentRequest]);
 
+    // Swap in fresh rows (e.g. transcription saved, speakers applied) without
+    // clearing the list, so the panel neither flashes empty nor loses its scroll.
+    const refresh = useCallback(async () => {
+        if (!meetingId || activeMeetingIdRef.current !== meetingId) return;
+
+        requestIdRef.current += 1;
+        const requestId = requestIdRef.current;
+        isLoadingRef.current = false;
+        setIsLoadingMore(false);
+        try {
+            await loadAllTranscripts(requestId);
+        } finally {
+            if (isCurrentRequest(requestId)) setIsLoading(false);
+        }
+    }, [meetingId, loadAllTranscripts, isCurrentRequest]);
+
     // A new meeting or effect lifetime owns its own requests.
     useEffect(() => {
         activeMeetingIdRef.current = meetingId;
@@ -263,5 +281,6 @@ export function usePaginatedTranscripts({
         loadMore,
         reset,
         refetch,
+        refresh,
     };
 }

@@ -4,6 +4,7 @@ use log::{debug, info};
 use once_cell::sync::Lazy;
 use std::path::Path;
 use std::sync::Arc;
+use tauri::{AppHandle, Emitter, Runtime};
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 use uuid::Uuid;
 
@@ -69,6 +70,16 @@ pub(crate) fn create_transcript_segments(
             }
         })
         .collect()
+}
+
+/// Tell the frontend a meeting's transcript rows changed in the database (a
+/// transcription pass was saved, or speaker labels were applied) so an open
+/// meeting can reload them without waiting for the rest of its task.
+pub(crate) fn emit_transcripts_updated<R: Runtime>(app: &AppHandle<R>, meeting_id: &str) {
+    let _ = app.emit(
+        "transcripts-updated",
+        serde_json::json!({ "meeting_id": meeting_id }),
+    );
 }
 
 /// Write transcripts.json to a meeting folder (atomic write with temp file)
