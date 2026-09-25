@@ -844,16 +844,47 @@ pub fn toggle_main_window<R: Runtime>(app: &AppHandle<R>) {
     let minimized = window.is_minimized().unwrap_or(false);
 
     if visible && !minimized {
-        if let Err(error) = window.hide() {
-            log::error!("Failed to hide main window: {}", error);
-        }
+        hide_main_window(app);
     } else {
         focus_main_window(app);
     }
 }
 
+/// Hide the main window and drop the Dock icon, leaving the app reachable from the tray.
+pub(crate) fn hide_main_window<R: Runtime>(app: &AppHandle<R>) {
+    let Some(window) = app.get_webview_window("main") else {
+        log::warn!("Could not find main window");
+        return;
+    };
+
+    if let Err(e) = window.hide() {
+        log::error!("Failed to hide main window: {}", e);
+        return;
+    }
+
+    set_dock_visible(app, false);
+}
+
+/// On macOS, switch between a regular app (Dock icon, app menu) and a tray-only accessory app.
+#[cfg(target_os = "macos")]
+fn set_dock_visible<R: Runtime>(app: &AppHandle<R>, visible: bool) {
+    let policy = if visible {
+        tauri::ActivationPolicy::Regular
+    } else {
+        tauri::ActivationPolicy::Accessory
+    };
+    if let Err(e) = app.set_activation_policy(policy) {
+        log::error!("Failed to set activation policy: {}", e);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_dock_visible<R: Runtime>(_app: &AppHandle<R>, _visible: bool) {}
+
 pub(crate) fn focus_main_window<R: Runtime>(app: &AppHandle<R>) {
     if let Some(window) = app.get_webview_window("main") {
+        set_dock_visible(app, true);
+
         if let Err(e) = window.unminimize() {
             log::error!("Failed to unminimize main window: {}", e);
         }
