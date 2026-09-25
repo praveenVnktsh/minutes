@@ -937,6 +937,7 @@ pub fn run() {
             api::api_get_meetings,
             api::api_set_meeting_pinned,
             api::api_set_meeting_archived,
+            api::api_set_meeting_debug,
             api::save_text_export,
             api::api_discard_meeting,
             api::api_get_meeting_audio_path,

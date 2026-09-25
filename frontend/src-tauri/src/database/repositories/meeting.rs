@@ -301,6 +301,15 @@ impl MeetingsRepository {
         Self::set_meeting_flag(pool, meeting_id, "archived", archived).await
     }
 
+    /// Mark a meeting as debug, or keep it as a real meeting.
+    pub async fn set_meeting_debug(
+        pool: &SqlitePool,
+        meeting_id: &str,
+        is_debug: bool,
+    ) -> Result<bool, SqlxError> {
+        Self::set_meeting_flag(pool, meeting_id, "is_debug", is_debug).await
+    }
+
     /// Shared implementation for boolean meeting flags.
     ///
     /// `column` is always one of this module's own constants, never user input.

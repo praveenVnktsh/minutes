@@ -55,6 +55,7 @@ mock.module('@/components/Sidebar/SidebarProvider', () => ({
     selectSearchResults: () => [],
     setMeetingPinned: async () => {},
     setMeetingArchived: async () => {},
+    setMeetingDebug: async () => {},
     meetingMutations: {},
     refetchMeetings: async () => {},
   }),
