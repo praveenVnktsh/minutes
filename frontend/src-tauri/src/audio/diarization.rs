@@ -940,6 +940,111 @@ async fn persist<R: Runtime>(
     Ok(())
 }
 
+/// Meetings being diarized in this process. `diarization_state` alone cannot
+/// tell a running meeting from one whose run died with the app, so the status
+/// command checks this first.
+static RUNNING: std::sync::Mutex<Option<HashSet<String>>> = std::sync::Mutex::new(None);
+
+/// Holds a meeting's slot in [`RUNNING`] and frees it on drop, so an early
+/// return or a panic cannot leave the meeting stuck as running.
+struct RunningSlot(String);
+
+impl RunningSlot {
+    fn acquire(meeting_id: &str) -> Result<Self> {
+        let mut running = RUNNING.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !running.get_or_insert_with(HashSet::new).insert(meeting_id.to_string()) {
+            bail!("Speaker identification is already running for this meeting");
+        }
+        Ok(Self(meeting_id.to_string()))
+    }
+}
+
+impl Drop for RunningSlot {
+    fn drop(&mut self) {
+        let mut running = RUNNING.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(running) = running.as_mut() {
+            running.remove(&self.0);
+        }
+    }
+}
+
+fn is_running(meeting_id: &str) -> bool {
+    RUNNING
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .as_ref()
+        .is_some_and(|running| running.contains(meeting_id))
+}
+
+/// Tell the frontend a meeting's [`DiarizationStatus`] may have changed.
+fn emit_status_changed<R: Runtime>(app: &AppHandle<R>, meeting_id: &str) {
+    let _ = app.emit(
+        "diarization-status-changed",
+        serde_json::json!({ "meeting_id": meeting_id }),
+    );
+}
+
+/// Record that a meeting's transcript rows were replaced and need speakers
+/// again. Runs inside the caller's transaction so the two land together.
+pub(crate) async fn mark_pending_in_tx(
+    tx: &mut sqlx::SqliteConnection,
+    meeting_id: &str,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO diarization_state (meeting_id, status, error, attempts, updated_at) \
+         VALUES (?, 'pending', NULL, 0, ?) \
+         ON CONFLICT(meeting_id) DO UPDATE SET status = 'pending', error = NULL, attempts = 0, \
+         updated_at = excluded.updated_at",
+    )
+    .bind(meeting_id)
+    .bind(Utc::now().to_rfc3339())
+    .execute(tx)
+    .await?;
+    Ok(())
+}
+
+/// Mark a run as started: still pending, one more attempt.
+async fn record_started(pool: &sqlx::SqlitePool, meeting_id: &str) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO diarization_state (meeting_id, status, error, attempts, updated_at) \
+         VALUES (?, 'pending', NULL, 1, ?) \
+         ON CONFLICT(meeting_id) DO UPDATE SET status = 'pending', error = NULL, \
+         attempts = diarization_state.attempts + 1, updated_at = excluded.updated_at",
+    )
+    .bind(meeting_id)
+    .bind(Utc::now().to_rfc3339())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Record how a run ended. Success resets the attempt count.
+async fn record_finished(
+    pool: &sqlx::SqlitePool,
+    meeting_id: &str,
+    error: Option<&str>,
+) -> Result<()> {
+    let (status, reset_attempts) = match error {
+        None => ("done", true),
+        Some(_) => ("failed", false),
+    };
+    sqlx::query(
+        "UPDATE diarization_state SET status = ?, error = ?, \
+         attempts = CASE WHEN ? THEN 0 ELSE attempts END, updated_at = ? \
+         WHERE meeting_id = ?",
+    )
+    .bind(status)
+    .bind(error)
+    .bind(reset_attempts)
+    .bind(Utc::now().to_rfc3339())
+    .bind(meeting_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Diarize a meeting and persist the speakers, tracking the run in
+/// `diarization_state` so a failure or a quit mid-run can be retried.
 pub async fn run_for_meeting<R: Runtime>(
     app: &AppHandle<R>,
     meeting_id: &str,
@@ -948,6 +1053,38 @@ pub async fn run_for_meeting<R: Runtime>(
     if matches!(num_speakers, Some(0)) {
         return Err(anyhow!("num_speakers must be greater than zero"));
     }
+    let pool = app
+        .try_state::<AppState>()
+        .ok_or_else(|| anyhow!("App state not available"))?
+        .db_manager
+        .pool()
+        .clone();
+    let slot = RunningSlot::acquire(meeting_id)?;
+    if let Err(error) = record_started(&pool, meeting_id).await {
+        log::warn!("Diarization: could not record start for meeting {meeting_id}: {error:#}");
+    }
+    emit_status_changed(app, meeting_id);
+
+    let outcome = diarize_and_persist(app, meeting_id, num_speakers).await;
+    let error = outcome.as_ref().err().map(|error| format!("{error:#}"));
+    if let Err(record_error) = record_finished(&pool, meeting_id, error.as_deref()).await {
+        log::warn!(
+            "Diarization: could not record result for meeting {meeting_id}: {record_error:#}"
+        );
+    }
+    if let Some(error) = &error {
+        log::warn!("Diarization failed for meeting {meeting_id}: {error}");
+    }
+    drop(slot);
+    emit_status_changed(app, meeting_id);
+    outcome
+}
+
+async fn diarize_and_persist<R: Runtime>(
+    app: &AppHandle<R>,
+    meeting_id: &str,
+    num_speakers: Option<usize>,
+) -> Result<DiarizationResult> {
     let state = app
         .try_state::<AppState>()
         .ok_or_else(|| anyhow!("App state not available"))?;
@@ -1028,6 +1165,7 @@ pub async fn run_for_meeting<R: Runtime>(
     )
     .await
     .context("Failed to persist diarization output")?;
+    crate::audio::common::emit_transcripts_updated(app, meeting_id);
     emit_stage(
         app,
         meeting_id,
@@ -1037,6 +1175,141 @@ pub async fn run_for_meeting<R: Runtime>(
     );
     let _ = app.emit("diarization-complete", &result);
     Ok(result)
+}
+
+/// Whether a meeting's current transcript has speaker labels, for the
+/// transcript panel's status and retry affordance.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum DiarizationStatus {
+    /// Speakers are applied to the current transcript.
+    Done,
+    /// A run is in progress in this process.
+    Running,
+    /// A run is owed but not running: it was interrupted (the app quit
+    /// mid-run) or has not started yet.
+    Pending { attempts: i64 },
+    /// The last run failed.
+    Failed { error: String },
+    /// No run was ever recorded, e.g. an imported meeting.
+    Missing,
+}
+
+async fn diarization_status(pool: &sqlx::SqlitePool, meeting_id: &str) -> Result<DiarizationStatus> {
+    if is_running(meeting_id) {
+        return Ok(DiarizationStatus::Running);
+    }
+    let row: Option<(String, Option<String>, i64)> = sqlx::query_as(
+        "SELECT status, error, attempts FROM diarization_state WHERE meeting_id = ?",
+    )
+    .bind(meeting_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(match row {
+        Some((status, error, attempts)) => match status.as_str() {
+            "done" => DiarizationStatus::Done,
+            "failed" => DiarizationStatus::Failed {
+                error: error.unwrap_or_else(|| "Unknown error".to_string()),
+            },
+            _ => DiarizationStatus::Pending { attempts },
+        },
+        // Meetings diarized before this table existed only have a run.
+        None => {
+            let has_run: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM diarization_runs WHERE meeting_id = ?)",
+            )
+            .bind(meeting_id)
+            .fetch_one(pool)
+            .await?;
+            if has_run {
+                DiarizationStatus::Done
+            } else {
+                DiarizationStatus::Missing
+            }
+        }
+    })
+}
+
+#[tauri::command]
+pub async fn get_diarization_status<R: Runtime>(
+    app: AppHandle<R>,
+    meeting_id: String,
+) -> Result<DiarizationStatus, String> {
+    let state = app
+        .try_state::<AppState>()
+        .ok_or_else(|| "App state not available".to_string())?;
+    diarization_status(state.db_manager.pool(), &meeting_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// Wait before resuming so startup (model loads, the first window) is not
+/// competing with a CPU-heavy diarization run.
+const RESUME_DELAY: Duration = Duration::from_secs(30);
+/// Stop resuming a meeting after this many runs without a success: it keeps
+/// failing or crashing the app, and the panel offers a manual retry instead.
+const RESUME_MAX_ATTEMPTS: i64 = 3;
+/// Only resume meetings whose diarization was owed within this window.
+const RESUME_WINDOW_DAYS: i64 = 7;
+
+/// Meetings whose diarization was owed when the app last quit, oldest first.
+async fn interrupted_meetings(pool: &sqlx::SqlitePool) -> Result<Vec<String>> {
+    let since = (Utc::now() - chrono::Duration::days(RESUME_WINDOW_DAYS)).to_rfc3339();
+    Ok(sqlx::query_scalar(
+        "SELECT meeting_id FROM diarization_state \
+         WHERE status = 'pending' AND attempts < ? AND updated_at >= ? \
+         ORDER BY updated_at",
+    )
+    .bind(RESUME_MAX_ATTEMPTS)
+    .bind(since)
+    .fetch_all(pool)
+    .await?)
+}
+
+/// Resume diarization the app was doing when it last quit. Runs one meeting
+/// at a time in the background and waits out any live recording first.
+pub fn init_resume_worker<R: Runtime>(app: &AppHandle<R>) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(RESUME_DELAY).await;
+        // The database is not set up until onboarding finishes.
+        let Some(pool) = app
+            .try_state::<AppState>()
+            .map(|state| state.db_manager.pool().clone())
+        else {
+            return;
+        };
+        let meetings = match interrupted_meetings(&pool).await {
+            Ok(meetings) => meetings,
+            Err(error) => {
+                log::warn!("Diarization resume: could not list interrupted meetings: {error:#}");
+                return;
+            }
+        };
+        if meetings.is_empty() {
+            return;
+        }
+        log::info!(
+            "Diarization resume: {} meeting(s) were interrupted, resuming",
+            meetings.len()
+        );
+        for meeting_id in meetings {
+            while crate::audio::recording_commands::has_recording_session() {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+            }
+            if is_running(&meeting_id) {
+                continue;
+            }
+            match run_for_meeting(&app, &meeting_id, None).await {
+                Ok(result) => log::info!(
+                    "Diarization resume: meeting {meeting_id} has {} speaker(s)",
+                    result.speaker_count
+                ),
+                // run_for_meeting already logged and recorded the failure.
+                Err(_) => {}
+            }
+        }
+    });
 }
 
 #[tauri::command]
@@ -1053,6 +1326,108 @@ pub async fn run_speaker_diarization<R: Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn state_pool() -> sqlx::SqlitePool {
+        use sqlx::Executor;
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        pool.execute(
+            "CREATE TABLE meetings (id TEXT PRIMARY KEY NOT NULL); \
+             INSERT INTO meetings VALUES ('m1'), ('m2'), ('m3'); \
+             CREATE TABLE diarization_runs (id TEXT PRIMARY KEY, meeting_id TEXT NOT NULL);",
+        )
+        .await
+        .unwrap();
+        pool.execute(include_str!(
+            "../../migrations/20260924000000_add_diarization_state.sql"
+        ))
+        .await
+        .unwrap();
+        pool
+    }
+
+    #[tokio::test]
+    async fn status_follows_a_meeting_through_failure_retry_and_retranscription() {
+        let pool = state_pool().await;
+        assert_eq!(diarization_status(&pool, "m1").await.unwrap(), DiarizationStatus::Missing);
+
+        record_started(&pool, "m1").await.unwrap();
+        assert_eq!(
+            diarization_status(&pool, "m1").await.unwrap(),
+            DiarizationStatus::Pending { attempts: 1 },
+            "a started run with no live slot reads as interrupted"
+        );
+        {
+            let _slot = RunningSlot::acquire("m1").unwrap();
+            assert_eq!(diarization_status(&pool, "m1").await.unwrap(), DiarizationStatus::Running);
+        }
+
+        record_finished(&pool, "m1", Some("No speaker turns were detected")).await.unwrap();
+        assert_eq!(
+            diarization_status(&pool, "m1").await.unwrap(),
+            DiarizationStatus::Failed { error: "No speaker turns were detected".into() }
+        );
+
+        record_started(&pool, "m1").await.unwrap();
+        assert_eq!(
+            diarization_status(&pool, "m1").await.unwrap(),
+            DiarizationStatus::Pending { attempts: 2 }
+        );
+        record_finished(&pool, "m1", None).await.unwrap();
+        assert_eq!(diarization_status(&pool, "m1").await.unwrap(), DiarizationStatus::Done);
+
+        // A retranscription replaces the rows, so speakers are owed again.
+        let mut conn = pool.acquire().await.unwrap();
+        mark_pending_in_tx(&mut conn, "m1").await.unwrap();
+        drop(conn);
+        assert_eq!(
+            diarization_status(&pool, "m1").await.unwrap(),
+            DiarizationStatus::Pending { attempts: 0 }
+        );
+    }
+
+    #[tokio::test]
+    async fn meetings_diarized_before_state_tracking_read_as_done() {
+        let pool = state_pool().await;
+        sqlx::query("INSERT INTO diarization_runs VALUES ('run', 'm2')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(diarization_status(&pool, "m2").await.unwrap(), DiarizationStatus::Done);
+    }
+
+    #[tokio::test]
+    async fn resume_skips_finished_repeatedly_failing_and_stale_meetings() {
+        let pool = state_pool().await;
+        // m1: interrupted once — resumed.
+        record_started(&pool, "m1").await.unwrap();
+        // m2: started and cut off RESUME_MAX_ATTEMPTS times — given up on.
+        for _ in 0..RESUME_MAX_ATTEMPTS {
+            record_started(&pool, "m2").await.unwrap();
+        }
+        // m3: finished — nothing to resume.
+        record_started(&pool, "m3").await.unwrap();
+        record_finished(&pool, "m3", None).await.unwrap();
+        assert_eq!(interrupted_meetings(&pool).await.unwrap(), vec!["m1".to_string()]);
+
+        // A pending meeting older than the window is left for a manual retry.
+        let stale = (Utc::now() - chrono::Duration::days(RESUME_WINDOW_DAYS + 1)).to_rfc3339();
+        sqlx::query("UPDATE diarization_state SET updated_at = ? WHERE meeting_id = 'm1'")
+            .bind(stale)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(interrupted_meetings(&pool).await.unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_meeting_runs_once_at_a_time() {
+        let slot = RunningSlot::acquire("slot-test").unwrap();
+        assert!(is_running("slot-test"));
+        assert!(RunningSlot::acquire("slot-test").is_err());
+        drop(slot);
+        assert!(!is_running("slot-test"));
+        drop(RunningSlot::acquire("slot-test").unwrap());
+    }
 
     fn transcript(id: &str, start: f64, end: f64, speaker: Option<&str>) -> Transcript {
         Transcript {

@@ -9,10 +9,12 @@ import { toast } from 'sonner';
 import { ChevronDown, ChevronUp, Loader2, Search, X } from 'lucide-react';
 import { useAudioPlayer } from '@/hooks/useAudioPlayer';
 import { useTranscriptionProgress } from '@/hooks/useTranscriptionProgress';
+import { useDiarizationStatus } from '@/hooks/useDiarizationStatus';
 import { useMeetingActivity } from '@/contexts/MeetingActivityContext';
 import { SpeakerCorrectionDialog, SpeakerIdentity } from './SpeakerCorrectionDialog';
 import { AudioScrubber } from './AudioScrubber';
 import { toneText } from '@/lib/theme-classes';
+import { SpeakerStatusNotice } from './SpeakerStatusNotice';
 
 export function findSegmentIdAtTime(
   segments: Array<{ id: string; timestamp: number; endTime?: number }>,
@@ -114,6 +116,24 @@ export function TranscriptPanel({
   // Segments are about to be replaced by the running pass, so edits made now
   // would be thrown away.
   const editsLocked = locked || transcriptionProgress !== null;
+  // Once a pass reaches its speaker stage the new transcript is saved, so it
+  // stays readable with a status line instead of sitting under the overlay.
+  const isDiarizingPass = transcriptionProgress?.isDiarization ?? false;
+
+  const { status: diarizationStatus } = useDiarizationStatus(meetingId);
+  const [isStartingDiarization, setIsStartingDiarization] = useState(false);
+  const handleRetryDiarization = useCallback(async () => {
+    if (!meetingId || isStartingDiarization) return;
+    setIsStartingDiarization(true);
+    try {
+      // Status and transcript refreshes arrive as events while this runs.
+      await invoke('run_speaker_diarization', { meetingId, numSpeakers: null });
+    } catch (error) {
+      toast.error(`Speaker identification failed: ${String(error)}`);
+    } finally {
+      setIsStartingDiarization(false);
+    }
+  }, [isStartingDiarization, meetingId]);
 
   useEffect(() => {
     setSpeakerNames(
@@ -447,6 +467,19 @@ export function TranscriptPanel({
         {player.error && (
           <p className={`mt-1 text-[11px] ${toneText.error}`}>{player.error}</p>
         )}
+        {meetingId && meetingFolderPath && convertedSegments.length > 0 && !isRecording
+          && (!transcriptionProgress || isDiarizingPass) && (
+          <SpeakerStatusNotice
+            status={diarizationStatus}
+            progress={isDiarizingPass && transcriptionProgress ? {
+              percent: transcriptionProgress.percent,
+              indeterminate: transcriptionProgress.indeterminate,
+              label: transcriptionProgress.stageLabel,
+            } : null}
+            isStarting={isStartingDiarization}
+            onRetry={() => void handleRetryDiarization()}
+          />
+        )}
         {locked && convertedSegments.length > 0 && (
           <p className="mt-2 text-[11px] text-[var(--ink-subtle)]">Transcript is locked while the summary is being generated.</p>
         )}
@@ -499,7 +532,7 @@ export function TranscriptPanel({
         )}
 
         {/* A pass over an existing transcript keeps it visible but inert. */}
-        {progressSurface && convertedSegments.length > 0 && (
+        {progressSurface && convertedSegments.length > 0 && !isDiarizingPass && (
           <div className="absolute inset-0 z-20 flex flex-col items-center justify-center pb-16">
             {/* Separate scrim layer so the progress text itself stays opaque. */}
             <div aria-hidden="true" className="absolute inset-0 bg-[var(--surface-0)] opacity-[0.85]" />

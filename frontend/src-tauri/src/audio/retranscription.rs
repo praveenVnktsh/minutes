@@ -533,6 +533,12 @@ async fn run_retranscription<R: Runtime>(
         .map_err(|e| anyhow!("Failed to insert transcript: {}", e))?;
     }
 
+    // The new rows have no speakers yet; if the app quits before diarization
+    // finishes, the startup resume picks this meeting up.
+    super::diarization::mark_pending_in_tx(&mut tx, &meeting_id)
+        .await
+        .map_err(|e| anyhow!("Failed to mark diarization pending: {}", e))?;
+
     tx.commit()
         .await
         .map_err(|e| anyhow!("Failed to commit transaction: {}", e))?;
@@ -542,6 +548,8 @@ async fn run_retranscription<R: Runtime>(
         segments.len(),
         meeting_id
     );
+    // Let an open meeting show the new transcript now rather than after diarization.
+    super::common::emit_transcripts_updated(&app, &meeting_id);
 
     // Write updated transcripts.json and metadata.json to the meeting folder
     emit_progress(
