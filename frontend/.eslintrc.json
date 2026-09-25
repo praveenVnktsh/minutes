@@ -23,6 +23,14 @@
       {
         "selector": "TemplateElement[value.raw=/\\b(bg|text|border|ring|from|to|via|fill|stroke|divide|outline|placeholder|shadow|decoration|caret|accent)-(white|black|(slate|gray|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose)-\\d{2,3})\\b/]",
         "message": "Tailwind palette colours don't follow the light/dark theme. Use a recipe from @/lib/theme-classes or a theme token (surface-*, ink-*, hairline, info, success, warning, error, selected, focus)."
+      },
+      {
+        "selector": "Literal[value=/\\b(bg|text|border|ring|from|to|via|fill|stroke|divide|outline|shadow|decoration|caret|accent)-(info|success|warning|error|recording|paused)-soft\\b/]",
+        "message": "There is no *-soft tone token, so this class renders no colour. Use the *-subtle token or a recipe from @/lib/theme-classes (panel, badge)."
+      },
+      {
+        "selector": "TemplateElement[value.raw=/\\b(bg|text|border|ring|from|to|via|fill|stroke|divide|outline|shadow|decoration|caret|accent)-(info|success|warning|error|recording|paused)-soft\\b/]",
+        "message": "There is no *-soft tone token, so this class renders no colour. Use the *-subtle token or a recipe from @/lib/theme-classes (panel, badge)."
       }
     ]
   },

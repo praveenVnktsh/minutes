@@ -9,6 +9,8 @@ import { RefObject } from 'react';
 import { parseSummaryContent } from '@/lib/summary-content';
 import { Button } from '@/components/ui/button';
 import { Loader2, Square } from 'lucide-react';
+import { panel } from '@/lib/theme-classes';
+import { cn } from '@/lib/utils';
 
 interface SummaryPanelProps {
   meeting: {
@@ -100,39 +102,46 @@ export function SummaryPanel({
           </div>
         )
       ) : (
-        <div className="flex-1 overflow-y-auto overflow-x-auto min-h-0">
+        <>
           {isSummaryLoading && (
-            <div className="sticky top-0 z-10 mx-auto flex max-w-[860px] items-center justify-between rounded-lg bg-info-soft px-3 py-2 text-sm text-info" role="status">
-              <span className="flex items-center gap-2"><Loader2 className="h-4 w-4 animate-spin" /> Regenerating. Your current notes remain available.</span>
-              <Button variant="ghost" size="sm" onClick={onStopGeneration}>Stop</Button>
+            <div className="flex-none px-10 pt-4">
+              <div
+                className={cn(panel.info, 'mx-auto flex w-full max-w-[860px] items-center justify-between rounded-lg px-3 py-2 text-sm')}
+                role="status"
+              >
+                <span className="flex items-center gap-2"><Loader2 className="h-4 w-4 animate-spin" /> Regenerating. Your current notes remain available.</span>
+                <Button variant="ghost" size="sm" onClick={onStopGeneration}>Stop</Button>
+              </div>
             </div>
           )}
-          <div className="meeting-notes-editor mx-auto w-full max-w-[860px] px-10 pb-24 pt-6">
-            <BlockNoteSummaryView
-              ref={summaryRef}
-              summaryData={aiSummary}
-              onSave={onSaveSummary}
-              onSummaryChange={onSummaryChange}
-              onDirtyChange={onDirtyChange}
-              status={summaryStatus}
-              error={summaryError}
-              onRegenerateSummary={() => {
-                Analytics.trackButtonClick('regenerate_summary', 'meeting_details');
-                onRegenerateSummary();
-              }}
-              meeting={{
-                id: meeting.id,
-                title: meetingTitle,
-                created_at: meeting.created_at
-              }}
-            />
+          <div className="flex-1 overflow-y-auto overflow-x-auto min-h-0" data-testid="summary-notes-scroller">
+            <div className="meeting-notes-editor mx-auto w-full max-w-[860px] px-10 pb-24 pt-6">
+              <BlockNoteSummaryView
+                ref={summaryRef}
+                summaryData={aiSummary}
+                onSave={onSaveSummary}
+                onSummaryChange={onSummaryChange}
+                onDirtyChange={onDirtyChange}
+                status={summaryStatus}
+                error={summaryError}
+                onRegenerateSummary={() => {
+                  Analytics.trackButtonClick('regenerate_summary', 'meeting_details');
+                  onRegenerateSummary();
+                }}
+                meeting={{
+                  id: meeting.id,
+                  title: meetingTitle,
+                  created_at: meeting.created_at
+                }}
+              />
+            </div>
+            {summaryStatus === 'error' && (
+              <div className={cn(panel.error, 'mx-10 mb-8 mt-4 rounded-xl p-3')} role="alert">
+                <p className="text-sm font-medium">{getSummaryStatusMessage(summaryStatus)}</p>
+              </div>
+            )}
           </div>
-          {summaryStatus === 'error' && (
-            <div className="mx-10 mb-8 mt-4 rounded-xl bg-error-soft p-3 text-error" role="alert">
-              <p className="text-sm font-medium">{getSummaryStatusMessage(summaryStatus)}</p>
-            </div>
-          )}
-        </div>
+        </>
       )}
     </div>
   );

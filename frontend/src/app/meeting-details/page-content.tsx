@@ -33,6 +33,7 @@ import { useMeetingOperations } from '@/hooks/meeting-details/useMeetingOperatio
 import { useConfig } from '@/contexts/ConfigContext';
 import { useRouter } from 'next/navigation';
 import { settingsHref } from '@/components/settings/settingsSections';
+import { badge } from '@/lib/theme-classes';
 
 export default function PageContent({
   meeting,
@@ -282,13 +283,13 @@ export default function PageContent({
       <Loader2 className="h-3.5 w-3.5 animate-spin" /> Generating summary…
     </span>
   ) : summaryActivity?.status === 'cancelled' ? (
-    <span className="shrink-0 rounded-full bg-warning-soft px-3 py-1.5 text-[11px] font-medium text-warning" role="status">Summary generation cancelled</span>
+    <span className={`shrink-0 rounded-full px-3 py-1.5 text-[11px] font-medium ${badge.warning}`} role="status">Summary generation cancelled</span>
   ) : summaryActivity?.status === 'failed' ? (
-    <span className="shrink-0 rounded-full bg-error-soft px-3 py-1.5 text-[11px] font-medium text-error" role="alert">
+    <span className={`shrink-0 rounded-full px-3 py-1.5 text-[11px] font-medium ${badge.error}`} role="alert">
       {summaryActivity.error || 'Summary generation failed'}
     </span>
   ) : isTranscribing ? (
-    <span className="flex shrink-0 items-center gap-1.5 rounded-full bg-info-soft px-3 py-1.5 text-[11px] font-medium text-info" role="status">
+    <span className={`flex shrink-0 items-center gap-1.5 rounded-full px-3 py-1.5 text-[11px] font-medium ${badge.info}`} role="status">
       <Loader2 className="h-3.5 w-3.5 animate-spin" /> {inFlightActivity?.progress_percentage == null ? 'Transcribing…' : `Transcribing ${Math.round(inFlightActivity.progress_percentage)}%`}
     </span>
   ) : activityError ? <span role="alert" className="text-xs font-medium text-error">{activityError}</span> : null;
