@@ -1,7 +1,7 @@
 'use client'
 
 import './globals.css'
-import { Source_Sans_3, Source_Serif_4 } from 'next/font/google'
+import localFont from 'next/font/local'
 import { useCallback, useEffect, useLayoutEffect, useState } from 'react'
 import { usePathname } from 'next/navigation'
 import { invoke } from '@tauri-apps/api/core'
@@ -41,15 +41,19 @@ import { settingsHref } from '@/components/settings/settingsSections'
 import { Toaster, toast } from 'sonner'
 import 'sonner/dist/styles.css'
 
-const sourceSans3 = Source_Sans_3({
-  subsets: ['latin'],
-  weight: ['400', '500', '600', '700'],
+// Self-hosted so the build never fetches from Google Fonts: next/font/google
+// crashes the whole build when Google answers a CI runner with a font URL it
+// cannot parse. Both files are the latin-subset variable fonts (wght 400-700),
+// licensed under the OFL (see ./fonts/OFL-*.txt).
+const sourceSans3 = localFont({
+  src: './fonts/source-sans-3-latin-variable.woff2',
+  weight: '400 700',
   variable: '--font-source-sans-3',
 })
 
-const sourceSerif4 = Source_Serif_4({
-  subsets: ['latin'],
-  weight: ['400', '500', '600', '700'],
+const sourceSerif4 = localFont({
+  src: './fonts/source-serif-4-latin-variable.woff2',
+  weight: '400 700',
   variable: '--font-source-serif-4',
 })
 

@@ -51,9 +51,8 @@ mock.module('next/navigation', () => ({
   usePathname: () => '/',
   useRouter: () => ({ push: mock(() => {}), replace: mock(() => {}), back: mock(() => {}) }),
 }))
-mock.module('next/font/google', () => ({
-  Source_Sans_3: () => ({ variable: 'font-sans-test' }),
-  Source_Serif_4: () => ({ variable: 'font-serif-test' }),
+mock.module('next/font/local', () => ({
+  default: ({ src }: { src: string }) => ({ variable: src.includes('serif') ? 'font-serif-test' : 'font-sans-test' }),
 }))
 mock.module('@/components/AnalyticsProvider', () => ({ default: ({ children }: { children: React.ReactNode }) => <>{children}</> }))
 mock.module('@/contexts/OllamaDownloadContext', () => ({ OllamaDownloadProvider: ({ children }: { children: React.ReactNode }) => <>{children}</> }))
