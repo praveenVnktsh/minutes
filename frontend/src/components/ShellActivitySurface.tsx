@@ -43,7 +43,10 @@ export function ShellActivitySurface() {
   })
   const visibleWork = showAll ? allWork : allWork.slice(0, 3)
   const commandIsFinalizing = controller.command === 'stop' || controller.command === 'finalize'
-  const showRecording = recordingState.isRecording && !commandIsFinalizing
+  // The live meeting workspace renders its own FloatingRecordingControls, so the shell card
+  // would duplicate the pause/stop controls there.
+  const isOnLiveWorkspace = Boolean(workspaceMeetingId) && workspaceMeetingId === controller.activeMeetingId
+  const showRecording = recordingState.isRecording && !commandIsFinalizing && !isOnLiveWorkspace
   const showFinalizing = commandIsFinalizing || (!recordingState.isRecording && (recordingState.isProcessing || recordingState.isSaving))
 
   if (!showRecording && !showFinalizing && allWork.length === 0) return null

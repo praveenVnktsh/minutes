@@ -20,6 +20,9 @@ let isRecording = false
 let isPaused = false
 let isCommandPending = true
 let controllerCommand: string | null = 'finalize'
+let activeMeetingId: string | null = null
+let pathname = '/settings'
+let currentMeeting: { id: string } | null = null
 
 mock.module('@/contexts/MeetingActivityContext', () => ({
   ...originalActivity,
@@ -46,13 +49,13 @@ mock.module('@/contexts/MeetingActivityContext', () => ({
 mock.module('@/contexts/RecordingControllerContext', () => ({
   ...originalController,
   useRecordingController: () => ({
-    command: controllerCommand, activeMeetingId: null, isCommandPending, returnToRecording: async () => {},
+    command: controllerCommand, activeMeetingId, isCommandPending, returnToRecording: async () => {},
     stopRecording: async () => {}, pauseRecording, resumeRecording,
   }),
 }))
 mock.module('@/contexts/RecordingStateContext', () => ({ ...originalRecording, useRecordingState: () => ({ isRecording, isPaused, isProcessing: false, isSaving: !isRecording }) }))
-mock.module('@/components/Sidebar/SidebarProvider', () => ({ ...originalSidebar, useSidebar: () => ({ currentMeeting: null }) }))
-mock.module('next/navigation', () => ({ ...originalNavigation, usePathname: () => '/settings' }))
+mock.module('@/components/Sidebar/SidebarProvider', () => ({ ...originalSidebar, useSidebar: () => ({ currentMeeting }) }))
+mock.module('next/navigation', () => ({ ...originalNavigation, usePathname: () => pathname }))
 
 const { ShellActivitySurface } = await import('./ShellActivitySurface')
 
@@ -61,6 +64,9 @@ beforeEach(() => {
   isPaused = false
   isCommandPending = true
   controllerCommand = 'finalize'
+  activeMeetingId = null
+  pathname = '/settings'
+  currentMeeting = null
   pauseRecording.mockClear()
   resumeRecording.mockClear()
 })
@@ -109,6 +115,31 @@ describe('ShellActivitySurface', () => {
     await act(async () => button.props.onClick())
     expect(resumeRecording).toHaveBeenCalledTimes(1)
     expect(pauseRecording).not.toHaveBeenCalled()
+    renderer.unmount()
+  })
+
+  test('hides the recording card on the live workspace, which has its own controls', () => {
+    isRecording = true
+    isCommandPending = false
+    controllerCommand = null
+    activeMeetingId = 'live-meeting'
+    pathname = '/meeting-details'
+    currentMeeting = { id: 'live-meeting' }
+    const renderer = create(<ShellActivitySurface />)
+    expect(renderer.root.findAllByProps({ 'aria-label': 'Pause recording' })).toHaveLength(0)
+    expect(JSON.stringify(renderer.toJSON())).not.toContain('Recording in progress')
+    renderer.unmount()
+  })
+
+  test('keeps the recording card when viewing a different meeting', () => {
+    isRecording = true
+    isCommandPending = false
+    controllerCommand = null
+    activeMeetingId = 'live-meeting'
+    pathname = '/meeting-details'
+    currentMeeting = { id: 'other-meeting' }
+    const renderer = create(<ShellActivitySurface />)
+    expect(renderer.root.findAllByProps({ 'aria-label': 'Pause recording' })).not.toHaveLength(0)
     renderer.unmount()
   })
 })
