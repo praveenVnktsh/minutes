@@ -27,11 +27,18 @@ export interface BetaFeatures {
    * @since v0.3.0
    */
   liveTranscription: boolean;
+  /**
+   * Remove laptop-speaker echo from the microphone before live transcription,
+   * so the remote side is not transcribed a second time as "mic"
+   * @since v1.5
+   */
+  micEchoCancellation: boolean;
 }
 
 export const DEFAULT_BETA_FEATURES: BetaFeatures = {
   importAndRetranscribe: true, // Default: enabled
   liveTranscription: true, // Deferred transcription mode is available by default
+  micEchoCancellation: false, // Opt-in until it has been proven on real calls
 };
 
 
@@ -41,6 +48,7 @@ export const DEFAULT_BETA_FEATURES: BetaFeatures = {
 export const BETA_FEATURE_NAMES: Record<keyof BetaFeatures, string> = {
   importAndRetranscribe: 'Import Audio & Retranscribe',
   liveTranscription: 'Live Transcription Toggle',
+  micEchoCancellation: 'Mic Echo Cancellation',
 };
 
 /**
@@ -49,6 +57,7 @@ export const BETA_FEATURE_NAMES: Record<keyof BetaFeatures, string> = {
 export const BETA_FEATURE_DESCRIPTIONS: Record<keyof BetaFeatures, string> = {
   importAndRetranscribe: 'Import audio files to transcribe or retranscribe existing meetings with different language settings.',
   liveTranscription: 'Show a toggle to enable/disable live transcription during recording. When off, audio is still recorded but transcription is skipped to save resources.',
+  micEchoCancellation: 'When the other side plays through your speakers, remove their voice from the microphone before transcribing, so it is not transcribed twice. Takes effect from the next recording.',
 };
 
 /**

@@ -550,6 +550,14 @@ async fn set_live_transcription_enabled<R: Runtime>(
 }
 
 #[tauri::command]
+async fn set_mic_echo_cancellation_enabled(enabled: bool) -> Result<(), String> {
+    log_info!("Setting mic echo cancellation (beta) enabled: {}", enabled);
+    audio::pipeline::MIC_ECHO_CANCELLATION_ENABLED
+        .store(enabled, std::sync::atomic::Ordering::SeqCst);
+    Ok(())
+}
+
+#[tauri::command]
 async fn set_language_preference(language: String) -> Result<(), String> {
     let mut lang_pref = LANGUAGE_PREFERENCE
         .lock()
@@ -999,6 +1007,7 @@ pub fn run() {
             set_language_preference,
             // Live transcription toggle
             set_live_transcription_enabled,
+            set_mic_echo_cancellation_enabled,
             // Notification system commands
             notifications::commands::get_notification_settings,
             notifications::commands::set_notification_settings,

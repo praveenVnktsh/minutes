@@ -6,7 +6,7 @@ authors = ["Meetily contributors"]
 license = "MIT"
 repository = "https://github.com/praveenvnktsh/minutes"
 edition = "2021"
-rust-version = "1.80"
+rust-version = "1.91"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -99,6 +99,10 @@ ebur128 = "0.1"
 
 # Noise suppression - RNNoise-based neural network noise reduction
 nnnoiseless = "0.5"
+
+# Acoustic echo cancellation for the live mic transcription path.
+# Pure-Rust port of WebRTC AEC3, so it adds no C++ build step. Needs Rust 1.91.
+sonora = { version = "0.2", default-features = false }
 
 # Speech recognition and async utilities
 # NOTE: whisper-rs is declared in platform-specific sections below (macOS/Windows/Linux)

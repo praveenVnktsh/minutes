@@ -224,6 +224,14 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     loadTranscriptConfig();
   }, []);
 
+  // Mirror the mic echo cancellation beta flag into Rust on mount and on every
+  // toggle, so recordings started from any entry point (shortcut, tray, meeting
+  // detection) pick it up. Rust reads it when each recording starts.
+  useEffect(() => {
+    invoke('set_mic_echo_cancellation_enabled', { enabled: betaFeatures.micEchoCancellation })
+      .catch(err => console.error('[ConfigContext] Failed to sync mic echo cancellation flag:', err));
+  }, [betaFeatures.micEchoCancellation]);
+
   // Sync language preference to Rust on mount (fixes startup desync bug)
   useEffect(() => {
     if (selectedLanguage) {

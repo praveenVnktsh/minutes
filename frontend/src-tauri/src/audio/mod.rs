@@ -20,6 +20,7 @@ pub mod async_logger;
 pub mod batch_processor;
 pub mod buffer_pool;
 pub mod device_monitor; // NEW: Device disconnect/reconnect monitoring
+pub mod echo_canceller; // Mic echo cancellation for the live transcription path
 pub mod hardware_detector;
 pub mod incremental_saver; // NEW: Incremental audio saving with checkpoints
 pub mod level_monitor;

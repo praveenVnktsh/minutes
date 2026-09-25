@@ -5,6 +5,12 @@ use std::sync::Arc;
 /// When false, audio chunks are not sent to the transcription engine (saves CPU/GPU).
 /// Recording continues normally regardless of this flag.
 pub static LIVE_TRANSCRIPTION_ENABLED: AtomicBool = AtomicBool::new(true);
+
+/// Beta flag: echo-cancel the mic against system audio before transcribing it.
+/// Set from the frontend's "Mic Echo Cancellation" beta feature. Read once when
+/// a recording's pipeline starts, so toggling it mid-recording takes effect on
+/// the next recording rather than disturbing audio the canceller is holding.
+pub static MIC_ECHO_CANCELLATION_ENABLED: AtomicBool = AtomicBool::new(false);
 use super::batch_processor::AudioMetricsBatcher;
 use crate::batch_audio_metric;
 use anyhow::Result;
@@ -20,6 +26,7 @@ use super::audio_processing::{
     audio_to_mono, HighPassFilter, LoudnessNormalizer, NoiseSuppressionProcessor,
 };
 use super::devices::AudioDevice;
+use super::echo_canceller::MicEchoCanceller;
 use super::recording_state::{AudioChunk, AudioError, DeviceType, RecordingState};
 use super::vad::{ContinuousVadProcessor, SpeechSegment};
 
@@ -856,6 +863,10 @@ pub struct AudioPipeline {
     transcription_sender: mpsc::UnboundedSender<AudioChunk>,
     mic_vad_processor: LiveVadSource,
     system_vad_processor: LiveVadSource,
+    // Removes speaker echo from the mic before its VAD, using system audio as
+    // the reference, so remote speech is not transcribed a second time as "mic".
+    // `None` when the beta flag was off as this recording started.
+    mic_echo_canceller: Option<MicEchoCanceller>,
     sample_rate: u32,
     chunk_id_counter: u64,
     // Timestamp of the latest audio chunk, for mixed audio drained on flush
@@ -950,6 +961,9 @@ impl AudioPipeline {
             transcription_sender,
             mic_vad_processor,
             system_vad_processor,
+            mic_echo_canceller: MIC_ECHO_CANCELLATION_ENABLED
+                .load(Ordering::SeqCst)
+                .then(|| MicEchoCanceller::new(sample_rate)),
             sample_rate,
             chunk_id_counter: 0,
             last_chunk_timestamp: 0.0,
@@ -1081,9 +1095,19 @@ impl AudioPipeline {
         // STEP 3: Transcribe each source independently. Both
         // processors receive the same aligned windows, so their
         // timestamps share the recording timeline.
+        // The mic is echo-cancelled against the system window first. The
+        // canceller (beta, off by default) holds back ~200ms of mic, but returns
+        // every sample at its original position, so the mic timeline is unchanged. Only the
+        // transcription path gets the cleaned mic; the recording keeps the raw one.
         // Skip VAD processing entirely when live transcription is disabled (saves CPU/GPU)
         if LIVE_TRANSCRIPTION_ENABLED.load(Ordering::Relaxed) {
-            self.process_source_audio(&mic_window, DeviceType::Microphone);
+            match self.mic_echo_canceller.as_mut() {
+                Some(canceller) => {
+                    let cleaned_mic = canceller.process(&mic_window, &sys_window);
+                    self.process_source_audio(&cleaned_mic, DeviceType::Microphone);
+                }
+                None => self.process_source_audio(&mic_window, DeviceType::Microphone),
+            }
             self.process_source_audio(&sys_window, DeviceType::System);
         }
 
@@ -1117,6 +1141,13 @@ impl AudioPipeline {
         if !LIVE_TRANSCRIPTION_ENABLED.load(Ordering::Relaxed) {
             info!("Live transcription disabled, skipping VAD flush");
             return Ok(());
+        }
+
+        // Hand the mic audio the echo canceller is still holding to the VAD
+        // before flushing it, or the end of the last utterance would be lost.
+        if let Some(canceller) = self.mic_echo_canceller.as_mut() {
+            let held_mic = canceller.flush();
+            self.process_source_audio(&held_mic, DeviceType::Microphone);
         }
 
         let mic_segments = self.mic_vad_processor.flush();
