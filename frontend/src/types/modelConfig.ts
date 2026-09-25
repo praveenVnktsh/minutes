@@ -1,3 +1,5 @@
+import { DEFAULT_WHISPER_MODEL } from '@/constants/modelDefaults';
+
 export type ModelProvider =
   | 'ollama'
   | 'groq'
@@ -56,6 +58,6 @@ export function mergeProviderKeyHydration(
 export const DEFAULT_MODEL_CONFIG: ModelConfig = {
   provider: 'builtin-ai',
   model: 'qwen3.5:4b',
-  whisperModel: 'large-v3',
+  whisperModel: DEFAULT_WHISPER_MODEL,
   ollamaEndpoint: null,
 };

@@ -92,7 +92,7 @@ fn discover_models_standalone() -> Result<Vec<ModelInfo>, String> {
 
     let mut models = Vec::new();
 
-    for &(name, filename, size_mb, accuracy, speed, description) in model_configs {
+    for &(name, filename, size_mb, accuracy, speed, description, legacy) in model_configs {
         let model_path = whisper_dir.join(filename);
         let status = if model_path.exists() {
             match std::fs::metadata(&model_path) {
@@ -118,6 +118,7 @@ fn discover_models_standalone() -> Result<Vec<ModelInfo>, String> {
             accuracy: accuracy.to_string(),
             speed: speed.to_string(),
             description: description.to_string(),
+            legacy,
         });
     }
 

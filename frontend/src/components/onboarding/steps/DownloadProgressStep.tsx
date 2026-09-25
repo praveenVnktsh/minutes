@@ -13,8 +13,7 @@ import {
   BUILTIN_AI_DOWNLOAD_PROGRESS_EVENT,
   type BuiltInAIDownloadProgressEvent,
 } from '@/lib/builtin-ai';
-
-const PARAKEET_MODEL = 'parakeet-tdt-0.6b-v3-int8';
+import { DEFAULT_PARAKEET_MODEL } from '@/constants/modelDefaults';
 
 /**
  * 'idle' is "nothing is running and nothing is done" — the state a user lands in after
@@ -239,7 +238,7 @@ export function DownloadProgressStep() {
       'parakeet-model-download-progress',
       (event) => {
         const { modelName, status } = event.payload;
-        if (modelName !== PARAKEET_MODEL) return;
+        if (modelName !== DEFAULT_PARAKEET_MODEL) return;
 
         if (status === 'cancelled') {
           setParakeetStatus('cancelled');
@@ -254,7 +253,7 @@ export function DownloadProgressStep() {
     const unlistenComplete = listen<{ modelName: string }>(
       'parakeet-model-download-complete',
       (event) => {
-        if (event.payload.modelName === PARAKEET_MODEL) {
+        if (event.payload.modelName === DEFAULT_PARAKEET_MODEL) {
           setParakeetStatus('completed');
         }
       }
@@ -263,7 +262,7 @@ export function DownloadProgressStep() {
     const unlistenError = listen<{ modelName: string; error: string }>(
       'parakeet-model-download-error',
       (event) => {
-        if (event.payload.modelName === PARAKEET_MODEL) {
+        if (event.payload.modelName === DEFAULT_PARAKEET_MODEL) {
           setParakeetStatus('error');
           setParakeetError(event.payload.error);
         }

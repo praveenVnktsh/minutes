@@ -4,18 +4,24 @@
 //! initialization, import, and retranscription.
 
 /// Default Whisper model for transcription when no preference is configured.
-/// This is the largest, highest-accuracy registered Whisper model.
-pub const DEFAULT_WHISPER_MODEL: &str = "large-v3";
+/// Turbo keeps nearly all of large-v3's accuracy at a fraction of the size and
+/// decode time.
+pub const DEFAULT_WHISPER_MODEL: &str = "large-v3-turbo-q5_0";
 
 /// Default Parakeet model for transcription when no preference is configured.
-/// This is the quantized version optimized for speed.
-pub const DEFAULT_PARAKEET_MODEL: &str = "parakeet-tdt-0.6b-v3-int8";
+/// The app targets English, and v2 is the English-only Parakeet, which scores
+/// better on English than the multilingual v3.
+pub const DEFAULT_PARAKEET_MODEL: &str = "parakeet-tdt-0.6b-v2-int8";
 
 /// Whisper model catalog with metadata for all supported models.
 /// Used by both WhisperEngine::discover_models() and discover_models_standalone().
 ///
-/// Format: (name, filename, size_mb, accuracy, speed, description)
-pub const WHISPER_MODEL_CATALOG: &[(&str, &str, u32, &str, &str, &str)] = &[
+/// Legacy models are no longer offered for download. They stay catalogued so a
+/// user who already has one installed keeps transcribing with it; the UI only
+/// lists a legacy model once it is on disk.
+///
+/// Format: (name, filename, size_mb, accuracy, speed, description, legacy)
+pub const WHISPER_MODEL_CATALOG: &[(&str, &str, u32, &str, &str, &str, bool)] = &[
     // Standard f16 models (full precision)
     (
         "tiny",
@@ -24,6 +30,7 @@ pub const WHISPER_MODEL_CATALOG: &[(&str, &str, u32, &str, &str, &str)] = &[
         "Decent",
         "Very Fast",
         "Fastest processing, good for real-time use",
+        true,
     ),
     (
         "base",
@@ -32,6 +39,7 @@ pub const WHISPER_MODEL_CATALOG: &[(&str, &str, u32, &str, &str, &str)] = &[
         "Good",
         "Fast",
         "Good balance of speed and accuracy",
+        true,
     ),
     (
         "small",
@@ -40,6 +48,7 @@ pub const WHISPER_MODEL_CATALOG: &[(&str, &str, u32, &str, &str, &str)] = &[
         "Good",
         "Medium",
         "Better accuracy, moderate speed",
+        true,
     ),
     (
         "medium",
@@ -48,6 +57,7 @@ pub const WHISPER_MODEL_CATALOG: &[(&str, &str, u32, &str, &str, &str)] = &[
         "High",
         "Slow",
         "High accuracy for professional use",
+        true,
     ),
     (
         "large-v3-turbo",
@@ -56,6 +66,7 @@ pub const WHISPER_MODEL_CATALOG: &[(&str, &str, u32, &str, &str, &str)] = &[
         "High",
         "Medium",
         "Best accuracy with improved speed",
+        true,
     ),
     (
         "large-v3",
@@ -64,6 +75,7 @@ pub const WHISPER_MODEL_CATALOG: &[(&str, &str, u32, &str, &str, &str)] = &[
         "High",
         "Slow",
         "Most Accurate, latest large model",
+        true,
     ),
     // Q5_1 quantized models (balanced speed/accuracy, slightly better quality than Q5_0)
     (
@@ -73,6 +85,7 @@ pub const WHISPER_MODEL_CATALOG: &[(&str, &str, u32, &str, &str, &str)] = &[
         "Decent",
         "Very Fast",
         "Quantized tiny model, ~50% faster processing",
+        true,
     ),
     (
         "base-q5_1",
@@ -81,6 +94,7 @@ pub const WHISPER_MODEL_CATALOG: &[(&str, &str, u32, &str, &str, &str)] = &[
         "Good",
         "Fast",
         "Quantized base model, good speed/accuracy balance",
+        true,
     ),
     (
         "small-q5_1",
@@ -89,6 +103,7 @@ pub const WHISPER_MODEL_CATALOG: &[(&str, &str, u32, &str, &str, &str)] = &[
         "Good",
         "Fast",
         "Quantized small model, faster than f16 version",
+        true,
     ),
     // Q5_0 quantized models (balanced speed/accuracy)
     (
@@ -98,6 +113,7 @@ pub const WHISPER_MODEL_CATALOG: &[(&str, &str, u32, &str, &str, &str)] = &[
         "High",
         "Medium",
         "Quantized medium model, professional quality",
+        true,
     ),
     (
         "large-v3-turbo-q5_0",
@@ -106,6 +122,7 @@ pub const WHISPER_MODEL_CATALOG: &[(&str, &str, u32, &str, &str, &str)] = &[
         "High",
         "Medium",
         "Quantized large model, best balance",
+        false,
     ),
     (
         "large-v3-q5_0",
@@ -114,5 +131,6 @@ pub const WHISPER_MODEL_CATALOG: &[(&str, &str, u32, &str, &str, &str)] = &[
         "High",
         "Slow",
         "Quantized large model, high accuracy",
+        false,
     ),
 ];

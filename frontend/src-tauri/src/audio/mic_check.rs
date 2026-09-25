@@ -42,7 +42,7 @@ const SILENCE_FLOOR: f32 = 0.01;
 /// Parakeet wants mono f32 at this rate.
 const TRANSCRIBE_SAMPLE_RATE: u32 = 16_000;
 /// The model onboarding downloads, and so the one most likely to be on disk.
-const PREFERRED_MODEL: &str = "parakeet-tdt-0.6b-v3-int8";
+const PREFERRED_MODEL: &str = crate::config::DEFAULT_PARAKEET_MODEL;
 
 /// Only one check may own the audio devices at a time.
 static CHECK_IN_FLIGHT: AtomicBool = AtomicBool::new(false);

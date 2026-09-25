@@ -10,8 +10,7 @@ import type { CancelDownloadOutcome, ParakeetDownloadProgressEvent } from '@/lib
 import { BUILTIN_AI_DOWNLOAD_PROGRESS_EVENT, BuiltInAIAPI } from '@/lib/builtin-ai';
 import type { BuiltInAIDownloadProgressEvent } from '@/lib/builtin-ai';
 import { mibToBytes } from '@/lib/download-display';
-
-const PARAKEET_MODEL = 'parakeet-tdt-0.6b-v3-int8';
+import { DEFAULT_PARAKEET_MODEL } from '@/constants/modelDefaults';
 
 // Step 1: Welcome, 2: Setup Overview, 3: Download Progress, 4: Permissions (macOS only),
 // 5: Mic Check. Non-macOS jumps from 3 to 5. The mic check is the last step and the only
@@ -306,7 +305,7 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
           eta_seconds,
           status,
         } = event.payload;
-        if (modelName !== PARAKEET_MODEL) return;
+        if (modelName !== DEFAULT_PARAKEET_MODEL) return;
 
         if (status === 'cancelled') {
           releaseDownloadSlot('parakeet');
@@ -338,7 +337,7 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
       'parakeet-model-download-complete',
       (event) => {
         const { modelName } = event.payload;
-        if (modelName === PARAKEET_MODEL) {
+        if (modelName === DEFAULT_PARAKEET_MODEL) {
           setParakeetDownloaded(true);
           setParakeetProgress(100);
           releaseDownloadSlot('parakeet');
@@ -350,7 +349,7 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
       'parakeet-model-download-error',
       (event) => {
         const { modelName } = event.payload;
-        if (modelName === PARAKEET_MODEL) {
+        if (modelName === DEFAULT_PARAKEET_MODEL) {
           console.error('Parakeet download error:', event.payload.error);
           releaseDownloadSlot('parakeet');
         }
@@ -428,11 +427,11 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
         const models = await ParakeetAPI.getAvailableModels();
         if (cancelled) return;
 
-        const model = models.find(m => m.name === PARAKEET_MODEL);
+        const model = models.find(m => m.name === DEFAULT_PARAKEET_MODEL);
         if (model && model.size_bytes > 0) {
           setParakeetSizeBytes(model.size_bytes);
         } else {
-          console.warn('[OnboardingContext] No catalogue size for Parakeet model:', PARAKEET_MODEL);
+          console.warn('[OnboardingContext] No catalogue size for Parakeet model:', DEFAULT_PARAKEET_MODEL);
         }
       } catch (error) {
         console.warn('[OnboardingContext] Failed to load Parakeet catalogue size:', error);
@@ -694,7 +693,7 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
       if (shouldStartParakeet) {
         console.log('[OnboardingContext] Starting Parakeet download');
         activeDownloadsRef.current.add('parakeet');
-        invoke('parakeet_download_model', { modelName: PARAKEET_MODEL })
+        invoke('parakeet_download_model', { modelName: DEFAULT_PARAKEET_MODEL })
           .catch(err => console.error('[OnboardingContext] Parakeet download failed:', err));
       }
 
@@ -734,7 +733,7 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
     activeDownloadsRef.current.add('parakeet');
     setIsBackgroundDownloading(true);
     try {
-      await invoke('parakeet_retry_download', { modelName: PARAKEET_MODEL });
+      await invoke('parakeet_retry_download', { modelName: DEFAULT_PARAKEET_MODEL });
     } catch (error) {
       console.error('[OnboardingContext] Retry failed:', error);
       releaseDownloadSlot('parakeet');
@@ -765,7 +764,7 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
   // cancel is finished by the cancelled progress event when the worker gets there.
   const cancelParakeetDownload = async (): Promise<CancelDownloadOutcome> => {
     console.log('[OnboardingContext] Cancelling Parakeet download');
-    const outcome = await ParakeetAPI.cancelDownload(PARAKEET_MODEL);
+    const outcome = await ParakeetAPI.cancelDownload(DEFAULT_PARAKEET_MODEL);
 
     setParakeetDownloaded(false);
     if (outcome === 'cancelled') {

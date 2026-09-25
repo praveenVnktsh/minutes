@@ -90,6 +90,8 @@ pub struct ModelInfo {
     pub speed: String, // Performance description
     pub status: ModelStatus,
     pub description: String,
+    /// No longer offered for download; listed only once installed.
+    pub legacy: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -106,6 +108,8 @@ struct ModelSpec {
     description: &'static str,
     source_base_url: &'static str,
     artifacts: &'static [ArtifactSpec],
+    /// Kept only so existing installs keep loading; see `ModelInfo::legacy`.
+    legacy: bool,
 }
 
 impl ModelSpec {
@@ -157,22 +161,24 @@ const PARAKEET_V2_ARTIFACTS: &[ArtifactSpec] = &[
 
 const PARAKEET_MODEL_SPECS: &[ModelSpec] = &[
     ModelSpec {
+        name: "parakeet-tdt-0.6b-v2-int8",
+        size_mb: 661,
+        quantization: QuantizationType::Int8,
+        speed: "Ultra Fast",
+        description: "English-only, the most accurate Parakeet on English speech",
+        source_base_url: "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/0bbb45a3365852604aef28b538a8f066f4ccaa85",
+        artifacts: PARAKEET_V2_ARTIFACTS,
+        legacy: false,
+    },
+    ModelSpec {
         name: "parakeet-tdt-0.6b-v3-int8",
         size_mb: 670,
         quantization: QuantizationType::Int8,
         speed: "Ultra Fast (v3)",
-        description: "Real time on M4 Max, latest version with int8 quantization",
+        description: "Multilingual (25 European languages), the previous default",
         source_base_url: "https://meetily.towardsgeneralintelligence.com/models/parakeet-tdt-0.6b-v3-onnx",
         artifacts: PARAKEET_V3_ARTIFACTS,
-    },
-    ModelSpec {
-        name: "parakeet-tdt-0.6b-v2-int8",
-        size_mb: 661,
-        quantization: QuantizationType::Int8,
-        speed: "Fast (v2)",
-        description: "Previous version with int8 quantization, good balance of speed and accuracy",
-        source_base_url: "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/0bbb45a3365852604aef28b538a8f066f4ccaa85",
-        artifacts: PARAKEET_V2_ARTIFACTS,
+        legacy: true,
     },
 ];
 
@@ -416,6 +422,7 @@ impl ParakeetEngine {
                     speed: spec.speed.to_string(),
                     status,
                     description: spec.description.to_string(),
+                    legacy: spec.legacy,
                 });
             }
 
@@ -1369,6 +1376,7 @@ mod tests {
         description: "test model",
         source_base_url: "",
         artifacts: SMALL_ARTIFACTS,
+        legacy: false,
     }];
 
     struct ExpectedResponse {
@@ -1479,6 +1487,7 @@ mod tests {
                 speed: "test".to_string(),
                 status: ModelStatus::Missing,
                 description: "test model".to_string(),
+                legacy: false,
             },
         );
         (temp_dir, engine, model_dir)
