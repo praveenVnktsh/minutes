@@ -5,6 +5,7 @@ import { Summary, Block } from '@/types';
 import { Section } from './Section';
 import { EditableTitle } from '../EditableTitle';
 import { ExclamationTriangleIcon, CheckCircleIcon, ClipboardDocumentCheckIcon } from '@heroicons/react/24/outline';
+import { panel, toneText } from '@/lib/theme-classes';
 
 interface Props {
   summary: Summary | null;
@@ -606,25 +607,25 @@ export const AISummary = ({ summary, status, error, onSummaryChange, onRegenerat
   };
 
   const renderErrorState = () => (
-    <div className="w-full p-4 bg-red-50 border border-red-200 rounded-lg">
+    <div className={`w-full p-4 ${panel.error} rounded-lg`}>
       <div className="flex items-center mb-2">
-        <ExclamationTriangleIcon className="h-5 w-5 text-red-500 mr-2" />
-        <h3 className="text-red-700 font-medium">Error Generating Summary</h3>
+        <ExclamationTriangleIcon className="h-5 w-5 mr-2" />
+        <h3 className="font-medium">Error Generating Summary</h3>
       </div>
-      <p className="text-red-600 text-sm">{error}</p>
-      <p className="text-red-500 text-xs mt-2">Please check your model configuration and API keys, or try again.</p>
+      <p className="text-sm">{error}</p>
+      <p className="mt-2 text-xs opacity-80">Please check your model configuration and API keys, or try again.</p>
     </div>
   );
 
   const renderLoadingState = () => (
-    <div className="w-full p-4 bg-blue-50 border border-blue-200 rounded-lg">
+    <div className={`w-full p-4 ${panel.info} rounded-lg`}>
       <div className="flex items-center space-x-3">
-        <div className="animate-spin rounded-full h-5 w-5 border-2 border-blue-500 border-t-transparent"></div>
+        <div className="animate-spin rounded-full h-5 w-5 border-2 border-current border-t-transparent"></div>
         <div>
-          <h3 className="text-blue-700 font-medium">
+          <h3 className="font-medium">
             {status === 'processing' ? 'Processing Transcript' : 'Generating Summary'}
           </h3>
-          <p className="text-blue-600 text-sm">
+          <p className="text-sm">
             {status === 'processing' 
               ? 'Analyzing your transcript...' 
               : 'Creating a detailed summary of your meeting...'}
@@ -688,7 +689,7 @@ export const AISummary = ({ summary, status, error, onSummaryChange, onRegenerat
             <span>Copy {selectedBlocks.length > 1 ? `${selectedBlocks.length} blocks` : 'block'}</span>
           </button>
           <button
-            className="w-full px-4 py-2 text-left hover:bg-surface-2 text-red-600 flex items-center space-x-2"
+            className={`w-full px-4 py-2 text-left hover:bg-surface-2 ${toneText.error} flex items-center space-x-2`}
             onClick={handleDeleteBlocks}
           >
             <span>🗑️</span>

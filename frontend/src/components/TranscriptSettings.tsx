@@ -9,6 +9,7 @@ import { Eye, EyeOff, Lock, Unlock } from 'lucide-react';
 import { ModelManager } from './WhisperModelManager';
 import { ParakeetModelManager } from './ParakeetModelManager';
 import { SaveFeedback, type SaveFeedbackState } from './ui/status-feedback';
+import { toneText } from '@/lib/theme-classes';
 
 
 export interface TranscriptModelProps {
@@ -272,7 +273,7 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                                         variant="ghost"
                                         size="icon"
                                         onClick={() => setIsApiKeyLocked(!isApiKeyLocked)}
-                                        className={`transition-colors duration-200 ${isLockButtonVibrating ? 'animate-vibrate text-red-500' : ''
+                                        className={`transition-colors duration-200 ${isLockButtonVibrating ? `animate-vibrate ${toneText.error}` : ''
                                             }`}
                                         title={isApiKeyLocked ? "Unlock to edit" : "Lock to prevent editing"}
                                     >

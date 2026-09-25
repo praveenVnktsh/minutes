@@ -12,6 +12,7 @@ import { useTranscriptionProgress } from '@/hooks/useTranscriptionProgress';
 import { useMeetingActivity } from '@/contexts/MeetingActivityContext';
 import { SpeakerCorrectionDialog, SpeakerIdentity } from './SpeakerCorrectionDialog';
 import { AudioScrubber } from './AudioScrubber';
+import { toneText } from '@/lib/theme-classes';
 
 export function findSegmentIdAtTime(
   segments: Array<{ id: string; timestamp: number; endTime?: number }>,
@@ -444,7 +445,7 @@ export function TranscriptPanel({
           />
         )}
         {player.error && (
-          <p className="mt-1 text-[11px] text-red-500">{player.error}</p>
+          <p className={`mt-1 text-[11px] ${toneText.error}`}>{player.error}</p>
         )}
         {locked && convertedSegments.length > 0 && (
           <p className="mt-2 text-[11px] text-[var(--ink-subtle)]">Transcript is locked while the summary is being generated.</p>

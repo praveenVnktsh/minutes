@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { LANGUAGE_OPTIONS } from "@/lib/summary-languages";
 import { useRecentLanguages } from "@/hooks/useRecentLanguages";
+import { selection } from "@/lib/theme-classes";
 
 interface LanguagePickerPopoverProps {
   value: string | null;
@@ -109,15 +110,15 @@ export function LanguagePickerPopover({
                 type="button"
                 aria-pressed={value === opt.code}
                 onClick={() => onChange(opt.code)}
-                className={`flex w-full items-center justify-between px-3 py-1.5 text-sm hover:bg-surface-2 text-left ${
-                  value === opt.code ? "text-blue-600 font-medium" : "text-ink"
+                className={`flex w-full items-center justify-between px-3 py-1.5 text-sm text-left ${
+                  value === opt.code ? `${selection.row.selected} font-medium` : selection.row.idle
                 }`}
               >
                 <span>
                   {opt.label}{" "}
                   <span className="text-xs text-ink-subtle">({opt.code})</span>
                 </span>
-                {value === opt.code && <span className="text-blue-600" aria-hidden="true">✓</span>}
+                {value === opt.code && <span className="text-ink" aria-hidden="true">✓</span>}
               </button>
             ))}
             <div className="my-1 h-px bg-surface-2" />
@@ -129,8 +130,8 @@ export function LanguagePickerPopover({
             type="button"
             aria-pressed={value === null}
             onClick={() => onChange(null)}
-            className={`flex w-full items-center justify-between px-3 py-1.5 text-sm hover:bg-surface-2 text-left ${
-              value === null ? "text-blue-600 font-medium" : "text-ink"
+            className={`flex w-full items-center justify-between px-3 py-1.5 text-sm text-left ${
+              value === null ? `${selection.row.selected} font-medium` : selection.row.idle
             }`}
           >
             <span className="flex flex-col">
@@ -139,7 +140,7 @@ export function LanguagePickerPopover({
                 <span className="text-xs font-normal text-ink-subtle">{autoSubtitle}</span>
               )}
             </span>
-            {value === null && <span className="text-blue-600" aria-hidden="true">✓</span>}
+            {value === null && <span className="text-ink" aria-hidden="true">✓</span>}
           </button>
         )}
 
@@ -155,15 +156,15 @@ export function LanguagePickerPopover({
             type="button"
             aria-pressed={value === opt.code}
             onClick={() => onChange(opt.code)}
-            className={`flex w-full items-center justify-between px-3 py-1.5 text-sm hover:bg-surface-2 text-left ${
-              value === opt.code ? "text-blue-600 font-medium" : "text-ink"
+            className={`flex w-full items-center justify-between px-3 py-1.5 text-sm text-left ${
+              value === opt.code ? `${selection.row.selected} font-medium` : selection.row.idle
             }`}
           >
             <span>
               {opt.label}{" "}
               <span className="text-xs text-ink-subtle">({opt.code})</span>
             </span>
-            {value === opt.code && <span className="text-blue-600" aria-hidden="true">✓</span>}
+            {value === opt.code && <span className="text-ink" aria-hidden="true">✓</span>}
           </button>
         ))}
 

@@ -14,6 +14,8 @@ import {
   type BuiltInAIDownloadProgressEvent,
 } from '@/lib/builtin-ai';
 import { DEFAULT_PARAKEET_MODEL } from '@/constants/modelDefaults';
+import { cn } from '@/lib/utils';
+import { badge, panel, progress as progressClasses, toneText } from '@/lib/theme-classes';
 
 /**
  * 'idle' is "nothing is running and nothing is done" — the state a user lands in after
@@ -423,11 +425,11 @@ export function DownloadProgressStep() {
             {status === 'downloading' && <Loader2 className="w-5 h-5 text-ink animate-spin" />}
             {status === 'stopping' && <span className="text-sm text-ink-muted">Stopping…</span>}
             {status === 'completed' && (
-              <div className="w-6 h-6 rounded-full bg-green-100 flex items-center justify-center">
-                <Check className="w-4 h-4 text-green-600" />
+              <div className={cn('w-6 h-6 rounded-full flex items-center justify-center', badge.success)}>
+                <Check className="w-4 h-4" />
               </div>
             )}
-            {status === 'error' && <span className="text-sm text-red-500">Failed</span>}
+            {status === 'error' && <span className={cn('text-sm', toneText.error)}>Failed</span>}
             {status === 'cancelled' && <span className="text-sm text-ink-muted">Cancelled</span>}
           </div>
         </div>
@@ -435,9 +437,9 @@ export function DownloadProgressStep() {
         {/* Progress Bar */}
         {showProgress && (
           <div className="space-y-2">
-            <div className="w-full h-2 bg-surface-2 rounded-full overflow-hidden">
+            <div className={cn('w-full h-2 rounded-full overflow-hidden', progressClasses.track)}>
               <div
-                className="h-full bg-gradient-to-r from-gray-700 to-gray-900 rounded-full transition-all duration-300"
+                className={cn('h-full rounded-full transition-all duration-300', progressClasses.fill)}
                 style={{ width: `${percent}%` }}
               />
             </div>
@@ -463,9 +465,9 @@ export function DownloadProgressStep() {
         )}
 
         {status === 'error' && (
-          <div className="mt-3 p-3 bg-red-50 border border-red-200 rounded-md">
-            <p className="text-sm text-red-600 font-medium">Download Error</p>
-            {error && <p className="text-xs text-red-500 mt-1">{error}</p>}
+          <div className={cn('mt-3 p-3 rounded-md', panel.error)}>
+            <p className="text-sm font-medium">Download Error</p>
+            {error && <p className="text-xs mt-1">{error}</p>}
           </div>
         )}
 
@@ -495,7 +497,7 @@ export function DownloadProgressStep() {
                     variant="outline"
                     size="sm"
                     onClick={onConfirmCancel}
-                    className="text-red-600 hover:text-red-600"
+                    className={cn(toneText.error, 'hover:text-error')}
                   >
                     Cancel download
                   </Button>

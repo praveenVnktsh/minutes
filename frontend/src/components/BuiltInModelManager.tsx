@@ -6,6 +6,7 @@ import { listen } from '@tauri-apps/api/event';
 import { Button } from '@/components/ui/button';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { cn } from '@/lib/utils';
+import { badge, progress as progressBar, selection, toneFill, toneText } from '@/lib/theme-classes';
 import { Download, RefreshCw, BadgeAlert, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { formatSummaryModelSizeLabelFromMb } from '@/lib/onboarding-summary-model';
@@ -221,13 +222,10 @@ export function BuiltInModelManager({
             <div
               key={model.name}
               className={cn(
-                'p-4 rounded-lg border transition-colors',
-                modelIsDownloading
-                  ? 'bg-surface-raised border-hairline'
-                  : 'bg-card',
+                'rounded-lg border bg-card p-4 transition-colors',
                 selectedModel === model.name
-                  ? 'ring-2 ring-ink border-ink'
-                  : 'border-hairline hover:border-hairline',
+                  ? selection.card.selected
+                  : selection.card.idle,
                 isAvailable && !modelIsDownloading && 'cursor-pointer'
               )}
               onClick={() => {
@@ -243,25 +241,25 @@ export function BuiltInModelManager({
                     <span className="min-w-0 break-words text-base font-bold leading-snug text-ink">{model.display_name || model.name}</span>
                     {isAvailable && (
                       <>
-                        <span className="flex shrink-0 items-center gap-1 text-xs font-medium text-green-600">
-                          <span className="h-2 w-2 rounded-full bg-green-600"></span>
+                        <span className={cn('flex shrink-0 items-center gap-1 text-xs font-medium', toneText.success)}>
+                          <span className={cn('h-2 w-2 rounded-full', toneFill.success)}></span>
                           Ready
                         </span>
                         {selectedModel === model.name && (
-                          <span className="shrink-0 rounded bg-blue-100 px-2 py-0.5 text-xs font-medium text-blue-700">
+                          <span className={cn('shrink-0 rounded px-2 py-0.5 text-xs font-medium', selection.pill)}>
                             Selected
                           </span>
                         )}
                       </>
                     )}
                     {isCorrupted && (
-                      <span className="flex shrink-0 items-center gap-1 rounded bg-red-100 px-2 py-0.5 text-xs font-medium text-red-700">
+                      <span className={cn('flex shrink-0 items-center gap-1 rounded px-2 py-0.5 text-xs font-medium', badge.error)}>
                         <BadgeAlert className="h-3 w-3" />
                         Corrupted
                       </span>
                     )}
                     {isError && (
-                      <span className="shrink-0 rounded bg-red-100 px-2 py-0.5 text-xs font-medium text-red-700">
+                      <span className={cn('shrink-0 rounded px-2 py-0.5 text-xs font-medium', badge.error)}>
                         Error
                       </span>
                     )}
@@ -342,7 +340,7 @@ export function BuiltInModelManager({
                   {/* Available - Show small trash icon (only if not currently selected) */}
                   {isAvailable && !modelIsDownloading && selectedModel !== model.name && (
                     <button
-                      className="p-2 rounded hover:bg-surface-2 transition-colors text-ink-muted hover:text-red-600"
+                      className="p-2 rounded hover:bg-surface-2 transition-colors text-ink-muted hover:text-error"
                       onClick={(e) => {
                         e.stopPropagation();
                         deleteModel(model.name);
@@ -359,7 +357,7 @@ export function BuiltInModelManager({
                   <p className="mb-1">{model.description}</p>
                 )}
                 {(isError || isCorrupted) && (
-                  <p className="mb-1 text-xs text-red-600">
+                  <p className={cn('mb-1 text-xs', toneText.error)}>
                     {isError && typeof model.status === 'object' && 'Error' in model.status
                       ? (model.status as any).Error
                       : isCorrupted
@@ -396,9 +394,9 @@ export function BuiltInModelManager({
                       <span>{formatSummaryModelSizeLabelFromMb(model.size_mb)}</span>
                     )}
                   </div>
-                  <div className="w-full h-2.5 bg-surface-2 rounded-full overflow-hidden">
+                  <div className={cn('h-2 w-full overflow-hidden rounded-full', progressBar.track)}>
                     <div
-                      className="h-full bg-gradient-to-r from-gray-800 to-gray-900 rounded-full transition-all duration-300"
+                      className={cn('h-full rounded-full transition-all duration-300', progressBar.fill)}
                       style={{ width: `${progress}%` }}
                     />
                   </div>

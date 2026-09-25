@@ -25,13 +25,13 @@ export async function showRecordingNotification(): Promise<void> {
             <p className="text-sm font-medium text-ink">
               Inform all participants this meeting is being recorded.
             </p>
-            <label className="flex items-center gap-2 text-xs cursor-pointer hover:bg-blue-100 p-2 rounded transition-colors">
+            <label className="flex items-center gap-2 text-xs cursor-pointer hover:bg-surface-2 p-2 rounded transition-colors">
               <input
                 type="checkbox"
                 onChange={(e) => {
                   dontShowAgain = e.target.checked;
                 }}
-                className="rounded border-hairline text-blue-600 focus:ring-blue-500 focus:ring-2"
+                className="rounded border-hairline text-ink focus:ring-focus focus:ring-2"
               />
               <span className="select-none text-ink">Don't show this again</span>
             </label>

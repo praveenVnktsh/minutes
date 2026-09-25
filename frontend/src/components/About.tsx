@@ -6,6 +6,7 @@ import { updateService, UpdateInfo } from '@/services/updateService';
 import { Button } from './ui/button';
 import { Loader2, CheckCircle2 } from 'lucide-react';
 import { toast } from 'sonner';
+import { toneText } from '@/lib/theme-classes';
 
 
 export function About() {
@@ -76,7 +77,7 @@ export function About() {
                         )}
                     </Button>
                     {updateInfo?.available && (
-                        <div className="mt-2 text-xs text-blue-600">
+                        <div className={`mt-2 text-xs ${toneText.info}`}>
                             Update available: v{updateInfo.version}
                         </div>
                     )}

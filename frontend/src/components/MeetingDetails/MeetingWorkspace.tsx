@@ -352,7 +352,7 @@ export function MeetingWorkspace({
                     onClick={() => (isGenerating ? onStopGeneration?.() : onRegenerate?.())}
                     title={isGenerating ? 'Stop generating' : notesDirty ? 'Your notes changed — re-enhance to include them' : 'Re-enhance notes'}
                     aria-label={isGenerating ? 'Stop generating' : notesDirty ? 'Your notes changed — re-enhance' : 'Re-enhance notes'}
-                    className={`flex h-6 w-6 items-center justify-center rounded-full text-ink-muted hover:bg-surface-2 hover:text-ink ${notesDirty && !isGenerating ? 'animate-pulse text-amber-500 ring-2 ring-amber-400/70' : ''}`}
+                    className={`flex h-6 w-6 items-center justify-center rounded-full text-ink-muted hover:bg-surface-2 hover:text-ink ${notesDirty && !isGenerating ? 'animate-pulse text-warning ring-2 ring-warning/70' : ''}`}
                   >
                     {isGenerating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RotateCw className="h-3.5 w-3.5" />}
                   </button>

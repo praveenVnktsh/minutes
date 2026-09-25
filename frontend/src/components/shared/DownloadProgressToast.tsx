@@ -7,6 +7,7 @@ import { X, Download, Check, Loader2, ArrowBigDownDash } from 'lucide-react';
 import type { ParakeetDownloadProgressEvent } from '@/lib/parakeet';
 import { BUILTIN_AI_DOWNLOAD_PROGRESS_EVENT, type BuiltInAIDownloadProgressEvent } from '@/lib/builtin-ai';
 import { BYTES_PER_MIB } from '@/lib/download-display';
+import { badge, toneText } from '@/lib/theme-classes';
 
 interface DownloadProgress {
   modelName: string;
@@ -66,12 +67,12 @@ function DownloadToastContent({
     <div className="flex items-center gap-3 w-full max-w-sm bg-surface-raised rounded-lg shadow-lg border border-hairline p-3 relative">
 
       {/* Icon */}
-      <div className={`flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center ${isComplete ? 'bg-green-100' : hasError ? 'bg-red-100' : isCancelled ? 'bg-surface-2' : 'bg-surface-2'
+      <div className={`flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center ${isComplete ? badge.success : hasError ? badge.error : isCancelled ? 'bg-surface-2' : 'bg-surface-2'
         }`}>
         {isComplete ? (
-          <Check className="w-4 h-4 text-green-600" />
+          <Check className="w-4 h-4" />
         ) : hasError ? (
-          <X className="w-4 h-4 text-red-600" />
+          <X className="w-4 h-4" />
         ) : isCancelled ? (
           <X className="w-4 h-4 text-ink-muted" />
         ) : (
@@ -100,9 +101,9 @@ function DownloadToastContent({
         </div>
 
         {hasError ? (
-          <p className="text-xs text-red-600">{download.error || 'Download failed'}</p>
+          <p className={`text-xs ${toneText.error}`}>{download.error || 'Download failed'}</p>
         ) : isComplete ? (
-          <p className="text-xs text-green-600">Download complete</p>
+          <p className={`text-xs ${toneText.success}`}>Download complete</p>
         ) : isCancelled ? (
           <p className="text-xs text-ink-muted">Download cancelled</p>
         ) : (

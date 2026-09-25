@@ -2,6 +2,7 @@ import { motion } from 'framer-motion';
 import { Download, RefreshCw, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
+import { badge, progress as progressBar, selection, toneFill, toneText } from '@/lib/theme-classes';
 import { formatFileSize } from '@/lib/whisper';
 
 /** The status shape both the Whisper and Parakeet engines report. */
@@ -60,7 +61,7 @@ export function TranscriptModelCard({
       transition={{ duration: 0.2 }}
       className={cn(
         'rounded-lg border bg-card p-4 transition-colors',
-        isSelected && isAvailable ? 'border-ink ring-2 ring-ink' : 'border-hairline',
+        isSelected && isAvailable ? selection.card.selected : selection.card.idle,
         isAvailable && 'cursor-pointer'
       )}
       onClick={() => {
@@ -74,28 +75,28 @@ export function TranscriptModelCard({
               {displayName}
             </span>
             {isRecommended && (
-              <span className="shrink-0 rounded bg-surface-2 px-2 py-0.5 text-xs font-medium text-ink-muted">
+              <span className={cn('shrink-0 rounded px-2 py-0.5 text-xs font-medium', badge.neutral)}>
                 Recommended
               </span>
             )}
             {isAvailable && !isCancelling && (
-              <span className="flex shrink-0 items-center gap-1 text-xs font-medium text-success">
-                <span className="h-2 w-2 rounded-full bg-success" />
+              <span className={cn('flex shrink-0 items-center gap-1 text-xs font-medium', toneText.success)}>
+                <span className={cn('h-2 w-2 rounded-full', toneFill.success)} />
                 Ready
               </span>
             )}
             {isSelected && isAvailable && (
-              <span className="shrink-0 rounded bg-selected px-2 py-0.5 text-xs font-medium text-selected-foreground">
+              <span className={cn('shrink-0 rounded px-2 py-0.5 text-xs font-medium', selection.pill)}>
                 Selected
               </span>
             )}
             {isCorrupted && (
-              <span className="shrink-0 rounded bg-error-subtle px-2 py-0.5 text-xs font-medium text-error">
+              <span className={cn('shrink-0 rounded px-2 py-0.5 text-xs font-medium', badge.error)}>
                 Corrupted
               </span>
             )}
             {isError && downloadProgress === null && (
-              <span className="shrink-0 rounded bg-error-subtle px-2 py-0.5 text-xs font-medium text-error">
+              <span className={cn('shrink-0 rounded px-2 py-0.5 text-xs font-medium', badge.error)}>
                 Download failed
               </span>
             )}
@@ -186,9 +187,9 @@ export function TranscriptModelCard({
               </div>
             )}
           </div>
-          <div className="h-2 w-full overflow-hidden rounded-full bg-hairline">
+          <div className={cn('h-2 w-full overflow-hidden rounded-full', progressBar.track)}>
             <motion.div
-              className="h-full rounded-full bg-ink"
+              className={cn('h-full rounded-full', progressBar.fill)}
               initial={{ width: 0 }}
               animate={{ width: `${progress}%` }}
               transition={{ duration: 0.3, ease: 'easeOut' }}

@@ -2,6 +2,7 @@ import React from 'react';
 import { Download } from 'lucide-react';
 import { toast } from 'sonner';
 import { UpdateInfo } from '@/services/updateService';
+import { link } from '@/lib/theme-classes';
 
 let globalShowDialogCallback: (() => void) | null = null;
 
@@ -34,7 +35,7 @@ export function showUpdateNotification(updateInfo: UpdateInfo, onUpdateClick?: (
           e.stopPropagation();
           handleClick();
         }}
-        className="text-sm font-medium text-blue-600 hover:text-blue-700 underline"
+        className={`text-sm font-medium ${link}`}
       >
         View Details
       </button>
