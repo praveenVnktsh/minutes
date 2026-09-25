@@ -368,15 +368,19 @@ pub async fn get_or_init_whisper<R: Runtime>(
             }
         }
         Ok(None) => {
-            info!("No transcript config found in API, falling back to 'small'");
-            "small".to_string()
+            info!(
+                "No transcript config found in API, falling back to '{}'",
+                crate::config::DEFAULT_WHISPER_MODEL
+            );
+            crate::config::DEFAULT_WHISPER_MODEL.to_string()
         }
         Err(e) => {
             warn!(
-                "Failed to get transcript config from API: {}, falling back to 'small'",
-                e
+                "Failed to get transcript config from API: {}, falling back to '{}'",
+                e,
+                crate::config::DEFAULT_WHISPER_MODEL
             );
-            "small".to_string()
+            crate::config::DEFAULT_WHISPER_MODEL.to_string()
         }
     };
 

@@ -11,6 +11,8 @@ export interface ParakeetModelInfo {
   status: ModelStatus;
   description?: string;
   quantization: QuantizationType;
+  /** No longer offered for download; the UI lists it only once installed. */
+  legacy: boolean;
 }
 
 export type QuantizationType = 'FP32' | 'Int8';
@@ -56,55 +58,18 @@ export interface ModelDisplayInfo {
 }
 
 export const MODEL_DISPLAY_CONFIG: Record<string, ModelDisplayInfo> = {
-  'parakeet-tdt-0.6b-v3-int8': {
+  'parakeet-tdt-0.6b-v2-int8': {
     friendlyName: 'Lightning',
     icon: '⚡',
-    tagline: 'Real time • Best for speed, great accuracy',
+    tagline: 'Real time • Most accurate for English',
     recommended: true,
     tier: 'fastest'
   },
-  'parakeet-tdt-0.6b-v2-int8': {
-    friendlyName: 'Compact',
-    icon: '📦',
-    tagline: 'Real time • Smaller size',
-    tier: 'balanced'
-  },
-  'parakeet-tdt-0.6b-v3-fp32': {
-    friendlyName: 'Precise',
-    icon: '🎯',
-    tagline: '20x real-time • Higher accuracy',
-    tier: 'precise'
-  }
-};
-
-// Model configuration for Parakeet models (matching Rust implementation)
-// Supported models: parakeet-tdt-0.6b in v2 and v3 variants
-// Source: https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx
-//
-// Display-only fallback: size_mb here is a hand-maintained restatement of the
-// Rust catalogue and drifts from it. Never use it for download sizes — use
-// the size_bytes the backend serves on ParakeetModelInfo instead.
-export const PARAKEET_MODEL_CONFIGS: Record<string, Partial<ParakeetModelInfo>> = {
   'parakeet-tdt-0.6b-v3-int8': {
-    description: 'Real time on M4 Max, optimized for speed',
-    size_mb: 670, // Actual download: 652MB encoder + 18.2MB decoder + 0.2MB extras
-    accuracy: 'High',
-    speed: 'Ultra Fast',
-    quantization: 'Int8'
-  },
-  'parakeet-tdt-0.6b-v2-int8': {
-    description: '25x real-time, smaller size with good accuracy',
-    size_mb: 661, // Actual download: 652MB encoder + 9MB decoder + 0.15MB extras
-    accuracy: 'High',
-    speed: 'Very Fast',
-    quantization: 'Int8'
-  },
-  'parakeet-tdt-0.6b-v3-fp32': {
-    description: '20x real-time on M4 Max, higher precision',
-    size_mb: 2554, // Actual download: 2.44GB + 41.8MB encoder + 72.5MB decoder + 0.2MB extras
-    accuracy: 'High',
-    speed: 'Fast',
-    quantization: 'FP32'
+    friendlyName: 'Multilingual',
+    icon: '🌍',
+    tagline: 'Real time • 25 European languages',
+    tier: 'balanced'
   }
 };
 
@@ -146,32 +111,6 @@ export function formatFileSize(sizeMb: number): string {
     return `${(sizeMb / 1000).toFixed(1)}GB`;
   }
   return `${sizeMb}MB`;
-}
-
-// Helper function to check if model is quantized
-export function isQuantizedModel(modelName: string): boolean {
-  return modelName.includes('int8');
-}
-
-// Helper function to get model performance badge
-export function getModelPerformanceBadge(quantization: QuantizationType): { label: string; color: string } {
-  switch (quantization) {
-    case 'FP32':
-      return { label: 'Full Precision', color: 'blue' };
-    case 'Int8':
-      return { label: 'Int8 Quantized', color: 'green' };
-    default:
-      return { label: 'Standard', color: 'gray' };
-  }
-}
-
-export function getRecommendedModel(systemSpecs?: { ram: number; cores: number }): string {
-  // Default to Int8 quantized model (fastest)
-  if (!systemSpecs) return 'parakeet-tdt-0.6b-v3-int8';
-
-  // For any system, prefer Int8 for speed
-  // FP32 can be used if user explicitly wants higher precision
-  return 'parakeet-tdt-0.6b-v3-int8';
 }
 
 // Tauri command wrappers for Parakeet backend

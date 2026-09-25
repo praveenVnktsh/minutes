@@ -65,6 +65,8 @@ pub struct ModelInfo {
     pub speed: String,
     pub status: ModelStatus,
     pub description: String,
+    /// No longer offered for download; listed only once installed.
+    pub legacy: bool,
 }
 
 struct ActiveDownload {
@@ -247,7 +249,7 @@ impl WhisperEngine {
         // Use centralized model catalog from config.rs
         let model_configs = WHISPER_MODEL_CATALOG;
 
-        for &(name, filename, size_mb, accuracy, speed, description) in model_configs {
+        for &(name, filename, size_mb, accuracy, speed, description, legacy) in model_configs {
             let model_path = models_dir.join(filename);
             let status = if model_path.exists() {
                 // Check if file size is reasonable (at least 1MB for a valid model)
@@ -299,6 +301,7 @@ impl WhisperEngine {
                 speed: speed.to_string(),
                 status,
                 description: description.to_string(),
+                legacy,
             };
 
             models.push(model_info);
@@ -1464,6 +1467,7 @@ mod tests {
                 speed: "Fast".to_string(),
                 status: ModelStatus::Downloading { progress: 42 },
                 description: "test model".to_string(),
+                legacy: true,
             },
         );
 

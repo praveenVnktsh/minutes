@@ -5,15 +5,17 @@
 
 /**
  * Default Whisper model for transcription when no preference is configured.
- * This is the largest, highest-accuracy registered Whisper model.
+ * Turbo keeps nearly all of large-v3's accuracy at a fraction of the size and
+ * decode time.
  */
-export const DEFAULT_WHISPER_MODEL = 'large-v3';
+export const DEFAULT_WHISPER_MODEL = 'large-v3-turbo-q5_0';
 
 /**
  * Default Parakeet model for transcription when no preference is configured.
- * This is the quantized version optimized for speed.
+ * The app targets English, and v2 is the English-only Parakeet, which scores
+ * better on English than the multilingual v3.
  */
-export const DEFAULT_PARAKEET_MODEL = 'parakeet-tdt-0.6b-v3-int8';
+export const DEFAULT_PARAKEET_MODEL = 'parakeet-tdt-0.6b-v2-int8';
 
 /**
  * Model defaults by provider type

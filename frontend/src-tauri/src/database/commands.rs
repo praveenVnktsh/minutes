@@ -199,7 +199,7 @@ pub async fn initialize_fresh_database(app: AppHandle) -> Result<(), String> {
         pool,
         "builtin-ai",
         default_summary_model,
-        "large-v3", // Default whisper model (unused for builtin but required)
+        crate::config::DEFAULT_WHISPER_MODEL, // Unused for builtin but required
         None,
     )
     .await

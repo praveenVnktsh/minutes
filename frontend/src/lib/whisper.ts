@@ -7,6 +7,8 @@ export interface ModelInfo {
   speed: ProcessingSpeed;
   status: ModelStatus;
   description?: string;
+  /** No longer offered for download; the UI lists it only once installed. */
+  legacy: boolean;
 }
 
 export type ModelAccuracy = 'High' | 'Good' | 'Decent';
@@ -49,87 +51,6 @@ export interface TranscribeAudioRequest {
   audioData: number[];
   sampleRate: number;
 }
-
-// Model configuration for different use cases
-export const MODEL_CONFIGS: Record<string, Partial<ModelInfo>> = {
-  // Standard f16 models (full precision)
-  'large-v3': {
-    description: 'Highest accuracy, best for important meetings. Slower processing.',
-    size_mb: 2951,
-    accuracy: 'High',
-    speed: 'Slow'
-  },
-  'large-v3-turbo': {
-    description: 'Best accuracy with improved speed.',
-    size_mb: 1549,
-    accuracy: 'High',
-    speed: 'Medium'
-  },
-  'medium': {
-    description: 'Balanced accuracy and speed. Good for most use cases.',
-    size_mb: 1463,
-    accuracy: 'High',
-    speed: 'Slow'
-  },
-  'small': {
-    description: 'Fast processing with good quality. Great for quick transcription.',
-    size_mb: 466,
-    accuracy: 'Good',
-    speed: 'Medium'
-  },
-  'base': {
-    description: 'Good balance of speed and accuracy.',
-    size_mb: 142,
-    accuracy: 'Good',
-    speed: 'Fast'
-  },
-  'tiny': {
-    description: 'Fastest processing, good for real-time use.',
-    size_mb: 39,
-    accuracy: 'Decent',
-    speed: 'Very Fast'
-  },
-
-  // Q5_1 quantized models (balanced speed/accuracy, slightly better quality than Q5_0)
-  'tiny-q5_1': {
-    description: 'Quantized tiny model, ~50% faster processing.',
-    size_mb: 31,
-    accuracy: 'Decent',
-    speed: 'Very Fast'
-  },
-  'base-q5_1': {
-    description: 'Quantized base model, good speed/accuracy balance.',
-    size_mb: 57,
-    accuracy: 'Good',
-    speed: 'Fast'
-  },
-  'small-q5_1': {
-    description: 'Quantized small model, faster than f16 version.',
-    size_mb: 181,
-    accuracy: 'Good',
-    speed: 'Fast'
-  },
-
-  // Q5_0 quantized models (balanced speed/accuracy)
-  'medium-q5_0': {
-    description: 'Quantized medium model, professional quality with better speed.',
-    size_mb: 514,
-    accuracy: 'High',
-    speed: 'Medium'
-  },
-  'large-v3-turbo-q5_0': {
-    description: 'Quantized large turbo model, best balance.',
-    size_mb: 547,
-    accuracy: 'High',
-    speed: 'Medium'
-  },
-  'large-v3-q5_0': {
-    description: 'Quantized large model, best balance of speed and accuracy.',
-    size_mb: 1031,
-    accuracy: 'High',
-    speed: 'Slow'
-  }
-};
 
 // Helper functions
 export function getModelIcon(accuracy: ModelAccuracy): string {
@@ -175,22 +96,6 @@ export function isQuantizedModel(modelName: string): boolean {
 }
 
 // Helper function to get model performance badge
-export function getModelPerformanceBadge(modelName: string): { label: string; color: string } {
-  const type = getModelType(modelName);
-  switch (type) {
-    case 'f16':
-      return { label: 'Full Precision', color: 'blue' };
-    case 'q5_1':
-      return { label: 'Balanced+', color: 'green' };
-    case 'q5_0':
-      return { label: 'Balanced', color: 'green' };
-    case 'q4_0':
-      return { label: 'Fast', color: 'orange' };
-    default:
-      return { label: 'Standard', color: 'gray' };
-  }
-}
-
 // Helper function to get concise tagline for model (similar to Parakeet style)
 export function getModelTagline(modelName: string, speed: ProcessingSpeed, accuracy: ModelAccuracy): string {
   const isQuantized = isQuantizedModel(modelName);
@@ -240,42 +145,6 @@ export function getModelTagline(modelName: string, speed: ProcessingSpeed, accur
   }
 
   return `${speedText} • ${featureText}`;
-}
-
-// Group models by their base name for better UI organization
-export function groupModelsByBase(models: ModelInfo[]): Record<string, ModelInfo[]> {
-  const grouped: Record<string, ModelInfo[]> = {};
-
-  models.forEach(model => {
-    const baseName = getModelBaseName(model.name);
-    if (!grouped[baseName]) {
-      grouped[baseName] = [];
-    }
-    grouped[baseName].push(model);
-  });
-
-  // Sort each group: f16 first, then q5_1, then q5_0, then q4_0
-  Object.keys(grouped).forEach(baseName => {
-    grouped[baseName].sort((a, b) => {
-      const aType = getModelType(a.name);
-      const bType = getModelType(b.name);
-      const order = { 'f16': 0, 'q5_1': 1, 'q5_0': 2, 'q4_0': 3 };
-      return order[aType] - order[bType];
-    });
-  });
-
-  return grouped;
-}
-
-export function getRecommendedModel(systemSpecs?: { ram: number; cores: number }): string {
-  if (!systemSpecs) return 'medium-q5_0'; // Default to balanced quantized model
-
-  if (systemSpecs.ram >= 8000 && systemSpecs.cores >= 8) {
-    return 'large-v3'; // High-end system
-  } else if (systemSpecs.ram >= 4000 && systemSpecs.cores >= 4) {
-    return 'medium'; // Mid-range system
-  }
-  return 'small'; // Lower-spec system
 }
 
 // Tauri command wrappers for whisper-rs backend
