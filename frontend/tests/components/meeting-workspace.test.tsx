@@ -71,11 +71,11 @@ describe('MeetingWorkspace composition', () => {
     expect(html).not.toContain('Re-enhance notes');
   });
 
-  test('initializes compact workspaces without opening the transcript dock', () => {
+  test('keeps the transcript dock open in compact (non-maximized) windows', () => {
     compact = true;
     const html = renderWorkspace(<div>Enhanced notes</div>);
-    expect(html).toContain('aria-pressed="false"');
-    expect(html).not.toContain('Transcript content');
+    expect(html).toContain('title="Toggle transcript" aria-pressed="true"');
+    expect(html).toContain('Transcript content');
   });
 
   test('shows retry instead of Generate while the initial summary read is unknown', () => {
