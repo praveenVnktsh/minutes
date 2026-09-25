@@ -2,7 +2,7 @@
 
 import { useState } from 'react'
 import { usePathname } from 'next/navigation'
-import { Pause, Play, Square } from 'lucide-react'
+import { Pause, Play, Square, X } from 'lucide-react'
 import { MeetingActivityFeedback } from '@/app/_components/StatusOverlays'
 import { useSidebar } from '@/components/Sidebar/SidebarProvider'
 import { Button } from '@/components/ui/button'
@@ -14,10 +14,12 @@ import { useRecordingState } from '@/contexts/RecordingStateContext'
 export function ShellActivitySurface() {
   const controller = useRecordingController()
   const recordingState = useRecordingState()
-  const { snapshot, summaries, retrySummary, cancelSummary } = useMeetingActivity()
+  const { snapshot, summaries, retrySummary, cancelSummary, dismissSummary } = useMeetingActivity()
   const { currentMeeting } = useSidebar()
   const pathname = usePathname()
   const [showAll, setShowAll] = useState(false)
+  const [hiddenKeys, setHiddenKeys] = useState<Set<string>>(new Set())
+  const hideKey = (key: string) => setHiddenKeys((previous) => new Set(previous).add(key))
   const workspaceMeetingId = pathname === '/meeting-details' ? currentMeeting?.id : null
   const activityCandidates = snapshot.activities.filter((activity) => (
     activity.kind !== 'recording'
@@ -34,13 +36,13 @@ export function ShellActivitySurface() {
     && ['queued', 'processing', 'failed'].includes(summary.status)
   )).sort((left, right) => Number(left.status === 'failed') - Number(right.status === 'failed') || right.revision - left.revision)
   const allWork = [
-    ...activityCandidates.map((activity) => ({ type: 'activity' as const, id: activity.task_id, activity })),
-    ...summaryCandidates.map((summary) => ({ type: 'summary' as const, id: summary.activityId, summary })),
+    ...activityCandidates.map((activity) => ({ type: 'activity' as const, id: activity.task_id, key: `${activity.task_id}:${activity.revision}`, activity })),
+    ...summaryCandidates.map((summary) => ({ type: 'summary' as const, id: summary.activityId, key: `${summary.activityId}:${summary.revision}`, summary })),
   ].sort((left, right) => {
     const leftStatus = left.type === 'activity' ? left.activity.status : left.summary.status
     const rightStatus = right.type === 'activity' ? right.activity.status : right.summary.status
     return Number(leftStatus === 'failed' || leftStatus === 'ready') - Number(rightStatus === 'failed' || rightStatus === 'ready')
-  })
+  }).filter((work) => !hiddenKeys.has(work.key))
   const visibleWork = showAll ? allWork : allWork.slice(0, 3)
   const commandIsFinalizing = controller.command === 'stop' || controller.command === 'finalize'
   // The live meeting workspace renders its own FloatingRecordingControls, so the shell card
@@ -77,8 +79,13 @@ export function ShellActivitySurface() {
       )}
       {showFinalizing && <div className="rounded-xl border border-hairline bg-surface-raised p-3 shadow-lg"><StatusFeedback pending tone="info">{recordingState.isSaving ? 'Saving meeting…' : 'Finishing transcription…'}</StatusFeedback></div>}
       {visibleWork.map((work) => work.type === 'activity' ? (
-        <div key={work.id} className="rounded-xl border border-hairline bg-surface-raised p-3 shadow-lg">
-          <p className="mb-1 truncate text-xs font-semibold text-ink">{work.activity.title}</p>
+        <div key={work.key} className="rounded-xl border border-hairline bg-surface-raised p-3 shadow-lg">
+          <div className="mb-1 flex items-start gap-2">
+            <p className="min-w-0 flex-1 truncate text-xs font-semibold text-ink">{work.activity.title}</p>
+            <button type="button" aria-label={`Dismiss ${work.activity.title}`} className="shrink-0 rounded-sm text-ink-muted hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus focus-visible:ring-offset-2" onClick={() => hideKey(work.key)}>
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
           <MeetingActivityFeedback activity={work.activity} />
           {work.activity.progress_percentage !== null && (
             <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-surface-2" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={work.activity.progress_percentage}>
@@ -87,8 +94,21 @@ export function ShellActivitySurface() {
           )}
         </div>
       ) : (
-        <div key={work.id} className="rounded-xl border border-hairline bg-surface-raised p-3 shadow-lg">
-          <p className="mb-1 truncate text-xs font-semibold text-ink">{work.summary.response?.meetingName ?? 'Meeting summary'}</p>
+        <div key={work.key} className="rounded-xl border border-hairline bg-surface-raised p-3 shadow-lg">
+          <div className="mb-1 flex items-start gap-2">
+            <p className="min-w-0 flex-1 truncate text-xs font-semibold text-ink">{work.summary.response?.meetingName ?? 'Meeting summary'}</p>
+            <button
+              type="button"
+              aria-label={`Dismiss ${work.summary.response?.meetingName ?? 'Meeting summary'}`}
+              className="shrink-0 rounded-sm text-ink-muted hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus focus-visible:ring-offset-2"
+              onClick={() => {
+                hideKey(work.key)
+                if (work.summary.status === 'failed') dismissSummary(work.summary.meetingId, work.summary.processId ?? undefined)
+              }}
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
           <StatusFeedback
             pending={work.summary.status === 'queued' || work.summary.status === 'processing'}
             tone={work.summary.status === 'failed' ? 'error' : 'info'}
