@@ -159,6 +159,23 @@ describe('ShellActivitySurface', () => {
     renderer.unmount()
   })
 
+  test('a dismissed card stays hidden across progress revisions and returns on a status change', async () => {
+    const processing = summaries[0]
+    const renderer = create(<ShellActivitySurface />)
+    const dismissButton = renderer.root.findByProps({ 'aria-label': 'Dismiss Quarterly review' })
+    await act(async () => dismissButton.props.onClick())
+    expect(JSON.stringify(renderer.toJSON())).not.toContain('Quarterly review')
+    summaries = [{ ...processing, revision: 5 }]
+    await act(async () => renderer.update(<ShellActivitySurface />))
+    expect(JSON.stringify(renderer.toJSON())).not.toContain('Quarterly review')
+    expect(JSON.stringify(renderer.toJSON())).toContain('Show 3 more activities')
+    expect(dismissSummary).not.toHaveBeenCalled()
+    summaries = [{ ...processing, revision: 6, status: 'failed', error: 'Summary failed' }]
+    await act(async () => renderer.update(<ShellActivitySurface />))
+    expect(JSON.stringify(renderer.toJSON())).toContain('Show 4 more activities')
+    renderer.unmount()
+  })
+
   test('dismissing a failed summary hides it locally and calls dismissSummary', async () => {
     summaries = [{
       activityId: 'failed-summary:process-2', revision: 7, meetingId: 'failed-meeting', processId: 'process-2', status: 'failed',

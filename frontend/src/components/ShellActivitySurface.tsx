@@ -36,8 +36,8 @@ export function ShellActivitySurface() {
     && ['queued', 'processing', 'failed'].includes(summary.status)
   )).sort((left, right) => Number(left.status === 'failed') - Number(right.status === 'failed') || right.revision - left.revision)
   const allWork = [
-    ...activityCandidates.map((activity) => ({ type: 'activity' as const, id: activity.task_id, key: `${activity.task_id}:${activity.revision}`, activity })),
-    ...summaryCandidates.map((summary) => ({ type: 'summary' as const, id: summary.activityId, key: `${summary.activityId}:${summary.revision}`, summary })),
+    ...activityCandidates.map((activity) => ({ type: 'activity' as const, id: activity.task_id, key: `${activity.task_id}:${activity.status}`, activity })),
+    ...summaryCandidates.map((summary) => ({ type: 'summary' as const, id: summary.activityId, key: `${summary.activityId}:${summary.status}`, summary })),
   ].sort((left, right) => {
     const leftStatus = left.type === 'activity' ? left.activity.status : left.summary.status
     const rightStatus = right.type === 'activity' ? right.activity.status : right.summary.status
@@ -79,7 +79,7 @@ export function ShellActivitySurface() {
       )}
       {showFinalizing && <div className="rounded-xl border border-hairline bg-surface-raised p-3 shadow-lg"><StatusFeedback pending tone="info">{recordingState.isSaving ? 'Saving meeting…' : 'Finishing transcription…'}</StatusFeedback></div>}
       {visibleWork.map((work) => work.type === 'activity' ? (
-        <div key={work.key} className="rounded-xl border border-hairline bg-surface-raised p-3 shadow-lg">
+        <div key={work.id} className="rounded-xl border border-hairline bg-surface-raised p-3 shadow-lg">
           <div className="mb-1 flex items-start gap-2">
             <p className="min-w-0 flex-1 truncate text-xs font-semibold text-ink">{work.activity.title}</p>
             <button type="button" aria-label={`Dismiss ${work.activity.title}`} className="shrink-0 rounded-sm text-ink-muted hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus focus-visible:ring-offset-2" onClick={() => hideKey(work.key)}>
@@ -94,7 +94,7 @@ export function ShellActivitySurface() {
           )}
         </div>
       ) : (
-        <div key={work.key} className="rounded-xl border border-hairline bg-surface-raised p-3 shadow-lg">
+        <div key={work.id} className="rounded-xl border border-hairline bg-surface-raised p-3 shadow-lg">
           <div className="mb-1 flex items-start gap-2">
             <p className="min-w-0 flex-1 truncate text-xs font-semibold text-ink">{work.summary.response?.meetingName ?? 'Meeting summary'}</p>
             <button
