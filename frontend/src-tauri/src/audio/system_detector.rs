@@ -382,12 +382,18 @@ fn list_microphone_using_apps() -> Vec<String> {
             for process in processes {
                 if process.is_running_input().unwrap_or(false) {
                     if let Ok(pid) = process.pid() {
+                        // Browsers and Electron/WebKit apps capture the mic from a
+                        // helper process that isn't a running app itself, so name
+                        // the app responsible for it (Chrome helper → Google Chrome).
+                        let pid = responsible_pid(pid);
                         if let Some(running_app) = cidre::ns::RunningApp::with_pid(pid) {
                             let name = running_app
                                 .localized_name()
                                 .map(|s| s.to_string())
                                 .unwrap_or_else(|| format!("Process {}", pid));
-                            apps.push(name);
+                            if !apps.contains(&name) {
+                                apps.push(name);
+                            }
                         }
                     }
                 }
@@ -401,6 +407,21 @@ fn list_microphone_using_apps() -> Vec<String> {
             apps
         }
         Err(_) => Vec::new(),
+    }
+}
+
+#[cfg(target_os = "macos")]
+extern "C" {
+    // libquarantine (part of libSystem): the pid macOS holds responsible for
+    // `pid`, e.g. the browser that owns a helper or WebKit GPU process.
+    fn responsibility_get_pid_responsible_for_pid(pid: i32) -> i32;
+}
+
+#[cfg(target_os = "macos")]
+fn responsible_pid(pid: i32) -> i32 {
+    match unsafe { responsibility_get_pid_responsible_for_pid(pid) } {
+        responsible if responsible > 0 => responsible,
+        _ => pid,
     }
 }
 
@@ -525,6 +546,27 @@ mod tests {
         assert!(!google_meet_url_is_open("https://meet.google.com/"));
         assert!(!google_meet_url_is_open("https://meet.google.com/landing"));
         assert!(!google_meet_url_is_open("https://youtube.com/watch?v=123"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn helper_processes_resolve_to_their_owning_app() {
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("5")
+            .spawn()
+            .expect("spawn child");
+        let child_pid = child.id() as i32;
+
+        // A spawned child shares its parent's responsible app, the same way a
+        // browser's audio helper resolves to the browser.
+        assert_eq!(
+            responsible_pid(child_pid),
+            responsible_pid(std::process::id() as i32)
+        );
+        assert_ne!(responsible_pid(child_pid), child_pid);
+
+        let _ = child.kill();
+        let _ = child.wait();
     }
 
     #[tokio::test]
