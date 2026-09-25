@@ -436,6 +436,18 @@ pub async fn api_set_meeting_archived<R: Runtime>(
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+pub async fn api_set_meeting_debug<R: Runtime>(
+    _app: AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+    meeting_id: String,
+    debug: bool,
+) -> Result<bool, String> {
+    MeetingsRepository::set_meeting_debug(state.db_manager.pool(), &meeting_id, debug)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Write a text export (e.g. Markdown) to the user's Downloads folder.
 ///
 /// Returns the absolute path that was written. The filename is sanitized so the

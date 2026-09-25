@@ -12,6 +12,7 @@ const searchTranscripts = mock(async () => {})
 const refetchMeetings = mock(async () => {})
 const setMeetingPinned = mock(async () => {})
 const setMeetingArchived = mock(async () => {})
+const setMeetingDebug = mock(async () => {})
 const runRecordingAction = mock(async () => {})
 const runImportAction = mock(async () => {})
 const openMeeting = mock(async () => {})
@@ -26,7 +27,7 @@ mock.module('@/components/Sidebar/SidebarProvider', () => ({
   ...originalSidebar,
   useSidebar: () => ({
     catalogStatus: 'ready', catalogError: null, searchStatus: 'idle', searchError: null,
-    searchTranscripts, refetchMeetings, setMeetingPinned, setMeetingArchived, meetingMutations: {},
+    searchTranscripts, refetchMeetings, setMeetingPinned, setMeetingArchived, setMeetingDebug, meetingMutations: {},
     selectMeetings: (visibility?: Parameters<typeof selectCatalogMeetings>[1]) => selectCatalogMeetings(meetings, visibility),
     selectSearchResults: (visibility?: Parameters<typeof selectCatalogSearchResults>[2]) => selectCatalogSearchResults([], meetings, visibility),
   }),
@@ -46,13 +47,15 @@ mock.module('@/contexts/MeetingActivityContext', () => ({
   ...originalActivity,
   useMeetingActivity: () => ({ activeMeetingId: 'active', getMeetingActivities: () => [] }),
 }))
-mock.module('@/hooks/useDebugMode', () => ({ ...originalDebug, useDebugMode: () => false }))
+let debugModeEnabled = false
+mock.module('@/hooks/useDebugMode', () => ({ ...originalDebug, useDebugMode: () => debugModeEnabled }))
 
 const originalWindow = globalThis.window
 const { MeetingsLibrary } = await import('./MeetingsLibrary')
 
 beforeEach(() => {
-  for (const fn of [searchTranscripts, refetchMeetings, setMeetingPinned, setMeetingArchived, runRecordingAction, runImportAction, openMeeting, consumeMeetingSearchFocus]) fn.mockClear()
+  for (const fn of [searchTranscripts, refetchMeetings, setMeetingPinned, setMeetingArchived, setMeetingDebug, runRecordingAction, runImportAction, openMeeting, consumeMeetingSearchFocus]) fn.mockClear()
+  debugModeEnabled = false
   Object.defineProperty(globalThis, 'window', { configurable: true, value: new EventTarget() })
 })
 
@@ -104,6 +107,20 @@ describe('MeetingsLibrary', () => {
     const pinButton = renderer!.root.findByProps({ 'aria-label': 'Unpin Active planning' })
     await act(async () => pinButton.props.onClick({ stopPropagation: () => {} }))
     expect(JSON.stringify(renderer!.toJSON())).toContain('pin failed')
+    await act(async () => renderer!.unmount())
+  })
+
+  test('shows "Keep as real meeting" only on debug meetings, and it calls setMeetingDebug', async () => {
+    debugModeEnabled = true
+    let renderer: ReturnType<typeof create>
+    await act(async () => { renderer = create(<MeetingsLibrary />) })
+
+    const keepButton = renderer!.root.findByProps({ 'aria-label': 'Keep as real meeting Debug capture' })
+    expect(keepButton.props.title).toBe('Keep as real meeting')
+    await act(async () => keepButton.props.onClick({ stopPropagation: () => {} }))
+    expect(setMeetingDebug).toHaveBeenCalledWith('debug', false)
+
+    expect(renderer!.root.findAllByProps({ 'aria-label': 'Keep as real meeting Active planning' })).toHaveLength(0)
     await act(async () => renderer!.unmount())
   })
 })

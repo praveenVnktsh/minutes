@@ -6,6 +6,7 @@ import {
   Archive,
   ArchiveRestore,
   AudioLines,
+  BadgeCheck,
   Bug,
   MessageSquare,
   Mic,
@@ -69,6 +70,7 @@ export default function SimpleSidebar() {
     selectSearchResults,
     setMeetingPinned,
     setMeetingArchived,
+    setMeetingDebug,
     meetingMutations,
   } = useSidebar();
   const { activeMeetingId } = useMeetingActivity();
@@ -128,6 +130,16 @@ export default function SimpleSidebar() {
     }
   };
 
+  const keepAsRealMeeting = async (event: MouseEvent, meeting: CurrentMeeting) => {
+    event.stopPropagation();
+    setActionError(null);
+    try {
+      await setMeetingDebug(meeting.id, false);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : String(error));
+    }
+  };
+
   const searching = Boolean(query.trim());
   const pinnedMeetings = searching ? [] : visibleMeetings.filter((meeting) => meeting.pinned && !meeting.archived);
   const regularMeetings = searching ? visibleMeetings : visibleMeetings.filter((meeting) => !meeting.pinned && !meeting.archived);
@@ -138,7 +150,7 @@ export default function SimpleSidebar() {
     const active = Boolean(pathname?.includes('/meeting-details')) && currentMeeting?.id === meeting.id;
     const live = activeMeetingId === meeting.id;
     const mutation = meetingMutations[meeting.id];
-    const pending = mutation?.pin?.status === 'pending' || mutation?.archive?.status === 'pending';
+    const pending = mutation?.pin?.status === 'pending' || mutation?.archive?.status === 'pending' || mutation?.debug?.status === 'pending';
     return (
       <div
         key={meeting.id}
@@ -188,6 +200,18 @@ export default function SimpleSidebar() {
           >
             {meeting.archived ? <ArchiveRestore className="h-3.5 w-3.5" /> : <Archive className="h-3.5 w-3.5" />}
           </button>
+          {meeting.debug && (
+            <button
+              type="button"
+              onClick={(event) => keepAsRealMeeting(event, meeting)}
+              disabled={pending}
+              title="Keep as real meeting"
+              aria-label={`Keep as real meeting: ${meeting.title}`}
+              className="rounded p-1 text-ink-subtle hover:bg-surface-1 hover:text-success"
+            >
+              <BadgeCheck className="h-3.5 w-3.5" />
+            </button>
+          )}
         </div>
       </div>
     );

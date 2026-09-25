@@ -38,7 +38,7 @@ export type TranscriptSearchResult = MeetingSearchResult;
 
 export type CatalogStatus = 'loading' | 'refreshing' | 'ready' | 'error';
 export type SearchStatus = 'idle' | 'searching' | 'success' | 'error';
-export type MeetingMutationKind = 'rename' | 'pin' | 'archive';
+export type MeetingMutationKind = 'rename' | 'pin' | 'archive' | 'debug';
 
 export interface MeetingMutationStatus {
   status: 'pending' | 'error';
@@ -50,7 +50,7 @@ export type MeetingMutationStates = Record<
   Partial<Record<MeetingMutationKind, MeetingMutationStatus>>
 >;
 
-type MutableMeetingField = 'title' | 'pinned' | 'archived';
+type MutableMeetingField = 'title' | 'pinned' | 'archived' | 'debug';
 
 interface SummarySubscription {
   processId: string;
@@ -94,6 +94,7 @@ interface SidebarContextType {
   renameMeeting: (meetingId: string, title: string) => Promise<void>;
   setMeetingPinned: (meetingId: string, pinned: boolean) => Promise<void>;
   setMeetingArchived: (meetingId: string, archived: boolean) => Promise<void>;
+  setMeetingDebug: (meetingId: string, debug: boolean) => Promise<void>;
   meetingMutations: MeetingMutationStates;
   setServerAddress: (address: string) => void;
   serverAddress: string;
@@ -167,6 +168,7 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
         ['title', 'rename'],
         ['pinned', 'pin'],
         ['archived', 'archive'],
+        ['debug', 'debug'],
       ] as const) {
         const queue = mutationQueuesRef.current.get(`${meeting.id}:${kind}`);
         if (!queue) continue;
@@ -434,6 +436,10 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
     mutateMeeting(meetingId, 'archived', archived, 'archive', 'api_set_meeting_archived', { meetingId, archived })
   ), [mutateMeeting]);
 
+  const setMeetingDebug = React.useCallback((meetingId: string, debug: boolean) => (
+    mutateMeeting(meetingId, 'debug', debug, 'debug', 'api_set_meeting_debug', { meetingId, debug })
+  ), [mutateMeeting]);
+
   const selectCatalogMeetings = React.useCallback(
     (visibility?: MeetingVisibility) => selectMeetings(meetings, visibility),
     [meetings],
@@ -498,6 +504,7 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
       renameMeeting,
       setMeetingPinned,
       setMeetingArchived,
+      setMeetingDebug,
       meetingMutations,
       setServerAddress,
       serverAddress,
