@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
 /// Global flag to enable/disable live transcription during recording.
@@ -11,6 +11,16 @@ pub static LIVE_TRANSCRIPTION_ENABLED: AtomicBool = AtomicBool::new(true);
 /// a recording's pipeline starts, so toggling it mid-recording takes effect on
 /// the next recording rather than disturbing audio the canceller is holding.
 pub static MIC_ECHO_CANCELLATION_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// RMS of the latest mixed recording window (an `f32` stored as its bits), for
+/// the record bar's live waveform. Written every ~50ms while a pipeline runs
+/// and reset to 0 when it ends; read by the `get_recording_level` command.
+pub static RECORDING_LEVEL: AtomicU32 = AtomicU32::new(0);
+
+/// The latest mixed-window RMS, 0.0 when nothing is recording.
+pub fn recording_level() -> f32 {
+    f32::from_bits(RECORDING_LEVEL.load(Ordering::Relaxed))
+}
 use super::batch_processor::AudioMetricsBatcher;
 use crate::batch_audio_metric;
 use anyhow::Result;
@@ -1073,6 +1083,8 @@ impl AudioPipeline {
             }
         }
 
+        RECORDING_LEVEL.store(0, Ordering::Relaxed);
+
         // Flush any remaining VAD segments
         self.flush_remaining_audio()?;
 
@@ -1085,6 +1097,10 @@ impl AudioPipeline {
     fn mix_and_dispatch_window(&mut self, mic_window: Vec<f32>, sys_window: Vec<f32>) {
         // Simple mixing without aggressive ducking
         let mixed_clean = self.mixer.mix_window(&mic_window, &sys_window);
+        if !mixed_clean.is_empty() {
+            let rms = (mixed_clean.iter().map(|&x| x * x).sum::<f32>() / mixed_clean.len() as f32).sqrt();
+            RECORDING_LEVEL.store(rms.to_bits(), Ordering::Relaxed);
+        }
 
         // NO POST-GAIN NEEDED: Microphone already normalized by EBU R128 to -23 LUFS
         // This is broadcast-standard loudness (Netflix/YouTube/Spotify level)

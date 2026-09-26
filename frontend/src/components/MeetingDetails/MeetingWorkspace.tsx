@@ -99,10 +99,38 @@ export function MeetingWorkspace({
   const [workspaceWidth, setWorkspaceWidth] = useState(0);
   const dockRef = useRef<HTMLDivElement>(null);
 
+  const titleInputRef = useRef<HTMLInputElement>(null);
+  const titleDraftRef = useRef(titleDraft);
+  titleDraftRef.current = titleDraft;
+  const titleOwnerRef = useRef(createdAt);
+
+  // A new title for the same meeting that didn't come from typing here (the
+  // model naming it after enhancing) types itself in. Switching meetings,
+  // your own edits, and reduced motion swap it instantly.
   useEffect(() => {
-    setTitleDraft(title);
     setLocalTitleError(null);
-  }, [title]);
+    const sameMeeting = titleOwnerRef.current === createdAt;
+    titleOwnerRef.current = createdAt;
+    const animate =
+      sameMeeting &&
+      title !== titleDraftRef.current &&
+      document.activeElement !== titleInputRef.current &&
+      !window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    if (!animate) {
+      setTitleDraft(title);
+      return;
+    }
+    let shown = 0;
+    const timer = window.setInterval(() => {
+      shown += 1;
+      setTitleDraft(title.slice(0, shown));
+      if (shown >= title.length) window.clearInterval(timer);
+    }, 38);
+    return () => {
+      window.clearInterval(timer);
+      setTitleDraft(title);
+    };
+  }, [title, createdAt]);
 
   const commitTitle = async () => {
     if (skipBlurCommitRef.current) {
@@ -278,6 +306,7 @@ export function MeetingWorkspace({
       <div className="flex min-h-[76px] shrink-0 items-center justify-between gap-6 px-8 py-3">
         <div className="min-w-0 flex-1">
           <input
+            ref={titleInputRef}
             value={titleDraft}
             onChange={(event) => setTitleDraft(event.target.value)}
             onBlur={() => void commitTitle()}

@@ -396,6 +396,13 @@ async fn is_audio_level_monitoring() -> bool {
     audio::simple_level_monitor::is_monitoring()
 }
 
+/// Loudness of the audio being recorded right now (RMS of the latest mixed
+/// window, 0.0-1.0), polled by the floating record bar to draw its waveform.
+#[tauri::command]
+fn get_recording_level() -> f32 {
+    audio::pipeline::recording_level()
+}
+
 // Analytics commands are now handled by analytics::commands module
 
 // Whisper commands are now handled by whisper_engine::commands module
@@ -899,6 +906,7 @@ pub fn run() {
             start_audio_level_monitoring,
             stop_audio_level_monitoring,
             is_audio_level_monitoring,
+            get_recording_level,
             // Onboarding microphone check
             audio::mic_check::mic_check_start,
             audio::mic_check::mic_check_cancel,

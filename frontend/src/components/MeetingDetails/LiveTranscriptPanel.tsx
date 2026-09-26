@@ -58,8 +58,9 @@ export function LiveTranscriptPanel() {
     <div className="flex h-full min-w-0 flex-col bg-[var(--surface-0)] text-ink">
       <div className="mx-auto w-full max-w-[900px] px-8 pb-2 pt-4">
         <div className="flex items-center justify-between gap-3">
-          <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.12em] text-[#d74d3f]">
-            <span className="h-2 w-2 animate-pulse rounded-full bg-[#d74d3f]" /> Recording
+          <div className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-[0.08em] text-recording">
+            <span className={`h-1.5 w-1.5 rounded-full bg-recording ${isPaused ? '' : 'animate-pulse'}`} />
+            {isPaused ? 'Paused' : 'Live'}
           </div>
           {toggleAvailable && (
             <label

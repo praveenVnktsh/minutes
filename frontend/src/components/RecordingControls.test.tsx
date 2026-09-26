@@ -67,9 +67,9 @@ describe('recording feedback composition', () => {
   test('shows activeDuration (excluding pauses) rather than recordingDuration', () => {
     const renderer = create(controls)
     const rendered = JSON.stringify(renderer.toJSON())
-    // activeDuration: 9 -> "0:09"; recordingDuration: 12 -> "0:12"
-    expect(rendered).toContain('0:09')
-    expect(rendered).not.toContain('0:12')
+    // activeDuration: 9 -> "00:09"; recordingDuration: 12 -> "00:12"
+    expect(rendered).toContain('00:09')
+    expect(rendered).not.toContain('00:12')
     renderer.unmount()
   })
 

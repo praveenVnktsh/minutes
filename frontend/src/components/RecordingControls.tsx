@@ -1,13 +1,14 @@
 'use client';
 
 import { useState } from 'react';
-import { Mic, Pause, Play, Square } from 'lucide-react';
+import { Mic, Pause, Play, Sparkles, Square } from 'lucide-react';
 import type { SummaryResponse } from '@/types/summary';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { StatusFeedback } from '@/components/ui/status-feedback';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
 import { useRecordingController } from '@/contexts/RecordingControllerContext';
 import Analytics from '@/lib/analytics';
+import { RecordingWaveform } from '@/components/RecordingWaveform';
 
 interface RecordingControlsProps {
   isRecording: boolean;
@@ -24,9 +25,11 @@ interface RecordingControlsProps {
 }
 
 function formatTime(time: number): string {
-  const minutes = Math.floor(time / 60);
+  const hours = Math.floor(time / 3600);
+  const minutes = Math.floor((time % 3600) / 60);
   const seconds = Math.floor(time % 60);
-  return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+  const pad = (n: number) => n.toString().padStart(2, '0');
+  return hours > 0 ? `${hours}:${pad(minutes)}:${pad(seconds)}` : `${pad(minutes)}:${pad(seconds)}`;
 }
 
 export const RecordingControls: React.FC<RecordingControlsProps> = ({
@@ -57,11 +60,13 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
   return (
     <TooltipProvider>
       <div className="flex flex-col space-y-2">
-        <div className="flex min-h-14 items-center gap-2 rounded-2xl border border-[var(--hairline)] bg-[var(--surface-raised)] p-1.5 shadow-[0_12px_35px_rgba(45,43,37,0.14)] backdrop-blur">
+        <div className="flex h-[52px] items-center gap-3 rounded-full border border-hairline bg-[color-mix(in_srgb,var(--surface-raised)_90%,transparent)] p-1.5 shadow-[0_18px_40px_-16px_rgba(0,0,0,0.35)] backdrop-blur-xl">
           {isParentProcessing ? (
-            <div className="flex items-center gap-2 px-4 py-2">
-              <div className="h-4 w-4 animate-spin rounded-full border-2 border-[var(--hairline)] border-t-[var(--ink)]" />
-              <span className="text-sm text-[var(--ink-muted)]">Finishing your meeting...</span>
+            <div className="flex items-center gap-2.5 px-5">
+              <Sparkles className="h-4 w-4 animate-[spin_2.4s_linear_infinite] text-info" />
+              <span className="animate-shimmer bg-[linear-gradient(90deg,var(--ink-subtle)_0%,var(--ink)_40%,var(--ink-subtle)_80%)] bg-[length:200%_100%] bg-clip-text text-sm font-semibold text-transparent">
+                Finishing your meeting…
+              </span>
             </div>
           ) : !isRecording ? (
             <button
@@ -71,7 +76,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
                 void run(onRecordingStart);
               }}
               disabled={pending || isRecordingDisabled}
-              className="flex h-11 min-w-[174px] items-center justify-center gap-2 rounded-xl bg-brand px-5 text-sm font-semibold text-brand-foreground transition hover:opacity-90 disabled:opacity-40"
+              className="flex h-10 min-w-[174px] items-center justify-center gap-2 rounded-full bg-brand px-5 text-sm font-semibold text-brand-foreground transition hover:opacity-90 disabled:opacity-40"
             >
               {controller.command === 'start' ? (
                 <div className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
@@ -80,22 +85,25 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
             </button>
           ) : (
             <>
-              <div className="flex min-w-[104px] items-center gap-2 px-3 text-sm font-medium text-[var(--ink-muted)]">
-                <span className={`h-2 w-2 rounded-full ${recordingState.isPaused ? 'bg-paused' : 'animate-pulse bg-recording'}`} />
-                {formatTime(recordingState.activeDuration ?? recordingState.recordingDuration ?? 0)}
+              <div className="flex items-center gap-2.5 pl-3">
+                <span className={`h-2 w-2 flex-none rounded-full ${recordingState.isPaused ? 'bg-paused' : 'animate-pulse bg-recording'}`} />
+                <span className="font-mono text-sm font-semibold tabular-nums text-ink">
+                  {formatTime(recordingState.activeDuration ?? recordingState.recordingDuration ?? 0)}
+                </span>
                 {recordingState.isPaused ? <span className="sr-only">Paused</span> : null}
               </div>
+              <RecordingWaveform active={!recordingState.isPaused} className="h-7 w-[120px]" />
               <button
                 type="button"
                 onClick={() => void run(recordingState.isPaused
                   ? controller.resumeRecording
                   : controller.pauseRecording)}
                 disabled={pending}
-                className="flex h-10 w-10 items-center justify-center rounded-xl text-[var(--ink-muted)] hover:bg-[var(--surface-2)] disabled:opacity-40"
+                className="flex h-9 w-9 items-center justify-center rounded-full bg-surface-2 text-ink transition hover:bg-selected disabled:opacity-40"
                 aria-label={recordingState.isPaused ? 'Resume recording' : 'Pause recording'}
                 title={recordingState.isPaused ? 'Resume recording' : 'Pause recording'}
               >
-                {recordingState.isPaused ? <Play className="h-4 w-4" /> : <Pause className="h-4 w-4" />}
+                {recordingState.isPaused ? <Play className="h-3.5 w-3.5 fill-current" /> : <Pause className="h-3.5 w-3.5 fill-current" />}
               </button>
               <button
                 type="button"
@@ -105,10 +113,13 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
                   void run(() => onRecordingStop(true));
                 }}
                 disabled={pending}
-                className="flex h-10 items-center gap-2 rounded-xl bg-recording px-4 text-sm font-semibold text-recording-foreground hover:opacity-90 disabled:opacity-40"
+                aria-label="End meeting"
+                title="End meeting"
+                className="flex h-9 w-9 items-center justify-center rounded-full bg-recording text-recording-foreground transition hover:opacity-90 active:scale-90 disabled:opacity-40"
               >
-                <Square className="h-3.5 w-3.5 fill-current" />
-                {controller.command === 'stop' || controller.command === 'finalize' ? 'Ending...' : 'End meeting'}
+                {controller.command === 'stop' || controller.command === 'finalize' ? (
+                  <div className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                ) : <Square className="h-3.5 w-3.5 fill-current" />}
               </button>
             </>
           )}
