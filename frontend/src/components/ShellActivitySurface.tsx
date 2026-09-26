@@ -2,7 +2,7 @@
 
 import { useState } from 'react'
 import { usePathname } from 'next/navigation'
-import { Pause, Play, Square, X } from 'lucide-react'
+import { Minimize2, Pause, Play, Square, X } from 'lucide-react'
 import { MeetingActivityFeedback } from '@/app/_components/StatusOverlays'
 import { useSidebar } from '@/components/Sidebar/SidebarProvider'
 import { Button } from '@/components/ui/button'
@@ -18,6 +18,7 @@ export function ShellActivitySurface() {
   const { currentMeeting } = useSidebar()
   const pathname = usePathname()
   const [showAll, setShowAll] = useState(false)
+  const [minimized, setMinimized] = useState(false)
   const [hiddenKeys, setHiddenKeys] = useState<Set<string>>(new Set())
   const hideKey = (key: string) => setHiddenKeys((previous) => new Set(previous).add(key))
   const workspaceMeetingId = pathname === '/meeting-details' ? currentMeeting?.id : null
@@ -52,8 +53,24 @@ export function ShellActivitySurface() {
   const showFinalizing = commandIsFinalizing || (!recordingState.isRecording && (recordingState.isProcessing || recordingState.isSaving))
 
   if (!showRecording && !showFinalizing && allWork.length === 0) return null
+  if (minimized) {
+    const count = (showRecording ? 1 : 0) + (showFinalizing ? 1 : 0) + allWork.length
+    return (
+      <aside aria-label="Meeting activity" className="fixed bottom-4 right-4 z-30 flex justify-end">
+        <button type="button" aria-label="Show activity" className="flex items-center gap-2 rounded-full border border-hairline bg-surface-raised px-3 py-1.5 text-xs font-semibold text-ink shadow-lg hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus focus-visible:ring-offset-2" onClick={() => setMinimized(false)}>
+          {showRecording && <span className={`h-2 w-2 rounded-full ${recordingState.isPaused ? 'bg-paused' : 'animate-pulse bg-recording'}`} />}
+          {count === 1 ? '1 activity' : `${count} activities`}
+        </button>
+      </aside>
+    )
+  }
   return (
     <aside aria-label="Meeting activity" className="fixed bottom-4 right-4 z-30 w-[min(360px,calc(100vw-2rem))] space-y-2">
+      <div className="flex justify-end">
+        <button type="button" aria-label="Minimize activity" className="rounded-md bg-surface-raised p-1 text-ink-muted shadow hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus focus-visible:ring-offset-2" onClick={() => setMinimized(true)}>
+          <Minimize2 className="h-3.5 w-3.5" />
+        </button>
+      </div>
       {showRecording && (
         <div className="rounded-xl border border-recording/30 bg-surface-raised p-3 shadow-lg">
           <div className="flex items-center gap-2">
