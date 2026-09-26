@@ -6,8 +6,8 @@ use crate::summary::language_detection::detect_summary_language;
 use crate::summary::llm_client::LLMProvider;
 use crate::summary::metadata::read_detected_summary_language_from_metadata;
 use crate::summary::processor::{
-    clean_llm_markdown_detailed, extract_meeting_name_from_markdown, generate_meeting_summary,
-    language_name_from_code, require_visible_markdown,
+    clean_llm_markdown_detailed, default_notes_system_prompt, extract_meeting_name_from_markdown,
+    generate_meeting_summary, language_name_from_code, require_visible_markdown,
 };
 use crate::summary::templates::{self, Template};
 use chrono::{DateTime, Utc};
@@ -65,6 +65,8 @@ struct SummaryCacheSource {
     custom_prompt_fingerprint: String,
     template_id: String,
     template_fingerprint: String,
+    #[serde(default)]
+    notes_prompt_fingerprint: String,
     token_threshold: usize,
     model_provider: String,
     model_name: String,
@@ -100,6 +102,7 @@ fn build_summary_cache_source(
     custom_prompt: &str,
     template_id: &str,
     template_fingerprint: &str,
+    notes_prompt_fingerprint: &str,
     token_threshold: usize,
     model_provider: &str,
     model_name: &str,
@@ -114,6 +117,7 @@ fn build_summary_cache_source(
         custom_prompt_fingerprint: stable_text_fingerprint(custom_prompt),
         template_id: template_id.to_string(),
         template_fingerprint: template_fingerprint.to_string(),
+        notes_prompt_fingerprint: notes_prompt_fingerprint.to_string(),
         token_threshold,
         model_provider: model_provider.to_string(),
         model_name: model_name.to_string(),
@@ -329,7 +333,7 @@ impl SummaryService {
     /// the main thread. It updates the database with progress and results.
     ///
     /// # Arguments
-    /// * `_app` - Tauri app handle (for future use)
+    /// * `app` - Tauri app handle (used for app data dir and the saved notes-prompt override)
     /// * `pool` - SQLx connection pool
     /// * `meeting_id` - Unique identifier for the meeting
     /// * `text` - Full transcript text
@@ -340,7 +344,7 @@ impl SummaryService {
     // This task boundary carries the persisted command inputs into detached processing.
     #[allow(clippy::too_many_arguments)]
     pub async fn process_transcript_background<R: tauri::Runtime>(
-        _app: AppHandle<R>,
+        app: AppHandle<R>,
         pool: SqlitePool,
         meeting_id: String,
         started_at: DateTime<Utc>,
@@ -496,7 +500,13 @@ impl SummaryService {
         };
 
         // Get app data directory for BuiltInAI provider
-        let app_data_dir = _app.path().app_data_dir().ok();
+        let app_data_dir = app.path().app_data_dir().ok();
+
+        let notes_prompt_override = crate::summary::prompt_settings::load_notes_prompt(&app);
+        let effective_notes_prompt = match notes_prompt_override.as_deref().map(str::trim) {
+            Some(trimmed) if !trimmed.is_empty() => trimmed.to_string(),
+            _ => default_notes_system_prompt(),
+        };
 
         if let Some(code) = &summary_language {
             info!("📝 Summary language preference: {}", code);
@@ -520,11 +530,14 @@ impl SummaryService {
         };
         let template_fingerprint = template_cache_fingerprint(&template);
 
+        let notes_prompt_fingerprint = stable_text_fingerprint(&effective_notes_prompt);
+
         let cache_source = build_summary_cache_source(
             &text,
             &custom_prompt,
             &template_id,
             &template_fingerprint,
+            &notes_prompt_fingerprint,
             token_threshold,
             &model_provider,
             &model_name,
@@ -572,6 +585,7 @@ impl SummaryService {
             &custom_prompt,
             &template_id,
             &template,
+            Some(effective_notes_prompt.as_str()),
             token_threshold,
             ollama_endpoint.as_deref(),
             custom_openai_endpoint.as_deref(),
@@ -823,13 +837,19 @@ mod tests {
         );
     }
 
+    fn sample_notes_prompt_fingerprint() -> String {
+        stable_text_fingerprint("standard notes prompt")
+    }
+
     fn sample_cache_source() -> SummaryCacheSource {
         let template_fingerprint = stable_text_fingerprint("standard template prompt");
+        let notes_prompt_fingerprint = sample_notes_prompt_fingerprint();
         build_summary_cache_source(
             "transcript body",
             "custom prompt",
             "standard_meeting",
             &template_fingerprint,
+            &notes_prompt_fingerprint,
             3700,
             "ollama",
             "gemma3:1b",
@@ -921,6 +941,7 @@ mod tests {
     fn test_changed_summary_inputs_reject_cache() {
         let source = sample_cache_source();
         let template_fingerprint = source.template_fingerprint.clone();
+        let notes_prompt_fingerprint = source.notes_prompt_fingerprint.clone();
         let raw = build_summary_result_json(
             "# Reunion\n## Points\nBonjour",
             "# Meeting\n## Points\nHello",
@@ -938,6 +959,7 @@ mod tests {
                 "custom prompt",
                 "standard_meeting",
                 &template_fingerprint,
+                &notes_prompt_fingerprint,
                 3700,
                 "ollama",
                 "gemma3:1b",
@@ -952,6 +974,7 @@ mod tests {
                 "changed prompt",
                 "standard_meeting",
                 &template_fingerprint,
+                &notes_prompt_fingerprint,
                 3700,
                 "ollama",
                 "gemma3:1b",
@@ -966,6 +989,7 @@ mod tests {
                 "custom prompt",
                 "daily_standup",
                 &template_fingerprint,
+                &notes_prompt_fingerprint,
                 3700,
                 "ollama",
                 "gemma3:1b",
@@ -980,6 +1004,7 @@ mod tests {
                 "custom prompt",
                 "standard_meeting",
                 &template_fingerprint,
+                &notes_prompt_fingerprint,
                 3700,
                 "openai",
                 "gemma3:1b",
@@ -994,6 +1019,7 @@ mod tests {
                 "custom prompt",
                 "standard_meeting",
                 &template_fingerprint,
+                &notes_prompt_fingerprint,
                 3700,
                 "ollama",
                 "qwen2.5:3b",
@@ -1008,6 +1034,7 @@ mod tests {
                 "custom prompt",
                 "standard_meeting",
                 &template_fingerprint,
+                &notes_prompt_fingerprint,
                 3700,
                 "ollama",
                 "gemma3:1b",
@@ -1022,6 +1049,7 @@ mod tests {
                 "custom prompt",
                 "standard_meeting",
                 &template_fingerprint,
+                &notes_prompt_fingerprint,
                 3700,
                 "ollama",
                 "gemma3:1b",
@@ -1062,6 +1090,31 @@ mod tests {
 
         assert_eq!(
             extract_cached_english_markdown(&raw, &changed_template, Some("de")).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn test_changed_notes_prompt_rejects_cache() {
+        let source = sample_cache_source();
+        let raw = build_summary_result_json(
+            "# Reunion\n## Points\nBonjour",
+            "# Meeting\n## Points\nHello",
+            source.clone(),
+            Some("fr"),
+            false,
+            false,
+        )
+        .unwrap()
+        .to_string();
+
+        let changed_notes_prompt = SummaryCacheSource {
+            notes_prompt_fingerprint: stable_text_fingerprint("changed notes prompt"),
+            ..source
+        };
+
+        assert_eq!(
+            extract_cached_english_markdown(&raw, &changed_notes_prompt, Some("de")).unwrap(),
             None
         );
     }

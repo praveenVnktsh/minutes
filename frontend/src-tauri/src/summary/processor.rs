@@ -228,7 +228,7 @@ fn build_combine_summary_user_prompt(combined_text: &str) -> String {
         "{ENGLISH_BASE_SUMMARY_INSTRUCTION}\n\nThe following are consecutive summaries of a meeting. Combine them into a single, coherent, and detailed narrative summary that retains all important details, organized logically. Do not include reasoning, self-correction, or meta-commentary — output only the summary content.\n\n<summaries>\n{combined_text}\n</summaries>"
     )
 }
-fn build_notes_system_prompt() -> String {
+pub fn default_notes_system_prompt() -> String {
     format!(
         r#"You are Minutes, an expert meeting note-taker in the style of Granola.
 
@@ -245,6 +245,15 @@ The user typed their own notes during the meeting. Your job is to ENRICH those n
 8. {ENGLISH_BASE_SUMMARY_INSTRUCTION}
 9. Output ONLY the Markdown notes — no reasoning, thinking, self-correction, or meta-commentary."#
     )
+}
+
+/// Resolves the system prompt used for the final notes call: a user-provided
+/// override when present and non-blank, otherwise the built-in default.
+fn resolve_notes_system_prompt(override_prompt: Option<&str>) -> String {
+    match override_prompt.map(str::trim) {
+        Some(trimmed) if !trimmed.is_empty() => trimmed.to_string(),
+        _ => default_notes_system_prompt(),
+    }
 }
 
 /// Rough token count estimation using character count
@@ -365,6 +374,7 @@ pub(crate) async fn generate_meeting_summary(
     custom_prompt: &str,
     template_id: &str,
     template: &Template,
+    notes_system_prompt: Option<&str>,
     token_threshold: usize,
     ollama_endpoint: Option<&str>,
     custom_openai_endpoint: Option<&str>,
@@ -520,7 +530,7 @@ pub(crate) async fn generate_meeting_summary(
         // templates are intentionally not used.
         let _ = (template_id, template);
         info!("Generating enhanced bullet notes");
-        let final_system_prompt = build_notes_system_prompt();
+        let final_system_prompt = resolve_notes_system_prompt(notes_system_prompt);
         let mut final_user_prompt = String::new();
         if !custom_prompt.is_empty() {
             final_user_prompt.push_str("<my_notes>\n");
@@ -780,7 +790,7 @@ mod tests {
 
     #[test]
     fn notes_prompt_forces_english_base_output() {
-        let prompt = build_notes_system_prompt();
+        let prompt = default_notes_system_prompt();
 
         assert!(prompt.contains(ENGLISH_BASE_SUMMARY_INSTRUCTION));
         assert!(prompt.contains("bullet"));
@@ -791,7 +801,7 @@ mod tests {
 
     #[test]
     fn notes_prompt_forbids_reasoning_output() {
-        let prompt = build_notes_system_prompt();
+        let prompt = default_notes_system_prompt();
         assert!(
             prompt.to_lowercase().contains("no reasoning")
                 || prompt.contains("meta-commentary")
@@ -875,6 +885,38 @@ mod tests {
             Some(&cancellation_token),
         )
         .is_err());
+    }
+
+    #[test]
+    fn resolve_notes_system_prompt_uses_override_when_present() {
+        assert_eq!(
+            resolve_notes_system_prompt(Some("Custom prompt text")),
+            "Custom prompt text"
+        );
+    }
+
+    #[test]
+    fn resolve_notes_system_prompt_falls_back_when_blank() {
+        assert_eq!(
+            resolve_notes_system_prompt(Some("   \n\t")),
+            default_notes_system_prompt()
+        );
+    }
+
+    #[test]
+    fn resolve_notes_system_prompt_falls_back_when_none() {
+        assert_eq!(
+            resolve_notes_system_prompt(None),
+            default_notes_system_prompt()
+        );
+    }
+
+    #[test]
+    fn resolve_notes_system_prompt_trims_override() {
+        assert_eq!(
+            resolve_notes_system_prompt(Some("  Custom prompt  \n")),
+            "Custom prompt"
+        );
     }
 
     #[test]

@@ -34,6 +34,7 @@ pub(crate) mod language_detection;
 pub mod llm_client;
 pub(crate) mod metadata;
 pub mod processor;
+pub mod prompt_settings;
 pub mod service;
 pub mod summary_engine;
 pub mod template_commands;
@@ -65,6 +66,14 @@ pub use template_commands::{
     __tauri_command_name_api_get_template_details, __tauri_command_name_api_list_templates,
     __tauri_command_name_api_validate_template, api_get_template_details, api_list_templates,
     api_validate_template,
+};
+
+// Re-export summary prompt settings commands
+pub use prompt_settings::{
+    __cmd__api_get_summary_prompt, __cmd__api_reset_summary_prompt, __cmd__api_save_summary_prompt,
+    __tauri_command_name_api_get_summary_prompt, __tauri_command_name_api_reset_summary_prompt,
+    __tauri_command_name_api_save_summary_prompt, api_get_summary_prompt, api_reset_summary_prompt,
+    api_save_summary_prompt,
 };
 
 // Re-export commonly used items

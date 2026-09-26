@@ -989,6 +989,10 @@ pub fn run() {
             summary::commands::api_save_meeting_detected_summary_language,
             summary::commands::api_detect_transcript_summary_language,
             summary::commands::api_cancel_summary,
+            // Summary prompt settings commands
+            summary::prompt_settings::api_get_summary_prompt,
+            summary::prompt_settings::api_save_summary_prompt,
+            summary::prompt_settings::api_reset_summary_prompt,
             // Template commands
             summary::template_commands::api_list_templates,
             summary::template_commands::api_get_template_details,
