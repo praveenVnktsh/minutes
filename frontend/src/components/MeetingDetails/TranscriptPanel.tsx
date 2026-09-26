@@ -15,6 +15,7 @@ import { SpeakerCorrectionDialog, SpeakerIdentity } from './SpeakerCorrectionDia
 import { AudioScrubber } from './AudioScrubber';
 import { toneText } from '@/lib/theme-classes';
 import { SpeakerStatusNotice } from './SpeakerStatusNotice';
+import { ModelProvenanceNote } from './ModelProvenanceNote';
 
 export function findSegmentIdAtTime(
   segments: Array<{ id: string; timestamp: number; endTime?: number }>,
@@ -480,6 +481,7 @@ export function TranscriptPanel({
             onRetry={() => void handleRetryDiarization()}
           />
         )}
+        {meetingId && <ModelProvenanceNote meetingId={meetingId} />}
         {locked && convertedSegments.length > 0 && (
           <p className="mt-2 text-[11px] text-[var(--ink-subtle)]">Transcript is locked while the summary is being generated.</p>
         )}

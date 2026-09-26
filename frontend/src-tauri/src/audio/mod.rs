@@ -63,6 +63,9 @@ pub mod sortformer;
 
 pub mod speaker_corrections;
 
+// Which models transcribed, diarized and summarized a meeting.
+pub mod model_provenance;
+
 // Onboarding's microphone check: record, meter and transcribe a short sample.
 pub mod mic_check;
 

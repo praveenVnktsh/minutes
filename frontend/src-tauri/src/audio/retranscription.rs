@@ -354,6 +354,15 @@ async fn run_retranscription<R: Runtime>(
         None
     };
 
+    // Resolved model name actually loaded on the chosen engine, for provenance.
+    // `model` may be None (configured default used), so this is read back from
+    // the engine rather than the request.
+    let resolved_model_name = if use_parakeet {
+        parakeet_engine.as_ref().unwrap().get_current_model().await
+    } else {
+        whisper_engine.as_ref().unwrap().get_current_model().await
+    };
+
     // Split very long segments at silence boundaries for better transcription quality.
     // Hard cuts at arbitrary sample positions lose words at boundaries. Instead, scan
     // for the lowest-energy window near the target split point and cut there.
@@ -575,6 +584,23 @@ async fn run_retranscription<R: Runtime>(
         write_retranscription_metadata(&folder_path, &meeting_id, duration_seconds, &audio_filename)
     {
         warn!("Failed to update metadata.json: {}", e);
+    }
+
+    // Record which model actually produced this transcript, for the model
+    // provenance note. Must run after write_retranscription_metadata() above
+    // so that rewrite doesn't clobber the key.
+    if let Some(model_name) = resolved_model_name {
+        let transcription_model = super::model_provenance::TranscriptionModel {
+            provider: if use_parakeet { "parakeet" } else { "whisper" }.to_string(),
+            model: model_name,
+        };
+        if let Err(e) =
+            super::model_provenance::record_transcription_model(&folder_path, &transcription_model)
+        {
+            warn!("Failed to record transcription model provenance: {}", e);
+        }
+    } else {
+        warn!("Could not determine resolved model name; skipping transcription model provenance");
     }
 
     // Persistence and diarization are one non-cancellable tail once committed.
