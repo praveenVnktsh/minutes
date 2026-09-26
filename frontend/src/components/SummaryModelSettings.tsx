@@ -2,6 +2,7 @@
 
 import { ModelConfigForm } from '@/components/settings/ModelConfigForm';
 import { SummaryLanguageSettings } from '@/components/SummaryLanguageSettings';
+import { SummaryPromptSettings } from '@/components/SummaryPromptSettings';
 import { Switch } from '@/components/ui/switch';
 import { useConfig } from '@/contexts/ConfigContext';
 
@@ -36,6 +37,8 @@ export function SummaryModelSettings({ refetchTrigger: _refetchTrigger }: Summar
       <div className="rounded-lg border border-hairline bg-surface-raised p-6 shadow-sm">
         <ModelConfigForm />
       </div>
+
+      <SummaryPromptSettings />
     </div>
   );
 }
