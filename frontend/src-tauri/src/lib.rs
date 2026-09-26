@@ -55,6 +55,7 @@ pub mod meeting_activity;
 pub mod meeting_assistant;
 pub mod meeting_detection;
 pub mod meeting_prompt;
+pub mod model_catalog;
 pub mod notifications;
 pub mod ollama;
 pub mod onboarding;
