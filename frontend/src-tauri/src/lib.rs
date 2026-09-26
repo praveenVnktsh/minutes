@@ -1065,6 +1065,8 @@ pub fn run() {
             audio::speaker_corrections::rename_speaker,
             audio::speaker_corrections::merge_speakers,
             audio::speaker_corrections::reassign_transcript_speaker,
+            // Model provenance (which models transcribed, diarized and summarized a meeting)
+            audio::model_provenance::get_meeting_model_provenance,
             // Import audio commands
             audio::import::select_and_validate_audio_command,
             audio::import::validate_audio_file_command,

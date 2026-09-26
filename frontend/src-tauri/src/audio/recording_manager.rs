@@ -640,6 +640,17 @@ impl RecordingManager {
         self.recording_saver.add_transcript_segment(segment);
     }
 
+    /// Record the transcription model actually driving this session's live
+    /// transcription, so it lands in the meeting's metadata.json (PRA-577
+    /// model provenance note). Thin forward to the saver, which owns the
+    /// metadata read/merge/write.
+    pub fn record_transcription_model(
+        &mut self,
+        model: crate::audio::model_provenance::TranscriptionModel,
+    ) {
+        self.recording_saver.set_transcription_model(model);
+    }
+
     /// Add a transcript chunk to be saved later (legacy method)
     pub fn add_transcript_chunk(&self, text: String) {
         self.recording_saver.add_transcript_chunk(text);

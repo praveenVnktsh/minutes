@@ -322,6 +322,61 @@ static STOPPING_TRANSCRIPT_SEGMENTS: Mutex<
     )>,
 > = Mutex::new(None);
 
+/// Determine the transcription engine actually serving this recording session
+/// and record it against the meeting's metadata.json (PRA-577 model
+/// provenance note).
+///
+/// `get_or_init_transcription_engine` mirrors what the transcription worker
+/// just did to obtain its own engine handle: when a model is already loaded
+/// (the normal case here, since the worker starts first) it reuses it rather
+/// than reloading, so this call is cheap. Best-effort only — on any failure
+/// to determine the engine, or if the recording session is no longer live by
+/// the time it resolves, this logs and gives up quietly; provenance is a
+/// nice-to-have, never worth failing or delaying a recording over.
+fn record_live_transcription_model<R: Runtime>(app: &AppHandle<R>) {
+    let app = app.clone();
+    tokio::spawn(async move {
+        let engine = match transcription::get_or_init_transcription_engine(&app).await {
+            Ok(engine) => engine,
+            Err(e) => {
+                warn!(
+                    "Could not determine live transcription model for provenance: {}",
+                    e
+                );
+                return;
+            }
+        };
+
+        let provider = match &engine {
+            transcription::TranscriptionEngine::Whisper(_) => "whisper".to_string(),
+            transcription::TranscriptionEngine::Parakeet(_) => "parakeet".to_string(),
+            transcription::TranscriptionEngine::Provider(provider) => {
+                provider.provider_name().to_string()
+            }
+        };
+        let model = engine
+            .get_current_model()
+            .await
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let transcription_model =
+            crate::audio::model_provenance::TranscriptionModel { provider, model };
+
+        match RECORDING_MANAGER.lock() {
+            Ok(mut guard) => match guard.as_mut() {
+                Some(session) => session.record_transcription_model(transcription_model),
+                None => {
+                    warn!("No active recording session to record the transcription model against")
+                }
+            },
+            Err(e) => warn!(
+                "Failed to lock recording manager to record transcription model: {}",
+                e
+            ),
+        }
+    });
+}
+
 fn store_transcript_segment(segment: crate::audio::recording_saver::TranscriptSegment) {
     if let Ok(manager_guard) = RECORDING_MANAGER.lock() {
         if let Some(manager) = manager_guard.as_ref() {
@@ -1022,6 +1077,10 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
         *global_task = Some(task_handle);
         drop(global_task);
 
+        // Best-effort: record which model is actually transcribing this
+        // session for the metadata.json provenance note (PRA-577).
+        record_live_transcription_model(&app);
+
         // Listen for transcript updates so live history survives page reloads.
         use tauri::Listener;
         let listener_id = app.listen("transcript-update", move |event: tauri::Event| {
@@ -1264,6 +1323,10 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
         let mut global_task = TRANSCRIPTION_TASK.lock().unwrap();
         *global_task = Some(task_handle);
         drop(global_task);
+
+        // Best-effort: record which model is actually transcribing this
+        // session for the metadata.json provenance note (PRA-577).
+        record_live_transcription_model(&app);
 
         // Listen for transcript updates so live history survives page reloads.
         use tauri::Listener;
@@ -1954,6 +2017,11 @@ pub async fn ensure_live_transcription_running<R: Runtime>(app: &AppHandle<R>) {
 
     let handle = transcription::start_transcription_task(app.clone(), receiver);
     *TRANSCRIPTION_TASK.lock().unwrap() = Some(handle);
+
+    // Best-effort: record which model is actually transcribing this session
+    // for the metadata.json provenance note (PRA-577).
+    record_live_transcription_model(app);
+
     info!("▶️ Live transcription enabled mid-recording");
 }
 

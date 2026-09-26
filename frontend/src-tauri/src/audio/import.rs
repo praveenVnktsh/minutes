@@ -713,6 +713,50 @@ async fn run_import<R: Runtime>(
         warn!("Failed to write metadata.json: {}", e);
     }
 
+    // Record which transcription model actually produced this transcript so the
+    // meeting details view can show provenance later. Best-effort: a failure
+    // here should not fail the import.
+    let transcription_provider = if use_parakeet { "parakeet" } else { "whisper" };
+    let transcription_model = if let Some(engine) = whisper_engine.as_ref() {
+        engine.get_current_model().await.unwrap_or_else(|| {
+            model
+                .clone()
+                .unwrap_or_else(|| DEFAULT_WHISPER_MODEL.to_string())
+        })
+    } else if let Some(engine) = parakeet_engine.as_ref() {
+        engine.get_current_model().await.unwrap_or_else(|| {
+            model
+                .clone()
+                .unwrap_or_else(|| DEFAULT_PARAKEET_MODEL.to_string())
+        })
+    } else {
+        // No speech was detected, so no engine was loaded. Resolve the model
+        // that would have been used, mirroring the target_model logic in
+        // get_or_init_whisper/get_or_init_parakeet above.
+        match model.as_deref() {
+            Some(m) => m.to_string(),
+            None => get_configured_model(&app, transcription_provider)
+                .await
+                .unwrap_or_else(|_| {
+                    if use_parakeet {
+                        DEFAULT_PARAKEET_MODEL.to_string()
+                    } else {
+                        DEFAULT_WHISPER_MODEL.to_string()
+                    }
+                }),
+        }
+    };
+
+    if let Err(e) = crate::audio::model_provenance::record_transcription_model(
+        &meeting_folder,
+        &crate::audio::model_provenance::TranscriptionModel {
+            provider: transcription_provider.to_string(),
+            model: transcription_model,
+        },
+    ) {
+        warn!("Failed to record transcription model provenance: {}", e);
+    }
+
     emit_progress(&app, "complete", 100, "Import complete");
 
     Ok(ImportResult {
