@@ -138,6 +138,7 @@
     --error-subtle-rgb: 253 235 234;
     --error-subtle: rgb(var(--error-subtle-rgb));
     --recording-rgb: 180 35 24;
+    --recording-foreground: #ffffff;
     --recording: rgb(var(--recording-rgb));
     --recording-subtle-rgb: 254 236 235;
     --recording-subtle: rgb(var(--recording-subtle-rgb));
@@ -207,6 +208,7 @@
     --error-subtle-rgb: 67 31 29;
     --error-subtle: rgb(var(--error-subtle-rgb));
     --recording-rgb: 255 170 163;
+    --recording-foreground: #1b1b1b;
     --recording: rgb(var(--recording-rgb));
     --recording-subtle-rgb: 71 28 26;
     --recording-subtle: rgb(var(--recording-subtle-rgb));

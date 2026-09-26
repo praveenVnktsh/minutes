@@ -329,7 +329,7 @@ const TranscriptSegment = memo(function TranscriptSegment({
             title={onSeek ? 'Play from here' : undefined}
             onPointerDown={onSeek ? handleRowPointerDown : undefined}
             onClick={onSeek ? handleRowClick : undefined}
-            className={`mb-3 rounded-lg px-2 -mx-2 transition-colors ${highlightClass}${onSeek ? ' cursor-pointer' : ''}`}
+            className={`mb-3 rounded-lg px-2 -mx-2 transition-colors ${highlightClass}${onSeek ? ' cursor-pointer' : ''}${isStreaming ? ' animate-rise-in' : ''}`}
         >
             <div className="flex items-start gap-2">
                 <Tooltip>
@@ -339,12 +339,12 @@ const TranscriptSegment = memo(function TranscriptSegment({
                                 type="button"
                                 onClick={() => onSeek(timestamp)}
                                 title="Play from here"
-                                className="mt-1 min-w-[50px] flex-shrink-0 text-left text-xs text-ink-subtle hover:text-ink"
+                                className="mt-1 min-w-[50px] flex-shrink-0 text-left font-mono text-[11.5px] tabular-nums text-ink-subtle hover:text-ink"
                             >
                                 {formatRecordingTime(timestamp)}
                             </button>
                         ) : (
-                            <span className="mt-1 min-w-[50px] flex-shrink-0 text-xs text-ink-subtle">
+                            <span className="mt-1 min-w-[50px] flex-shrink-0 font-mono text-[11.5px] tabular-nums text-ink-subtle">
                                 {formatRecordingTime(timestamp)}
                             </span>
                         )}
@@ -366,13 +366,7 @@ const TranscriptSegment = memo(function TranscriptSegment({
                             onRenameSpeaker={onRenameSpeaker}
                         />
                     )}
-                    {isStreaming ? (
-                        <div className="bg-surface-2 border border-hairline rounded-lg px-3 py-2">
-                            <p className="text-base text-ink leading-relaxed">{renderText(displayText)}</p>
-                        </div>
-                    ) : (
-                        <p className="text-base text-ink leading-relaxed">{renderText(displayText)}</p>
-                    )}
+                    <p className="text-base text-ink leading-relaxed">{renderText(displayText)}</p>
                 </div>
             </div>
         </div>
