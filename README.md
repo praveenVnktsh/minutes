@@ -16,6 +16,8 @@
   Audio, transcripts, notes, and summaries stay on your machine unless you explicitly configure an external AI provider.
 </p>
 
+<p align="center"><b><a href="https://praveenvnktsh.github.io/minutes/">praveenvnktsh.github.io/minutes</a></b></p>
+
 ---
 
 ## Screenshots

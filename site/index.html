@@ -1,0 +1,1153 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Minutes — the meeting recorder that never leaves the room</title>
+<meta name="description" content="Minutes records your meetings, transcribes them on your own machine, and turns the notes you jotted into notes worth keeping. No bot in the call. No cloud. No account. Free and open source for macOS and Windows." />
+<meta name="theme-color" content="#121211" media="(prefers-color-scheme: dark)" />
+<meta name="theme-color" content="#fbfaf7" media="(prefers-color-scheme: light)" />
+<meta property="og:type" content="website" />
+<meta property="og:title" content="Minutes — every word kept, nothing sent" />
+<meta property="og:description" content="Local-first AI meeting notes. Records mic + system audio, transcribes on-device, and enhances the notes you actually took." />
+<meta property="og:url" content="https://praveenvnktsh.github.io/minutes/" />
+<meta property="og:image" content="https://praveenvnktsh.github.io/minutes/screens/workspace.png" />
+<meta name="twitter:card" content="summary_large_image" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23f4f2ec'/%3E%3Cg fill='%23272622'%3E%3Crect x='14' y='24' width='5' height='16' rx='2.5'/%3E%3Crect x='22' y='24' width='5' height='16' rx='2.5'/%3E%3Ccircle cx='32' cy='32' r='3'/%3E%3Crect x='37' y='24' width='5' height='16' rx='2.5'/%3E%3Crect x='45' y='24' width='5' height='16' rx='2.5'/%3E%3C/g%3E%3C/svg%3E" />
+<link rel="preload" href="fonts/source-serif-4-latin-variable.woff2" as="font" type="font/woff2" crossorigin />
+<link rel="preload" href="fonts/source-sans-3-latin-variable.woff2" as="font" type="font/woff2" crossorigin />
+<script>
+  // Apply the saved theme before first paint so there is no flash.
+  try { const t = localStorage.getItem('minutes-theme'); if (t) document.documentElement.dataset.theme = t; } catch (e) {}
+</script>
+<style>
+@font-face { font-family: "Source Serif 4"; src: url("fonts/source-serif-4-latin-variable.woff2") format("woff2"); font-weight: 400 700; font-display: swap; }
+@font-face { font-family: "Source Sans 3"; src: url("fonts/source-sans-3-latin-variable.woff2") format("woff2"); font-weight: 400 700; font-display: swap; }
+
+/* ---------- tokens (mirroring the app's globals.css) ---------- */
+:root {
+  --bg: #fbfaf7;
+  --surface-1: #f4f2ec;
+  --surface-2: #efede7;
+  --raised: #ffffff;
+  --ink: #272622;
+  --ink-muted: #5d5a53;
+  --ink-subtle: #6f6b63;
+  --hairline: #e5e2da;
+  --hairline-strong: #d6d2c7;
+  --selected: #e7e2d7;
+  --rec: #b42318;
+  --rec-glow: rgba(180, 35, 24, .22);
+  --info: #174ea6;
+  --info-subtle: #e8f1ff;
+  --success: #176b3a;
+  --success-subtle: #e7f6ec;
+  --spk-1: #174ea6; --spk-1-bg: #e8f1ff;
+  --spk-2: #176b3a; --spk-2-bg: #e7f6ec;
+  --spk-3: #7a4b00; --spk-3-bg: #fff4d6;
+  --glow: rgba(23, 78, 166, .10);
+  --shadow: 0 1px 0 rgba(0,0,0,.02), 0 30px 80px -30px rgba(40, 32, 12, .28), 0 12px 30px -18px rgba(40, 32, 12, .18);
+  --grain-opacity: .35;
+  --serif: "Source Serif 4", "Iowan Old Style", Georgia, serif;
+  --sans: "Source Sans 3", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #121211; --surface-1: #1b1b1b; --surface-2: #232323; --raised: #1f1f1f;
+    --ink: #ededed; --ink-muted: #a3a3a3; --ink-subtle: #8f8f8f;
+    --hairline: #2a2a2a; --hairline-strong: #3a3a3a; --selected: #35332e;
+    --rec: #ff5b4f; --rec-glow: rgba(255, 91, 79, .28);
+    --info: #9cc4ff; --info-subtle: #172b49; --success: #86d7a5; --success-subtle: #173525;
+    --spk-1: #9cc4ff; --spk-1-bg: #172b49; --spk-2: #86d7a5; --spk-2-bg: #173525; --spk-3: #f2c46d; --spk-3-bg: #3a2c10;
+    --glow: rgba(156, 196, 255, .08);
+    --shadow: 0 0 0 1px rgba(255,255,255,.04), 0 40px 120px -30px rgba(0,0,0,.8), 0 20px 40px -20px rgba(0,0,0,.6);
+    --grain-opacity: .5;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #121211; --surface-1: #1b1b1b; --surface-2: #232323; --raised: #1f1f1f;
+  --ink: #ededed; --ink-muted: #a3a3a3; --ink-subtle: #8f8f8f;
+  --hairline: #2a2a2a; --hairline-strong: #3a3a3a; --selected: #35332e;
+  --rec: #ff5b4f; --rec-glow: rgba(255, 91, 79, .28);
+  --info: #9cc4ff; --info-subtle: #172b49; --success: #86d7a5; --success-subtle: #173525;
+  --spk-1: #9cc4ff; --spk-1-bg: #172b49; --spk-2: #86d7a5; --spk-2-bg: #173525; --spk-3: #f2c46d; --spk-3-bg: #3a2c10;
+  --glow: rgba(156, 196, 255, .08);
+  --shadow: 0 0 0 1px rgba(255,255,255,.04), 0 40px 120px -30px rgba(0,0,0,.8), 0 20px 40px -20px rgba(0,0,0,.6);
+  --grain-opacity: .5;
+  color-scheme: dark;
+}
+
+/* ---------- base ---------- */
+*, *::before, *::after { box-sizing: border-box; }
+html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--ink);
+  font-family: var(--sans); font-size: 17px; line-height: 1.55;
+  -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
+  overflow-x: hidden;
+}
+body::before { /* film grain */
+  content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 100; opacity: var(--grain-opacity);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 .5 0 0 0 0 .5 0 0 0 0 .5 0 0 0 .06 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+a { color: inherit; }
+img { max-width: 100%; display: block; }
+::selection { background: var(--selected); }
+.wrap { width: min(1180px, 100% - 32px); margin-inline: auto; }
+.serif { font-family: var(--serif); }
+.eyebrow {
+  font-size: 13px; letter-spacing: .14em; text-transform: uppercase; color: var(--ink-subtle); font-weight: 600;
+}
+h1, h2, h3 { font-family: var(--serif); font-weight: 500; letter-spacing: -.02em; margin: 0; }
+h2 { font-size: clamp(34px, 5vw, 60px); line-height: 1.04; }
+h3 { font-size: 22px; line-height: 1.2; letter-spacing: -.01em; }
+p { margin: 0; }
+.lede { color: var(--ink-muted); font-size: clamp(17px, 1.6vw, 20px); max-width: 60ch; }
+section { position: relative; }
+.section { padding: clamp(80px, 12vw, 150px) 0; }
+.section-head { display: grid; gap: 18px; margin-bottom: clamp(40px, 6vw, 72px); max-width: 780px; }
+.muted { color: var(--ink-muted); }
+.hair { border: 0; border-top: 1px solid var(--hairline); margin: 0; }
+
+.btn {
+  display: inline-flex; align-items: center; gap: 10px; height: 48px; padding: 0 22px; border-radius: 999px;
+  font: 600 16px/1 var(--sans); text-decoration: none; border: 1px solid transparent; cursor: pointer;
+  transition: transform .2s ease, background .2s ease, box-shadow .2s ease, border-color .2s;
+  white-space: nowrap;
+}
+.btn:active { transform: translateY(1px) scale(.99); }
+.btn-primary { background: var(--ink); color: var(--bg); box-shadow: 0 10px 30px -12px var(--rec-glow); }
+.btn-primary:hover { transform: translateY(-1px); box-shadow: 0 16px 40px -12px var(--rec-glow); }
+.btn-ghost { border-color: var(--hairline-strong); color: var(--ink); background: color-mix(in srgb, var(--bg) 60%, transparent); }
+.btn-ghost:hover { border-color: var(--ink-subtle); }
+.btn svg { width: 18px; height: 18px; flex: none; }
+:focus-visible { outline: 2px solid var(--info); outline-offset: 3px; border-radius: 6px; }
+
+/* ---------- nav ---------- */
+.nav {
+  position: sticky; top: 0; z-index: 50;
+  backdrop-filter: saturate(1.4) blur(14px); -webkit-backdrop-filter: saturate(1.4) blur(14px);
+  background: color-mix(in srgb, var(--bg) 72%, transparent);
+  border-bottom: 1px solid transparent; transition: border-color .3s;
+}
+.nav.scrolled { border-bottom-color: var(--hairline); }
+.nav-inner { display: flex; align-items: center; justify-content: space-between; height: 64px; gap: 16px; }
+.brand { display: inline-flex; align-items: center; gap: 10px; text-decoration: none; font-weight: 600; font-size: 18px; letter-spacing: -.01em; }
+.logo { width: 30px; height: 30px; border-radius: 8px; background: var(--ink); display: grid; place-items: center; flex: none; }
+.logo svg { width: 20px; height: 20px; }
+.logo svg * { fill: var(--bg); }
+.nav-links { display: flex; align-items: center; gap: 28px; font-size: 15px; }
+.nav-links a { text-decoration: none; color: var(--ink-muted); transition: color .2s; }
+.nav-links a:hover { color: var(--ink); }
+.nav-right { display: flex; align-items: center; gap: 8px; }
+.icon-btn {
+  width: 38px; height: 38px; border-radius: 999px; display: grid; place-items: center; border: 1px solid var(--hairline);
+  background: transparent; color: var(--ink-muted); cursor: pointer; transition: color .2s, border-color .2s; text-decoration: none;
+}
+.icon-btn:hover { color: var(--ink); border-color: var(--hairline-strong); }
+.icon-btn svg { width: 17px; height: 17px; }
+.nav .btn { height: 38px; padding: 0 16px; font-size: 14px; }
+@media (max-width: 760px) { .nav-links { display: none; } }
+@media (max-width: 420px) { .nav .btn { display: none; } }
+
+/* ---------- hero ---------- */
+.hero { padding: clamp(48px, 8vw, 96px) 0 0; overflow: hidden; isolation: isolate; }
+.hero-bg { position: absolute; inset: 0; z-index: -1; pointer-events: none; }
+.hero-bg canvas { position: absolute; left: 0; right: 0; top: 34%; width: 100%; height: 360px; opacity: .55; }
+.hero-bg::after {
+  content: ""; position: absolute; inset: -20% -10% auto; height: 900px;
+  background: radial-gradient(ellipse 50% 40% at 50% 30%, var(--glow), transparent 70%);
+}
+.hero-copy { text-align: center; display: grid; justify-items: center; gap: 26px; }
+.pill {
+  display: inline-flex; align-items: center; gap: 10px; padding: 6px 14px 6px 8px; border-radius: 999px;
+  border: 1px solid var(--hairline); background: color-mix(in srgb, var(--raised) 70%, transparent);
+  font-size: 14px; color: var(--ink-muted); text-decoration: none; transition: border-color .2s;
+}
+.pill:hover { border-color: var(--hairline-strong); }
+.pill .dot { display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; border-radius: 999px; background: var(--surface-2); color: var(--ink); font-weight: 600; font-size: 12px; }
+.rec-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--rec); box-shadow: 0 0 0 0 var(--rec-glow); animation: pulse 1.6s ease-out infinite; flex: none; }
+@keyframes pulse { 0% { box-shadow: 0 0 0 0 var(--rec-glow); } 70% { box-shadow: 0 0 0 9px transparent; } 100% { box-shadow: 0 0 0 0 transparent; } }
+.hero h1 {
+  font-size: clamp(40px, 8.6vw, 112px); line-height: .96; letter-spacing: -.035em; font-weight: 450;
+}
+.hero h1 .soft { color: var(--ink-subtle); }
+.hero .lede { text-align: center; margin-inline: auto; max-width: 56ch; }
+.hero-ctas { display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; }
+.hero-meta { font-size: 14px; color: var(--ink-subtle); display: flex; gap: 18px; flex-wrap: wrap; justify-content: center; }
+.hero-meta span { display: inline-flex; align-items: center; gap: 7px; }
+.hero-meta svg { width: 15px; height: 15px; }
+
+/* ---------- app mock ---------- */
+.stage { margin-top: clamp(48px, 7vw, 80px); perspective: 2000px; padding-bottom: 20px; }
+.mock {
+  position: relative; border-radius: 16px; background: var(--surface-0, var(--bg)); overflow: hidden;
+  border: 1px solid var(--hairline); box-shadow: var(--shadow);
+  transform: rotateX(8deg) scale(.97); transform-origin: 50% 0; transition: transform 1.2s cubic-bezier(.2,.7,.2,1);
+  --m-bg: var(--bg);
+}
+:root .mock { background: var(--m-bg); }
+.mock.flat { transform: none; }
+.mock-chrome { height: 38px; display: flex; align-items: center; gap: 8px; padding: 0 14px; border-bottom: 1px solid var(--hairline); background: var(--surface-1); }
+.mock-chrome i { width: 12px; height: 12px; border-radius: 50%; display: block; }
+.mock-chrome i:nth-child(1) { background: #ff5f57; } .mock-chrome i:nth-child(2) { background: #febc2e; } .mock-chrome i:nth-child(3) { background: #28c840; }
+.mock-chrome b { margin-left: 10px; font-size: 13px; color: var(--ink-subtle); font-weight: 600; }
+.mock-body { display: grid; grid-template-columns: 210px 1.25fr 1fr; height: 520px; }
+.m-rail { border-right: 1px solid var(--hairline); background: var(--surface-1); padding: 16px 12px; display: flex; flex-direction: column; gap: 6px; font-size: 13.5px; }
+.m-rail .brand { font-size: 15px; margin: 0 4px 12px; }
+.m-rail .brand .logo { width: 24px; height: 24px; border-radius: 7px; }
+.m-rail .brand .logo svg { width: 16px; height: 16px; }
+.m-new { background: var(--raised); border: 1px solid var(--hairline); border-radius: 10px; padding: 9px 12px; font-weight: 600; display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+.m-item { padding: 8px 10px; border-radius: 8px; color: var(--ink-muted); display: flex; gap: 8px; align-items: center; }
+.m-item svg, .m-new svg { width: 15px; height: 15px; flex: none; }
+.m-item.on { background: var(--selected); color: var(--ink); }
+.m-recent { font-size: 11px; letter-spacing: .12em; color: var(--ink-subtle); margin: 14px 10px 4px; font-weight: 600; }
+.m-meet { padding: 8px 10px; border-radius: 8px; line-height: 1.3; }
+.m-meet small { display: block; color: var(--ink-subtle); font-size: 11.5px; margin-top: 2px; }
+.m-meet.on { background: var(--surface-2); box-shadow: inset 2px 0 0 var(--info); }
+.m-meet .t { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; }
+
+.m-notes { padding: 30px 36px 90px; overflow: hidden; position: relative; }
+.m-title { font-family: var(--serif); font-size: 30px; line-height: 1.15; letter-spacing: -.02em; min-height: 1.2em; }
+.m-title .caret { display: inline-block; width: 2px; height: .9em; background: var(--info); vertical-align: -2px; margin-left: 2px; animation: blink 1s steps(1) infinite; }
+.m-date { color: var(--ink-subtle); font-size: 13px; margin-top: 4px; }
+.m-seg { display: inline-flex; margin-top: 16px; padding: 3px; border-radius: 10px; background: var(--surface-1); border: 1px solid var(--hairline); font-size: 13px; }
+.m-seg span { padding: 5px 12px; border-radius: 7px; color: var(--ink-subtle); display: inline-flex; gap: 6px; align-items: center; transition: background .3s, color .3s; }
+.m-seg span.on { background: var(--raised); color: var(--ink); box-shadow: 0 1px 2px rgba(0,0,0,.08); }
+.m-seg svg { width: 13px; height: 13px; }
+.m-list { list-style: none; padding: 0; margin: 22px 0 0; display: grid; gap: 14px; font-size: 15.5px; line-height: 1.5; }
+.m-list li { position: relative; padding-left: 18px; }
+.m-list li::before { content: ""; position: absolute; left: 2px; top: .62em; width: 5px; height: 5px; border-radius: 50%; background: var(--ink); }
+.m-list .own { font-weight: 400; transition: font-weight .4s; }
+.enhanced .m-list .own { font-weight: 650; }
+.enhanced .m-list .sub { display: block; }
+.m-list .add { color: var(--ink-muted); }
+.m-list .add .w { opacity: 0; filter: blur(6px); transition: opacity .5s ease, filter .5s ease; }
+.m-list .add .w.in { opacity: 1; filter: blur(0); }
+.m-list .sub { display: none; margin-top: 6px; padding-left: 14px; border-left: 1px solid var(--hairline); font-size: 14.5px; color: var(--ink-muted); }
+.m-list .sub .w { opacity: 0; filter: blur(6px); transition: opacity .5s ease, filter .5s ease; }
+.m-list .sub .w.in { opacity: 1; filter: blur(0); }
+.typing-caret { display: inline-block; width: 1.5px; height: 1.05em; background: var(--ink); vertical-align: -3px; margin-left: 1px; animation: blink 1s steps(1) infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+.m-actions { margin-top: 20px; display: flex; flex-wrap: wrap; gap: 8px; }
+.m-chip { font-size: 12.5px; padding: 4px 10px; border-radius: 999px; background: var(--success-subtle); color: var(--success); font-weight: 600; opacity: 0; transform: translateY(6px); transition: opacity .5s, transform .5s; display: inline-flex; align-items: center; gap: 6px; }
+.m-chip.in { opacity: 1; transform: none; }
+.m-chip svg { width: 12px; height: 12px; }
+
+.m-dock { border-left: 1px solid var(--hairline); display: flex; flex-direction: column; min-height: 0; }
+.m-dock-head { padding: 16px 18px 12px; display: flex; gap: 8px; align-items: center; }
+.m-tab { font-size: 13px; padding: 6px 12px; border-radius: 999px; color: var(--ink-subtle); display: inline-flex; gap: 6px; align-items: center; }
+.m-tab.on { background: var(--surface-2); color: var(--ink); }
+.m-tab svg { width: 14px; height: 14px; }
+.m-live { margin-left: auto; font-size: 11.5px; font-weight: 700; letter-spacing: .08em; color: var(--rec); display: inline-flex; align-items: center; gap: 6px; transition: opacity .3s; }
+.m-live .rec-dot { width: 6px; height: 6px; }
+.m-search { margin: 0 18px 10px; height: 34px; border: 1px solid var(--hairline); border-radius: 10px; display: flex; align-items: center; gap: 8px; padding: 0 12px; font-size: 13px; color: var(--ink-subtle); }
+.m-search svg { width: 14px; height: 14px; }
+.m-feed { flex: 1; min-height: 0; overflow: hidden; display: flex; flex-direction: column; justify-content: flex-end; padding: 0 18px 90px; gap: 16px;
+  mask-image: linear-gradient(to bottom, transparent 0, #000 60px); -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 60px); }
+.m-line { display: grid; grid-template-columns: 44px 1fr; gap: 4px 8px; font-size: 14px; line-height: 1.5; animation: rise .5s ease both; }
+@keyframes rise { from { opacity: 0; transform: translateY(8px); } }
+.m-line time { font: 11.5px/1 var(--mono); color: var(--ink-subtle); padding-top: 5px; }
+.spk { display: inline-block; font-size: 11.5px; font-weight: 700; padding: 2px 8px; border-radius: 6px; margin-bottom: 3px; }
+.spk.s1 { color: var(--spk-1); background: var(--spk-1-bg); }
+.spk.s2 { color: var(--spk-2); background: var(--spk-2-bg); }
+.spk.s3 { color: var(--spk-3); background: var(--spk-3-bg); }
+.m-line .txt .w { opacity: 0; transition: opacity .25s; }
+.m-line .txt .w.in { opacity: 1; }
+
+.recbar {
+  position: absolute; left: 50%; bottom: 22px; transform: translateX(-50%); z-index: 3;
+  display: flex; align-items: center; gap: 14px; height: 52px; padding: 0 10px 0 18px; border-radius: 999px;
+  background: color-mix(in srgb, var(--raised) 88%, transparent); border: 1px solid var(--hairline-strong);
+  backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+  box-shadow: 0 18px 40px -16px rgba(0,0,0,.35); font-size: 14px; min-width: 330px;
+  transition: min-width .5s ease;
+}
+.recbar .time { font: 600 14px/1 var(--mono); font-variant-numeric: tabular-nums; }
+.recbar canvas { width: 120px; height: 28px; }
+.recbar .ctl { width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; background: var(--surface-2); color: var(--ink); }
+.recbar .ctl.stop { background: var(--rec); color: #fff; }
+.recbar .ctl svg { width: 14px; height: 14px; }
+.recbar .state { display: none; align-items: center; gap: 10px; font-weight: 600; padding-right: 10px; }
+.recbar.enhancing .rec-ui { display: none; }
+.recbar.enhancing .state { display: inline-flex; }
+.recbar.enhancing { min-width: 260px; justify-content: center; }
+.shimmer {
+  background: linear-gradient(90deg, var(--ink-subtle) 0%, var(--ink) 40%, var(--ink-subtle) 80%); background-size: 200% 100%;
+  -webkit-background-clip: text; background-clip: text; color: transparent; animation: shimmer 1.4s linear infinite;
+}
+@keyframes shimmer { to { background-position: -200% 0; } }
+.rec-ui { display: contents; }
+.spark { width: 16px; height: 16px; color: var(--info); animation: spin 2.4s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.recbar.done .spark { animation: none; }
+
+@media (max-width: 980px) { .mock-body { grid-template-columns: 1.2fr 1fr; } .m-rail { display: none; } }
+@media (max-width: 700px) {
+  .mock-body { grid-template-columns: 1fr; grid-template-rows: auto 220px; height: auto; }
+  .m-notes { padding: 22px 20px 20px; }
+  .m-title { font-size: 24px; }
+  .m-dock { border-left: 0; border-top: 1px solid var(--hairline); }
+  .m-feed { padding-bottom: 84px; }
+  .recbar { min-width: 0; gap: 10px; padding-left: 14px; }
+  .recbar canvas { width: 70px; }
+  .mock { transform: none; }
+}
+
+/* ---------- ticker ---------- */
+.ticker { border-block: 1px solid var(--hairline); overflow: hidden; margin-top: clamp(40px, 6vw, 70px); }
+.ticker-track { display: flex; gap: 56px; padding: 22px 0; width: max-content; animation: marquee 48s linear infinite; }
+.ticker:hover .ticker-track { animation-play-state: paused; }
+.ticker-item { display: inline-flex; align-items: baseline; gap: 12px; white-space: nowrap; color: var(--ink-muted); font-size: 15px; }
+.ticker-item b { font-family: var(--serif); font-weight: 500; font-size: 26px; color: var(--ink); letter-spacing: -.02em; }
+.ticker-item i { font-style: normal; color: var(--hairline-strong); }
+@keyframes marquee { to { transform: translateX(-50%); } }
+
+/* ---------- steps ---------- */
+.steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
+.step { border: 1px solid var(--hairline); border-radius: 20px; padding: 28px; background: var(--surface-1); display: grid; gap: 14px; align-content: start; position: relative; overflow: hidden; min-height: 330px; }
+.step .n { font: 600 13px/1 var(--mono); color: var(--ink-subtle); }
+.step p { color: var(--ink-muted); }
+.step-vis { margin-top: auto; height: 120px; border-radius: 14px; background: var(--bg); border: 1px solid var(--hairline); position: relative; overflow: hidden; display: grid; place-items: center; }
+@media (max-width: 900px) { .steps { grid-template-columns: 1fr; } .step { min-height: 0; } }
+
+.lanes { width: 100%; padding: 14px 18px; display: grid; gap: 8px; }
+.lane { display: grid; grid-template-columns: 58px 1fr; align-items: center; gap: 10px; font-size: 12px; color: var(--ink-subtle); font-weight: 600; }
+.lane canvas { width: 100%; height: 22px; }
+.jot { font-family: var(--serif); font-size: 17px; padding: 0 22px; width: 100%; line-height: 1.6; }
+.jot div::before { content: "– "; color: var(--ink-subtle); }
+.jot .hl { background: linear-gradient(transparent 60%, var(--rec-glow) 60%); }
+.enh { font-size: 13.5px; padding: 0 20px; width: 100%; line-height: 1.5; }
+.enh b { font-weight: 650; }
+.enh span { color: var(--info); }
+
+/* ---------- bento ---------- */
+.bento { display: grid; grid-template-columns: repeat(6, 1fr); gap: 16px; }
+.card {
+  grid-column: span 2; border: 1px solid var(--hairline); border-radius: 22px; padding: 26px; background: var(--surface-1);
+  display: flex; flex-direction: column; gap: 10px; position: relative; overflow: hidden; min-height: 260px;
+  transition: border-color .3s, transform .3s;
+}
+.card:hover { border-color: var(--hairline-strong); }
+.card.w3 { grid-column: span 3; } .card.w4 { grid-column: span 4; }
+.card p { color: var(--ink-muted); font-size: 15.5px; }
+.card .vis { margin-top: auto; padding-top: 18px; }
+.card::after { content: ""; position: absolute; inset: 0; pointer-events: none; opacity: 0; transition: opacity .3s;
+  background: radial-gradient(420px circle at var(--mx, 50%) var(--my, 0%), var(--glow), transparent 60%); }
+.card:hover::after { opacity: 1; }
+@media (max-width: 980px) { .bento { grid-template-columns: repeat(2, 1fr); } .card, .card.w3, .card.w4 { grid-column: span 1; } .card.wide-sm { grid-column: span 2; } }
+@media (max-width: 640px) { .bento { grid-template-columns: 1fr; } .card, .card.w3, .card.w4, .card.wide-sm { grid-column: auto; } }
+
+.nobot { display: flex; gap: 10px; flex-wrap: wrap; }
+.tile { flex: 1 1 70px; aspect-ratio: 4/3; border-radius: 12px; background: var(--bg); border: 1px solid var(--hairline); display: grid; place-items: center; font-size: 12px; color: var(--ink-subtle); position: relative; }
+.tile .av { width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; font-weight: 700; font-size: 12px; }
+.tile.bot { border-style: dashed; color: var(--rec); }
+.tile.bot::after { content: ""; position: absolute; left: 14%; right: 14%; top: 50%; height: 2px; background: var(--rec); transform: rotate(-24deg); border-radius: 2px; }
+.tile.bot span { opacity: .55; text-decoration: none; text-align: center; line-height: 1.2; padding: 4px; }
+
+.chat { display: grid; gap: 8px; font-size: 14px; }
+.bubble { padding: 9px 13px; border-radius: 14px; max-width: 88%; }
+.bubble.me { justify-self: end; background: var(--ink); color: var(--bg); border-bottom-right-radius: 4px; }
+.bubble.ai { background: var(--bg); border: 1px solid var(--hairline); border-bottom-left-radius: 4px; }
+.bubble.ai cite { font-style: normal; font: 11px var(--mono); color: var(--info); background: var(--info-subtle); padding: 1px 5px; border-radius: 4px; }
+
+.toast { display: flex; gap: 12px; align-items: center; padding: 12px 14px; border-radius: 14px; background: var(--bg); border: 1px solid var(--hairline); box-shadow: 0 12px 30px -18px rgba(0,0,0,.4); font-size: 14px; }
+.toast .ic { width: 34px; height: 34px; border-radius: 9px; background: var(--ink); display: grid; place-items: center; flex: none; }
+.toast .ic svg { width: 20px; height: 20px; } .toast .ic svg * { fill: var(--bg); }
+.toast b { display: block; font-weight: 650; } .toast small { color: var(--ink-subtle); font-size: 13px; }
+.toast .go { margin-left: auto; font-size: 13px; font-weight: 650; padding: 6px 12px; border-radius: 999px; background: var(--rec); color: #fff; white-space: nowrap; }
+
+.gpu { display: flex; flex-wrap: wrap; gap: 8px; }
+.gpu span { font: 600 13px/1 var(--mono); padding: 8px 11px; border-radius: 8px; border: 1px solid var(--hairline); background: var(--bg); }
+.gpu span.hot { border-color: transparent; background: var(--ink); color: var(--bg); }
+
+.speakers { display: grid; gap: 8px; }
+.speakers .row { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+.speakers .bar { height: 8px; border-radius: 99px; }
+
+.kbar { border-radius: 12px; border: 1px solid var(--hairline); background: var(--bg); overflow: hidden; font-size: 14px; }
+.kbar .q { display: flex; align-items: center; gap: 8px; padding: 11px 14px; border-bottom: 1px solid var(--hairline); }
+.kbar .q svg { width: 15px; height: 15px; color: var(--ink-subtle); }
+.kbar kbd { margin-left: auto; font: 11px var(--mono); border: 1px solid var(--hairline); border-radius: 5px; padding: 2px 6px; color: var(--ink-subtle); }
+.kbar .r { padding: 9px 14px; color: var(--ink-muted); display: flex; gap: 10px; }
+.kbar .r mark { background: var(--selected); color: var(--ink); border-radius: 3px; padding: 0 2px; }
+.kbar .r small { margin-left: auto; color: var(--ink-subtle); font-family: var(--mono); font-size: 11px; }
+
+.modes { display: inline-flex; padding: 3px; border-radius: 10px; background: var(--bg); border: 1px solid var(--hairline); font-size: 13px; }
+.modes span { padding: 6px 12px; border-radius: 7px; color: var(--ink-subtle); }
+.modes span.on { background: var(--surface-2); color: var(--ink); font-weight: 600; }
+
+/* ---------- privacy ---------- */
+.privacy { background: var(--surface-1); border-block: 1px solid var(--hairline); overflow: hidden; }
+.priv-grid { display: grid; grid-template-columns: 1fr 1.05fr; gap: clamp(32px, 6vw, 80px); align-items: center; }
+@media (max-width: 900px) { .priv-grid { grid-template-columns: 1fr; } }
+.priv-points { display: grid; gap: 22px; margin-top: 36px; }
+.priv-points div { display: grid; grid-template-columns: 28px 1fr; gap: 12px; }
+.priv-points svg { width: 22px; height: 22px; color: var(--success); margin-top: 2px; }
+.priv-points b { font-weight: 650; display: block; }
+.priv-points span { color: var(--ink-muted); font-size: 15.5px; }
+.diagram svg { width: 100%; height: auto; overflow: visible; }
+.diagram .box { fill: var(--bg); stroke: var(--hairline-strong); }
+.diagram .boundary { fill: none; stroke: var(--ink-subtle); stroke-dasharray: 6 6; animation: dash 30s linear infinite; }
+@keyframes dash { to { stroke-dashoffset: -600; } }
+.diagram .lbl { fill: var(--ink); font: 600 14px var(--sans); }
+.diagram .sub { fill: var(--ink-subtle); font: 12px var(--sans); }
+.diagram .cap { fill: var(--ink-subtle); font: 600 11px var(--sans); letter-spacing: .14em; }
+.diagram .flow { stroke: var(--ink-subtle); stroke-width: 1.5; fill: none; }
+.diagram .pkt { fill: var(--info); }
+.diagram .cloud { fill: none; stroke: var(--hairline-strong); stroke-width: 1.5; }
+.diagram .x { stroke: var(--rec); stroke-width: 2.5; stroke-linecap: round; }
+.diagram .zero { fill: var(--rec); font: 600 12px var(--mono); }
+.diagram .blocked { stroke: var(--rec); stroke-width: 1.5; stroke-dasharray: 3 5; fill: none; opacity: .7; }
+
+/* ---------- compare ---------- */
+.compare { border: 1px solid var(--hairline); border-radius: 22px; overflow: hidden; }
+.compare table { width: 100%; border-collapse: collapse; font-size: 16px; }
+.compare th, .compare td { text-align: left; padding: 18px 24px; border-bottom: 1px solid var(--hairline); vertical-align: top; }
+.compare tr:last-child td { border-bottom: 0; }
+.compare thead th { font-size: 13px; letter-spacing: .12em; text-transform: uppercase; color: var(--ink-subtle); font-weight: 600; background: var(--surface-1); }
+.compare thead th.us { color: var(--ink); }
+.compare td:first-child { color: var(--ink-muted); width: 34%; }
+.compare td.us { font-weight: 600; background: color-mix(in srgb, var(--success-subtle) 45%, transparent); }
+.compare td.us::before { content: "✓"; color: var(--success); margin-right: 10px; font-weight: 700; }
+.compare td.them { color: var(--ink-subtle); }
+@media (max-width: 640px) {
+  .compare th, .compare td { padding: 14px 14px; font-size: 14.5px; }
+  .compare td.us::before { margin-right: 6px; }
+}
+
+/* ---------- gallery ---------- */
+.gallery-tabs { display: inline-flex; padding: 4px; border-radius: 12px; background: var(--surface-1); border: 1px solid var(--hairline); margin-bottom: 28px; flex-wrap: wrap; }
+.gallery-tabs button { font: 600 14px var(--sans); color: var(--ink-subtle); background: none; border: 0; padding: 9px 16px; border-radius: 9px; cursor: pointer; transition: background .25s, color .25s; }
+.gallery-tabs button[aria-selected="true"] { background: var(--raised); color: var(--ink); box-shadow: 0 1px 3px rgba(0,0,0,.1); }
+.frame { border-radius: 16px; overflow: hidden; border: 1px solid var(--hairline); box-shadow: var(--shadow); background: #1b1b1b; position: relative; aspect-ratio: 1600 / 1028; }
+.frame img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; object-position: top; opacity: 0; transform: scale(1.015); transition: opacity .6s ease, transform .9s ease; }
+.frame img.on { opacity: 1; transform: none; }
+.caption { margin-top: 18px; color: var(--ink-muted); font-size: 15px; min-height: 1.5em; }
+
+/* ---------- stack ---------- */
+.stack { display: grid; grid-template-columns: repeat(4, 1fr); border: 1px solid var(--hairline); border-radius: 22px; overflow: hidden; }
+.stack div { padding: 26px; border-right: 1px solid var(--hairline); display: grid; gap: 6px; align-content: start; }
+.stack div:last-child { border-right: 0; }
+.stack b { font-family: var(--serif); font-weight: 500; font-size: 24px; letter-spacing: -.01em; }
+.stack span { color: var(--ink-muted); font-size: 15px; }
+.stack small { font: 12px var(--mono); color: var(--ink-subtle); }
+@media (max-width: 900px) { .stack { grid-template-columns: 1fr 1fr; } .stack div:nth-child(2) { border-right: 0; } .stack div:nth-child(-n+2) { border-bottom: 1px solid var(--hairline); } }
+@media (max-width: 520px) { .stack { grid-template-columns: 1fr; } .stack div { border-right: 0; border-bottom: 1px solid var(--hairline); } .stack div:last-child { border-bottom: 0; } }
+
+/* ---------- download ---------- */
+.dl { text-align: center; display: grid; justify-items: center; gap: 22px; }
+.dl h2 { font-size: clamp(44px, 7.5vw, 96px); letter-spacing: -.035em; line-height: .98; max-width: 14ch; }
+.dl-cards { display: grid; grid-template-columns: repeat(2, minmax(0, 340px)); gap: 16px; margin-top: 26px; width: 100%; justify-content: center; }
+@media (max-width: 720px) { .dl-cards { grid-template-columns: 1fr; } }
+.dl-card { border: 1px solid var(--hairline); border-radius: 20px; padding: 24px; background: var(--surface-1); text-align: left; display: grid; gap: 14px; text-decoration: none; transition: border-color .25s, transform .25s; }
+.dl-card:hover { border-color: var(--ink-subtle); transform: translateY(-2px); }
+.dl-card.primary { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+.dl-card.primary small { color: color-mix(in srgb, var(--bg) 65%, transparent); }
+.dl-card .os { display: flex; align-items: center; gap: 12px; font-size: 20px; font-weight: 650; }
+.dl-card .os svg { width: 26px; height: 26px; }
+.dl-card small { color: var(--ink-subtle); font-size: 14px; }
+.dl-card .get { font-weight: 650; display: inline-flex; align-items: center; gap: 8px; font-size: 15px; }
+.dl-card .get svg { width: 16px; height: 16px; }
+.dl-note { max-width: 640px; font-size: 14.5px; color: var(--ink-subtle); }
+.dl-note code { font: 13px var(--mono); background: var(--surface-2); padding: 2px 6px; border-radius: 5px; color: var(--ink-muted); word-break: break-all; }
+
+/* ---------- footer ---------- */
+footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size: 14.5px; color: var(--ink-subtle); }
+.foot { display: flex; justify-content: space-between; gap: 30px; flex-wrap: wrap; align-items: flex-start; }
+.foot nav { display: flex; gap: 22px; flex-wrap: wrap; }
+.foot nav a { text-decoration: none; } .foot nav a:hover { color: var(--ink); }
+.foot .fine { margin-top: 12px; max-width: 520px; }
+
+/* ---------- reveal ---------- */
+.reveal { opacity: 0; transform: translateY(24px); transition: opacity .9s cubic-bezier(.2,.7,.2,1), transform .9s cubic-bezier(.2,.7,.2,1); }
+.reveal.in { opacity: 1; transform: none; }
+.hero-copy .reveal { opacity: 1; transform: none; animation: rise-in .9s cubic-bezier(.2,.7,.2,1) both; }
+.hero-copy .d1 { animation-delay: .08s; } .hero-copy .d2 { animation-delay: .16s; } .hero-copy .d3 { animation-delay: .24s; }
+@keyframes rise-in { from { opacity: 0; transform: translateY(24px); } }
+.d1 { transition-delay: .08s; } .d2 { transition-delay: .16s; } .d3 { transition-delay: .24s; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; scroll-behavior: auto !important; }
+  .reveal { opacity: 1; transform: none; }
+  .ticker-track { animation: none; flex-wrap: wrap; width: auto; justify-content: center; }
+  .ticker-track [aria-hidden] { display: none; }
+}
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="logo" viewBox="0 0 24 24"><rect x="3" y="8" width="2.6" height="8" rx="1.3"/><rect x="7.2" y="8" width="2.6" height="8" rx="1.3"/><circle cx="12" cy="12" r="1.5"/><rect x="14.2" y="8" width="2.6" height="8" rx="1.3"/><rect x="18.4" y="8" width="2.6" height="8" rx="1.3"/></symbol>
+    <symbol id="i-apple" viewBox="0 0 24 24"><path fill="currentColor" d="M16.4 12.6c0-2.5 2-3.7 2.1-3.8-1.2-1.7-3-1.9-3.6-2-1.5-.2-3 .9-3.8.9-.8 0-2-.9-3.3-.9-1.7 0-3.3 1-4.2 2.5-1.8 3.1-.5 7.8 1.3 10.3.9 1.2 1.9 2.6 3.2 2.6 1.3-.1 1.8-.8 3.3-.8 1.6 0 2 .8 3.3.8 1.4 0 2.3-1.3 3.1-2.5 1-1.4 1.4-2.8 1.4-2.9 0 0-2.8-1.1-2.8-4.2zM13.9 5.1c.7-.9 1.2-2 1-3.1-1 0-2.2.7-2.9 1.5-.6.7-1.2 1.9-1.1 3 1.1.1 2.3-.6 3-1.4z"/></symbol>
+    <symbol id="i-win" viewBox="0 0 24 24"><path fill="currentColor" d="M3 5.5 10.4 4.5v7H3zm0 13 7.4 1v-7H3zm8.3 1.1L21 21v-8.5h-9.7zm0-15.2v7.1H21V3z"/></symbol>
+    <symbol id="i-gh" viewBox="0 0 24 24"><path fill="currentColor" d="M12 1.5a10.5 10.5 0 0 0-3.3 20.5c.5.1.7-.2.7-.5v-1.8c-2.9.6-3.5-1.4-3.5-1.4-.5-1.2-1.2-1.5-1.2-1.5-1-.7.1-.6.1-.6 1 .1 1.6 1.1 1.6 1.1.9 1.6 2.5 1.1 3.1.9.1-.7.4-1.1.7-1.4-2.3-.3-4.8-1.2-4.8-5.2 0-1.1.4-2.1 1.1-2.8-.1-.3-.5-1.4.1-2.8 0 0 .9-.3 2.9 1.1a10 10 0 0 1 5.3 0c2-1.4 2.9-1.1 2.9-1.1.6 1.4.2 2.5.1 2.8.7.8 1.1 1.7 1.1 2.8 0 4-2.5 4.9-4.8 5.2.4.3.7 1 .7 1.9v2.9c0 .3.2.6.7.5A10.5 10.5 0 0 0 12 1.5z"/></symbol>
+    <symbol id="i-down" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 4v12m0 0 5-5m-5 5-5-5M5 20h14"/></symbol>
+    <symbol id="i-mic" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></g></symbol>
+    <symbol id="i-video" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><rect x="3" y="6" width="13" height="12" rx="2.5"/><path d="m16 10 5-3v10l-5-3z"/></g></symbol>
+    <symbol id="i-home" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" d="M4 10.5 12 4l8 6.5V20H4z"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="6.5"/><path d="m20 20-4-4"/></g></symbol>
+    <symbol id="i-doc" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M6 3h8l4 4v14H6z"/><path d="M9 12h6M9 16h6"/></g></symbol>
+    <symbol id="i-chat" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" d="M4 12a8 8 0 1 1 3.2 6.4L4 20l1.2-3.4A8 8 0 0 1 4 12z"/></symbol>
+    <symbol id="i-spark" viewBox="0 0 24 24"><path fill="currentColor" d="M12 2c.4 4.6 2.4 7.6 7.5 8.3v1.4C14.4 12.4 12.4 15.4 12 20h-1.4c-.4-4.6-2.4-7.6-7.5-8.3v-1.4c5.1-.7 7.1-3.7 7.5-8.3z"/></symbol>
+    <symbol id="i-list" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" d="M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" d="m5 12.5 4.5 4.5L19 7.5"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M12 3 5 6v5.5c0 4.4 3 8.2 7 9.5 4-1.3 7-5.1 7-9.5V6z"/><path d="m9 12 2.2 2.2L15.5 10" stroke-linecap="round"/></g></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></g></symbol>
+    <symbol id="i-moon" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" d="M20 14.5A8 8 0 0 1 9.5 4 8 8 0 1 0 20 14.5z"/></symbol>
+    <symbol id="i-pause" viewBox="0 0 24 24"><path fill="currentColor" d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z"/></symbol>
+    <symbol id="i-stop" viewBox="0 0 24 24"><rect fill="currentColor" x="6" y="6" width="12" height="12" rx="2"/></symbol>
+    <symbol id="i-lock" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8"><rect x="5" y="10.5" width="14" height="10" rx="2.5"/><path d="M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5"/></g></symbol>
+    <symbol id="i-free" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="m8 16 8-8"/><circle cx="12" cy="12" r="9"/></g></symbol>
+    <symbol id="i-code" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="m8 8-4 4 4 4M16 8l4 4-4 4M13.5 5l-3 14"/></symbol>
+  </defs>
+</svg>
+
+<header class="nav" id="nav">
+  <div class="wrap nav-inner">
+    <a class="brand" href="#top" aria-label="Minutes home">
+      <span class="logo"><svg><use href="#logo"/></svg></span>minutes
+    </a>
+    <nav class="nav-links" aria-label="Sections">
+      <a href="#how">How it works</a>
+      <a href="#features">Features</a>
+      <a href="#privacy">Privacy</a>
+      <a href="#compare">Compare</a>
+    </nav>
+    <div class="nav-right">
+      <button class="icon-btn" id="theme" type="button" aria-label="Toggle light and dark theme">
+        <svg class="sun"><use href="#i-sun"/></svg><svg class="moon" style="display:none"><use href="#i-moon"/></svg>
+      </button>
+      <a class="icon-btn" href="https://github.com/praveenvnktsh/minutes" aria-label="Minutes on GitHub"><svg><use href="#i-gh"/></svg></a>
+      <a class="btn btn-primary" href="#download">Download</a>
+    </div>
+  </div>
+</header>
+
+<main id="top">
+  <!-- ================= HERO ================= -->
+  <section class="hero">
+    <div class="hero-bg" aria-hidden="true"><canvas id="bgwave"></canvas></div>
+    <div class="wrap">
+      <div class="hero-copy">
+        <a class="pill reveal" href="https://github.com/praveenvnktsh/minutes/releases/latest">
+          <span class="dot"><span class="rec-dot"></span>New</span> Free &amp; open source for macOS and Windows
+        </a>
+        <h1 class="reveal d1"><span style="white-space:nowrap">Every word, kept.</span><br /><span class="soft">Nothing sent.</span></h1>
+        <p class="lede reveal d2">Minutes records your meetings, transcribes them on your own machine, and turns the notes you jotted into notes worth keeping. No bot in the call. No cloud. No account.</p>
+        <div class="hero-ctas reveal d3">
+          <a class="btn btn-primary dl-primary" href="#download">
+            <svg class="os-icon"><use href="#i-down"/></svg><span class="dl-label">Download Minutes</span>
+          </a>
+          <a class="btn btn-ghost" href="https://github.com/praveenvnktsh/minutes"><svg><use href="#i-gh"/></svg>Star on GitHub</a>
+        </div>
+        <div class="hero-meta reveal d3">
+          <span><svg><use href="#i-lock"/></svg>Runs 100% on-device</span>
+          <span><svg><use href="#i-free"/></svg>No subscription</span>
+          <span><svg><use href="#i-code"/></svg>MIT licensed</span>
+        </div>
+      </div>
+
+      <!-- Live product mock -->
+      <div class="stage">
+        <div class="mock" id="mock" role="img" aria-label="Animated demo of Minutes: a meeting is recorded, transcribed live, and your jotted notes are enhanced with details from the transcript.">
+          <div class="mock-chrome"><i></i><i></i><i></i><b>minutes</b></div>
+          <div class="mock-body">
+            <aside class="m-rail" aria-hidden="true">
+              <div class="brand"><span class="logo"><svg><use href="#logo"/></svg></span>minutes</div>
+              <div class="m-new"><svg><use href="#i-mic"/></svg>New meeting</div>
+              <div class="m-item"><svg><use href="#i-search"/></svg>Search</div>
+              <div class="m-item"><svg><use href="#i-home"/></svg>Home</div>
+              <div class="m-item on"><svg><use href="#i-video"/></svg>Meetings</div>
+              <div class="m-recent">RECENT</div>
+              <div class="m-meet on"><span class="t" id="railTitle">Meeting 25_09_26_10_02</span><small>Today, 10:02 AM</small></div>
+              <div class="m-meet"><span class="t">Design review: onboarding</span><small>Yesterday, 4:30 PM</small></div>
+              <div class="m-meet"><span class="t">Hiring loop debrief</span><small>Yesterday, 2:00 PM</small></div>
+              <div class="m-meet"><span class="t">Weekly 1:1 with Sam</span><small>Mon, 11:15 AM</small></div>
+            </aside>
+
+            <div class="m-notes" id="notes">
+              <div class="m-title" id="mTitle">Meeting 25_09_26_10_02</div>
+              <div class="m-date">Today, 10:02 AM · 3 speakers</div>
+              <div class="m-seg" aria-hidden="true">
+                <span id="segRaw" class="on"><svg><use href="#i-list"/></svg>Raw</span>
+                <span id="segEnh"><svg><use href="#i-spark"/></svg>Enhanced</span>
+              </div>
+              <ul class="m-list" id="mList"></ul>
+              <div class="m-actions" id="mActions"></div>
+            </div>
+
+            <div class="m-dock" aria-hidden="true">
+              <div class="m-dock-head">
+                <span class="m-tab on"><svg><use href="#i-doc"/></svg>Transcript</span>
+                <span class="m-tab"><svg><use href="#i-chat"/></svg>Chat</span>
+                <span class="m-live" id="mLive"><span class="rec-dot"></span>LIVE</span>
+              </div>
+              <div class="m-search"><svg><use href="#i-search"/></svg>Search transcript…</div>
+              <div class="m-feed" id="feed"></div>
+            </div>
+          </div>
+
+          <div class="recbar" id="recbar" aria-hidden="true">
+            <span class="rec-ui">
+              <span class="rec-dot"></span>
+              <span class="time" id="timer">00:00</span>
+              <canvas id="recwave" width="240" height="56"></canvas>
+              <span class="ctl"><svg><use href="#i-pause"/></svg></span>
+              <span class="ctl stop" id="stopBtn"><svg><use href="#i-stop"/></svg></span>
+            </span>
+            <span class="state"><svg class="spark"><use href="#i-spark"/></svg><span class="shimmer" id="stateText">Enhancing your notes…</span></span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="ticker" aria-label="At a glance">
+      <div class="ticker-track">
+        <span class="ticker-item"><b>0 bytes</b> of audio uploaded</span><i>✦</i>
+        <span class="ticker-item"><b>0 bots</b> joining your calls</span><i>✦</i>
+        <span class="ticker-item"><b>$0</b> per month, forever</span><i>✦</i>
+        <span class="ticker-item"><b>Mic + system</b> audio, mixed</span><i>✦</i>
+        <span class="ticker-item"><b>Whisper</b> &amp; <b>Parakeet</b> on-device</span><i>✦</i>
+        <span class="ticker-item"><b>Metal · CUDA · Vulkan</b> acceleration</span><i>✦</i>
+        <span class="ticker-item"><b>Works</b> in airplane mode</span><i>✦</i>
+        <span aria-hidden="true" class="ticker-item"><b>0 bytes</b> of audio uploaded</span><i aria-hidden="true">✦</i>
+        <span aria-hidden="true" class="ticker-item"><b>0 bots</b> joining your calls</span><i aria-hidden="true">✦</i>
+        <span aria-hidden="true" class="ticker-item"><b>$0</b> per month, forever</span><i aria-hidden="true">✦</i>
+        <span aria-hidden="true" class="ticker-item"><b>Mic + system</b> audio, mixed</span><i aria-hidden="true">✦</i>
+        <span aria-hidden="true" class="ticker-item"><b>Whisper</b> &amp; <b>Parakeet</b> on-device</span><i aria-hidden="true">✦</i>
+        <span aria-hidden="true" class="ticker-item"><b>Metal · CUDA · Vulkan</b> acceleration</span><i aria-hidden="true">✦</i>
+        <span aria-hidden="true" class="ticker-item"><b>Works</b> in airplane mode</span><i aria-hidden="true">✦</i>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= HOW ================= -->
+  <section class="section" id="how">
+    <div class="wrap">
+      <div class="section-head">
+        <span class="eyebrow reveal">How it works</span>
+        <h2 class="reveal d1">Your notes, finished for you.</h2>
+        <p class="lede reveal d2">Most AI notetakers throw away what you wrote and hand you a generic report. Minutes starts from your notes — your words, your order — and fills in what you didn't have time to type.</p>
+      </div>
+      <div class="steps">
+        <article class="step reveal">
+          <span class="n">01</span>
+          <h3>Hit record.</h3>
+          <p>Minutes captures your microphone and the call's audio together, mixed so nobody drowns anybody out. No bot, no invite, no permission slip.</p>
+          <div class="step-vis"><div class="lanes">
+            <div class="lane">MIC<canvas data-lane="mic" width="400" height="44"></canvas></div>
+            <div class="lane">SYSTEM<canvas data-lane="sys" width="400" height="44"></canvas></div>
+          </div></div>
+        </article>
+        <article class="step reveal d1">
+          <span class="n">02</span>
+          <h3>Jot what matters.</h3>
+          <p>Type a few words whenever something important happens. Fragments are fine. That's the whole point.</p>
+          <div class="step-vis"><div class="jot">
+            <div>offline mode <span class="hl">first</span></div>
+            <div>pricing??</div>
+            <div>dev → spec</div>
+          </div></div>
+        </article>
+        <article class="step reveal d2">
+          <span class="n">03</span>
+          <h3>Enhance.</h3>
+          <p>A local model rewrites nothing you said. It keeps your bullets and adds names, numbers and decisions from the transcript.</p>
+          <div class="step-vis"><div class="enh">
+            <div><b>Offline mode first</b> <span>— unblocks October pilots; ~2 sprints.</span></div>
+            <div><b>Pricing??</b> <span>Keep free tier; Priya drafts by Fri.</span></div>
+          </div></div>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= FEATURES ================= -->
+  <section class="section" id="features" style="padding-top:0">
+    <div class="wrap">
+      <div class="section-head">
+        <span class="eyebrow reveal">Features</span>
+        <h2 class="reveal d1">Everything a recorder should do. <span class="muted">Nothing it shouldn't.</span></h2>
+      </div>
+
+      <div class="bento">
+        <article class="card w4 wide-sm reveal">
+          <h3>Nobody else in the room.</h3>
+          <p>Cloud notetakers join as a guest and announce themselves to everyone. Minutes listens from your own machine, like you do.</p>
+          <div class="vis nobot" aria-hidden="true">
+            <div class="tile"><div class="av" style="background:var(--spk-1-bg);color:var(--spk-1)">MA</div></div>
+            <div class="tile"><div class="av" style="background:var(--spk-2-bg);color:var(--spk-2)">DV</div></div>
+            <div class="tile"><div class="av" style="background:var(--spk-3-bg);color:var(--spk-3)">PR</div></div>
+            <div class="tile"><div class="av" style="background:var(--surface-2);color:var(--ink)">You</div></div>
+            <div class="tile bot"><span>AI Notetaker<br />(Recording)</span></div>
+          </div>
+        </article>
+
+        <article class="card reveal d1">
+          <h3>Live, or later.</h3>
+          <p>Watch the transcript stream in, or transcribe after the call to keep your laptop cool.</p>
+          <div class="vis"><div class="modes" id="modes"><span class="on">Live</span><span>After the call</span></div></div>
+        </article>
+
+        <article class="card reveal">
+          <h3>Knows who said it.</h3>
+          <p>On-device speaker diarization, with a speaker manager to name and reassign.</p>
+          <div class="vis speakers" aria-hidden="true">
+            <div class="row"><span class="spk s1">Maya</span><span class="bar" style="width:62%;background:var(--spk-1)"></span></div>
+            <div class="row"><span class="spk s2">Dev</span><span class="bar" style="width:38%;background:var(--spk-2)"></span></div>
+            <div class="row"><span class="spk s3">Priya</span><span class="bar" style="width:47%;background:var(--spk-3)"></span></div>
+          </div>
+        </article>
+
+        <article class="card w4 wide-sm reveal d1">
+          <h3>Ask your meeting anything.</h3>
+          <p>Chat across the transcript and your notes. Ask what was decided, have it tighten a section, or pull out every action item.</p>
+          <div class="vis chat" aria-hidden="true">
+            <div class="bubble me">What did we promise the pilot customers?</div>
+            <div class="bubble ai">An offline-capable build for the October pilots, about two sprints of work. Dev owns the spec. <cite>00:19</cite></div>
+          </div>
+        </article>
+
+        <article class="card w3 reveal">
+          <h3>Starts when your meeting does.</h3>
+          <p>Minutes notices when a supported meeting begins and offers to record. One click, and it lives in your menu bar.</p>
+          <div class="vis" aria-hidden="true">
+            <div class="toast"><span class="ic"><svg><use href="#logo"/></svg></span><div><b>Meeting detected</b><small>Start recording with Minutes?</small></div><span class="go">Record</span></div>
+          </div>
+        </article>
+
+        <article class="card w3 reveal d1">
+          <h3>Find any word you ever heard.</h3>
+          <p>Full-text search across every transcript, stored in a local SQLite database you own.</p>
+          <div class="vis kbar" aria-hidden="true">
+            <div class="q"><svg><use href="#i-search"/></svg>pilot<kbd>⌘K</kbd></div>
+            <div class="r"><span>Q3 roadmap: offline mode &amp; <mark>pilot</mark>s</span><small>00:12</small></div>
+            <div class="r"><span>Enterprise <mark>pilot</mark> kickoff</span><small>14:40</small></div>
+          </div>
+        </article>
+
+        <article class="card reveal">
+          <h3>Fast on your hardware.</h3>
+          <p>GPU acceleration on every platform, with a CPU fallback.</p>
+          <div class="vis gpu" aria-hidden="true"><span class="hot">Metal</span><span>Core ML</span><span>CUDA</span><span>Vulkan</span><span>CPU</span></div>
+        </article>
+
+        <article class="card reveal d1">
+          <h3>Bring old recordings.</h3>
+          <p>Import any audio file and Minutes transcribes it in a background queue.</p>
+          <div class="vis gpu" aria-hidden="true"><span>.wav</span><span>.mp3</span><span>.m4a</span><span>…</span></div>
+        </article>
+
+        <article class="card reveal d2">
+          <h3>Your models, your call.</h3>
+          <p>Built-in local models or Ollama. Claude, Groq and OpenRouter only if you add a key.</p>
+          <div class="vis gpu" aria-hidden="true"><span class="hot">Built-in</span><span>Ollama</span><span>Bring your own key</span></div>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= PRIVACY ================= -->
+  <section class="section privacy" id="privacy">
+    <div class="wrap priv-grid">
+      <div>
+        <span class="eyebrow reveal">Privacy</span>
+        <h2 class="reveal d1" style="margin-top:18px">Airplane mode is a feature.</h2>
+        <p class="lede reveal d2" style="margin-top:22px">Your meetings hold salaries, roadmaps, diagnoses and deals. They belong on your disk, not in somebody's training set.</p>
+        <div class="priv-points">
+          <div class="reveal"><svg><use href="#i-shield"/></svg><p><b>Transcribed on your machine.</b><span>Whisper and Parakeet run locally, accelerated by your GPU.</span></p></div>
+          <div class="reveal d1"><svg><use href="#i-shield"/></svg><p><b>No account, no telemetry.</b><span>Usage telemetry is off and there's no analytics destination configured. Nothing to sign up for.</span></p></div>
+          <div class="reveal d2"><svg><use href="#i-shield"/></svg><p><b>Cloud AI is opt-in, and obvious.</b><span>Only if you add your own provider key does anything leave, and only to the provider you chose.</span></p></div>
+          <div class="reveal d3"><svg><use href="#i-shield"/></svg><p><b>Open source, so you don't have to trust us.</b><span>Every line is on GitHub under the MIT license. Read it, build it, audit it.</span></p></div>
+        </div>
+      </div>
+
+      <div class="diagram reveal d1" aria-label="Diagram: audio, transcription, notes and storage all run inside your machine; nothing flows to the cloud." role="img">
+        <svg viewBox="0 0 520 470" aria-hidden="true">
+          <rect class="boundary" x="10" y="30" width="360" height="430" rx="26"/>
+          <text class="cap" x="34" y="20">YOUR MACHINE</text>
+
+          <g transform="translate(40 60)"><rect class="box" width="300" height="70" rx="14"/><text class="lbl" x="22" y="31">Mic + system audio</text><text class="sub" x="22" y="51">Mixed, ducked, clipping-safe</text></g>
+          <g transform="translate(40 160)"><rect class="box" width="300" height="70" rx="14"/><text class="lbl" x="22" y="31">Whisper / Parakeet</text><text class="sub" x="22" y="51">Voice-activity filtered, GPU-accelerated</text></g>
+          <g transform="translate(40 260)"><rect class="box" width="300" height="70" rx="14"/><text class="lbl" x="22" y="31">Local LLM</text><text class="sub" x="22" y="51">Enhances your notes, names the meeting</text></g>
+          <g transform="translate(40 360)"><rect class="box" width="300" height="70" rx="14"/><text class="lbl" x="22" y="31">SQLite on your disk</text><text class="sub" x="22" y="51">Meetings, transcripts, notes</text></g>
+
+          <path class="flow" d="M190 130v30M190 230v30M190 330v30"/>
+          <circle class="pkt" r="4"><animateMotion dur="3.2s" repeatCount="indefinite" path="M190 130 L190 160 L190 230 L190 260 L190 330 L190 360"/></circle>
+          <circle class="pkt" r="4" opacity=".6"><animateMotion dur="3.2s" begin="-1.6s" repeatCount="indefinite" path="M190 130 L190 160 L190 230 L190 260 L190 330 L190 360"/></circle>
+
+          <path class="blocked" d="M340 195 C 400 195, 410 150, 440 140"/>
+          <g transform="translate(410 70)">
+            <path class="cloud" d="M22 62h66a22 22 0 0 0 0-44 30 30 0 0 0-57-4A24 24 0 0 0 22 62z"/>
+            <path class="x" d="M40 26l30 26M70 26l-30 26"/>
+            <text class="zero" x="10" y="92">0 bytes sent</text>
+          </g>
+        </svg>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= COMPARE ================= -->
+  <section class="section" id="compare">
+    <div class="wrap">
+      <div class="section-head">
+        <span class="eyebrow reveal">Compare</span>
+        <h2 class="reveal d1">The recorder you'd build for yourself.</h2>
+        <p class="lede reveal d2">A cloud notetaker is someone else's server with a microphone in your meeting. Here's the difference, line by line.</p>
+      </div>
+      <div class="compare reveal">
+        <table>
+          <thead><tr><th scope="col"></th><th scope="col" class="us">Minutes</th><th scope="col">Typical cloud notetaker</th></tr></thead>
+          <tbody>
+            <tr><td>Where your audio goes</td><td class="us">Stays on your machine</td><td class="them">Uploaded to vendor servers</td></tr>
+            <tr><td>Bot joins the call</td><td class="us">Never</td><td class="them">Usually</td></tr>
+            <tr><td>Account required</td><td class="us">No</td><td class="them">Yes</td></tr>
+            <tr><td>Works offline</td><td class="us">Yes</td><td class="them">No</td></tr>
+            <tr><td>Starts from your own notes</td><td class="us">Yes, keeps your wording</td><td class="them">Fixed summary templates</td></tr>
+            <tr><td>Price</td><td class="us">Free, forever</td><td class="them">Monthly per-seat subscription</td></tr>
+            <tr><td>Source code</td><td class="us">Open, MIT licensed</td><td class="them">Closed</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= GALLERY ================= -->
+  <section class="section" id="tour" style="padding-top:0">
+    <div class="wrap">
+      <div class="section-head">
+        <span class="eyebrow reveal">The app</span>
+        <h2 class="reveal d1">One calm screen, start to finish.</h2>
+      </div>
+      <div class="gallery-tabs reveal" role="tablist" aria-label="Screenshots">
+        <button role="tab" aria-selected="true" data-shot="0">Workspace</button>
+        <button role="tab" aria-selected="false" data-shot="1">Ask your meeting</button>
+        <button role="tab" aria-selected="false" data-shot="2">Light theme</button>
+      </div>
+      <div class="frame reveal d1">
+        <img class="on" src="screens/workspace.png" alt="The Minutes workspace: enhanced notes on the left, the transcript with speaker chips on the right." loading="lazy" />
+        <img src="screens/chat.png" alt="Minutes with the AI chat open beside the transcript." loading="lazy" />
+        <img src="screens/workspace-light.png" alt="The Minutes workspace in the light theme." loading="lazy" />
+      </div>
+      <p class="caption" id="caption">Notes on the left, the live transcript docked on the right. Raw and Enhanced are one click apart.</p>
+    </div>
+  </section>
+
+  <!-- ================= STACK ================= -->
+  <section class="section" style="padding-top:0">
+    <div class="wrap">
+      <div class="section-head">
+        <span class="eyebrow reveal">Under the hood</span>
+        <h2 class="reveal d1">Native, not a web page in a costume.</h2>
+      </div>
+      <div class="stack reveal">
+        <div><small>CORE</small><b>Rust</b><span>Audio capture, mixing, inference and storage in a Tauri 2 core.</span></div>
+        <div><small>SPEECH</small><b>whisper.cpp · Parakeet</b><span>Two local speech engines, voice-activity filtered.</span></div>
+        <div><small>ACCELERATION</small><b>Metal · CUDA · Vulkan</b><span>Core ML on Apple Silicon, GPUs everywhere else.</span></div>
+        <div><small>STORAGE</small><b>SQLite</b><span>One local database file. Yours to back up, move or delete.</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= DOWNLOAD ================= -->
+  <section class="section" id="download" style="padding-top:clamp(40px,6vw,80px)">
+    <div class="wrap dl">
+      <span class="eyebrow reveal">Download</span>
+      <h2 class="reveal d1">Take better notes by tomorrow's standup.</h2>
+      <p class="lede reveal d2">Free, open source, and yours. No sign-up between you and the record button.</p>
+      <div class="dl-cards">
+        <a class="dl-card reveal" id="dl-mac" href="https://github.com/praveenvnktsh/minutes/releases/latest/download/minutes-macos-arm64.dmg">
+          <span class="os"><svg><use href="#i-apple"/></svg>macOS</span>
+          <small>Apple Silicon · macOS 13 or later</small>
+          <span class="get"><svg><use href="#i-down"/></svg>minutes-macos-arm64.dmg</span>
+        </a>
+        <a class="dl-card reveal d1" id="dl-win" href="https://github.com/praveenvnktsh/minutes/releases/latest/download/minutes-windows-x64-setup.exe">
+          <span class="os"><svg><use href="#i-win"/></svg>Windows</span>
+          <small>x64 installer · <span style="text-decoration:underline" id="msi">.msi also available</span></small>
+          <span class="get"><svg><use href="#i-down"/></svg>minutes-windows-x64-setup.exe</span>
+        </a>
+      </div>
+      <p class="dl-note reveal">Minutes isn't notarized by Apple yet, so macOS may warn on first launch. Right-click the app and choose <b>Open</b>, or run <code>xattr -dr com.apple.quarantine /Applications/minutes.app</code> once. Updates after that are signed and automatic.</p>
+      <p class="dl-note reveal"><a href="https://github.com/praveenvnktsh/minutes/releases/latest">All releases &amp; notes</a> · <a href="https://github.com/praveenvnktsh/minutes#quick-start">Build from source</a></p>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap foot">
+    <div>
+      <a class="brand" href="#top"><span class="logo"><svg><use href="#logo"/></svg></span>minutes</a>
+      <p class="fine">This page loads no trackers, no analytics and no third-party fonts either. Built on whisper.cpp, Screenpipe and NVIDIA Parakeet tooling. MIT licensed.</p>
+    </div>
+    <nav aria-label="Footer">
+      <a href="https://github.com/praveenvnktsh/minutes">GitHub</a>
+      <a href="https://github.com/praveenvnktsh/minutes/releases">Releases</a>
+      <a href="https://github.com/praveenvnktsh/minutes/blob/main/PRIVACY_POLICY.md">Privacy policy</a>
+      <a href="https://github.com/praveenvnktsh/minutes/blob/main/CONTRIBUTING.md">Contribute</a>
+      <a href="https://github.com/praveenvnktsh/minutes/blob/main/LICENSE.md">License</a>
+    </nav>
+  </div>
+</footer>
+
+<script>
+(() => {
+  const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const $ = (s, r = document) => r.querySelector(s);
+  const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+  /* ---------- theme toggle ---------- */
+  const root = document.documentElement;
+  const isDark = () => root.dataset.theme ? root.dataset.theme === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
+  const syncIcon = () => { $('#theme .sun').style.display = isDark() ? '' : 'none'; $('#theme .moon').style.display = isDark() ? 'none' : ''; };
+  syncIcon();
+  $('#theme').addEventListener('click', () => {
+    root.dataset.theme = isDark() ? 'light' : 'dark';
+    try { localStorage.setItem('minutes-theme', root.dataset.theme); } catch (e) {}
+    syncIcon();
+  });
+  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', syncIcon);
+  const css = v => getComputedStyle(root).getPropertyValue(v).trim();
+
+  /* ---------- nav border on scroll ---------- */
+  const nav = $('#nav');
+  addEventListener('scroll', () => nav.classList.toggle('scrolled', scrollY > 8), { passive: true });
+
+  /* ---------- OS-aware download button ---------- */
+  const ua = navigator.userAgent;
+  const os = /Mac/.test(ua) && !/iPhone|iPad/.test(ua) ? 'mac' : /Win/.test(ua) ? 'win' : null;
+  if (os) {
+    const a = $('.dl-primary');
+    a.href = $(os === 'mac' ? '#dl-mac' : '#dl-win').href;
+    $('.dl-label', a).textContent = os === 'mac' ? 'Download for macOS' : 'Download for Windows';
+    $('.os-icon use', a).setAttribute('href', os === 'mac' ? '#i-apple' : '#i-win');
+    const card = $(os === 'mac' ? '#dl-mac' : '#dl-win');
+    card.classList.add('primary');
+    if (os === 'win') card.parentNode.prepend(card);
+  }
+  $('#msi').addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); location.href = 'https://github.com/praveenvnktsh/minutes/releases/latest/download/minutes-windows-x64.msi'; });
+
+  /* ---------- reveal on scroll ---------- */
+  const io = new IntersectionObserver(es => es.forEach(e => { if (e.isIntersecting) { e.target.classList.add('in'); io.unobserve(e.target); } }), { rootMargin: '0px 0px -8% 0px' });
+  $$('.reveal').forEach(el => el.closest('.hero-copy') || io.observe(el));
+
+  /* ---------- card spotlight ---------- */
+  $$('.card').forEach(c => c.addEventListener('pointermove', e => {
+    const r = c.getBoundingClientRect();
+    c.style.setProperty('--mx', (e.clientX - r.left) + 'px'); c.style.setProperty('--my', (e.clientY - r.top) + 'px');
+  }));
+
+  /* ---------- visibility-aware animation loop ---------- */
+  const loops = [];
+  const onScreen = new WeakMap();
+  const vis = new IntersectionObserver(es => es.forEach(e => onScreen.set(e.target, e.isIntersecting)));
+  function loop(el, fn) { vis.observe(el); loops.push([el, fn]); }
+  let t0 = performance.now();
+  function frame(now) {
+    const t = (now - t0) / 1000;
+    for (const [el, fn] of loops) if (onScreen.get(el) && !document.hidden) fn(t);
+    requestAnimationFrame(frame);
+  }
+
+  /* ---------- hero background waveform ---------- */
+  const bg = $('#bgwave'), bctx = bg.getContext('2d');
+  function sizeBg() { const d = Math.min(devicePixelRatio, 2); bg.width = bg.clientWidth * d; bg.height = bg.clientHeight * d; }
+  sizeBg(); addEventListener('resize', sizeBg);
+  loop(bg, t => {
+    const w = bg.width, h = bg.height, n = Math.floor(w / (10 * Math.min(devicePixelRatio, 2)));
+    bctx.clearRect(0, 0, w, h);
+    bctx.fillStyle = css('--hairline-strong');
+    const bw = w / n;
+    for (let i = 0; i < n; i++) {
+      const x = i / n;
+      const env = Math.sin(Math.PI * x) ** 1.5;
+      const a = (Math.sin(x * 23 + t * 1.3) * .5 + Math.sin(x * 57 - t * 2.1) * .3 + Math.sin(x * 9 + t * .6) * .4) * .5 + .5;
+      const bh = Math.max(2, env * a * h * .9);
+      bctx.fillRect(i * bw + bw * .3, (h - bh) / 2, bw * .4, bh);
+    }
+  });
+
+  /* ---------- small waveforms (record bar + mic/system lanes) ---------- */
+  let speaking = 0; // 0..1, driven by the demo
+  const rw = $('#recwave'), rctx = rw.getContext('2d');
+  const levels = new Array(24).fill(.1);
+  let lastPush = 0;
+  loop(rw, t => {
+    if (t - lastPush > .07) {
+      lastPush = t;
+      levels.shift();
+      levels.push(Math.max(.08, speaking * (.35 + Math.random() * .65) + Math.random() * .08));
+    }
+    rctx.clearRect(0, 0, rw.width, rw.height);
+    rctx.fillStyle = css('--rec');
+    const bw = rw.width / levels.length;
+    levels.forEach((l, i) => { const h = l * rw.height; rctx.beginPath(); rctx.roundRect(i * bw + bw * .25, (rw.height - h) / 2, bw * .5, h, 3); rctx.fill(); });
+  });
+
+  $$('canvas[data-lane]').forEach(c => {
+    const ctx = c.getContext('2d'), mic = c.dataset.lane === 'mic';
+    loop(c, t => {
+      ctx.clearRect(0, 0, c.width, c.height);
+      ctx.fillStyle = mic ? css('--rec') : css('--info');
+      const n = 50, bw = c.width / n;
+      for (let i = 0; i < n; i++) {
+        const x = i / n + t * .12;
+        // Alternate who's talking so the lanes duck against each other.
+        const talk = mic ? (Math.sin(x * 6) > 0 ? 1 : .15) : (Math.sin(x * 6) > 0 ? .25 : 1);
+        const a = Math.abs(Math.sin(x * 71) * Math.sin(x * 23 + 1)) * talk;
+        const h = Math.max(2, a * c.height);
+        ctx.fillRect(i * bw + bw * .2, (c.height - h) / 2, bw * .6, h);
+      }
+    });
+  });
+
+  /* ---------- live / after toggle ---------- */
+  const modes = $$('#modes span');
+  setInterval(() => modes.forEach(m => m.classList.toggle('on')), 2600);
+
+  /* ---------- gallery ---------- */
+  const caps = [
+    'Notes on the left, the live transcript docked on the right. Raw and Enhanced are one click apart.',
+    'Ask your meeting: chat across the transcript and your notes with a local model.',
+    'Light and dark themes, following your system.'
+  ];
+  const tabs = $$('.gallery-tabs button'), shots = $$('.frame img');
+  tabs.forEach(b => b.addEventListener('click', () => {
+    const i = +b.dataset.shot;
+    tabs.forEach(x => x.setAttribute('aria-selected', x === b));
+    shots.forEach((s, j) => s.classList.toggle('on', i === j));
+    $('#caption').textContent = caps[i];
+  }));
+
+  /* ---------- the hero demo ---------- */
+  const mock = $('#mock');
+  vis.observe(mock);
+  addEventListener('scroll', () => { if (scrollY > 40) mock.classList.add('flat'); }, { passive: true });
+  setTimeout(() => mock.classList.add('flat'), 1400);
+
+  const SPK = { Maya: 's1', Dev: 's2', Priya: 's3' };
+  const LINES = [
+    { at: '00:12', who: 'Maya', text: 'If we ship offline mode first, the enterprise pilots can start in October.', note: 0 },
+    { at: '00:19', who: 'Dev', text: "Offline is about two sprints if we reuse the sync engine." },
+    { at: '00:27', who: 'Priya', text: "Pricing is the open question. I'd keep the free tier and gate the admin controls.", note: 1 },
+    { at: '00:36', who: 'Priya', text: "I'll have draft numbers by Friday." },
+    { at: '00:41', who: 'Maya', text: 'Great. Dev, can you own the offline spec?' },
+    { at: '00:44', who: 'Dev', text: "Yep, I'll write it up this week.", note: 2 }
+  ];
+  const NOTES = [
+    { own: 'offline mode first', add: '— unblocks the enterprise pilots starting in October.', sub: 'About two sprints by reusing the existing sync engine.' },
+    { own: 'pricing??', add: '— keep the free tier, gate admin controls behind paid plans.', sub: 'Priya drafts numbers by Friday.' },
+    { own: 'dev → spec', add: 'for offline mode, due this week.' }
+  ];
+  const ACTIONS = ['Dev · offline spec', 'Priya · pricing draft by Fri'];
+  const TITLE = 'Q3 roadmap: offline mode & pricing';
+
+  const feed = $('#feed'), list = $('#mList'), acts = $('#mActions'), title = $('#mTitle'), bar = $('#recbar');
+  const words = (s) => s.split(' ').map(w => `<span class="w">${w}</span>`).join(' ');
+  let sec = 0, timerId;
+  const fmt = s => `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+
+  async function waitVisible() { while (!onScreen.get(mock) || document.hidden) await sleep(300); }
+
+  function reset() {
+    feed.innerHTML = ''; list.innerHTML = ''; acts.innerHTML = '';
+    title.textContent = 'Meeting 25_09_26_10_02'; $('#railTitle').textContent = title.textContent;
+    mock.classList.remove('enhanced'); bar.classList.remove('enhancing', 'done');
+    $('#segRaw').classList.add('on'); $('#segEnh').classList.remove('on'); $('#mLive').style.opacity = 1;
+    $('#stateText').textContent = 'Enhancing your notes…'; $('#stateText').classList.add('shimmer');
+    sec = 0; $('#timer').textContent = fmt(0);
+  }
+
+  function addNote(n) {
+    const li = document.createElement('li');
+    li.innerHTML = `<span class="own"></span><span class="typing-caret"></span> <span class="add">${words(n.add)}</span>${n.sub ? `<span class="sub">${words(n.sub)}</span>` : ''}`;
+    list.appendChild(li);
+    return li;
+  }
+
+  async function typeNote(n) {
+    const li = addNote(n), own = $('.own', li);
+    for (const ch of n.own) { await waitVisible(); own.textContent += ch; await sleep(70 + Math.random() * 90); }
+    await sleep(300);
+    $('.typing-caret', li).remove();
+  }
+
+  async function sayLine(l) {
+    const el = document.createElement('div');
+    el.className = 'm-line';
+    el.innerHTML = `<time>${l.at}</time><div><span class="spk ${SPK[l.who]}">${l.who}</span><div class="txt">${words(l.text)}</div></div>`;
+    feed.appendChild(el);
+    while (feed.children.length > 6) feed.firstChild.remove();
+    speaking = 1;
+    for (const w of $$('.w', el)) { await waitVisible(); w.classList.add('in'); await sleep(110 + Math.random() * 90); }
+    speaking = .15;
+  }
+
+  function staticFinal() {
+    LINES.forEach(l => { const el = document.createElement('div'); el.className = 'm-line'; el.innerHTML = `<time>${l.at}</time><div><span class="spk ${SPK[l.who]}">${l.who}</span><div class="txt">${words(l.text)}</div></div>`; feed.appendChild(el); });
+    NOTES.forEach(n => { const li = addNote(n); $('.own', li).textContent = n.own; $('.typing-caret', li).remove(); });
+    $$('.w', mock).forEach(w => w.classList.add('in'));
+    title.textContent = TITLE; $('#railTitle').textContent = TITLE;
+    mock.classList.add('enhanced'); $('#segRaw').classList.remove('on'); $('#segEnh').classList.add('on');
+    ACTIONS.forEach(a => acts.insertAdjacentHTML('beforeend', `<span class="m-chip in"><svg><use href="#i-check"/></svg>${a}</span>`));
+    bar.classList.add('enhancing', 'done'); $('#stateText').textContent = 'Notes enhanced'; $('#stateText').classList.remove('shimmer');
+    $('#mLive').style.opacity = 0; $('#timer').textContent = '00:47';
+  }
+
+  async function run() {
+    for (;;) {
+      await waitVisible();
+      reset();
+      await sleep(700);
+      clearInterval(timerId);
+      timerId = setInterval(() => { if (!document.hidden) $('#timer').textContent = fmt(++sec); }, 1000);
+      speaking = .15;
+      for (const l of LINES) {
+        await sayLine(l);
+        if (l.note !== undefined) { await sleep(250); await typeNote(NOTES[l.note]); }
+        await sleep(450);
+      }
+      await sleep(600);
+      // Stop → enhance
+      clearInterval(timerId); speaking = 0;
+      $('#stopBtn').animate([{ transform: 'scale(1)' }, { transform: 'scale(.85)' }, { transform: 'scale(1)' }], { duration: 260 });
+      await sleep(300);
+      bar.classList.add('enhancing'); $('#mLive').style.opacity = 0;
+      $('#segRaw').classList.remove('on'); $('#segEnh').classList.add('on');
+      await sleep(1400);
+      mock.classList.add('enhanced');
+      for (const li of $$('li', list)) {
+        for (const w of $$('.w', li)) { w.classList.add('in'); await sleep(45); }
+        await sleep(200);
+      }
+      // The model names the meeting.
+      title.innerHTML = '<span class="caret"></span>';
+      for (let i = 1; i <= TITLE.length; i++) { title.innerHTML = TITLE.slice(0, i).replace(/&/g, '&amp;') + '<span class="caret"></span>'; await sleep(38); }
+      title.textContent = TITLE; $('#railTitle').textContent = TITLE;
+      for (const a of ACTIONS) {
+        acts.insertAdjacentHTML('beforeend', `<span class="m-chip"><svg><use href="#i-check"/></svg>${a}</span>`);
+        const chip = acts.lastElementChild; requestAnimationFrame(() => requestAnimationFrame(() => chip.classList.add('in')));
+        await sleep(260);
+      }
+      bar.classList.add('done'); $('#stateText').textContent = 'Notes enhanced'; $('#stateText').classList.remove('shimmer');
+      await sleep(7000);
+    }
+  }
+
+  if (reduce) {
+    staticFinal();
+    // Draw each canvas once so they're not empty.
+    for (const [, fn] of loops) fn(1.5);
+  } else {
+    requestAnimationFrame(frame);
+    run();
+  }
+})();
+</script>
+</body>
+</html>
