@@ -26,6 +26,9 @@ interface FakeTransaction {
 }
 
 function fakeDatabase(options: FakeOptions = {}): IDBDatabase {
+  // Stateful across transactions so a put() made through one service call
+  // is visible to a get() made through a later one (round-trip tests).
+  let storedMeeting = options.meeting;
   return {
     transaction: () => {
       if (options.transactionThrows) throw options.transactionThrows;
@@ -49,14 +52,14 @@ function fakeDatabase(options: FakeOptions = {}): IDBDatabase {
           queueMicrotask(() => {
             if (options.getError) request.onerror?.(new Event('error'));
             else {
-              request.result = options.meeting;
+              request.result = storedMeeting;
               request.onsuccess?.(new Event('success'));
-              if (!options.meeting) finish();
+              if (!storedMeeting) finish();
             }
           });
           return request as unknown as IDBRequest;
         },
-        put: () => {
+        put: (value: unknown) => {
           const request: FakeRequest = {
             error: options.putError ?? null,
             onsuccess: null,
@@ -64,7 +67,10 @@ function fakeDatabase(options: FakeOptions = {}): IDBDatabase {
           };
           queueMicrotask(() => {
             if (options.putError) request.onerror?.(new Event('error'));
-            else request.onsuccess?.(new Event('success'));
+            else {
+              storedMeeting = value as MeetingMetadata;
+              request.onsuccess?.(new Event('success'));
+            }
             finish();
           });
           return request as unknown as IDBRequest;
@@ -147,5 +153,47 @@ describe('IndexedDBService strict recovery operations', () => {
 
     await expect(service.getTranscripts('recovery-1')).resolves.toEqual([]);
     await expect(service.markMeetingSaved('recovery-1')).resolves.toBeUndefined();
+  });
+});
+
+describe('IndexedDBService resumeOfMeetingId', () => {
+  test('setResumeOfMeetingId stamps an existing record, keeping its other fields, and the stamp reads back', async () => {
+    const service = new IndexedDBService(fakeDatabase({ meeting: { ...meeting } }));
+
+    await expect(service.setResumeOfMeetingId('recovery-1', 'meeting-100')).resolves.toBe(true);
+    await expect(service.getMeetingMetadata('recovery-1')).resolves.toEqual({
+      ...meeting,
+      resumeOfMeetingId: 'meeting-100',
+    });
+  });
+
+  test('setResumeOfMeetingId resolves false and writes nothing for a missing record', async () => {
+    // No `meeting` given, so the record is missing; a putError would fail the
+    // test if the implementation wrongly issued a put in this branch.
+    const service = new IndexedDBService(fakeDatabase({ putError: new Error('should not be called') }));
+
+    await expect(service.setResumeOfMeetingId('missing', 'meeting-100')).resolves.toBe(false);
+  });
+
+  test('getMeetingMetadata loads a record without resumeOfMeetingId with the field undefined', async () => {
+    const service = new IndexedDBService(fakeDatabase({ meeting: { ...meeting } }));
+
+    const loaded = await service.getMeetingMetadata('recovery-1');
+    expect(loaded?.resumeOfMeetingId).toBeUndefined();
+  });
+
+  test('saveMeetingMetadata preserves an existing resumeOfMeetingId when incoming metadata omits it', async () => {
+    const service = new IndexedDBService(fakeDatabase({
+      meeting: { ...meeting, resumeOfMeetingId: 'meeting-100' },
+    }));
+    const incoming: MeetingMetadata = { ...meeting, transcriptCount: 5 };
+
+    await service.saveMeetingMetadata(incoming);
+
+    await expect(service.getMeetingMetadata('recovery-1')).resolves.toEqual({
+      ...meeting,
+      transcriptCount: 5,
+      resumeOfMeetingId: 'meeting-100',
+    });
   });
 });

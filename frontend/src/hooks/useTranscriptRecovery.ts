@@ -228,13 +228,24 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
       }));
 
       // 6. Save to backend database using existing save utilities
-      const saveResponse = await storageService.saveMeeting(
-        metadata.title,
-        formattedTranscripts,
-        folderPath ?? null,
-        false,
-        recoveryRowIds()[meetingId] ?? boundMeetingId(folderPath),
-      );
+      // A resumed session appends into the meeting it resumed, so recovery
+      // neither replaces that meeting's transcript nor creates a second meeting.
+      const saveResponse = metadata.resumeOfMeetingId
+        ? await storageService.saveMeeting(
+          metadata.title,
+          formattedTranscripts,
+          folderPath ?? null,
+          false,
+          metadata.resumeOfMeetingId,
+          true,
+        )
+        : await storageService.saveMeeting(
+          metadata.title,
+          formattedTranscripts,
+          folderPath ?? null,
+          false,
+          recoveryRowIds()[meetingId] ?? boundMeetingId(folderPath),
+        );
 
       const savedMeetingId = saveResponse.meeting_id;
       persistRecoveryRowId(meetingId, savedMeetingId);
