@@ -228,27 +228,45 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
       }));
 
       // 6. Save to backend database using existing save utilities
-      // A resumed session appends into the meeting it resumed, so recovery
-      // neither replaces that meeting's transcript nor creates a second meeting.
-      const saveResponse = metadata.resumeOfMeetingId
-        ? await storageService.saveMeeting(
-          metadata.title,
-          formattedTranscripts,
-          folderPath ?? null,
-          false,
-          metadata.resumeOfMeetingId,
-          true,
-        )
-        : await storageService.saveMeeting(
+      let savedMeetingId: string;
+      if (metadata.resumeOfMeetingId) {
+        // A resumed session appends into the meeting it resumed, so recovery
+        // neither replaces that meeting's transcript nor creates a second
+        // meeting. Appending is not idempotent: once it has happened, a retry
+        // (after a failed audio merge, say) must not append the segments again.
+        const resumeOfMeetingId = metadata.resumeOfMeetingId;
+        // The IndexedDB flag survives a restart; the recovery row id covers a
+        // retry in this session when writing that flag failed.
+        const alreadyAppended = metadata.resumeAppended
+          || recoveryRowIds()[meetingId] === resumeOfMeetingId;
+        if (alreadyAppended) {
+          savedMeetingId = resumeOfMeetingId;
+        } else {
+          const saveResponse = await storageService.saveMeeting(
+            metadata.title,
+            formattedTranscripts,
+            folderPath ?? null,
+            false,
+            resumeOfMeetingId,
+            true,
+          );
+          savedMeetingId = saveResponse.meeting_id;
+          persistRecoveryRowId(meetingId, savedMeetingId);
+        }
+        if (!metadata.resumeAppended) {
+          await indexedDBService.markResumeAppendedStrict(meetingId);
+        }
+      } else {
+        const saveResponse = await storageService.saveMeeting(
           metadata.title,
           formattedTranscripts,
           folderPath ?? null,
           false,
           recoveryRowIds()[meetingId] ?? boundMeetingId(folderPath),
         );
-
-      const savedMeetingId = saveResponse.meeting_id;
-      persistRecoveryRowId(meetingId, savedMeetingId);
+        savedMeetingId = saveResponse.meeting_id;
+        persistRecoveryRowId(meetingId, savedMeetingId);
+      }
 
       if (folderPath) {
         try {

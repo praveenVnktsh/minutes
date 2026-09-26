@@ -196,4 +196,19 @@ describe('IndexedDBService resumeOfMeetingId', () => {
       resumeOfMeetingId: 'meeting-100',
     });
   });
+
+  test('markResumeAppendedStrict flags an existing record and rejects a missing one', async () => {
+    const service = new IndexedDBService(fakeDatabase({
+      meeting: { ...meeting, resumeOfMeetingId: 'meeting-100' },
+    }));
+
+    await service.markResumeAppendedStrict('recovery-1');
+    await expect(service.getMeetingMetadata('recovery-1')).resolves.toEqual({
+      ...meeting,
+      resumeOfMeetingId: 'meeting-100',
+      resumeAppended: true,
+    });
+    await expect(new IndexedDBService(fakeDatabase()).markResumeAppendedStrict('missing'))
+      .rejects.toThrow('was not found');
+  });
 });

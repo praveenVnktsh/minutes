@@ -14,6 +14,7 @@ export interface MeetingMetadata {
   savedToSQLite: boolean;     // Flag: saved to backend DB
   folderPath?: string;        // Path to recording folder
   resumeOfMeetingId?: string; // Saved meeting id this entry resumes, when recovering a resumed session
+  resumeAppended?: boolean;   // Recovery already appended this entry's transcript into resumeOfMeetingId
 }
 
 export interface StoredTranscript {
@@ -256,6 +257,36 @@ export class IndexedDBService {
 
     const [stamped] = await Promise.all([operation, completed]);
     return stamped;
+  }
+
+  /**
+   * Record that recovery has appended this entry's transcript into the meeting
+   * it resumes. Appending is not idempotent, so a retried recovery (after a
+   * failed audio merge, say) must not append the same segments again.
+   */
+  async markResumeAppendedStrict(meetingId: string): Promise<void> {
+    if (!this.db) await this.init();
+
+    const transaction = this.db!.transaction(['meetings'], 'readwrite');
+    const completed = this.waitForTransaction(transaction);
+    const store = transaction.objectStore('meetings');
+    const operation = new Promise<void>((resolve, reject) => {
+      const getRequest = store.get(meetingId);
+      getRequest.onsuccess = () => {
+        const meeting = getRequest.result as MeetingMetadata | undefined;
+        if (!meeting) {
+          reject(new Error(`Recovery meeting ${meetingId} was not found in IndexedDB`));
+          return;
+        }
+        meeting.resumeAppended = true;
+        const putRequest = store.put(meeting);
+        putRequest.onsuccess = () => resolve();
+        putRequest.onerror = () => reject(putRequest.error ?? new Error('IndexedDB put failed'));
+      };
+      getRequest.onerror = () => reject(getRequest.error ?? new Error('IndexedDB get failed'));
+    });
+
+    await Promise.all([operation, completed]);
   }
 
   /**

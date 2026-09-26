@@ -7,15 +7,24 @@ const transcripts: StoredTranscript[] = [
   { meetingId: 'recovery-1', text: 'hello', timestamp: '2026-01-01T00:00:00Z', sequenceId: 1 } as StoredTranscript,
 ];
 
+let audioStatus = 'success';
 const invoke = mock(async (command: string) =>
   command === 'recover_audio_from_checkpoints'
-    ? { status: 'success', chunk_count: 1, estimated_duration_seconds: 1, message: '' }
+    ? { status: audioStatus, chunk_count: 1, estimated_duration_seconds: 1, message: '' }
     : undefined
 );
-const getMeetingMetadata = mock(async () => metadata);
+const getMeetingMetadata = mock(async () => ({ ...metadata }));
 const getTranscriptsStrict = mock(async () => transcripts.map((t) => ({ ...t })));
 const markMeetingSavedStrict = mock(async () => {});
-const saveMeeting = mock(async (..._args: unknown[]) => ({ status: 'success', meeting_id: 'saved-id' }));
+let markResumeAppendedError: Error | null = null;
+const markResumeAppendedStrict = mock(async () => {
+  if (markResumeAppendedError) throw markResumeAppendedError;
+  metadata = { ...metadata, resumeAppended: true };
+});
+const saveMeeting = mock(async (...args: unknown[]) => ({
+  status: 'success',
+  meeting_id: (args[4] as string | null) ?? 'saved-id',
+}));
 
 const originalCore = { ...await import('@tauri-apps/api/core') };
 const originalIndexedDB = { ...await import('@/services/indexedDBService') };
@@ -31,7 +40,7 @@ afterAll(() => {
 });
 mock.module('@tauri-apps/api/core', () => ({ invoke }));
 mock.module('@/services/indexedDBService', () => ({
-  indexedDBService: { getMeetingMetadata, getTranscriptsStrict, markMeetingSavedStrict },
+  indexedDBService: { getMeetingMetadata, getTranscriptsStrict, markMeetingSavedStrict, markResumeAppendedStrict },
 }));
 mock.module('@/services/storageService', () => ({ storageService: { saveMeeting } }));
 mock.module('@/lib/summary-language-preferences', () => ({
@@ -53,9 +62,16 @@ async function recover(meetingId: string) {
   await act(async () => {
     renderer = create(<Probe />);
   });
+  return attempt(meetingId);
+}
+
+/** Runs recoverMeeting on the already-rendered hook, returning its result or error. */
+async function attempt(meetingId: string) {
+  let outcome: unknown;
   await act(async () => {
-    await hook.recoverMeeting(meetingId);
+    outcome = await hook.recoverMeeting(meetingId).catch((error: unknown) => error);
   });
+  return outcome;
 }
 
 const realSessionStorage = Object.getOwnPropertyDescriptor(globalThis, 'sessionStorage');
@@ -92,6 +108,9 @@ beforeEach(() => {
   invoke.mockClear();
   saveMeeting.mockClear();
   markMeetingSavedStrict.mockClear();
+  markResumeAppendedStrict.mockClear();
+  markResumeAppendedError = null;
+  audioStatus = 'success';
 });
 
 afterEach(async () => {
@@ -163,5 +182,42 @@ describe('useTranscriptRecovery recoverMeeting', () => {
     expect(saveMeeting.mock.calls[0]).toEqual([
       'Standup', expectedTranscripts, '/meetings/standup', false, 'meeting-remembered',
     ]);
+  });
+
+  test('retrying a resumed entry after a failed audio merge does not append its segments again', async () => {
+    stubSessionStorage();
+    metadata = entry({ resumeOfMeetingId: 'meeting-orig' });
+    audioStatus = 'failed';
+
+    const first = await recover('recovery-1');
+    expect(first).toMatchObject({ success: false, meetingId: 'meeting-orig' });
+    expect(markMeetingSavedStrict).not.toHaveBeenCalled();
+    expect(markResumeAppendedStrict).toHaveBeenCalledWith('recovery-1');
+
+    // A restart loses sessionStorage; the IndexedDB flag alone must stop a second append.
+    stubSessionStorage();
+    audioStatus = 'success';
+    const second = await attempt('recovery-1');
+
+    expect(second).toMatchObject({ success: true, meetingId: 'meeting-orig' });
+    expect(saveMeeting).toHaveBeenCalledTimes(1);
+    expect(markMeetingSavedStrict).toHaveBeenCalledWith('recovery-1');
+  });
+
+  test('a retry in the same session does not append again when flagging the entry failed', async () => {
+    stubSessionStorage();
+    metadata = entry({ resumeOfMeetingId: 'meeting-orig' });
+    markResumeAppendedError = new Error('IndexedDB unavailable');
+
+    const first = await recover('recovery-1');
+    expect(first).toBeInstanceOf(Error);
+    expect(saveMeeting).toHaveBeenCalledTimes(1);
+
+    markResumeAppendedError = null;
+    const second = await attempt('recovery-1');
+
+    expect(second).toMatchObject({ success: true, meetingId: 'meeting-orig' });
+    expect(saveMeeting).toHaveBeenCalledTimes(1);
+    expect(markResumeAppendedStrict).toHaveBeenCalledTimes(2);
   });
 });
