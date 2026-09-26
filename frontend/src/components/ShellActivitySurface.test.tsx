@@ -190,4 +190,57 @@ describe('ShellActivitySurface', () => {
     expect(JSON.stringify(renderer.toJSON())).not.toContain('Meeting summary')
     renderer.unmount()
   })
+
+  test('minimizing hides every card and shows a restore pill with the total count; the pill restores them', async () => {
+    const renderer = create(<ShellActivitySurface />)
+    const minimizeButton = renderer.root.findByProps({ 'aria-label': 'Minimize activity' })
+    await act(async () => minimizeButton.props.onClick())
+    let rendered = JSON.stringify(renderer.toJSON())
+    expect(rendered).not.toContain('Saving meeting')
+    expect(rendered).not.toContain('Active transcription')
+    expect(rendered).not.toContain('Quarterly review')
+    expect(rendered).not.toContain('more activities')
+    expect(renderer.root.findAllByProps({ 'aria-label': 'Minimize activity' })).toHaveLength(0)
+    const pill = renderer.root.findByProps({ 'aria-label': 'Show activity' })
+    expect(rendered).toContain('8 activities')
+    await act(async () => pill.props.onClick())
+    rendered = JSON.stringify(renderer.toJSON())
+    expect(rendered).toContain('Saving meeting')
+    expect(rendered).toContain('Active transcription')
+    expect(rendered).toContain('Quarterly review')
+    expect(renderer.root.findAllByProps({ 'aria-label': 'Show activity' })).toHaveLength(0)
+    renderer.unmount()
+  })
+
+  test('minimizing while recording hides the pause/stop controls but keeps the restore pill visible', async () => {
+    isRecording = true
+    isPaused = false
+    isCommandPending = false
+    controllerCommand = null
+    const renderer = create(<ShellActivitySurface />)
+    const minimizeButton = renderer.root.findByProps({ 'aria-label': 'Minimize activity' })
+    await act(async () => minimizeButton.props.onClick())
+    expect(renderer.root.findAllByProps({ 'aria-label': 'Pause recording' })).toHaveLength(0)
+    const pill = renderer.root.findByProps({ 'aria-label': 'Show activity' })
+    expect(pill).toBeTruthy()
+    expect(JSON.stringify(renderer.toJSON())).toContain('8 activities')
+    renderer.unmount()
+  })
+
+  test('minimized state persists across an update as new work arrives, and the pill count updates', async () => {
+    const renderer = create(<ShellActivitySurface />)
+    const minimizeButton = renderer.root.findByProps({ 'aria-label': 'Minimize activity' })
+    await act(async () => minimizeButton.props.onClick())
+    expect(JSON.stringify(renderer.toJSON())).toContain('8 activities')
+    summaries = [...summaries, {
+      activityId: 'summary-2:process-2', revision: 1, meetingId: 'summary-meeting-2', processId: 'process-2', status: 'queued',
+      response: null, error: null, reconciliationError: null,
+    }]
+    await act(async () => renderer.update(<ShellActivitySurface />))
+    const rendered = JSON.stringify(renderer.toJSON())
+    expect(rendered).not.toContain('Quarterly review')
+    expect(rendered).not.toContain('Saving meeting')
+    expect(rendered).toContain('9 activities')
+    renderer.unmount()
+  })
 })
