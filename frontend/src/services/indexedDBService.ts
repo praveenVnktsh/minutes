@@ -13,6 +13,8 @@ export interface MeetingMetadata {
   transcriptCount: number;    // Number of transcript segments
   savedToSQLite: boolean;     // Flag: saved to backend DB
   folderPath?: string;        // Path to recording folder
+  resumeOfMeetingId?: string; // Saved meeting id this entry resumes, when recovering a resumed session
+  resumeAppended?: boolean;   // Recovery already appended this entry's transcript into resumeOfMeetingId
 }
 
 export interface StoredTranscript {
@@ -116,8 +118,20 @@ export class IndexedDBService {
       const transaction = this.db!.transaction(['meetings'], 'readwrite');
       const store = transaction.objectStore('meetings');
 
+      // Read the existing record first so a resumeOfMeetingId stamped between
+      // this caller's read and write (see setResumeOfMeetingId) isn't lost.
+      const existing = await new Promise<MeetingMetadata | undefined>((resolve, reject) => {
+        const request = store.get(metadata.meetingId);
+        request.onsuccess = () => resolve(request.result as MeetingMetadata | undefined);
+        request.onerror = () => reject(request.error);
+      });
+
+      const toStore = metadata.resumeOfMeetingId === undefined && existing?.resumeOfMeetingId !== undefined
+        ? { ...metadata, resumeOfMeetingId: existing.resumeOfMeetingId }
+        : metadata;
+
       await new Promise<void>((resolve, reject) => {
-        const request = store.put(metadata);
+        const request = store.put(toStore);
         request.onsuccess = () => resolve();
         request.onerror = () => reject(request.error);
       });
@@ -204,6 +218,67 @@ export class IndexedDBService {
         }
         meeting.savedToSQLite = true;
         meeting.lastUpdated = Date.now();
+        const putRequest = store.put(meeting);
+        putRequest.onsuccess = () => resolve();
+        putRequest.onerror = () => reject(putRequest.error ?? new Error('IndexedDB put failed'));
+      };
+      getRequest.onerror = () => reject(getRequest.error ?? new Error('IndexedDB get failed'));
+    });
+
+    await Promise.all([operation, completed]);
+  }
+
+  /**
+   * Stamp the meeting this recovery entry resumes, so recovery can save back
+   * into that meeting id with append=true instead of wiping or duplicating it.
+   * Resolves false without writing anything if the record isn't found.
+   */
+  async setResumeOfMeetingId(meetingId: string, resumeOfMeetingId: string): Promise<boolean> {
+    if (!this.db) await this.init();
+
+    const transaction = this.db!.transaction(['meetings'], 'readwrite');
+    const completed = this.waitForTransaction(transaction);
+    const store = transaction.objectStore('meetings');
+    const operation = new Promise<boolean>((resolve, reject) => {
+      const getRequest = store.get(meetingId);
+      getRequest.onsuccess = () => {
+        const meeting = getRequest.result as MeetingMetadata | undefined;
+        if (!meeting) {
+          resolve(false);
+          return;
+        }
+        meeting.resumeOfMeetingId = resumeOfMeetingId;
+        const putRequest = store.put(meeting);
+        putRequest.onsuccess = () => resolve(true);
+        putRequest.onerror = () => reject(putRequest.error ?? new Error('IndexedDB put failed'));
+      };
+      getRequest.onerror = () => reject(getRequest.error ?? new Error('IndexedDB get failed'));
+    });
+
+    const [stamped] = await Promise.all([operation, completed]);
+    return stamped;
+  }
+
+  /**
+   * Record that recovery has appended this entry's transcript into the meeting
+   * it resumes. Appending is not idempotent, so a retried recovery (after a
+   * failed audio merge, say) must not append the same segments again.
+   */
+  async markResumeAppendedStrict(meetingId: string): Promise<void> {
+    if (!this.db) await this.init();
+
+    const transaction = this.db!.transaction(['meetings'], 'readwrite');
+    const completed = this.waitForTransaction(transaction);
+    const store = transaction.objectStore('meetings');
+    const operation = new Promise<void>((resolve, reject) => {
+      const getRequest = store.get(meetingId);
+      getRequest.onsuccess = () => {
+        const meeting = getRequest.result as MeetingMetadata | undefined;
+        if (!meeting) {
+          reject(new Error(`Recovery meeting ${meetingId} was not found in IndexedDB`));
+          return;
+        }
+        meeting.resumeAppended = true;
         const putRequest = store.put(meeting);
         putRequest.onsuccess = () => resolve();
         putRequest.onerror = () => reject(putRequest.error ?? new Error('IndexedDB put failed'));

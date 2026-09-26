@@ -178,6 +178,47 @@ export function shouldDiscardShortMeeting(check: ShortMeetingCheck): boolean {
     && !check.hasTranscript;
 }
 
+export interface StampResumeTargetOptions {
+  resumeMeetingId: string | null;
+  /** sessionStorage 'indexeddb_current_meeting_id', read before the native start call. */
+  previousRecoveryId: string | null;
+  /** Reads sessionStorage 'indexeddb_current_meeting_id' now. */
+  readRecoveryId: () => string | null;
+  stamp: (recoveryId: string, resumeOfMeetingId: string) => Promise<boolean>;
+  wait: (ms: number) => Promise<void>;
+  attempts?: number;
+  intervalMs?: number;
+}
+
+/**
+ * Stamps the IndexedDB recovery entry created for a resumed session with the
+ * saved meeting id it resumes, so recovering it later appends into that
+ * meeting instead of wiping or duplicating it. TranscriptContext creates the
+ * recovery entry asynchronously after start returns, and sessionStorage may
+ * still hold a stale id from a previous session until it does, so this polls
+ * for a genuinely new id before stamping. Never throws.
+ */
+export async function stampResumeTarget(options: StampResumeTargetOptions): Promise<string | null> {
+  const { resumeMeetingId, previousRecoveryId, readRecoveryId, stamp, wait } = options;
+  if (!resumeMeetingId) return null;
+  const attempts = options.attempts ?? 40;
+  const intervalMs = options.intervalMs ?? 250;
+  try {
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      const id = readRecoveryId();
+      if (id && id !== previousRecoveryId) {
+        if (await stamp(id, resumeMeetingId)) return id;
+      }
+      await wait(intervalMs);
+    }
+  } catch (error) {
+    console.warn('Could not stamp the resume target on the recovery entry:', error);
+    return null;
+  }
+  console.warn('Gave up stamping the resume target on the recovery entry: no recovery entry appeared.');
+  return null;
+}
+
 function meetingTitleNow(): string {
   const now = new Date();
   const parts = [
@@ -517,6 +558,7 @@ export function RecordingControllerProvider({
         : meetingTitleNow();
       setMeetingTitle(title);
       recordingState.setStatus(RecordingStatus.STARTING, 'Initializing recording...');
+      const previousRecoveryId = sessionStorage.getItem('indexeddb_current_meeting_id');
       nativeStartInvoked = true;
       const result = await recordingService.startRecordingWithDevices(
         selectedDevices?.micDevice ?? null,
@@ -537,6 +579,17 @@ export function RecordingControllerProvider({
       latestSessionIdRef.current = result.session_id;
       sessionsRef.current.set(result.session_id, session);
       persistSessions(sessionsRef.current);
+      if (resumeMeetingId) {
+        // Fire-and-forget: the recovery entry may not exist yet, and stamping
+        // must never block or fail the start of a recording.
+        void stampResumeTarget({
+          resumeMeetingId,
+          previousRecoveryId,
+          readRecoveryId: () => sessionStorage.getItem('indexeddb_current_meeting_id'),
+          stamp: (recoveryId, resumeOfMeetingId) => indexedDBService.setResumeOfMeetingId(recoveryId, resumeOfMeetingId),
+          wait: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+        });
+      }
       clearTranscripts();
       setIsMeetingActive(true);
       Analytics.trackButtonClick(
