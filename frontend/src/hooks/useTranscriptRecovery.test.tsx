@@ -25,6 +25,12 @@ const saveMeeting = mock(async (...args: unknown[]) => ({
   status: 'success',
   meeting_id: (args[4] as string | null) ?? 'saved-id',
 }));
+// api_get_meeting rejects with a plain string, as Tauri commands do.
+let getMeetingError: string | null = null;
+const getMeeting = mock(async (id: string) => {
+  if (getMeetingError) throw getMeetingError;
+  return { id, title: 'Standup' };
+});
 
 const originalCore = { ...await import('@tauri-apps/api/core') };
 const originalIndexedDB = { ...await import('@/services/indexedDBService') };
@@ -42,7 +48,7 @@ mock.module('@tauri-apps/api/core', () => ({ invoke }));
 mock.module('@/services/indexedDBService', () => ({
   indexedDBService: { getMeetingMetadata, getTranscriptsStrict, markMeetingSavedStrict, markResumeAppendedStrict },
 }));
-mock.module('@/services/storageService', () => ({ storageService: { saveMeeting } }));
+mock.module('@/services/storageService', () => ({ storageService: { saveMeeting, getMeeting } }));
 mock.module('@/lib/summary-language-preferences', () => ({
   applyPinnedSummaryLanguageToMeeting: async () => {},
 }));
@@ -107,6 +113,8 @@ const expectedTranscripts = [expect.objectContaining({ text: 'hello', sequence_i
 beforeEach(() => {
   invoke.mockClear();
   saveMeeting.mockClear();
+  getMeeting.mockClear();
+  getMeetingError = null;
   markMeetingSavedStrict.mockClear();
   markResumeAppendedStrict.mockClear();
   markResumeAppendedError = null;
@@ -219,5 +227,60 @@ describe('useTranscriptRecovery recoverMeeting', () => {
     expect(second).toMatchObject({ success: true, meetingId: 'meeting-orig' });
     expect(saveMeeting).toHaveBeenCalledTimes(1);
     expect(markResumeAppendedStrict).toHaveBeenCalledTimes(2);
+  });
+
+  test('a resumed entry whose meeting was deleted is recovered as a new meeting', async () => {
+    stubSessionStorage({
+      active_recording_sessions: JSON.stringify([{ meetingId: 'meeting-orig', folderPath: '/meetings/standup' }]),
+    });
+    metadata = entry({ resumeOfMeetingId: 'meeting-orig' });
+    getMeetingError = 'Meeting not found: meeting-orig';
+
+    const result = await recover('recovery-1');
+
+    expect(getMeeting).toHaveBeenCalledWith('meeting-orig');
+    expect(saveMeeting).toHaveBeenCalledTimes(1);
+    expect(saveMeeting.mock.calls[0]).toEqual([
+      'Standup', expectedTranscripts, '/meetings/standup', false, null,
+    ]);
+    expect(result).toMatchObject({ success: true, meetingId: 'saved-id' });
+    expect(markResumeAppendedStrict).not.toHaveBeenCalled();
+    expect(markMeetingSavedStrict).toHaveBeenCalledWith('recovery-1');
+  });
+
+  test('retrying a deleted-target entry after a failed audio merge reuses its new meeting', async () => {
+    const store = stubSessionStorage();
+    metadata = entry({ resumeOfMeetingId: 'meeting-orig' });
+    getMeetingError = 'Meeting not found: meeting-orig';
+    audioStatus = 'failed';
+
+    const first = await recover('recovery-1');
+    expect(first).toMatchObject({ success: false, meetingId: 'saved-id' });
+    expect(JSON.parse(store.get('transcript_recovery_row_ids') ?? '{}')).toEqual({ 'recovery-1': 'saved-id' });
+    expect(markResumeAppendedStrict).not.toHaveBeenCalled();
+
+    audioStatus = 'success';
+    const second = await attempt('recovery-1');
+
+    expect(second).toMatchObject({ success: true, meetingId: 'saved-id' });
+    expect(saveMeeting).toHaveBeenCalledTimes(2);
+    expect(saveMeeting.mock.calls[1]).toEqual([
+      'Standup', expectedTranscripts, '/meetings/standup', false, 'saved-id',
+    ]);
+    expect(markResumeAppendedStrict).not.toHaveBeenCalled();
+    expect(markMeetingSavedStrict).toHaveBeenCalledWith('recovery-1');
+  });
+
+  test('a resumed entry fails instead of forking when its meeting cannot be read', async () => {
+    stubSessionStorage();
+    metadata = entry({ resumeOfMeetingId: 'meeting-orig' });
+    getMeetingError = 'Failed to retrieve meeting: database is locked';
+
+    const result = await recover('recovery-1');
+
+    expect(result).toBe('Failed to retrieve meeting: database is locked');
+    expect(saveMeeting).not.toHaveBeenCalled();
+    expect(markResumeAppendedStrict).not.toHaveBeenCalled();
+    expect(markMeetingSavedStrict).not.toHaveBeenCalled();
   });
 });

@@ -1066,7 +1066,10 @@ pub async fn api_get_meeting<R: Runtime>(
             log_info!("Successfully retrieved meeting {}", meeting_id);
             Ok(meeting)
         }
-        Ok(None) => {
+        // The repository reports a missing row as RowNotFound, not Ok(None).
+        // Both mean the meeting is gone, and callers such as transcript
+        // recovery rely on this message to tell a deletion from a read failure.
+        Ok(None) | Err(sqlx::Error::RowNotFound) => {
             log_warn!("Meeting not found: {}", meeting_id);
             Err(format!("Meeting not found: {}", meeting_id))
         }

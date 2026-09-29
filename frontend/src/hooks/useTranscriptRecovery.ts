@@ -73,6 +73,21 @@ function boundMeetingId(folderPath?: string): string | null {
   }
 }
 
+/**
+ * Whether a saved meeting still exists. Only a missing row counts as gone; any
+ * other failure to read it is rethrown rather than treated as a deletion.
+ */
+async function meetingExists(meetingId: string): Promise<boolean> {
+  try {
+    await storageService.getMeeting(meetingId);
+    return true;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.startsWith('Meeting not found')) return false;
+    throw error;
+  }
+}
+
 export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
   const [recoverableMeetings, setRecoverableMeetings] = useState<MeetingMetadata[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -241,6 +256,24 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
           || recoveryRowIds()[meetingId] === resumeOfMeetingId;
         if (alreadyAppended) {
           savedMeetingId = resumeOfMeetingId;
+          if (!metadata.resumeAppended) {
+            await indexedDBService.markResumeAppendedStrict(meetingId);
+          }
+        } else if (!(await meetingExists(resumeOfMeetingId))) {
+          // The meeting it resumed was deleted, so there is nothing to append
+          // into: recover the session as a meeting of its own. The bound session
+          // may still point at the deleted meeting, so only a row this recovery
+          // created is reused. The entry is not flagged as appended, so a retry
+          // finds the target still gone and saves into that same row again.
+          const saveResponse = await storageService.saveMeeting(
+            metadata.title,
+            formattedTranscripts,
+            folderPath ?? null,
+            false,
+            recoveryRowIds()[meetingId] ?? null,
+          );
+          savedMeetingId = saveResponse.meeting_id;
+          persistRecoveryRowId(meetingId, savedMeetingId);
         } else {
           const saveResponse = await storageService.saveMeeting(
             metadata.title,
@@ -252,8 +285,6 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
           );
           savedMeetingId = saveResponse.meeting_id;
           persistRecoveryRowId(meetingId, savedMeetingId);
-        }
-        if (!metadata.resumeAppended) {
           await indexedDBService.markResumeAppendedStrict(meetingId);
         }
       } else {
