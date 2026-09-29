@@ -381,3 +381,33 @@ async fn delete_meeting_with_transaction(
 
     Ok(result.rows_affected() > 0)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // api_get_meeting maps this error to "Meeting not found", which transcript
+    // recovery uses to tell a deleted meeting from a failed read.
+    #[tokio::test]
+    async fn get_meeting_reports_a_missing_row_as_row_not_found() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::query(
+            "CREATE TABLE meetings (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                folder_path TEXT,
+                pinned INTEGER NOT NULL DEFAULT 0,
+                archived INTEGER NOT NULL DEFAULT 0
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let result = MeetingsRepository::get_meeting(&pool, "deleted-meeting").await;
+
+        assert!(matches!(result, Err(SqlxError::RowNotFound)));
+    }
+}
