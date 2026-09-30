@@ -29,6 +29,7 @@ import { useMeetingData } from '@/hooks/meeting-details/useMeetingData';
 import { useSummaryGeneration } from '@/hooks/meeting-details/useSummaryGeneration';
 import { useTemplates } from '@/hooks/meeting-details/useTemplates';
 import { useCopyOperations } from '@/hooks/meeting-details/useCopyOperations';
+import { useTitleRegeneration } from '@/hooks/meeting-details/useTitleRegeneration';
 import { useMeetingOperations } from '@/hooks/meeting-details/useMeetingOperations';
 import { useConfig } from '@/contexts/ConfigContext';
 import { useRouter } from 'next/navigation';
@@ -110,7 +111,7 @@ export default function PageContent({
   const manuallySelectedViewMeetingIdsRef = useRef(new Set<string>());
 
   // Sidebar context
-  const { renameMeeting, meetingMutations } = useSidebar();
+  const { renameMeeting, refetchMeetings, meetingMutations } = useSidebar();
   const router = useRouter();
 
   // Get model config from ConfigContext
@@ -137,6 +138,17 @@ export default function PageContent({
       updateMeetingTitle(trimmed);
     }
   }, [meeting.id, meetingTitle, renameMeeting, updateMeetingTitle]);
+
+  // The backend has already saved the new title; refresh the page and sidebar list to match
+  const titleRegeneration = useTitleRegeneration({
+    meetingId: meeting.id,
+    onRegenerated: async (title) => {
+      if (lifetimeRef.current.mounted && lifetimeRef.current.meetingId === meeting.id) {
+        updateMeetingTitle(title);
+      }
+      await refetchMeetings();
+    },
+  });
 
   const handleOpenModelSettings = useCallback(async () => {
     try {
@@ -393,6 +405,8 @@ export default function PageContent({
           showAssistant
           peopleCount={0}
           onTitleChange={handleTitleChange}
+          onRegenerateTitle={titleRegeneration.regenerateTitle}
+          titleRegenerating={titleRegeneration.isRegenerating}
           titlePending={meetingMutations[meeting.id]?.rename?.status === 'pending'}
           titleError={meetingMutations[meeting.id]?.rename?.error}
         />
@@ -424,6 +438,8 @@ export default function PageContent({
           statusBanner={statusBanner}
           toolbarActions={<>{summaryToolbarActions}{exportButton}</>}
           onTitleChange={handleTitleChange}
+          onRegenerateTitle={titleRegeneration.regenerateTitle}
+          titleRegenerating={titleRegeneration.isRegenerating}
           titlePending={meetingMutations[meeting.id]?.rename?.status === 'pending'}
           titleError={meetingMutations[meeting.id]?.rename?.error}
           onRegenerate={() => {
