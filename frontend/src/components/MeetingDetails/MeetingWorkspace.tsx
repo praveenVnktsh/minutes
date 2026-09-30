@@ -63,6 +63,8 @@ export function MeetingWorkspace({
   notesDirty = false,
   titlePending = false,
   titleError,
+  onRegenerateTitle,
+  titleRegenerating = false,
 }: {
   title: string;
   createdAt: string;
@@ -85,6 +87,8 @@ export function MeetingWorkspace({
   notesDirty?: boolean;
   titlePending?: boolean;
   titleError?: string | null;
+  onRegenerateTitle?: () => void | Promise<void>;
+  titleRegenerating?: boolean;
 }) {
   const { collapsed } = useShell();
   const sidebarWidth = collapsed ? SIDEBAR_COLLAPSED_WIDTH : SIDEBAR_WIDTH;
@@ -305,27 +309,41 @@ export function MeetingWorkspace({
       {/* Header */}
       <div className="flex min-h-[76px] shrink-0 items-center justify-between gap-6 px-8 py-3">
         <div className="min-w-0 flex-1">
-          <input
-            ref={titleInputRef}
-            value={titleDraft}
-            onChange={(event) => setTitleDraft(event.target.value)}
-            onBlur={() => void commitTitle()}
-            disabled={titlePending}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter') {
-                event.preventDefault();
-                (event.target as HTMLInputElement).blur();
-              } else if (event.key === 'Escape') {
-                skipBlurCommitRef.current = true;
-                setTitleDraft(title);
-                (event.target as HTMLInputElement).blur();
-              }
-            }}
-            spellCheck={false}
-            aria-label="Meeting title"
-            placeholder="Untitled meeting"
-            className="w-full truncate rounded bg-transparent font-serif text-[26px] font-semibold tracking-[-0.02em] text-ink outline-none placeholder:text-ink-subtle focus-visible:ring-2 focus-visible:ring-focus"
-          />
+          <div className="flex items-center gap-1">
+            <input
+              ref={titleInputRef}
+              value={titleDraft}
+              onChange={(event) => setTitleDraft(event.target.value)}
+              onBlur={() => void commitTitle()}
+              disabled={titlePending}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault();
+                  (event.target as HTMLInputElement).blur();
+                } else if (event.key === 'Escape') {
+                  skipBlurCommitRef.current = true;
+                  setTitleDraft(title);
+                  (event.target as HTMLInputElement).blur();
+                }
+              }}
+              spellCheck={false}
+              aria-label="Meeting title"
+              placeholder="Untitled meeting"
+              className="min-w-0 flex-1 truncate rounded bg-transparent font-serif text-[26px] font-semibold tracking-[-0.02em] text-ink outline-none placeholder:text-ink-subtle focus-visible:ring-2 focus-visible:ring-focus"
+            />
+            {onRegenerateTitle && (
+              <button
+                type="button"
+                onClick={() => void onRegenerateTitle()}
+                disabled={titleRegenerating || titlePending}
+                title="Regenerate title"
+                aria-label="Regenerate title"
+                className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-ink-muted hover:bg-surface-2 hover:text-ink focus-visible:ring-2 focus-visible:ring-focus disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-ink-muted"
+              >
+                {titleRegenerating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+              </button>
+            )}
+          </div>
           {(dateSubtitle || peopleCount > 0) && (
             <p className="mt-0.5 text-xs text-ink-subtle">
               {[dateSubtitle, peopleCount > 0 ? `${peopleCount} ${peopleCount === 1 ? 'person' : 'people'}` : ''].filter(Boolean).join(' · ')}

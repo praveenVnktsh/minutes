@@ -1,13 +1,16 @@
+use crate::database::models::{Setting, Transcript};
 use crate::database::repositories::{
     meeting::MeetingsRepository, setting::SettingsRepository, summary::SummaryProcessesRepository,
 };
 use crate::ollama::metadata::ModelMetadataCache;
 use crate::summary::language_detection::detect_summary_language;
-use crate::summary::llm_client::LLMProvider;
+use crate::summary::llm_client::{generate_summary, LLMProvider};
 use crate::summary::metadata::read_detected_summary_language_from_metadata;
 use crate::summary::processor::{
-    clean_llm_markdown_detailed, default_notes_system_prompt, extract_meeting_name_from_markdown,
-    generate_meeting_summary, language_name_from_code, require_visible_markdown,
+    build_title_user_prompt, clean_llm_markdown_detailed, default_notes_system_prompt,
+    extract_meeting_name_from_markdown, generate_meeting_summary, is_prompt_echo_title,
+    language_name_from_code, require_visible_markdown, sanitize_generated_title,
+    title_system_prompt,
 };
 use crate::summary::templates::{self, Template};
 use chrono::{DateTime, Utc};
@@ -213,6 +216,112 @@ fn extract_cached_english_markdown(
     }
 }
 
+/// Everything an LLM call needs beyond the prompts, resolved from saved settings.
+struct LlmConfig {
+    provider: LLMProvider,
+    model_name: String,
+    api_key: String,
+    ollama_endpoint: Option<String>,
+    custom_openai_endpoint: Option<String>,
+    max_tokens: Option<u32>,
+    temperature: Option<f32>,
+    top_p: Option<f32>,
+}
+
+/// Resolves the API key, Ollama endpoint and CustomOpenAI settings for a provider/model pair.
+/// `settings` is the already-loaded settings row, when the caller has one, so Ollama's
+/// endpoint lookup does not read it again.
+async fn load_llm_config(
+    pool: &SqlitePool,
+    model_provider: &str,
+    model_name: &str,
+    settings: Option<&Setting>,
+) -> Result<LlmConfig, String> {
+    let provider = LLMProvider::from_str(model_provider)?;
+    let mut config = LlmConfig {
+        provider: provider.clone(),
+        model_name: model_name.to_string(),
+        api_key: String::new(),
+        ollama_endpoint: None,
+        custom_openai_endpoint: None,
+        max_tokens: None,
+        temperature: None,
+        top_p: None,
+    };
+
+    match provider {
+        LLMProvider::BuiltInAI => {}
+        LLMProvider::Ollama => {
+            config.ollama_endpoint = match settings {
+                Some(settings) => settings.ollama_endpoint.clone(),
+                None => match SettingsRepository::get_model_config(pool).await {
+                    Ok(settings) => settings.and_then(|settings| settings.ollama_endpoint),
+                    Err(e) => {
+                        info!("Failed to retrieve Ollama endpoint: {}, using default", e);
+                        None
+                    }
+                },
+            };
+        }
+        LLMProvider::CustomOpenAI => {
+            let custom = match SettingsRepository::get_custom_openai_config(pool).await {
+                Ok(Some(custom)) => custom,
+                Ok(None) => {
+                    return Err(
+                        "Custom OpenAI provider selected but no configuration found".to_string()
+                    );
+                }
+                Err(e) => {
+                    return Err(format!("Failed to retrieve custom OpenAI config: {}", e));
+                }
+            };
+            info!("✓ Using custom OpenAI endpoint: {}", custom.endpoint);
+            config.api_key = custom.api_key.unwrap_or_default();
+            config.custom_openai_endpoint = Some(custom.endpoint);
+            config.max_tokens = custom.max_tokens.map(|t| t as u32);
+            config.temperature = custom.temperature;
+            config.top_p = custom.top_p;
+        }
+        _ => {
+            config.api_key = match SettingsRepository::get_api_key(pool, model_provider).await {
+                Ok(Some(key)) if !key.is_empty() => key,
+                Ok(None) | Ok(Some(_)) => {
+                    return Err(format!("API key not found for {}", model_provider));
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "Failed to retrieve API key for {}: {}",
+                        model_provider, e
+                    ));
+                }
+            };
+        }
+    }
+
+    Ok(config)
+}
+
+/// Joins stored transcript segments into the plain text the title prompt reads,
+/// labelling each line with its speaker the way the summary transcript does.
+fn title_transcript_text(segments: &[Transcript]) -> String {
+    segments
+        .iter()
+        .filter_map(|segment| {
+            let text = segment.transcript.trim();
+            if text.is_empty() {
+                return None;
+            }
+            Some(match segment.speaker.as_deref().map(str::trim) {
+                Some("mic") => format!("[You] {text}"),
+                Some("system") => format!("[Others] {text}"),
+                Some(speaker) if !speaker.is_empty() => format!("[{speaker}] {text}"),
+                _ => text.to_string(),
+            })
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Summary service - handles all summary generation logic
 pub struct SummaryService;
 
@@ -362,92 +471,21 @@ impl SummaryService {
             meeting_id
         );
 
-        // Parse provider
-        let provider = match LLMProvider::from_str(&model_provider) {
-            Ok(p) => p,
+        let LlmConfig {
+            provider,
+            model_name,
+            api_key: final_api_key,
+            ollama_endpoint,
+            custom_openai_endpoint,
+            max_tokens: custom_openai_max_tokens,
+            temperature: custom_openai_temperature,
+            top_p: custom_openai_top_p,
+        } = match load_llm_config(&pool, &model_provider, &model_name, None).await {
+            Ok(config) => config,
             Err(e) => {
                 Self::fail_and_cleanup(&pool, &meeting_id, started_at, &e).await;
                 return;
             }
-        };
-
-        // Validate and setup api_key, Flexible for Ollama, BuiltInAI, and CustomOpenAI
-        let api_key = if provider == LLMProvider::Ollama
-            || provider == LLMProvider::BuiltInAI
-            || provider == LLMProvider::CustomOpenAI
-        {
-            // These providers don't require API keys from the standard database column
-            String::new()
-        } else {
-            match SettingsRepository::get_api_key(&pool, &model_provider).await {
-                Ok(Some(key)) if !key.is_empty() => key,
-                Ok(None) | Ok(Some(_)) => {
-                    let err_msg = format!("API key not found for {}", model_provider);
-                    Self::fail_and_cleanup(&pool, &meeting_id, started_at, &err_msg).await;
-                    return;
-                }
-                Err(e) => {
-                    let err_msg =
-                        format!("Failed to retrieve API key for {}: {}", model_provider, e);
-                    Self::fail_and_cleanup(&pool, &meeting_id, started_at, &err_msg).await;
-                    return;
-                }
-            }
-        };
-
-        // Get Ollama endpoint if provider is Ollama
-        let ollama_endpoint = if provider == LLMProvider::Ollama {
-            match SettingsRepository::get_model_config(&pool).await {
-                Ok(Some(config)) => config.ollama_endpoint,
-                Ok(None) => None,
-                Err(e) => {
-                    info!("Failed to retrieve Ollama endpoint: {}, using default", e);
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        // Get CustomOpenAI config if provider is CustomOpenAI
-        let (
-            custom_openai_endpoint,
-            custom_openai_api_key,
-            custom_openai_max_tokens,
-            custom_openai_temperature,
-            custom_openai_top_p,
-        ) = if provider == LLMProvider::CustomOpenAI {
-            match SettingsRepository::get_custom_openai_config(&pool).await {
-                Ok(Some(config)) => {
-                    info!("✓ Using custom OpenAI endpoint: {}", config.endpoint);
-                    (
-                        Some(config.endpoint),
-                        config.api_key,
-                        config.max_tokens.map(|t| t as u32),
-                        config.temperature,
-                        config.top_p,
-                    )
-                }
-                Ok(None) => {
-                    let err_msg = "Custom OpenAI provider selected but no configuration found";
-                    Self::fail_and_cleanup(&pool, &meeting_id, started_at, err_msg).await;
-                    return;
-                }
-                Err(e) => {
-                    let err_msg = format!("Failed to retrieve custom OpenAI config: {}", e);
-                    Self::fail_and_cleanup(&pool, &meeting_id, started_at, &err_msg).await;
-                    return;
-                }
-            }
-        } else {
-            (None, None, None, None, None)
-        };
-
-        // For CustomOpenAI, use its API key (if any) instead of the empty string
-        let final_api_key = if provider == LLMProvider::CustomOpenAI {
-            custom_openai_api_key.unwrap_or_default()
-        } else {
-            api_key
         };
 
         // Dynamically fetch context size based on provider and model
@@ -639,7 +677,14 @@ impl SummaryService {
                             extract_meeting_name_from_markdown(&generated.final_markdown)
                                 .filter(|name| !name.is_empty())
                         {
-                            if let Err(error) =
+                            // Old notes-prompt overrides still carry the example title,
+                            // which small models copy verbatim instead of naming the meeting.
+                            if is_prompt_echo_title(&name, &text) {
+                                warn!(
+                                    "Keeping meeting name for {}: generated title '{}' echoes the prompt example",
+                                    meeting_id, name
+                                );
+                            } else if let Err(error) =
                                 MeetingsRepository::update_meeting_name(&pool, &meeting_id, &name)
                                     .await
                             {
@@ -688,6 +733,80 @@ impl SummaryService {
             }
         }
         Self::cleanup_cancellation_token(&meeting_id, started_at);
+    }
+
+    /// Asks the configured summary model for a fresh meeting title from the stored
+    /// transcript and the user's notes, saves it, and returns it.
+    pub async fn regenerate_meeting_title<R: tauri::Runtime>(
+        app: &AppHandle<R>,
+        pool: &SqlitePool,
+        meeting_id: &str,
+    ) -> Result<String, String> {
+        let model_config = SettingsRepository::get_model_config(pool)
+            .await
+            .map_err(|e| format!("Failed to load summary model settings: {}", e))?
+            .filter(|config| !config.provider.trim().is_empty() && !config.model.trim().is_empty())
+            .ok_or_else(|| "No summary model configured".to_string())?;
+        let config = load_llm_config(
+            pool,
+            &model_config.provider,
+            &model_config.model,
+            Some(&model_config),
+        )
+        .await?;
+
+        let (segments, _) =
+            MeetingsRepository::get_meeting_transcripts_paginated(pool, meeting_id, i64::MAX, 0)
+                .await
+                .map_err(|e| format!("Failed to load transcript for {}: {}", meeting_id, e))?;
+        let transcript = title_transcript_text(&segments);
+        if transcript.trim().is_empty() {
+            return Err("This meeting has no transcript to generate a title from".to_string());
+        }
+
+        let notes = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT notes_markdown FROM meeting_notes WHERE meeting_id = ?",
+        )
+        .bind(meeting_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| format!("Failed to load notes for {}: {}", meeting_id, e))?
+        .flatten();
+
+        info!(
+            "Regenerating title for meeting_id {} with {}/{}",
+            meeting_id, model_config.provider, config.model_name
+        );
+        let app_data_dir = app.path().app_data_dir().ok();
+        let client = reqwest::Client::new();
+        let completion = generate_summary(
+            &client,
+            &config.provider,
+            &config.model_name,
+            &config.api_key,
+            title_system_prompt(),
+            &build_title_user_prompt(&transcript, notes.as_deref()),
+            config.ollama_endpoint.as_deref(),
+            config.custom_openai_endpoint.as_deref(),
+            config.max_tokens,
+            config.temperature,
+            config.top_p,
+            app_data_dir.as_ref(),
+            None,
+        )
+        .await?;
+
+        let title = sanitize_generated_title(&completion.content)
+            .ok_or_else(|| "The model did not return a usable title".to_string())?;
+
+        match MeetingsRepository::update_meeting_name(pool, meeting_id, &title).await {
+            Ok(true) => {
+                info!("Regenerated title for meeting_id {}: {}", meeting_id, title);
+                Ok(title)
+            }
+            Ok(false) => Err(format!("Meeting not found: {}", meeting_id)),
+            Err(e) => Err(format!("Failed to save meeting title: {}", e)),
+        }
     }
 
     /// Updates the summary process status to failed with error message
@@ -749,6 +868,64 @@ mod tests {
         ));
         assert!(second.is_cancelled());
         SummaryService::cleanup_cancellation_token(&meeting_id, second_started_at);
+    }
+
+    fn segment(text: &str, speaker: Option<&str>) -> Transcript {
+        Transcript {
+            id: uuid::Uuid::new_v4().to_string(),
+            meeting_id: "meeting-1".to_string(),
+            transcript: text.to_string(),
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+            speaker: speaker.map(str::to_string),
+            summary: None,
+            action_items: None,
+            key_points: None,
+            audio_start_time: None,
+            audio_end_time: None,
+            duration: None,
+        }
+    }
+
+    #[test]
+    fn title_transcript_text_labels_speakers_in_order_and_skips_blank_segments() {
+        let segments = [
+            segment("  Kick off the hiring review. ", Some("mic")),
+            segment("   ", Some("system")),
+            segment("Two offers are out.", Some("system")),
+            segment("I own the budget.", Some("Priya")),
+            segment("Unattributed line", None),
+            segment("Blank speaker", Some("  ")),
+        ];
+        assert_eq!(
+            title_transcript_text(&segments),
+            "[You] Kick off the hiring review.\n[Others] Two offers are out.\n[Priya] I own the budget.\nUnattributed line\nBlank speaker"
+        );
+    }
+
+    #[test]
+    fn title_transcript_text_is_empty_without_spoken_text() {
+        assert_eq!(title_transcript_text(&[]), "");
+        assert_eq!(title_transcript_text(&[segment(" \n ", Some("mic"))]), "");
+    }
+
+    #[tokio::test]
+    async fn llm_config_resolves_keyless_providers_and_rejects_unknown_ones() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let config = load_llm_config(&pool, "builtin-ai", "gemma3:1b", None)
+            .await
+            .unwrap_or_else(|e| panic!("builtin-ai should need no settings: {e}"));
+        assert_eq!(config.provider, LLMProvider::BuiltInAI);
+        assert_eq!(config.model_name, "gemma3:1b");
+        assert!(config.api_key.is_empty());
+        assert!(config.ollama_endpoint.is_none());
+        assert!(config.custom_openai_endpoint.is_none());
+
+        assert_eq!(
+            load_llm_config(&pool, "not-a-provider", "x", None)
+                .await
+                .err(),
+            Some("Unsupported LLM provider: not-a-provider".to_string())
+        );
     }
 
     #[test]

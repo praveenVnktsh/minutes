@@ -574,6 +574,24 @@ pub async fn api_process_transcript<R: Runtime>(
     })
 }
 
+/// Regenerates a meeting's title from its transcript and saves it
+///
+/// Returns the new title so the UI can update without refetching.
+#[tauri::command]
+pub async fn api_regenerate_meeting_title<R: Runtime>(
+    app: AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+    meeting_id: String,
+) -> Result<String, String> {
+    log_info!(
+        "api_regenerate_meeting_title called for meeting_id: {}",
+        meeting_id
+    );
+
+    let pool = state.db_manager.pool().clone();
+    SummaryService::regenerate_meeting_title(&app, &pool, &meeting_id).await
+}
+
 /// Cancels an ongoing summary generation process
 ///
 /// This command triggers the cancellation token for the specified meeting,
