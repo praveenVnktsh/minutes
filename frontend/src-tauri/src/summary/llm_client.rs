@@ -1,3 +1,4 @@
+use crate::model_catalog::{endpoints, CatalogProvider};
 use reqwest::{header, Client};
 use serde::{Deserialize, Serialize};
 use std::future::Future;
@@ -308,15 +309,15 @@ pub(crate) async fn generate_summary(
 
     let (api_url, mut headers) = match provider {
         LLMProvider::OpenAI => (
-            "https://api.openai.com/v1/chat/completions".to_string(),
+            endpoints::chat_completions_url(CatalogProvider::OpenAI).to_string(),
             header::HeaderMap::new(),
         ),
         LLMProvider::Groq => (
-            "https://api.groq.com/openai/v1/chat/completions".to_string(),
+            endpoints::chat_completions_url(CatalogProvider::Groq).to_string(),
             header::HeaderMap::new(),
         ),
         LLMProvider::OpenRouter => (
-            "https://openrouter.ai/api/v1/chat/completions".to_string(),
+            endpoints::chat_completions_url(CatalogProvider::OpenRouter).to_string(),
             header::HeaderMap::new(),
         ),
         LLMProvider::Ollama => {
@@ -963,6 +964,25 @@ mod tests {
                 content: "Meeting summary.".to_string(),
                 reasoning_stripped: true,
             })
+        );
+    }
+
+    #[test]
+    fn chat_completions_urls_come_from_the_shared_catalog_endpoints() {
+        // The chat path and the model-listing path must agree on each
+        // provider's host, so both pull from `model_catalog::endpoints`
+        // rather than holding their own copy of the URL.
+        assert_eq!(
+            endpoints::chat_completions_url(CatalogProvider::OpenAI),
+            "https://api.openai.com/v1/chat/completions"
+        );
+        assert_eq!(
+            endpoints::chat_completions_url(CatalogProvider::Groq),
+            "https://api.groq.com/openai/v1/chat/completions"
+        );
+        assert_eq!(
+            endpoints::chat_completions_url(CatalogProvider::OpenRouter),
+            "https://openrouter.ai/api/v1/chat/completions"
         );
     }
 }
