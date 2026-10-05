@@ -448,10 +448,15 @@ pub struct AudioRecoveryStatus {
 
 /// Recover audio from checkpoint files
 /// This is called by the transcript recovery system to merge audio chunks after a crash
+///
+/// `discard_prior_audio` is set when the meeting a crashed session resumed has
+/// since been deleted: its audio.mp4 must not come back, so the resume marker
+/// is ignored and audio.mp4 is rebuilt from the checkpoints alone.
 #[tauri::command]
 pub async fn recover_audio_from_checkpoints(
     meeting_folder: String,
     _sample_rate: u32,
+    discard_prior_audio: Option<bool>,
 ) -> Result<AudioRecoveryStatus, String> {
     info!("Starting audio recovery for folder: {}", meeting_folder);
 
@@ -521,7 +526,14 @@ pub async fn recover_audio_from_checkpoints(
     // A resumed meeting that crashed already has audio.mp4 from its earlier part(s).
     // Its marker says so; prepend that audio so recovery never overwrites it.
     let marker_path = checkpoints_dir.join(PRIOR_AUDIO_MARKER_FILE);
-    let marker = if marker_path.is_file() {
+    let marker = if discard_prior_audio.unwrap_or(false) {
+        // Without a marker the existing audio.mp4 is ignored, never prepended or kept
+        info!(
+            "Discarding prior audio in {}: the meeting it resumed was deleted",
+            output_path_str
+        );
+        None
+    } else if marker_path.is_file() {
         let parsed = std::fs::read(&marker_path)
             .map_err(|e| e.to_string())
             .and_then(|bytes| {
@@ -939,10 +951,7 @@ mod tests {
         // newer than every checkpoint
         std::fs::write(meeting_folder.join("audio.mp4"), b"truncated").unwrap();
 
-        let status =
-            recover_audio_from_checkpoints(meeting_folder.to_string_lossy().to_string(), 48000)
-                .await
-                .unwrap();
+        let status = recover(&meeting_folder, None).await;
 
         assert_eq!(status.status, "success");
         assert_ne!(status.message, "Audio was already merged");
@@ -975,10 +984,7 @@ mod tests {
             IncrementalAudioSaver::new_resuming(meeting_folder.clone(), 48000).unwrap();
         record_without_finalize(&mut resumed, 2);
 
-        let status =
-            recover_audio_from_checkpoints(meeting_folder.to_string_lossy().to_string(), 48000)
-                .await
-                .unwrap();
+        let status = recover(&meeting_folder, None).await;
 
         assert_eq!(status.status, "success");
         assert_ne!(status.message, "Audio was already merged");
@@ -1011,10 +1017,7 @@ mod tests {
             .unwrap();
         let merged = std::fs::read(meeting_folder.join("audio.mp4")).unwrap();
 
-        let status =
-            recover_audio_from_checkpoints(meeting_folder.to_string_lossy().to_string(), 48000)
-                .await
-                .unwrap();
+        let status = recover(&meeting_folder, None).await;
 
         assert_eq!(status.status, "success");
         assert_eq!(status.message, "Audio was already merged");
@@ -1034,10 +1037,7 @@ mod tests {
         std::fs::write(checkpoints.join("audio_chunk_000.mp4"), b"chunk").unwrap();
         std::fs::write(checkpoints.join(PRIOR_AUDIO_MARKER_FILE), b"not json").unwrap();
 
-        let status =
-            recover_audio_from_checkpoints(meeting_folder.to_string_lossy().to_string(), 48000)
-                .await
-                .unwrap();
+        let status = recover(&meeting_folder, None).await;
 
         assert_eq!(status.status, "failed");
         assert_eq!(
@@ -1045,5 +1045,109 @@ mod tests {
             b"prior"
         );
         assert!(checkpoints.join("audio_chunk_000.mp4").exists());
+    }
+
+    async fn recover(
+        meeting_folder: &Path,
+        discard_prior_audio: Option<bool>,
+    ) -> AudioRecoveryStatus {
+        recover_audio_from_checkpoints(
+            meeting_folder.to_string_lossy().to_string(),
+            48000,
+            discard_prior_audio,
+        )
+        .await
+        .unwrap()
+    }
+
+    /// Merge `meeting_folder`'s checkpoints alone, without any prior audio, and
+    /// return the bytes.
+    fn checkpoints_only_audio(meeting_folder: &Path) -> Vec<u8> {
+        let mut chunk_paths: Vec<PathBuf> = std::fs::read_dir(meeting_folder.join(".checkpoints"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().and_then(|s| s.to_str()) == Some("mp4"))
+            .collect();
+        chunk_paths.sort();
+
+        let temp_dir = tempdir().unwrap();
+        let out = temp_dir.path().join("audio.mp4");
+        concat_into(
+            &temp_dir.path().join("concat_list.txt"),
+            None,
+            &chunk_paths,
+            &out,
+        )
+        .unwrap();
+        std::fs::read(out).unwrap()
+    }
+
+    #[tokio::test]
+    async fn recovery_discards_prior_audio_of_a_deleted_meeting() {
+        if find_ffmpeg_path().is_none() {
+            eprintln!("FFmpeg not available, skipping");
+            return;
+        }
+
+        let temp_dir = tempdir().unwrap();
+        let meeting_folder = temp_dir.path().join("Deleted Meeting");
+        std::fs::create_dir_all(meeting_folder.join(".checkpoints")).unwrap();
+
+        let mut first = IncrementalAudioSaver::new(meeting_folder.clone(), 48000).unwrap();
+        record_without_finalize(&mut first, 4);
+        let audio_path = first.finalize().await.unwrap();
+        let prior_size = std::fs::metadata(&audio_path).unwrap().len();
+
+        // Resume, then crash before finalize; the marker matches audio.mp4
+        std::fs::create_dir_all(meeting_folder.join(".checkpoints")).unwrap();
+        let mut resumed =
+            IncrementalAudioSaver::new_resuming(meeting_folder.clone(), 48000).unwrap();
+        record_without_finalize(&mut resumed, 2);
+        let expected = checkpoints_only_audio(&meeting_folder);
+
+        let status = recover(&meeting_folder, Some(true)).await;
+
+        assert_eq!(status.status, "success");
+        assert_ne!(status.message, "Audio was already merged");
+        let recovered = std::fs::read(&audio_path).unwrap();
+        assert!((recovered.len() as u64) < prior_size);
+        assert_eq!(recovered.len(), expected.len());
+    }
+
+    #[tokio::test]
+    async fn recovery_rebuilds_already_merged_audio_of_a_deleted_meeting() {
+        if find_ffmpeg_path().is_none() {
+            eprintln!("FFmpeg not available, skipping");
+            return;
+        }
+
+        let temp_dir = tempdir().unwrap();
+        let meeting_folder = temp_dir.path().join("Deleted Meeting");
+        std::fs::create_dir_all(meeting_folder.join(".checkpoints")).unwrap();
+
+        let mut first = IncrementalAudioSaver::new(meeting_folder.clone(), 48000).unwrap();
+        record_without_finalize(&mut first, 4);
+        first.finalize().await.unwrap();
+
+        std::fs::create_dir_all(meeting_folder.join(".checkpoints")).unwrap();
+        let mut resumed =
+            IncrementalAudioSaver::new_resuming(meeting_folder.clone(), 48000).unwrap();
+        record_without_finalize(&mut resumed, 2);
+        // Finalize's merge + rename landed, so the marker no longer matches audio.mp4
+        resumed
+            .merge_checkpoints(&meeting_folder.join("audio.mp4"))
+            .await
+            .unwrap();
+        let merged = std::fs::read(meeting_folder.join("audio.mp4")).unwrap();
+        let expected = checkpoints_only_audio(&meeting_folder);
+
+        let status = recover(&meeting_folder, Some(true)).await;
+
+        assert_eq!(status.status, "success");
+        assert_ne!(status.message, "Audio was already merged");
+        let recovered = std::fs::read(meeting_folder.join("audio.mp4")).unwrap();
+        assert_ne!(recovered, merged);
+        assert!(recovered.len() < merged.len());
+        assert_eq!(recovered.len(), expected.len());
     }
 }
