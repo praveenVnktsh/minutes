@@ -8,7 +8,7 @@ const transcripts: StoredTranscript[] = [
 ];
 
 let audioStatus = 'success';
-const invoke = mock(async (command: string) =>
+const invoke = mock(async (command: string, _args?: Record<string, unknown>) =>
   command === 'recover_audio_from_checkpoints'
     ? { status: audioStatus, chunk_count: 1, estimated_duration_seconds: 1, message: '' }
     : undefined
@@ -269,6 +269,39 @@ describe('useTranscriptRecovery recoverMeeting', () => {
     ]);
     expect(markResumeAppendedStrict).not.toHaveBeenCalled();
     expect(markMeetingSavedStrict).toHaveBeenCalledWith('recovery-1');
+  });
+
+  test('a resumed entry whose meeting was deleted discards that meeting\'s audio', async () => {
+    stubSessionStorage();
+    metadata = entry({ resumeOfMeetingId: 'meeting-orig' });
+    getMeetingError = 'Meeting not found: meeting-orig';
+
+    await recover('recovery-1');
+
+    const audioCall = invoke.mock.calls.findIndex(([command]) => command === 'recover_audio_from_checkpoints');
+    expect(invoke.mock.calls[audioCall]).toEqual([
+      'recover_audio_from_checkpoints',
+      { meetingFolder: '/meetings/standup', sampleRate: 48000, discardPriorAudio: true },
+    ]);
+    // The target is probed once, before the audio merge decides what to keep.
+    expect(getMeeting).toHaveBeenCalledTimes(1);
+    expect(getMeeting.mock.invocationCallOrder[0]).toBeLessThan(invoke.mock.invocationCallOrder[audioCall]);
+  });
+
+  test('a resumed entry whose meeting exists keeps that meeting\'s audio', async () => {
+    stubSessionStorage();
+    metadata = entry({ resumeOfMeetingId: 'meeting-orig' });
+
+    await recover('recovery-1');
+
+    expect(invoke.mock.calls.find(([command]) => command === 'recover_audio_from_checkpoints')).toEqual([
+      'recover_audio_from_checkpoints',
+      { meetingFolder: '/meetings/standup', sampleRate: 48000 },
+    ]);
+    expect(getMeeting).toHaveBeenCalledTimes(1);
+    expect(saveMeeting.mock.calls[0]).toEqual([
+      'Standup', expectedTranscripts, '/meetings/standup', false, 'meeting-orig', true,
+    ]);
   });
 
   test('a resumed entry fails instead of forking when its meeting cannot be read', async () => {

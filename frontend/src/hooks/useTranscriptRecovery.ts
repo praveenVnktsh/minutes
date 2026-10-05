@@ -193,13 +193,31 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
         throw new Error('No transcripts or audio found for this meeting');
       }
 
+      // A resumed session appends into the meeting it resumed, so recovery
+      // neither replaces that meeting's transcript nor creates a second
+      // meeting. Appending is not idempotent: once it has happened, a retry
+      // (after a failed audio merge, say) must not append the segments again.
+      // The IndexedDB flag survives a restart; the recovery row id covers a
+      // retry in this session when writing that flag failed.
+      const resumeOfMeetingId = metadata.resumeOfMeetingId;
+      const alreadyAppended = Boolean(resumeOfMeetingId) && (
+        metadata.resumeAppended || recoveryRowIds()[meetingId] === resumeOfMeetingId
+      );
+      // Whether the meeting it resumed was deleted is decided before the audio
+      // merge: the folder still holds that meeting's audio, which must not be
+      // carried into the meeting this recovery creates instead.
+      const resumeTargetGone = !!resumeOfMeetingId && !alreadyAppended
+        && !(await meetingExists(resumeOfMeetingId));
+
       // 4. Attempt audio recovery if folder path exists
       let audioRecoveryStatus: AudioRecoveryStatus | null = null;
       if (folderPath) {
         try {
           audioRecoveryStatus = await invoke<AudioRecoveryStatus>(
             'recover_audio_from_checkpoints',
-            { meetingFolder: folderPath, sampleRate: 48000 }
+            resumeTargetGone
+              ? { meetingFolder: folderPath, sampleRate: 48000, discardPriorAudio: true }
+              : { meetingFolder: folderPath, sampleRate: 48000 }
           );
         } catch (error) {
           console.error('Audio recovery failed:', error);
@@ -244,22 +262,13 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
 
       // 6. Save to backend database using existing save utilities
       let savedMeetingId: string;
-      if (metadata.resumeOfMeetingId) {
-        // A resumed session appends into the meeting it resumed, so recovery
-        // neither replaces that meeting's transcript nor creates a second
-        // meeting. Appending is not idempotent: once it has happened, a retry
-        // (after a failed audio merge, say) must not append the segments again.
-        const resumeOfMeetingId = metadata.resumeOfMeetingId;
-        // The IndexedDB flag survives a restart; the recovery row id covers a
-        // retry in this session when writing that flag failed.
-        const alreadyAppended = metadata.resumeAppended
-          || recoveryRowIds()[meetingId] === resumeOfMeetingId;
+      if (resumeOfMeetingId) {
         if (alreadyAppended) {
           savedMeetingId = resumeOfMeetingId;
           if (!metadata.resumeAppended) {
             await indexedDBService.markResumeAppendedStrict(meetingId);
           }
-        } else if (!(await meetingExists(resumeOfMeetingId))) {
+        } else if (resumeTargetGone) {
           // The meeting it resumed was deleted, so there is nothing to append
           // into: recover the session as a meeting of its own. The bound session
           // may still point at the deleted meeting, so only a row this recovery
