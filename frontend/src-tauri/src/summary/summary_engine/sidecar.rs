@@ -111,6 +111,23 @@ impl SidecarManager {
         })
     }
 
+    #[cfg(test)]
+    fn new_with_binary(helper_binary_path: PathBuf) -> Self {
+        Self {
+            child_process: Arc::new(Mutex::new(None)),
+            stdin_writer: Arc::new(Mutex::new(None)),
+            stdout_reader: Arc::new(Mutex::new(None)),
+            exchange_lock: Arc::new(Mutex::new(())),
+            last_activity: Arc::new(RwLock::new(Instant::now())),
+            is_healthy: Arc::new(AtomicBool::new(false)),
+            should_shutdown: Arc::new(AtomicBool::new(false)),
+            active_request_count: Arc::new(AtomicUsize::new(0)),
+            helper_binary_path,
+            current_model_path: Arc::new(RwLock::new(None)),
+            idle_timeout_secs: models::DEFAULT_IDLE_TIMEOUT_SECS,
+        }
+    }
+
     /// Resolve the path to llama-helper binary
     fn resolve_helper_binary() -> Result<PathBuf> {
         // 1. Check environment variable (dev mode or manual override)
@@ -873,5 +890,187 @@ impl Drop for SidecarManager {
         // Note: Actual cleanup happens in shutdown() method
         // We can't do async work in Drop, so this is best-effort
         log::debug!("SidecarManager dropped");
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// A stand-in for llama-helper that echoes each request line back, after a
+    /// second for requests that contain "slow".
+    fn fake_helper(dir: &std::path::Path) -> PathBuf {
+        let path = dir.join("fake-llama-helper");
+        std::fs::write(
+            &path,
+            "#!/bin/sh\nwhile IFS= read -r line; do\n  case \"$line\" in *slow*) sleep 1;; esac\n  printf '%s\\n' \"$line\"\ndone\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    async fn running_fake() -> (tempfile::TempDir, Arc<SidecarManager>) {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = fake_helper(dir.path());
+        let manager = Arc::new(SidecarManager::new_with_binary(binary));
+        manager
+            .ensure_running(dir.path().join("model.gguf"))
+            .await
+            .unwrap();
+        (dir, manager)
+    }
+
+    fn request(tag: &str) -> String {
+        format!(r#"{{"type":"generate","prompt":"{tag}"}}"#)
+    }
+
+    fn is_error(error: &anyhow::Error, cancelled: bool) -> bool {
+        match error.downcast_ref::<SidecarError>() {
+            Some(SidecarError::Cancelled) => cancelled,
+            Some(SidecarError::TimedOut(_)) => !cancelled,
+            None => false,
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_requests_each_get_their_own_reply() {
+        let (_dir, manager) = running_fake().await;
+        let mut tasks = Vec::new();
+        for i in 0..9 {
+            let manager = manager.clone();
+            let tag = if i % 4 == 0 {
+                format!("slow-{i}")
+            } else {
+                format!("fast-{i}")
+            };
+            tasks.push(tokio::spawn(async move {
+                let reply = manager
+                    .send_request(
+                        request(&tag),
+                        Duration::from_secs(5),
+                        None,
+                        OnAbandon::StopSidecar,
+                    )
+                    .await
+                    .unwrap();
+                (tag, reply)
+            }));
+        }
+        for task in tasks {
+            let (tag, reply) = task.await.unwrap();
+            assert_eq!(reply, request(&tag));
+        }
+        manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_abandoned_request_leaves_the_sidecar_running_and_its_reply_unread() {
+        let (_dir, manager) = running_fake().await;
+        let error = manager
+            .send_request(
+                request("slow-abandoned"),
+                Duration::from_millis(100),
+                None,
+                OnAbandon::LetFinish,
+            )
+            .await
+            .unwrap_err();
+        assert!(is_error(&error, false), "{error:#}");
+        assert!(manager.is_healthy(), "a timeline timeout must not stop it");
+
+        // The next caller waits for the stale reply to drain (that wait is
+        // not part of its own 500 ms timeout) and then reads its own reply.
+        let reply = manager
+            .send_request(
+                request("fast-next"),
+                Duration::from_millis(500),
+                None,
+                OnAbandon::StopSidecar,
+            )
+            .await
+            .unwrap();
+        assert_eq!(reply, request("fast-next"));
+        manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelling_while_queued_does_not_touch_the_sidecar() {
+        let (_dir, manager) = running_fake().await;
+        let busy = {
+            let manager = manager.clone();
+            tokio::spawn(async move {
+                manager
+                    .send_request(
+                        request("slow-busy"),
+                        Duration::from_secs(5),
+                        None,
+                        OnAbandon::StopSidecar,
+                    )
+                    .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let token = CancellationToken::new();
+        token.cancel();
+        let error = manager
+            .send_request(
+                request("fast-cancelled"),
+                Duration::from_secs(5),
+                Some(&token),
+                OnAbandon::StopSidecar,
+            )
+            .await
+            .unwrap_err();
+        assert!(is_error(&error, true), "{error:#}");
+        assert_eq!(busy.await.unwrap().unwrap(), request("slow-busy"));
+        assert!(manager.is_healthy());
+        manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_user_cancel_stops_the_sidecar() {
+        let (_dir, manager) = running_fake().await;
+        let token = CancellationToken::new();
+        let cancel = token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            cancel.cancel();
+        });
+        let error = manager
+            .send_request(
+                request("slow-cancel"),
+                Duration::from_secs(5),
+                Some(&token),
+                OnAbandon::StopSidecar,
+            )
+            .await
+            .unwrap_err();
+        assert!(is_error(&error, true), "{error:#}");
+        assert!(!manager.is_healthy());
+    }
+
+    #[tokio::test]
+    async fn a_dropped_shutdown_leaves_a_restartable_manager() {
+        let (dir, manager) = running_fake().await;
+        // Drop shutdown() part-way, as a select! or an abort would.
+        let _ = tokio::time::timeout(Duration::from_millis(1), manager.shutdown()).await;
+        assert!(!manager.is_healthy());
+        manager
+            .ensure_running(dir.path().join("model.gguf"))
+            .await
+            .unwrap();
+        let reply = manager
+            .send_request(
+                request("fast-after"),
+                Duration::from_secs(5),
+                None,
+                OnAbandon::StopSidecar,
+            )
+            .await
+            .unwrap();
+        assert_eq!(reply, request("fast-after"));
+        manager.shutdown().await.unwrap();
     }
 }
