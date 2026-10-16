@@ -60,6 +60,9 @@ enum Request {
         cache_prompt: Option<bool>,
         /// Byte length of the prompt's stable prefix.
         cache_prefix_chars: Option<usize>,
+        /// Byte length of an earlier, more stable part of that prefix (the
+        /// system prompt and live summary), checkpointed too.
+        cache_anchor_chars: Option<usize>,
         /// Context window for the persistent cached context (defaults to `context_size`).
         cache_context_size: Option<u32>,
         /// CPU threads for this request. The app lowers it while a recording
@@ -345,8 +348,14 @@ struct GenerateParams {
 #[derive(Debug, Clone, Copy)]
 struct CacheParams {
     prefix_chars: usize,
+    /// An earlier, more stable boundary inside the prefix.
+    anchor_chars: Option<usize>,
     context_size: u32,
 }
+
+/// Prefix states kept in host memory (each is roughly 70 MB per 1k tokens
+/// on Qwen 3.5 4B): the anchor and the stable prefix, plus one spare.
+const MAX_CHECKPOINTS: usize = 3;
 
 /// What generation reports while it runs.
 trait GenerationSink {
@@ -370,7 +379,8 @@ struct ModelState {
     // must go first.
     /// Persistent context for `cache_prompt` requests, with its n_ctx and threads.
     cache_ctx: Option<((u32, i32), LlamaContext<'static>)>,
-    checkpoint: Option<Checkpoint>,
+    /// Saved prefix states, most recently used first (at most `MAX_CHECKPOINTS`).
+    checkpoints: Vec<Checkpoint>,
     /// Boxed so its address stays put while `cache_ctx` borrows it.
     model: Option<Box<LlamaModel>>,
     model_path: Option<PathBuf>,
@@ -394,7 +404,7 @@ impl ModelState {
         let backend = LlamaBackend::init().context("Failed to init LlamaBackend")?;
         Ok(Self {
             cache_ctx: None,
-            checkpoint: None,
+            checkpoints: Vec::new(),
             model: None,
             model_path: None,
             context_size: 2048,
@@ -432,7 +442,7 @@ impl ModelState {
         eprintln!("📥 Loading model: {}", model_path.display());
         // Anything tied to the old model goes before it does.
         self.cache_ctx = None;
-        self.checkpoint = None;
+        self.checkpoints.clear();
         self.model = None;
         self.model_path = None;
 
@@ -505,7 +515,7 @@ impl ModelState {
             ))
             .with_n_batch(self.context_size)
             .with_n_threads(threads)
-            .with_n_threads_batch(threads);
+            .with_n_threads_batch(thread_count());
 
         let mut ctx = model
             .new_context(&self.backend, ctx_params)
@@ -554,12 +564,18 @@ impl ModelState {
         let n_ctx = cache.context_size.clamp(512, self.context_size.max(512));
         let tokens = self.tokenize(&params.prompt)?;
         check_context_budget(tokens.len(), params.max_tokens, n_ctx)?;
-        let prefix_end = floor_char_boundary(&params.prompt, cache.prefix_chars);
-        let prefix_tokens = if prefix_end == 0 {
-            Vec::new()
-        } else {
-            self.tokenize(&params.prompt[..prefix_end])?
-        };
+        // The stable prefix and, when given, an earlier anchor inside it.
+        let mut boundaries = Vec::new();
+        for chars in [cache.anchor_chars, Some(cache.prefix_chars)]
+            .into_iter()
+            .flatten()
+        {
+            let end = floor_char_boundary(&params.prompt, chars);
+            if end > 0 {
+                boundaries.push(self.tokenize(&params.prompt[..end])?);
+            }
+        }
+        let boundary_refs: Vec<&[LlamaToken]> = boundaries.iter().map(Vec::as_slice).collect();
         let model = self.model_static()?;
 
         let threads = params.threads;
@@ -570,7 +586,10 @@ impl ModelState {
                     .with_n_ctx(Some(NonZeroU32::new(n_ctx).context("Invalid ctx size")?))
                     .with_n_batch(n_ctx)
                     .with_n_threads(threads)
-                    .with_n_threads_batch(threads);
+                    // Prompt evaluation keeps every thread: on hybrid models
+                    // part of it runs on the CPU, and two threads made a cold
+                    // prompt ten times slower.
+                    .with_n_threads_batch(thread_count());
                 model
                     .new_context(&self.backend, ctx_params)
                     .context("unable to create the cached llama_context")?
@@ -578,40 +597,45 @@ impl ModelState {
         };
         ctx.clear_kv_cache();
 
-        let mut plan = plan_prefix(
-            &tokens,
-            &prefix_tokens,
-            self.checkpoint.as_ref().map(|c| c.tokens.as_slice()),
-        );
-        if plan.restore {
-            let checkpoint = self.checkpoint.as_ref().expect("planned from a checkpoint");
+        let saved: Vec<&[LlamaToken]> = self
+            .checkpoints
+            .iter()
+            .map(|c| c.tokens.as_slice())
+            .collect();
+        let mut plan = plan_prefix(&tokens, &boundary_refs, &saved);
+        if let Some(index) = plan.restore {
             // SAFETY: the bytes came from `state_seq_get_data_ext` on a context
             // of this same model.
             let restored = unsafe {
-                ctx.state_seq_set_data_ext(&checkpoint.state, 0, LlamaStateSeqFlags::empty())
+                ctx.state_seq_set_data_ext(
+                    &self.checkpoints[index].state,
+                    0,
+                    LlamaStateSeqFlags::empty(),
+                )
             };
-            if !restored {
+            if restored {
+                // Most recently used first.
+                let used = self.checkpoints.remove(index);
+                self.checkpoints.insert(0, used);
+            } else {
                 eprintln!("⚠️ Prefix checkpoint could not be restored; evaluating in full");
                 ctx.clear_kv_cache();
-                self.checkpoint = None;
-                plan = plan_prefix(&tokens, &prefix_tokens, None);
+                self.checkpoints.clear();
+                plan = plan_prefix(&tokens, &boundary_refs, &[]);
             }
         }
         let reused = plan.start;
 
         let mut batch = LlamaBatch::new(n_ctx as usize, 1);
         let mut position = plan.start;
-        if plan.saves_checkpoint() {
-            decode_range(
-                &mut ctx,
-                &mut batch,
-                &tokens,
-                position,
-                plan.stable_end,
-                false,
-            )?;
-            position = plan.stable_end;
-            self.checkpoint = save_checkpoint(&ctx, &tokens[..plan.stable_end]);
+        for end in plan.save_at.clone() {
+            decode_range(&mut ctx, &mut batch, &tokens, position, end, false)?;
+            position = end;
+            if let Some(checkpoint) = save_checkpoint(&ctx, &tokens[..end]) {
+                self.checkpoints.retain(|c| c.tokens != checkpoint.tokens);
+                self.checkpoints.insert(0, checkpoint);
+                self.checkpoints.truncate(MAX_CHECKPOINTS);
+            }
         }
         if sink.is_cancelled() {
             self.cache_ctx = Some(((n_ctx, threads), ctx));
@@ -1039,6 +1063,7 @@ fn main() -> Result<()> {
                 stream,
                 cache_prompt,
                 cache_prefix_chars,
+                cache_anchor_chars,
                 cache_context_size,
                 n_threads,
             }) => {
@@ -1072,6 +1097,7 @@ fn main() -> Result<()> {
 
                 let cache = cache_prompt.unwrap_or(false).then(|| CacheParams {
                     prefix_chars: cache_prefix_chars.unwrap_or(0),
+                    anchor_chars: cache_anchor_chars,
                     context_size: cache_context_size.unwrap_or(context_size),
                 });
                 let params = GenerateParams {

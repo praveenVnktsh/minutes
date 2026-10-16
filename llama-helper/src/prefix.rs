@@ -9,51 +9,54 @@ pub fn common_prefix_len<T: PartialEq>(a: &[T], b: &[T]) -> usize {
 }
 
 /// How a cached request evaluates its prompt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrefixPlan {
-    /// Restore the saved checkpoint before evaluating anything.
-    pub restore: bool,
-    /// First prompt position to evaluate (the checkpoint length when restoring).
+    /// Index of the checkpoint to restore before evaluating anything.
+    pub restore: Option<usize>,
+    /// First prompt position to evaluate (the checkpoint's length when restoring).
     pub start: usize,
-    /// End of the stable prefix. When it is past `start`, the prompt is
-    /// evaluated up to here first and a new checkpoint is saved at this point.
-    pub stable_end: usize,
-}
-
-impl PrefixPlan {
-    pub fn saves_checkpoint(&self) -> bool {
-        self.stable_end > self.start
-    }
+    /// Positions (ascending, all past `start`) where evaluation pauses to save
+    /// a new checkpoint: the ends of the stable boundaries.
+    pub save_at: Vec<usize>,
 }
 
 /// Plans a cached request.
 ///
 /// * `full` - the whole prompt's tokens.
-/// * `prefix` - the tokens of the stable prefix tokenized on its own. Only the
-///   part that also starts `full` counts: a boundary token can merge with the
-///   text after it.
-/// * `checkpoint` - the tokens the saved state covers, if any.
+/// * `boundaries` - token lists of the prompt's stable prefixes (an earlier
+///   "anchor" and the full stable part), each tokenized on its own. Only the
+///   part of each that also starts `full` counts: a boundary token can merge
+///   with the text after it.
+/// * `checkpoints` - the token lists the saved states cover.
 ///
-/// At least one prompt token is always left to evaluate, so the last position
-/// has logits to sample from.
-pub fn plan_prefix<T: PartialEq>(full: &[T], prefix: &[T], checkpoint: Option<&[T]>) -> PrefixPlan {
+/// The longest checkpoint that still starts the prompt is restored. At least
+/// one prompt token is always left to evaluate, so the last position has
+/// logits to sample from.
+pub fn plan_prefix<T: PartialEq>(
+    full: &[T],
+    boundaries: &[&[T]],
+    checkpoints: &[&[T]],
+) -> PrefixPlan {
     let last_evaluable = full.len().saturating_sub(1);
-    let stable_end = common_prefix_len(full, prefix).min(last_evaluable);
-    let restore_len = checkpoint
-        .filter(|saved| !saved.is_empty() && saved.len() <= last_evaluable)
-        .filter(|saved| common_prefix_len(full, saved) == saved.len())
-        .map(<[T]>::len);
-    match restore_len {
-        Some(len) => PrefixPlan {
-            restore: true,
-            start: len,
-            stable_end: stable_end.max(len),
-        },
-        None => PrefixPlan {
-            restore: false,
-            start: 0,
-            stable_end,
-        },
+    let restore = checkpoints
+        .iter()
+        .enumerate()
+        .filter(|(_, saved)| !saved.is_empty() && saved.len() <= last_evaluable)
+        .filter(|(_, saved)| common_prefix_len(full, saved) == saved.len())
+        .max_by_key(|(_, saved)| saved.len())
+        .map(|(index, saved)| (index, saved.len()));
+    let start = restore.map_or(0, |(_, len)| len);
+    let mut save_at: Vec<usize> = boundaries
+        .iter()
+        .map(|boundary| common_prefix_len(full, boundary).min(last_evaluable))
+        .filter(|end| *end > start)
+        .collect();
+    save_at.sort_unstable();
+    save_at.dedup();
+    PrefixPlan {
+        restore: restore.map(|(index, _)| index),
+        start,
+        save_at,
     }
 }
 
@@ -101,64 +104,78 @@ impl CancelFlag {
 mod tests {
     use super::*;
 
-    #[test]
-    fn cold_request_evaluates_the_stable_prefix_first() {
-        let plan = plan_prefix(&[1, 2, 3, 4, 5], &[1, 2, 3], None);
-        assert_eq!(
-            plan,
-            PrefixPlan {
-                restore: false,
-                start: 0,
-                stable_end: 3
-            }
-        );
-        assert!(plan.saves_checkpoint());
+    fn plan(full: &[i32], boundaries: &[&[i32]], checkpoints: &[&[i32]]) -> PrefixPlan {
+        plan_prefix(full, boundaries, checkpoints)
+    }
+
+    fn expect(restore: Option<usize>, start: usize, save_at: &[usize]) -> PrefixPlan {
+        PrefixPlan {
+            restore,
+            start,
+            save_at: save_at.to_vec(),
+        }
     }
 
     #[test]
-    fn warm_request_restores_and_skips_the_prefix() {
-        let plan = plan_prefix(&[1, 2, 3, 9, 9], &[1, 2, 3], Some(&[1, 2, 3]));
-        assert_eq!(
-            plan,
-            PrefixPlan {
-                restore: true,
-                start: 3,
-                stable_end: 3
-            }
+    fn cold_request_evaluates_and_saves_each_boundary() {
+        let p = plan(&[1, 2, 3, 4, 5], &[&[1, 2], &[1, 2, 3]], &[]);
+        assert_eq!(p, expect(None, 0, &[2, 3]));
+    }
+
+    #[test]
+    fn warm_request_restores_the_longest_matching_checkpoint() {
+        let p = plan(
+            &[1, 2, 3, 9, 9],
+            &[&[1, 2], &[1, 2, 3]],
+            &[&[1, 2], &[1, 2, 3]],
         );
-        assert!(!plan.saves_checkpoint());
+        assert_eq!(p, expect(Some(1), 3, &[]));
     }
 
     #[test]
     fn a_grown_prefix_extends_the_old_checkpoint() {
-        let plan = plan_prefix(&[1, 2, 3, 4, 5, 6], &[1, 2, 3, 4, 5], Some(&[1, 2, 3]));
-        assert_eq!((plan.restore, plan.start, plan.stable_end), (true, 3, 5));
-        assert!(plan.saves_checkpoint());
+        let p = plan(
+            &[1, 2, 3, 4, 5, 6],
+            &[&[1, 2], &[1, 2, 3, 4, 5]],
+            &[&[1, 2, 3]],
+        );
+        assert_eq!(p, expect(Some(0), 3, &[5]));
+    }
+
+    #[test]
+    fn a_moved_window_falls_back_to_the_anchor_checkpoint() {
+        // The transcript part changed; the summary anchor did not.
+        let p = plan(
+            &[1, 2, 7, 8, 9],
+            &[&[1, 2], &[1, 2, 7, 8]],
+            &[&[1, 2], &[1, 2, 3, 4]],
+        );
+        assert_eq!(p, expect(Some(0), 2, &[4]));
     }
 
     #[test]
     fn a_changed_prefix_does_not_restore() {
-        let plan = plan_prefix(&[1, 7, 3, 4], &[1, 7, 3], Some(&[1, 2, 3]));
-        assert_eq!((plan.restore, plan.start, plan.stable_end), (false, 0, 3));
+        let p = plan(&[1, 7, 3, 4], &[&[1, 7, 3]], &[&[1, 2, 3]]);
+        assert_eq!(p, expect(None, 0, &[3]));
     }
 
     #[test]
     fn a_boundary_token_that_merges_is_not_part_of_the_prefix() {
         // The prefix tokenized alone ends in 30; in the full prompt that text
         // merged into 31.
-        let plan = plan_prefix(&[1, 2, 31, 4], &[1, 2, 30], None);
-        assert_eq!(plan.stable_end, 2);
+        let p = plan(&[1, 2, 31, 4], &[&[1, 2, 30]], &[]);
+        assert_eq!(p.save_at, vec![2]);
     }
 
     #[test]
     fn at_least_one_token_is_left_to_evaluate() {
-        let plan = plan_prefix(&[1, 2, 3], &[1, 2, 3], Some(&[1, 2, 3]));
-        assert!(
-            !plan.restore,
+        let p = plan(&[1, 2, 3], &[&[1, 2, 3]], &[&[1, 2, 3]]);
+        assert_eq!(
+            p.restore, None,
             "a checkpoint covering the whole prompt leaves no logits"
         );
-        assert_eq!(plan.stable_end, 2);
-        assert!(plan_prefix::<i32>(&[], &[], None).stable_end == 0);
+        assert_eq!(p.save_at, vec![2]);
+        assert!(plan(&[], &[], &[]).save_at.is_empty());
     }
 
     #[test]

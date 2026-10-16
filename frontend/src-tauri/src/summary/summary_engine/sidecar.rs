@@ -355,7 +355,9 @@ impl SidecarManager {
     pub async fn busy_with_other_model(&self, model_path: &std::path::Path) -> bool {
         let current = self.current_model_path.read().await;
         self.active_request_count.load(Ordering::SeqCst) > 0
-            && current.as_deref().is_some_and(|current| current != model_path)
+            && current
+                .as_deref()
+                .is_some_and(|current| current != model_path)
     }
 
     /// Ensure sidecar is running, spawn if needed

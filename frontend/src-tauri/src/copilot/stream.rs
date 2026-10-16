@@ -391,6 +391,7 @@ impl ProviderStreamer {
             &parts.system,
             &parts.stable,
             &parts.rest,
+            parts.anchor,
             BuiltinStreamOptions {
                 max_tokens,
                 temperature,
@@ -473,6 +474,7 @@ mod tests {
         PromptParts {
             system: "sys".into(),
             stable: "stable\n".into(),
+            anchor: 0,
             rest: "TASK:\nwhat next?".into(),
         }
     }

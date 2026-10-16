@@ -50,9 +50,10 @@ pub struct TimelineItem {
     pub text: String,
 }
 
-/// The transcript window: the last 3–4 minutes, starting on a minute.
+/// The transcript window: the last 3–5 minutes. Its start moves in 2-minute
+/// steps, so the prompt prefix changes rarely.
 pub const WINDOW_MS: i64 = 180_000;
-const WINDOW_ALIGN_MS: i64 = 60_000;
+const WINDOW_ALIGN_MS: i64 = 120_000;
 /// Lines before this boundary belong to the stable prefix.
 const STABLE_ALIGN_MS: i64 = 30_000;
 
@@ -71,6 +72,9 @@ pub struct PromptParts {
     pub system: String,
     /// The stable start of the user message.
     pub stable: String,
+    /// Byte length of the most stable part of `stable` (the live summary),
+    /// which survives the transcript window moving.
+    pub anchor: usize,
     /// The rest of the user message: newest lines, notes, task.
     pub rest: String,
 }
@@ -172,6 +176,7 @@ pub fn build(lines: &[Line], timeline: &[TimelineItem], notes: &str, task: &Task
     let mut stable = String::new();
     stable.push_str("LIVE SUMMARY SO FAR:\n");
     stable.push_str(&timeline_block(timeline));
+    let anchor = stable.len();
     stable.push_str("\nTRANSCRIPT, LAST FEW MINUTES:\n");
     let split = window.partition_point(|l| l.start_ms < stable_cut);
     for line in &window[..split] {
@@ -199,6 +204,7 @@ pub fn build(lines: &[Line], timeline: &[TimelineItem], notes: &str, task: &Task
     PromptParts {
         system: super::prompt::SYSTEM_PROMPT.to_string(),
         stable,
+        anchor,
         rest,
     }
 }
@@ -276,6 +282,7 @@ mod tests {
         assert!(parts.rest.contains("MY NOTES:\ncheck QA"));
         assert!(parts.rest.ends_with(&task().text()));
         assert!(parts.system.contains("You: the person recording"));
+        assert!(parts.stable[..parts.anchor].ends_with("Ship on Friday\n"));
     }
 
     #[test]

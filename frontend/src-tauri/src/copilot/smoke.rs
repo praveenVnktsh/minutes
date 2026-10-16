@@ -20,7 +20,7 @@ use std::time::Instant;
 use super::context::{build, push_line, Line, Speaker, TimelineItem};
 use super::prompt::{QuickAction, Task};
 use crate::summary::summary_engine::client::{
-    format_builtin_prompt_with_prefix, RECORDING_LLM_THREADS,
+    format_builtin_prompt_with_prefixes, RECORDING_LLM_THREADS,
 };
 
 const MODEL: &str = "qwen3.5:4b";
@@ -116,7 +116,12 @@ impl Helper {
         }
     }
 
-    fn generate(&mut self, prompt: &str, prefix: Option<usize>, max_tokens: u32) -> Measured {
+    fn generate(
+        &mut self,
+        prompt: &str,
+        prefix: Option<(usize, usize)>,
+        max_tokens: u32,
+    ) -> Measured {
         let id = self.next_id;
         self.next_id += 1;
         let mut request = serde_json::json!({
@@ -136,9 +141,10 @@ impl Helper {
             "stream": true,
             "n_threads": RECORDING_LLM_THREADS,
         });
-        if let Some(prefix) = prefix {
+        if let Some((prefix, anchor)) = prefix {
             request["cache_prompt"] = true.into();
             request["cache_prefix_chars"] = prefix.into();
+            request["cache_anchor_chars"] = anchor.into();
             request["cache_context_size"] = 8192.into();
         }
         let started = Instant::now();
@@ -174,9 +180,21 @@ impl Drop for Helper {
     }
 }
 
-fn copilot_prompt(lines: &[Line], timeline: &[TimelineItem], task: &Task) -> (String, usize) {
+fn copilot_prompt(
+    lines: &[Line],
+    timeline: &[TimelineItem],
+    task: &Task,
+) -> (String, (usize, usize)) {
     let parts = build(lines, timeline, "Ask about the Acme contract", task);
-    format_builtin_prompt_with_prefix(MODEL, &parts.system, &parts.stable, &parts.rest).unwrap()
+    let (prompt, prefix, anchor) = format_builtin_prompt_with_prefixes(
+        MODEL,
+        &parts.system,
+        &parts.stable,
+        &parts.rest,
+        parts.anchor,
+    )
+    .unwrap();
+    (prompt, (prefix, anchor))
 }
 
 fn report(label: &str, m: &Measured) {
@@ -327,7 +345,7 @@ fn live_transcription_rtf_with_copilot_running() {
         Task::Action(QuickAction::CatchUp),
         Task::Question("Who owns the Acme integration?".into()),
     ];
-    let prompts: Vec<(String, usize, u32)> = tasks
+    let prompts: Vec<(String, (usize, usize), u32)> = tasks
         .iter()
         .map(|task| {
             let (prompt, prefix) = copilot_prompt(&lines, &timeline, task);

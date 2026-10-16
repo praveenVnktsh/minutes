@@ -48,6 +48,8 @@ enum Request {
         #[serde(skip_serializing_if = "Option::is_none")]
         cache_prefix_chars: Option<usize>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        cache_anchor_chars: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         cache_context_size: Option<u32>,
         /// Fewer CPU threads while a recording runs (see [`generation_threads`]).
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -390,6 +392,7 @@ pub async fn generate_with_builtin(
         stream: None,
         cache_prompt: None,
         cache_prefix_chars: None,
+        cache_anchor_chars: None,
         cache_context_size: None,
         n_threads: generation_threads(),
     };
@@ -502,6 +505,41 @@ pub fn format_builtin_prompt_with_prefix(
     user_stable: &str,
     user_rest: &str,
 ) -> Result<(String, usize)> {
+    format_builtin_prompt_with_prefixes(model_name, system_prompt, user_stable, user_rest, 0)
+        .map(|(prompt, prefix, _)| (prompt, prefix))
+}
+
+/// Like [`format_builtin_prompt_with_prefix`], plus the byte length of an
+/// earlier anchor: the prefix up to `user_stable[..anchor]`.
+pub fn format_builtin_prompt_with_prefixes(
+    model_name: &str,
+    system_prompt: &str,
+    user_stable: &str,
+    user_rest: &str,
+    anchor: usize,
+) -> Result<(String, usize, usize)> {
+    let (full, prefix) = prefix_for(model_name, system_prompt, user_stable, user_rest)?;
+    let anchor = anchor.min(user_stable.len());
+    let anchor_chars = if user_stable.is_char_boundary(anchor) {
+        let (_, anchor_chars) = prefix_for(
+            model_name,
+            system_prompt,
+            &user_stable[..anchor],
+            &format!("{}{user_rest}", &user_stable[anchor..]),
+        )?;
+        anchor_chars.min(prefix)
+    } else {
+        0
+    };
+    Ok((full, prefix, anchor_chars))
+}
+
+fn prefix_for(
+    model_name: &str,
+    system_prompt: &str,
+    user_stable: &str,
+    user_rest: &str,
+) -> Result<(String, usize)> {
     const SENTINEL: &str = "\u{1}COPILOT_USER\u{1}";
     let model_def = models::get_model_by_name(model_name)
         .ok_or_else(|| anyhow!("Unknown model: {}", model_name))?;
@@ -601,12 +639,18 @@ pub async fn generate_with_builtin_stream(
     system_prompt: &str,
     user_stable: &str,
     user_rest: &str,
+    anchor: usize,
     options: BuiltinStreamOptions,
     tokens: tokio::sync::mpsc::UnboundedSender<String>,
     cancellation_token: Option<&CancellationToken>,
 ) -> Result<BuiltinStreamCompletion> {
-    let (prompt, prefix_chars) =
-        format_builtin_prompt_with_prefix(model_name, system_prompt, user_stable, user_rest)?;
+    let (prompt, prefix_chars, anchor_chars) = format_builtin_prompt_with_prefixes(
+        model_name,
+        system_prompt,
+        user_stable,
+        user_rest,
+        anchor,
+    )?;
     // Never swap the helper's model under a running summary or timeline
     // request: that would stop it.
     if let Ok(model_path) = get_cached_model_path(app_data_dir, model_name) {
@@ -640,6 +684,7 @@ pub async fn generate_with_builtin_stream(
         stream: Some(true),
         cache_prompt: Some(true),
         cache_prefix_chars: Some(prefix_chars),
+        cache_anchor_chars: (anchor_chars > 0).then_some(anchor_chars),
         cache_context_size: Some(options.cache_context_size.min(model_def.context_size)),
         n_threads: generation_threads(),
     };
@@ -736,6 +781,7 @@ mod tests {
             stream: None,
             cache_prompt: None,
             cache_prefix_chars: None,
+            cache_anchor_chars: None,
             cache_context_size: None,
             n_threads: None,
         };
@@ -890,6 +936,7 @@ mod tests {
             stream: None,
             cache_prompt: None,
             cache_prefix_chars: None,
+            cache_anchor_chars: None,
             cache_context_size: None,
             n_threads: None,
         })
@@ -922,6 +969,13 @@ mod tests {
                 &full[..prefix]
             );
             assert!(full[prefix..].starts_with(rest));
+            let anchor_at = stable.find("\nTranscript").unwrap();
+            let (same, prefix2, anchor) =
+                format_builtin_prompt_with_prefixes(model, system, stable, rest, anchor_at)
+                    .unwrap();
+            assert_eq!((same.as_str(), prefix2), (full.as_str(), prefix));
+            assert!(full[..anchor].ends_with("[01:00] point\n"), "{model}");
+            assert!(anchor < prefix);
         }
     }
 
