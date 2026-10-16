@@ -9,13 +9,16 @@
 //! are applied here, so every surface (tray, floating prompt) agrees.
 
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, Mutex, RwLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Manager, Runtime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tauri::{path::BaseDirectory, AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_store::StoreExt;
 
 const STORE_FILE: &str = "meeting_detection.json";
 const STORE_KEY: &str = "settings";
+const SNOOZE_KEY: &str = "snoozed_until";
 const RECENT_APPS_LIMIT: usize = 12;
 
 /// An app capturing the microphone. `bundle_id` is the macOS bundle identifier
@@ -66,8 +69,9 @@ pub fn normalize_app_name(name: &str) -> String {
 /// Whether `entry` (from the ignore list) refers to `app`.
 ///
 /// Bundle ids match when both sides have one; otherwise (or additionally) the
-/// normalized names match. A name entry also matches a known meeting app by its
-/// display name, so typing "Zoom" ignores the `zoom.us` process.
+/// normalized names match. A name entry that names a known meeting app (its
+/// display name or an alias like "Teams") covers every process that known-app
+/// rule matches, so "Teams" also ignores "Microsoft Teams (work or school)".
 fn entry_matches(entry: &AudioApp, app: &AudioApp) -> bool {
     if let (Some(a), Some(b)) = (&entry.bundle_id, &app.bundle_id) {
         if a.eq_ignore_ascii_case(b) {
@@ -82,7 +86,10 @@ fn entry_matches(entry: &AudioApp, app: &AudioApp) -> bool {
     if entry_name == app_name {
         return true;
     }
-    known_meeting_app(&app_name).is_some_and(|display| normalize_app_name(display) == entry_name)
+    match known_app_named(&entry_name) {
+        Some(display) => known_meeting_app(&app_name) == Some(display),
+        None => false,
+    }
 }
 
 pub fn is_ignored(app: &AudioApp, ignored: &[AudioApp]) -> bool {
@@ -125,39 +132,45 @@ pub fn detect_meeting_app(
     generic
 }
 
+/// Known meeting apps: a process whose normalized name contains the token.
+const KNOWN_CONTAINS: &[(&str, &str)] = &[
+    ("google meet", "Google Meet"),
+    ("zoom", "Zoom"),
+    ("microsoft teams", "Microsoft Teams"),
+    ("webex", "Cisco Webex"),
+    ("amazon chime", "Amazon Chime"),
+    ("gotomeeting", "GoTo Meeting"),
+    ("go to meeting", "GoTo Meeting"),
+    ("bluejeans", "BlueJeans"),
+    ("whatsapp", "WhatsApp"),
+];
+
+/// Known meeting apps: a process whose normalized name is exactly the token.
+const KNOWN_EXACT: &[(&str, &str)] = &[
+    ("teams", "Microsoft Teams"),
+    ("slack", "Slack Huddle"),
+    ("discord", "Discord"),
+    ("facetime", "FaceTime"),
+    ("telegram", "Telegram"),
+    ("signal", "Signal"),
+];
+
 fn known_meeting_app(lower: &str) -> Option<&'static str> {
-    const CONTAINS: &[(&str, &str)] = &[
-        ("google meet", "Google Meet"),
-        ("zoom", "Zoom"),
-        ("microsoft teams", "Microsoft Teams"),
-        ("webex", "Cisco Webex"),
-        ("amazon chime", "Amazon Chime"),
-        ("gotomeeting", "GoTo Meeting"),
-        ("go to meeting", "GoTo Meeting"),
-        ("bluejeans", "BlueJeans"),
-        ("whatsapp", "WhatsApp"),
-    ];
-    for (token, display) in CONTAINS {
-        if lower.contains(token) {
-            return Some(display);
-        }
-    }
+    KNOWN_CONTAINS
+        .iter()
+        .find(|(token, _)| lower.contains(token))
+        .or_else(|| KNOWN_EXACT.iter().find(|(token, _)| lower == *token))
+        .map(|(_, display)| *display)
+}
 
-    const EXACT: &[(&str, &str)] = &[
-        ("teams", "Microsoft Teams"),
-        ("slack", "Slack Huddle"),
-        ("discord", "Discord"),
-        ("facetime", "FaceTime"),
-        ("telegram", "Telegram"),
-        ("signal", "Signal"),
-    ];
-    for (token, display) in EXACT {
-        if lower == *token {
-            return Some(display);
-        }
-    }
-
-    None
+/// The known meeting app a user-entered name refers to, when it is exactly
+/// that app's display name or one of its aliases ("Teams", "Zoom", "Slack").
+fn known_app_named(entry: &str) -> Option<&'static str> {
+    KNOWN_CONTAINS
+        .iter()
+        .chain(KNOWN_EXACT)
+        .find(|(token, display)| *token == entry || normalize_app_name(display) == entry)
+        .map(|(_, display)| *display)
 }
 
 /// Apps that use audio but are not meetings: media, browsers (probed for Meet
@@ -252,7 +265,27 @@ static SETTINGS: LazyLock<RwLock<MeetingDetectionSettings>> =
 /// Apps capturing the mic right now, so a settings change can re-evaluate.
 static ACTIVE_APPS: Mutex<Vec<AudioApp>> = Mutex::new(Vec::new());
 static RECENT_APPS: Mutex<Vec<AudioApp>> = Mutex::new(Vec::new());
-static SNOOZED_UNTIL: Mutex<Option<(Instant, u64)>> = Mutex::new(None);
+/// Wall-clock end of the snooze, in Unix seconds. Wall clock rather than
+/// `Instant` because `Instant` stops while the Mac sleeps, which would stretch a
+/// one-hour snooze overnight.
+static SNOOZED_UNTIL: Mutex<Option<u64>> = Mutex::new(None);
+/// Set once the store file has been checked (and backed up if unreadable).
+static STORE_CHECKED: AtomicBool = AtomicBool::new(false);
+
+/// Event the settings UI listens to so it never works from a stale copy.
+pub const CHANGED_EVENT: &str = "meeting-detection-changed";
+
+fn now_epoch() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|now| now.as_secs())
+        .unwrap_or_default()
+}
+
+/// Whether a snooze ending at `until` (Unix seconds) is still running at `now`.
+fn snooze_active(until: Option<u64>, now: u64) -> bool {
+    until.is_some_and(|until| now < until)
+}
 
 fn cached_settings() -> MeetingDetectionSettings {
     SETTINGS
@@ -267,11 +300,61 @@ fn set_cached_settings(settings: MeetingDetectionSettings) {
     }
 }
 
-/// Load the settings from the store into the in-memory cache.
+/// If the store file exists but cannot be read as settings, copy it to
+/// `<file>.bak` so the user's list survives the defaults being saved over it.
+/// Returns the backup path when one was written.
+fn back_up_unreadable_store(path: &Path) -> Option<PathBuf> {
+    let bytes = std::fs::read(path).ok()?;
+    let readable = serde_json::from_slice::<serde_json::Value>(&bytes)
+        .ok()
+        .is_some_and(|value| match value.get(STORE_KEY) {
+            Some(settings) => {
+                serde_json::from_value::<MeetingDetectionSettings>(settings.clone()).is_ok()
+            }
+            None => value.is_object(),
+        });
+    if readable {
+        return None;
+    }
+    let mut backup = path.as_os_str().to_owned();
+    backup.push(".bak");
+    let backup = PathBuf::from(backup);
+    match std::fs::copy(path, &backup) {
+        Ok(_) => {
+            log::warn!(
+                "Meeting detection: {} was unreadable; saved a copy to {} and using defaults",
+                path.display(),
+                backup.display()
+            );
+            Some(backup)
+        }
+        Err(error) => {
+            log::warn!(
+                "Meeting detection: {} is unreadable and could not be backed up: {error}",
+                path.display()
+            );
+            None
+        }
+    }
+}
+
+fn open_store<R: Runtime>(
+    app: &AppHandle<R>,
+) -> anyhow::Result<std::sync::Arc<tauri_plugin_store::Store<R>>> {
+    if !STORE_CHECKED.swap(true, Ordering::SeqCst) {
+        // The store plugin resolves relative paths against the app data dir and
+        // silently starts empty when the file cannot be parsed.
+        if let Ok(path) = app.path().resolve(STORE_FILE, BaseDirectory::AppData) {
+            back_up_unreadable_store(&path);
+        }
+    }
+    app.store(STORE_FILE)
+        .map_err(|error| anyhow::anyhow!("Failed to open {STORE_FILE}: {error}"))
+}
+
+/// Load the settings (and any persisted snooze) from the store into memory.
 pub fn load_settings<R: Runtime>(app: &AppHandle<R>) -> anyhow::Result<MeetingDetectionSettings> {
-    let store = app
-        .store(STORE_FILE)
-        .map_err(|error| anyhow::anyhow!("Failed to open {STORE_FILE}: {error}"))?;
+    let store = open_store(app)?;
     let settings = match store.get(STORE_KEY) {
         Some(value) => serde_json::from_value(value).unwrap_or_else(|error| {
             log::warn!("Meeting detection: unreadable settings, using defaults: {error}");
@@ -287,28 +370,90 @@ fn save_settings<R: Runtime>(
     app: &AppHandle<R>,
     settings: &MeetingDetectionSettings,
 ) -> anyhow::Result<()> {
-    let store = app
-        .store(STORE_FILE)
-        .map_err(|error| anyhow::anyhow!("Failed to open {STORE_FILE}: {error}"))?;
+    let store = open_store(app)?;
     store.set(STORE_KEY, serde_json::to_value(settings)?);
     store
         .save()
         .map_err(|error| anyhow::anyhow!("Failed to save {STORE_FILE}: {error}"))?;
     set_cached_settings(settings.clone());
+    let _ = app.emit(CHANGED_EVENT, ());
     Ok(())
 }
 
-/// Seconds since the Unix epoch when the snooze ends, if detection is snoozed.
-fn snoozed_until_epoch() -> Option<u64> {
-    let mut guard = SNOOZED_UNTIL.lock().unwrap_or_else(|e| e.into_inner());
-    match *guard {
-        Some((until, epoch)) if Instant::now() < until => Some(epoch),
-        Some(_) => {
-            *guard = None;
-            None
-        }
-        None => None,
+/// Read-modify-write the stored settings so concurrent edits (prompt and
+/// settings window) each apply to the latest list rather than a stale copy.
+fn update_settings<R: Runtime>(
+    app: &AppHandle<R>,
+    change: impl FnOnce(&mut MeetingDetectionSettings) -> bool,
+) -> anyhow::Result<MeetingDetectionSettings> {
+    static WRITE_LOCK: Mutex<()> = Mutex::new(());
+    let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut settings = load_settings(app)?;
+    if change(&mut settings) {
+        save_settings(app, &settings)?;
     }
+    Ok(settings)
+}
+
+fn persist_snooze<R: Runtime>(app: &AppHandle<R>, until: Option<u64>) {
+    if let Ok(mut guard) = SNOOZED_UNTIL.lock() {
+        *guard = until;
+    }
+    match open_store(app) {
+        Ok(store) => {
+            match until {
+                Some(until) => store.set(SNOOZE_KEY, serde_json::json!(until)),
+                None => {
+                    store.delete(SNOOZE_KEY);
+                }
+            }
+            if let Err(error) = store.save() {
+                log::warn!("Meeting detection: could not save snooze: {error}");
+            }
+        }
+        Err(error) => log::warn!("Meeting detection: could not save snooze: {error}"),
+    }
+    let _ = app.emit(CHANGED_EVENT, ());
+}
+
+/// Restore a snooze saved before a restart, and watch for it to end.
+pub fn restore_snooze<R: Runtime>(app: &AppHandle<R>) {
+    let Ok(store) = open_store(app) else { return };
+    let until = store.get(SNOOZE_KEY).and_then(|value| value.as_u64());
+    if snooze_active(until, now_epoch()) {
+        if let Ok(mut guard) = SNOOZED_UNTIL.lock() {
+            *guard = until;
+        }
+        spawn_snooze_watcher(app.clone(), until.unwrap_or_default());
+    } else if until.is_some() {
+        persist_snooze(app, None);
+    }
+}
+
+/// Ends the snooze on time by wall clock and re-evaluates what is using the
+/// mic, so a meeting already in progress is offered as soon as it ends.
+fn spawn_snooze_watcher<R: Runtime>(app: AppHandle<R>, until: u64) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(15)).await;
+            let current = SNOOZED_UNTIL.lock().map(|guard| *guard).unwrap_or(None);
+            if current != Some(until) {
+                return; // resumed or snoozed again; that call owns the watch
+            }
+            if !snooze_active(current, now_epoch()) {
+                log::info!("Meeting detection: snooze ended");
+                persist_snooze(&app, None);
+                reevaluate(&app, PromptUpdate::ShowOrHide);
+                return;
+            }
+        }
+    });
+}
+
+/// Unix seconds when the snooze ends, if detection is snoozed now.
+fn snoozed_until_epoch() -> Option<u64> {
+    let until = SNOOZED_UNTIL.lock().map(|guard| *guard).unwrap_or(None);
+    until.filter(|_| snooze_active(until, now_epoch()))
 }
 
 /// Record the apps now capturing the mic and return the meeting to offer, with
@@ -338,17 +483,44 @@ fn current_detection() -> Option<DetectedMeeting> {
     detect_meeting_app(&apps, &cached_settings())
 }
 
-/// Re-apply the settings to whatever is capturing the mic now and update the
-/// tray. With `hide_prompt`, also hide the prompt when nothing is left to offer;
-/// the prompt's own "Don't ask" flow passes false so its Undo stays visible.
-fn reevaluate<R: Runtime>(app: &AppHandle<R>, hide_prompt: bool) {
+/// What a re-evaluation may do to the floating prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PromptUpdate {
+    /// Show the prompt for what is detected now, or hide it if nothing is.
+    ShowOrHide,
+    /// Leave the prompt alone: the prompt itself started this change and is
+    /// showing its own confirmation with Undo.
+    TrayOnly,
+}
+
+/// Re-apply the settings and snooze to whatever is capturing the mic now, so
+/// the tray and the prompt reflect them straight away.
+fn reevaluate<R: Runtime>(app: &AppHandle<R>, prompt: PromptUpdate) {
     let detected = current_detection();
-    let nothing_to_offer = detected.is_none();
-    crate::tray::set_meeting_detected(app, detected.map(|d| d.display_name));
-    if hide_prompt && nothing_to_offer {
-        if let Some(window) = app.get_webview_window("meeting-prompt") {
-            let _ = window.hide();
+    crate::tray::set_meeting_detected(app, detected.as_ref().map(|d| d.display_name.clone()));
+    if prompt == PromptUpdate::TrayOnly {
+        return;
+    }
+    match detected {
+        Some(detected) => {
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                crate::meeting_prompt::maybe_show(&app, &detected).await;
+            });
         }
+        None => {
+            if let Some(window) = app.get_webview_window("meeting-prompt") {
+                let _ = window.hide();
+            }
+        }
+    }
+}
+
+fn prompt_update_for(source: Option<&str>) -> PromptUpdate {
+    if source == Some("prompt") {
+        PromptUpdate::TrayOnly
+    } else {
+        PromptUpdate::ShowOrHide
     }
 }
 
@@ -361,32 +533,39 @@ pub fn get_meeting_detection_settings<R: Runtime>(
     load_settings(&app).map_err(|error| error.to_string())
 }
 
+/// Turn the "only known meeting apps" option on or off without touching the
+/// ignore list.
 #[tauri::command]
-pub fn set_meeting_detection_settings<R: Runtime>(
+pub fn set_only_known_meeting_apps<R: Runtime>(
     app: AppHandle<R>,
-    settings: MeetingDetectionSettings,
+    enabled: bool,
 ) -> Result<MeetingDetectionSettings, String> {
-    save_settings(&app, &settings).map_err(|error| error.to_string())?;
-    reevaluate(&app, true);
+    let settings = update_settings(&app, |settings| {
+        let changed = settings.only_known_apps != enabled;
+        settings.only_known_apps = enabled;
+        changed
+    })
+    .map_err(|error| error.to_string())?;
+    reevaluate(&app, PromptUpdate::ShowOrHide);
     Ok(settings)
 }
 
-/// Add an app to the ignore list (from the prompt or from settings).
+/// Add an app to the ignore list. `source` is "prompt" when the floating
+/// prompt asked, so it can keep showing its Undo.
 #[tauri::command]
 pub fn ignore_meeting_app<R: Runtime>(
     app: AppHandle<R>,
     target: AudioApp,
+    source: Option<String>,
 ) -> Result<MeetingDetectionSettings, String> {
-    let mut settings = load_settings(&app).map_err(|error| error.to_string())?;
-    if add_ignored(&mut settings, &target) {
-        save_settings(&app, &settings).map_err(|error| error.to_string())?;
-        log::info!(
-            "Meeting detection: ignoring {} ({:?})",
-            target.name,
-            target.bundle_id
-        );
-    }
-    reevaluate(&app, false);
+    let settings = update_settings(&app, |settings| add_ignored(settings, &target))
+        .map_err(|error| error.to_string())?;
+    log::info!(
+        "Meeting detection: ignoring {} ({:?})",
+        target.name,
+        target.bundle_id
+    );
+    reevaluate(&app, prompt_update_for(source.as_deref()));
     Ok(settings)
 }
 
@@ -395,12 +574,11 @@ pub fn ignore_meeting_app<R: Runtime>(
 pub fn unignore_meeting_app<R: Runtime>(
     app: AppHandle<R>,
     target: AudioApp,
+    source: Option<String>,
 ) -> Result<MeetingDetectionSettings, String> {
-    let mut settings = load_settings(&app).map_err(|error| error.to_string())?;
-    if remove_ignored(&mut settings, &target) {
-        save_settings(&app, &settings).map_err(|error| error.to_string())?;
-    }
-    reevaluate(&app, false);
+    let settings = update_settings(&app, |settings| remove_ignored(settings, &target))
+        .map_err(|error| error.to_string())?;
+    reevaluate(&app, prompt_update_for(source.as_deref()));
     Ok(settings)
 }
 
@@ -413,18 +591,16 @@ pub fn get_recent_audio_apps() -> Vec<AudioApp> {
 /// Stop detecting meetings for `minutes`. Returns when the snooze ends (Unix seconds).
 #[tauri::command]
 pub fn snooze_meeting_detection<R: Runtime>(app: AppHandle<R>, minutes: u32) -> u64 {
-    let duration = Duration::from_secs(u64::from(minutes.clamp(1, 24 * 60)) * 60);
-    let until_epoch = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|now| (now + duration).as_secs())
-        .unwrap_or_default();
-    if let Ok(mut guard) = SNOOZED_UNTIL.lock() {
-        *guard = Some((Instant::now() + duration, until_epoch));
-    }
+    let until = now_epoch() + u64::from(minutes.clamp(1, 24 * 60)) * 60;
+    persist_snooze(&app, Some(until));
     log::info!("Meeting detection: snoozed for {minutes} minutes");
-    crate::meeting_prompt::dismiss_meeting_prompt(app.clone());
-    reevaluate(&app, true);
-    until_epoch
+    // Cancel any unclaimed start request, but do not mark the prompt dismissed:
+    // the snooze suppresses it, and when the snooze ends a meeting already in
+    // progress should be offered.
+    crate::meeting_prompt::cancel_pending_request(&app);
+    reevaluate(&app, PromptUpdate::ShowOrHide);
+    spawn_snooze_watcher(app, until);
+    until
 }
 
 /// When the current snooze ends (Unix seconds), if one is active.
@@ -435,10 +611,8 @@ pub fn get_meeting_detection_snooze() -> Option<u64> {
 
 #[tauri::command]
 pub fn resume_meeting_detection<R: Runtime>(app: AppHandle<R>) {
-    if let Ok(mut guard) = SNOOZED_UNTIL.lock() {
-        *guard = None;
-    }
-    reevaluate(&app, true);
+    persist_snooze(&app, None);
+    reevaluate(&app, PromptUpdate::ShowOrHide);
 }
 
 #[cfg(test)]
@@ -564,6 +738,83 @@ mod tests {
             detect_meeting_app(&apps(&["Some Call App.app"]), &settings),
             None
         );
+    }
+
+    #[test]
+    fn a_typed_known_app_name_or_alias_covers_all_its_processes() {
+        for entry in ["Teams", "Microsoft Teams", "microsoft teams"] {
+            let settings = ignoring(&[AudioApp::named(entry)]);
+            assert_eq!(
+                detect_meeting_app(&apps(&["Microsoft Teams (work or school)"]), &settings),
+                None,
+                "{entry}"
+            );
+            assert_eq!(
+                detect_meeting_app(&apps(&["Teams"]), &settings),
+                None,
+                "{entry}"
+            );
+        }
+        let settings = ignoring(&[AudioApp::named("Slack")]);
+        assert_eq!(detect_meeting_app(&apps(&["Slack"]), &settings), None);
+        // Only an exact alias counts: a longer name that merely contains one does not.
+        let settings = ignoring(&[AudioApp::named("Zoom Notes Helper")]);
+        assert_eq!(
+            detect_meeting_app(&apps(&["zoom.us"]), &settings)
+                .map(|d| d.display_name)
+                .as_deref(),
+            Some("Zoom")
+        );
+    }
+
+    #[test]
+    fn snooze_expiry_follows_the_wall_clock() {
+        assert!(snooze_active(Some(1_000), 999));
+        assert!(!snooze_active(Some(1_000), 1_000));
+        assert!(!snooze_active(None, 0));
+        // An hour's snooze set before an overnight sleep is over in the morning.
+        let set_at = 1_700_000_000;
+        assert!(!snooze_active(Some(set_at + 3600), set_at + 9 * 3600));
+    }
+
+    #[test]
+    fn an_unreadable_store_is_backed_up_before_defaults_take_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("meeting_detection.json");
+
+        assert_eq!(
+            back_up_unreadable_store(&path),
+            None,
+            "missing file is fine"
+        );
+
+        std::fs::write(&path, br#"{"settings":{"ignored_apps":[{"name":"X"}]}}"#).unwrap();
+        assert_eq!(
+            back_up_unreadable_store(&path),
+            None,
+            "valid file is left alone"
+        );
+
+        std::fs::write(&path, b"{ not json").unwrap();
+        let backup = back_up_unreadable_store(&path).expect("backed up");
+        assert_eq!(backup, dir.path().join("meeting_detection.json.bak"));
+        assert_eq!(std::fs::read(&backup).unwrap(), b"{ not json");
+
+        std::fs::write(&path, br#"{"settings":{"ignored_apps":"oops"}}"#).unwrap();
+        assert!(
+            back_up_unreadable_store(&path).is_some(),
+            "wrong shape is backed up"
+        );
+    }
+
+    #[test]
+    fn only_the_prompt_keeps_its_own_view_on_ignore() {
+        assert_eq!(prompt_update_for(Some("prompt")), PromptUpdate::TrayOnly);
+        assert_eq!(
+            prompt_update_for(Some("settings")),
+            PromptUpdate::ShowOrHide
+        );
+        assert_eq!(prompt_update_for(None), PromptUpdate::ShowOrHide);
     }
 
     #[test]

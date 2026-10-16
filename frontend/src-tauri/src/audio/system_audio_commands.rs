@@ -51,6 +51,7 @@ pub async fn start_system_audio_monitoring(
     if let Err(error) = crate::meeting_detection::load_settings(&app_handle) {
         tracing::warn!("Meeting detection: could not load settings: {error}");
     }
+    crate::meeting_detection::restore_snooze(&app_handle);
 
     let mut detector = SystemAudioDetector::new();
 

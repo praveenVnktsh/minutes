@@ -222,6 +222,12 @@ fn settle_request_state(
 #[tauri::command]
 pub fn dismiss_meeting_prompt<R: Runtime>(app: AppHandle<R>) {
     dismiss();
+    cancel_pending_request(&app);
+}
+
+/// Drop a start request nobody has claimed yet, without marking the prompt
+/// dismissed for the rest of the call.
+pub fn cancel_pending_request<R: Runtime>(app: &AppHandle<R>) {
     let request_id = {
         let mut pending = PENDING_REQUEST
             .lock()
@@ -229,7 +235,7 @@ pub fn dismiss_meeting_prompt<R: Runtime>(app: AppHandle<R>) {
         cancel_unclaimed(&mut pending)
     };
     if let Some(request_id) = request_id {
-        clear_legacy_fallback(&app, &request_id);
+        clear_legacy_fallback(app, &request_id);
     }
 }
 

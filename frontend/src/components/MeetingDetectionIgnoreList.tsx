@@ -34,25 +34,36 @@ export function MeetingDetectionIgnoreList() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const refresh = useCallback(async (isCancelled: () => boolean = () => false) => {
+    try {
+      const [loaded, recentApps, snooze] = await Promise.all([
+        meetingDetectionService.getSettings(),
+        meetingDetectionService.recentApps().catch(() => [] as AudioApp[]),
+        meetingDetectionService.snoozedUntil().catch(() => null),
+      ]);
+      if (isCancelled()) return;
+      setSettings(loaded);
+      setRecent(recentApps ?? []);
+      setSnoozedUntil(snooze);
+    } catch (loadError) {
+      if (!isCancelled()) setError(`Could not load ignored apps: ${describeError(loadError)}`);
+    }
+  }, []);
+
+  // Load once, then follow changes made anywhere (the prompt's "Don't ask",
+  // a snooze ending) so this view never writes back a stale copy.
   useEffect(() => {
     let cancelled = false;
-    void (async () => {
-      try {
-        const [loaded, recentApps, snooze] = await Promise.all([
-          meetingDetectionService.getSettings(),
-          meetingDetectionService.recentApps().catch(() => [] as AudioApp[]),
-          meetingDetectionService.snoozedUntil().catch(() => null),
-        ]);
-        if (cancelled) return;
-        setSettings(loaded);
-        setRecent(recentApps ?? []);
-        setSnoozedUntil(snooze);
-      } catch (loadError) {
-        if (!cancelled) setError(`Could not load ignored apps: ${describeError(loadError)}`);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, []);
+    let unlisten: (() => void) | undefined;
+    void refresh(() => cancelled);
+    meetingDetectionService.onChanged(() => { void refresh(() => cancelled); })
+      .then((stop) => { if (cancelled) stop(); else unlisten = stop; })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [refresh]);
 
   const run = useCallback(async (action: () => Promise<MeetingDetectionSettings>) => {
     setBusy(true);
@@ -113,7 +124,7 @@ export function MeetingDetectionIgnoreList() {
           aria-label="Only prompt for known meeting apps"
           checked={settings.only_known_apps}
           disabled={busy}
-          onCheckedChange={(enabled) => void run(() => meetingDetectionService.setSettings({ ...settings, only_known_apps: enabled }))}
+          onCheckedChange={(enabled) => void run(() => meetingDetectionService.setOnlyKnownApps(enabled))}
         />
       </div>
 

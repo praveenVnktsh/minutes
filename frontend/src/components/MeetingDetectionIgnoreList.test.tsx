@@ -3,9 +3,20 @@ import React from 'react'
 import { act, create, type ReactTestRenderer } from 'react-test-renderer'
 
 const originalCore = { ...(await import('@tauri-apps/api/core')) }
+const originalEvent = { ...(await import('@tauri-apps/api/event')) }
 afterAll(() => {
   mock.module('@tauri-apps/api/core', () => originalCore)
+  mock.module('@tauri-apps/api/event', () => originalEvent)
 })
+
+const eventHandlers = new Map<string, () => void>()
+mock.module('@tauri-apps/api/event', () => ({
+  ...originalEvent,
+  listen: async (event: string, handler: () => void) => {
+    eventHandlers.set(event, handler)
+    return () => eventHandlers.delete(event)
+  },
+}))
 
 type App = { name: string; bundle_id: string | null }
 let settings: { ignored_apps: App[]; only_known_apps: boolean }
@@ -31,8 +42,8 @@ mock.module('@tauri-apps/api/core', () => ({
         settings = { ...settings, ignored_apps: settings.ignored_apps.filter((app) => app.name !== target.name) }
         return settings
       }
-      case 'set_meeting_detection_settings':
-        settings = args!.settings as typeof settings
+      case 'set_only_known_meeting_apps':
+        settings = { ...settings, only_known_apps: args!.enabled as boolean }
         return settings
       default:
         return undefined
@@ -63,6 +74,7 @@ describe('MeetingDetectionIgnoreList', () => {
       { name: 'Raycast', bundle_id: 'com.raycast.macos' },
     ]
     calls.length = 0
+    eventHandlers.clear()
   })
 
   test('lists ignored apps and removes one', async () => {
@@ -82,7 +94,7 @@ describe('MeetingDetectionIgnoreList', () => {
     expect(renderer.root.findAll((node) => node.type === 'button' && textOf(node) === 'Superwhisper')).toHaveLength(0)
     await act(async () => { chips[0].props.onClick() })
     const added = calls.find((call) => call.command === 'ignore_meeting_app')
-    expect(added?.args).toEqual({ target: { name: 'Raycast', bundle_id: 'com.raycast.macos' } })
+    expect(added?.args).toEqual({ target: { name: 'Raycast', bundle_id: 'com.raycast.macos' }, source: 'settings' })
   })
 
   test('adds a typed app name', async () => {
@@ -92,15 +104,27 @@ describe('MeetingDetectionIgnoreList', () => {
     const form = renderer.root.findByType('form')
     await act(async () => { form.props.onSubmit({ preventDefault: () => {} }) })
     const added = calls.find((call) => call.command === 'ignore_meeting_app')
-    expect(added?.args).toEqual({ target: { name: 'Voice Tool', bundle_id: null } })
+    expect(added?.args).toEqual({ target: { name: 'Voice Tool', bundle_id: null }, source: 'settings' })
     expect(text(renderer)).toContain('Voice Tool')
   })
 
-  test('saves the only-known-apps toggle', async () => {
+  test('the only-known-apps toggle sends just the flag, so apps added elsewhere survive', async () => {
     const renderer = await render()
+    // The prompt adds an app while settings is open.
+    settings = { ...settings, ignored_apps: [...settings.ignored_apps, { name: 'zoom.us', bundle_id: 'us.zoom.xos' }] }
     const toggle = renderer.root.findByProps({ 'aria-label': 'Only prompt for known meeting apps' })
     await act(async () => { toggle.props.onCheckedChange(true) })
-    const saved = calls.find((call) => call.command === 'set_meeting_detection_settings')
-    expect((saved?.args as { settings: typeof settings }).settings.only_known_apps).toBe(true)
+    const saved = calls.find((call) => call.command === 'set_only_known_meeting_apps')
+    expect(saved?.args).toEqual({ enabled: true })
+    expect(calls.some((call) => call.command === 'set_meeting_detection_settings')).toBe(false)
+    expect(settings.ignored_apps.map((app) => app.name)).toEqual(['Superwhisper', 'zoom.us'])
+    expect(text(renderer)).toContain('zoom.us')
+  })
+
+  test('refreshes when detection settings change elsewhere', async () => {
+    const renderer = await render()
+    settings = { ...settings, ignored_apps: [...settings.ignored_apps, { name: 'Raycast', bundle_id: null }] }
+    await act(async () => { eventHandlers.get('meeting-detection-changed')?.() })
+    expect(renderer.root.findAllByProps({ 'aria-label': 'Remove Raycast' })).toHaveLength(1)
   })
 })

@@ -47,13 +47,13 @@ pub mod audio;
 pub mod calendar;
 pub mod config;
 pub mod console_utils;
+pub mod copilot;
 pub mod database;
 pub mod debug_mode;
 pub mod download_eta;
 pub mod groq;
 pub mod live_notes;
 pub mod live_summary;
-pub mod copilot;
 pub mod meeting_activity;
 pub mod meeting_assistant;
 pub mod meeting_detection;
@@ -900,7 +900,7 @@ pub fn run() {
             debug_mode::delete_debug_meetings,
             meeting_prompt::dismiss_meeting_prompt,
             meeting_detection::get_meeting_detection_settings,
-            meeting_detection::set_meeting_detection_settings,
+            meeting_detection::set_only_known_meeting_apps,
             meeting_detection::ignore_meeting_app,
             meeting_detection::unignore_meeting_app,
             meeting_detection::get_recent_audio_apps,

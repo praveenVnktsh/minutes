@@ -56,6 +56,11 @@ describe('detectMeetingApp with an ignore list', () => {
     expect(normalizeAppName('  SuperWhisper.app ')).toBe('superwhisper');
   });
 
+  test('a typed alias covers every process of that known app', () => {
+    expect(detectMeetingApp(['Microsoft Teams (work or school)'], { ignored: ['Teams'] })).toBeNull();
+    expect(detectMeetingApp(['zoom.us'], { ignored: ['Zoom Notes Helper'] })?.name).toBe('Zoom');
+  });
+
   test('a non-ignored app still triggers alongside an ignored one', () => {
     expect(detectMeetingApp(['zoom.us', 'Slack'], { ignored: ['Zoom'] })?.name).toBe('Slack Huddle');
   });

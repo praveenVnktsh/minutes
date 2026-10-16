@@ -26,6 +26,11 @@ export default function MeetingPromptPage() {
   const [view, setView] = useState<PromptView>('prompt')
   const [actionError, setActionError] = useState<string | null>(null)
   const undoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const viewRef = useRef<PromptView>('prompt')
+  const moreButtonRef = useRef<HTMLButtonElement | null>(null)
+  const firstMenuItemRef = useRef<HTMLButtonElement | null>(null)
+  const undoButtonRef = useRef<HTMLButtonElement | null>(null)
+  const previousViewRef = useRef<PromptView>('prompt')
   const [requestId, setRequestId] = useState<string | null>(null)
   const [pending, setPending] = useState(false)
   const [listenerReady, setListenerReady] = useState(false)
@@ -93,7 +98,13 @@ export default function MeetingPromptPage() {
       else earlyResultsRef.current.set(result.request_id, result)
     }), () => setListenerReady(true), true)
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !pendingRef.current) {
+      if (event.key !== 'Escape') return
+      // Escape closes the "…" menu back to the prompt rather than dismissing it.
+      if (viewRef.current === 'more') {
+        setView('prompt')
+        return
+      }
+      if (!pendingRef.current) {
         void invoke('dismiss_meeting_prompt')
           .catch(() => {})
           .then(() => getCurrentWindow().hide())
@@ -117,9 +128,21 @@ export default function MeetingPromptPage() {
     if (undoTimerRef.current) clearTimeout(undoTimerRef.current)
   }, [])
 
+  // Keep focus with the view: into the menu when it opens, onto Undo after
+  // "Don't ask", and back to the "…" button when the menu closes.
+  useEffect(() => {
+    viewRef.current = view
+    if (view === 'more') firstMenuItemRef.current?.focus()
+    else if (view === 'ignored') undoButtonRef.current?.focus()
+    else if (previousViewRef.current === 'more') moreButtonRef.current?.focus()
+    previousViewRef.current = view
+  }, [view])
+
+  // Only hide the window. The ignore list already stops this app prompting;
+  // marking the prompt dismissed would also silence the next real meeting
+  // until the microphone goes idle.
   const closeAfterIgnore = useCallback(async () => {
     undoTimerRef.current = null
-    await invoke('dismiss_meeting_prompt').catch(() => {})
     await getCurrentWindow().hide()
     setView('prompt')
   }, [])
@@ -128,7 +151,7 @@ export default function MeetingPromptPage() {
     if (pending) return
     const target = detectedApp ?? { name: appName, bundle_id: null }
     try {
-      await meetingDetectionService.ignoreApp(target)
+      await meetingDetectionService.ignoreApp(target, 'prompt')
     } catch (ignoreError) {
       setActionError(ignoreError instanceof Error ? ignoreError.message : String(ignoreError))
       setView('prompt')
@@ -144,7 +167,7 @@ export default function MeetingPromptPage() {
     undoTimerRef.current = null
     const target = detectedApp ?? { name: appName, bundle_id: null }
     try {
-      await meetingDetectionService.unignoreApp(target)
+      await meetingDetectionService.unignoreApp(target, 'prompt')
       setView('prompt')
     } catch (undoError) {
       setActionError(undoError instanceof Error ? undoError.message : String(undoError))
@@ -200,7 +223,7 @@ export default function MeetingPromptPage() {
       <main className={shell}>
         <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-2 text-ink-muted"><BellOff className="h-4 w-4" /></span>
         <p role="status" className="min-w-0 flex-1 truncate text-[12px] text-ink">Won&apos;t ask for {appName} again</p>
-        <Button size="sm" variant="outline" className="h-7 shrink-0 gap-1.5 px-3" onClick={() => void undoIgnore()}>
+        <Button ref={undoButtonRef} size="sm" variant="outline" className="h-7 shrink-0 gap-1.5 px-3" onClick={() => void undoIgnore()}>
           <Undo2 className="h-3 w-3" />
           Undo
         </Button>
@@ -211,17 +234,17 @@ export default function MeetingPromptPage() {
   if (view === 'more') {
     return (
       <main className={shell}>
-        <div className="flex min-w-0 flex-1 flex-col gap-1">
-          <button type="button" onClick={() => void dontAskAgain()} className="flex min-w-0 items-center gap-1.5 rounded-md px-1.5 py-0.5 text-left text-[12px] text-ink hover:bg-surface-2">
+        <div id="meeting-prompt-menu" role="menu" aria-label="More options" className="flex min-w-0 flex-1 flex-col gap-1">
+          <button ref={firstMenuItemRef} type="button" role="menuitem" onClick={() => void dontAskAgain()} className="flex min-w-0 items-center gap-1.5 rounded-md px-1.5 py-0.5 text-left text-[12px] text-ink hover:bg-surface-2">
             <BellOff className="h-3 w-3 shrink-0 text-ink-subtle" />
             <span className="truncate">Don&apos;t ask for {appName}</span>
           </button>
-          <button type="button" onClick={() => void snooze()} className="flex min-w-0 items-center gap-1.5 rounded-md px-1.5 py-0.5 text-left text-[12px] text-ink-muted hover:bg-surface-2 hover:text-ink">
+          <button type="button" role="menuitem" onClick={() => void snooze()} className="flex min-w-0 items-center gap-1.5 rounded-md px-1.5 py-0.5 text-left text-[12px] text-ink-muted hover:bg-surface-2 hover:text-ink">
             <Clock className="h-3 w-3 shrink-0 text-ink-subtle" />
             <span className="truncate">Snooze detection for 1 hour</span>
           </button>
         </div>
-        <button type="button" aria-label="Back" onClick={() => setView('prompt')} className="shrink-0 rounded-md p-1.5 text-ink-subtle hover:bg-surface-2 hover:text-ink">
+        <button type="button" aria-label="Close menu" onClick={() => setView('prompt')} className="shrink-0 rounded-md p-1.5 text-ink-subtle hover:bg-surface-2 hover:text-ink">
           <X className="h-3.5 w-3.5" />
         </button>
       </main>
@@ -242,7 +265,7 @@ export default function MeetingPromptPage() {
         {pending ? 'Starting' : !listenerReady ? subscriptionError ? 'Retry' : 'Preparing' : error ? 'Retry' : 'Start'}
       </Button>
       <div className="-ml-1 flex shrink-0 items-center">
-        <button type="button" aria-label="More options" disabled={pending} onClick={() => setView('more')} className="rounded-md p-1.5 text-ink-subtle hover:bg-surface-2 hover:text-ink disabled:opacity-40">
+        <button ref={moreButtonRef} type="button" aria-label="More options" aria-haspopup="menu" aria-expanded={false} aria-controls="meeting-prompt-menu" disabled={pending} onClick={() => setView('more')} className="rounded-md p-1.5 text-ink-subtle hover:bg-surface-2 hover:text-ink disabled:opacity-40">
           <MoreHorizontal className="h-3.5 w-3.5" />
         </button>
         <button type="button" aria-label="Dismiss" disabled={pending} onClick={() => void dismiss()} className="rounded-md p-1.5 text-ink-subtle hover:bg-surface-2 hover:text-ink disabled:opacity-40">
