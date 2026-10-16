@@ -633,16 +633,12 @@ mod tests {
             .unwrap();
         assert_eq!(ollama["options"]["num_ctx"], 4096, "the app-wide num_ctx");
 
-        let (_, _, gpt5, _) = streamer(LLMProvider::OpenAI, None)
-            .request(&parts(), 300, 0.3)
-            .unwrap();
-        let mut gpt5 = gpt5;
-        gpt5["model"] = "gpt-5-mini".into();
-        let (_, _, plain, _) = streamer(LLMProvider::OpenRouter, None)
+        // An OpenAI model the name check does not know refuses max_tokens.
+        let (_, _, plain, _) = streamer(LLMProvider::OpenAI, None)
             .request(&parts(), 300, 0.3)
             .unwrap();
         let retry = compatibility_retry_body(
-            &LLMProvider::OpenRouter,
+            &LLMProvider::OpenAI,
             &plain,
             reqwest::StatusCode::BAD_REQUEST,
             r#"{"error":{"message":"Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.","param":"max_tokens"}}"#,
