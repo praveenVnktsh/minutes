@@ -14,7 +14,7 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use super::models;
-use super::sidecar::{OnAbandon, SidecarManager};
+use super::sidecar::{OnAbandon, Priority, SidecarError, SidecarManager, SidecarRequest};
 
 // ============================================================================
 // Request/Response Types
@@ -38,6 +38,17 @@ enum Request {
         penalty_last_n: Option<i32>,
         stop_tokens: Option<Vec<String>>,
         seed: Option<u32>,
+        /// Echoed on every reply line; lets the sidecar cancel this request.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        stream: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_prompt: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_prefix_chars: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_context_size: Option<u32>,
     },
     Tokenize {
         text: String,
@@ -60,6 +71,12 @@ enum Response {
         prompt_tokens: Option<u32>,
         #[serde(default)]
         error_kind: Option<String>,
+        #[serde(default)]
+        completion_tokens: Option<u32>,
+        #[serde(default)]
+        reused_tokens: Option<u32>,
+        #[serde(default)]
+        tokens_per_second: Option<f64>,
     },
     TokenCount {
         count: u32,
@@ -108,12 +125,18 @@ fn parse_generate_response(response_json: &str) -> Result<BuiltinCompletion> {
             finish_reason,
             prompt_tokens,
             error_kind,
+            ..
         } => {
             if let Some(err_msg) = error {
                 if error_kind.as_deref() == Some("context_overflow") {
                     return Err(anyhow!(BuiltinError::ContextOverflow(err_msg)));
                 }
                 return Err(anyhow!("Generation failed: {}", err_msg));
+            }
+            // A reply this caller is still waiting for was only cancelled if
+            // another (interactive) request pre-empted it.
+            if finish_reason.as_deref() == Some("cancelled") {
+                return Err(anyhow!(SidecarError::Preempted));
             }
             Ok(BuiltinCompletion {
                 text,
@@ -345,6 +368,7 @@ pub async fn generate_with_builtin(
         .and_then(|value| i32::try_from(value).ok())
         .filter(|value| *value > 0)
         .unwrap_or(models::DEFAULT_MAX_TOKENS);
+    let id = next_request_id();
     let request = Request::Generate {
         prompt: formatted_prompt,
         max_tokens: Some(max_tokens),
@@ -359,6 +383,11 @@ pub async fn generate_with_builtin(
         penalty_last_n: Some(sampling.penalty_last_n),
         stop_tokens: Some(sampling.stop_tokens),
         seed: Some(options.seed.unwrap_or(BUILTIN_SEED)),
+        id: Some(id),
+        stream: None,
+        cache_prompt: None,
+        cache_prefix_chars: None,
+        cache_context_size: None,
     };
 
     let request_json = serde_json::to_string(&request)?;
@@ -367,14 +396,18 @@ pub async fn generate_with_builtin(
         .unwrap_or(Duration::from_secs(models::GENERATION_TIMEOUT_SECS));
 
     log::info!("Sending generation request to sidecar (max_tokens: {max_tokens})");
-    let response_json = send_cancellable(
-        &manager,
-        request_json,
-        timeout,
-        cancellation_token,
-        options.on_abandon,
-    )
-    .await?;
+    let response_json = manager
+        .send(SidecarRequest {
+            json: request_json,
+            id: Some(id),
+            priority: options.on_abandon.priority(),
+            timeout,
+            timeout_includes_queue: false,
+            cancellation_token,
+            on_abandon: options.on_abandon,
+            tokens: None,
+        })
+        .await?;
 
     if cancellation_token.is_some_and(CancellationToken::is_cancelled) {
         return Err(anyhow!("Generation cancelled"));
@@ -387,6 +420,166 @@ pub async fn generate_with_builtin(
         completion.truncated
     );
     Ok(completion)
+}
+
+/// Ids for generate requests, so the sidecar can cancel one in the helper.
+fn next_request_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The formatted prompt and the byte length of its stable prefix: the
+/// template's head, the system prompt and `user_stable`. llama-helper keeps
+/// that prefix's state between requests.
+pub fn format_builtin_prompt_with_prefix(
+    model_name: &str,
+    system_prompt: &str,
+    user_stable: &str,
+    user_rest: &str,
+) -> Result<(String, usize)> {
+    const SENTINEL: &str = "\u{1}COPILOT_USER\u{1}";
+    let model_def = models::get_model_by_name(model_name)
+        .ok_or_else(|| anyhow!("Unknown model: {}", model_name))?;
+    let template = model_def.template.as_str();
+    let marked = models::format_prompt(template, system_prompt, SENTINEL)?;
+    let head_len = marked
+        .find(SENTINEL)
+        .ok_or_else(|| anyhow!("Prompt template has no user slot"))?;
+    let tail_len = marked.len() - head_len - SENTINEL.len();
+    let stable_only = models::format_prompt(template, system_prompt, user_stable)?;
+    let prefix_chars = stable_only.len().saturating_sub(tail_len);
+    let full = models::format_prompt(
+        template,
+        system_prompt,
+        &format!("{user_stable}{user_rest}"),
+    )?;
+    // Escaping can only differ at the seam if a control marker straddles it;
+    // then reuse simply starts earlier.
+    let prefix_chars =
+        if full.as_bytes().get(..prefix_chars) == stable_only.as_bytes().get(..prefix_chars) {
+            prefix_chars
+        } else {
+            head_len
+        };
+    Ok((full, prefix_chars))
+}
+
+/// Settings for one streamed Copilot generation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BuiltinStreamOptions {
+    pub max_tokens: u32,
+    pub temperature: f32,
+    /// Total time allowed, waiting for the sidecar included.
+    pub timeout: Duration,
+    /// n_ctx of the helper's persistent cached context.
+    pub cache_context_size: u32,
+}
+
+/// A streamed built-in generation's result and timings.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BuiltinStreamCompletion {
+    pub text: String,
+    pub truncated: bool,
+    pub prompt_tokens: Option<u32>,
+    pub completion_tokens: Option<u32>,
+    pub reused_tokens: Option<u32>,
+    pub tokens_per_second: Option<f64>,
+}
+
+fn parse_stream_response(response_json: &str) -> Result<BuiltinStreamCompletion> {
+    let response: Response = serde_json::from_str(response_json)
+        .with_context(|| format!("Failed to parse response: {}", response_json))?;
+    match response {
+        Response::Response {
+            text,
+            error,
+            finish_reason,
+            prompt_tokens,
+            error_kind,
+            completion_tokens,
+            reused_tokens,
+            tokens_per_second,
+            ..
+        } => {
+            if let Some(err_msg) = error {
+                if error_kind.as_deref() == Some("context_overflow") {
+                    return Err(anyhow!(BuiltinError::ContextOverflow(err_msg)));
+                }
+                return Err(anyhow!("Generation failed: {}", err_msg));
+            }
+            if finish_reason.as_deref() == Some("cancelled") {
+                return Err(anyhow!(SidecarError::Cancelled));
+            }
+            Ok(BuiltinStreamCompletion {
+                text,
+                truncated: finish_reason.as_deref() == Some("length"),
+                prompt_tokens,
+                completion_tokens,
+                reused_tokens,
+                tokens_per_second,
+            })
+        }
+        Response::TokenCount { .. } => Err(anyhow!("Unexpected token count response")),
+        Response::Error { message } => Err(anyhow!("Sidecar error: {}", message)),
+    }
+}
+
+/// Streams a Copilot answer from the built-in model at interactive priority:
+/// it goes ahead of queued background work and pre-empts an in-flight live
+/// timeline request, but never a summary. Text chunks go to `tokens` as they
+/// arrive. Stop, cancel and timeout cancel the request inside the helper; the
+/// shared sidecar is never killed.
+#[allow(clippy::too_many_arguments)]
+pub async fn generate_with_builtin_stream(
+    app_data_dir: &Path,
+    model_name: &str,
+    system_prompt: &str,
+    user_stable: &str,
+    user_rest: &str,
+    options: BuiltinStreamOptions,
+    tokens: tokio::sync::mpsc::UnboundedSender<String>,
+    cancellation_token: Option<&CancellationToken>,
+) -> Result<BuiltinStreamCompletion> {
+    let (prompt, prefix_chars) =
+        format_builtin_prompt_with_prefix(model_name, system_prompt, user_stable, user_rest)?;
+    let (manager, model_def, model_path) = running_manager(app_data_dir, model_name).await?;
+    let sampling = model_def.sampling.sanitize_for_llama_helper();
+    let id = next_request_id();
+    let request = Request::Generate {
+        prompt,
+        max_tokens: Some(i32::try_from(options.max_tokens.max(1)).unwrap_or(i32::MAX)),
+        // The model's own context size, so the helper never reloads the
+        // model between Copilot and summary requests.
+        context_size: Some(model_def.context_size),
+        model_path: Some(model_path.to_string_lossy().to_string()),
+        temperature: Some(options.temperature),
+        top_k: Some(sampling.top_k),
+        top_p: Some(sampling.top_p),
+        presence_penalty: Some(sampling.presence_penalty),
+        frequency_penalty: Some(sampling.frequency_penalty),
+        repeat_penalty: Some(sampling.repeat_penalty),
+        penalty_last_n: Some(sampling.penalty_last_n),
+        stop_tokens: Some(sampling.stop_tokens),
+        seed: Some(BUILTIN_SEED),
+        id: Some(id),
+        stream: Some(true),
+        cache_prompt: Some(true),
+        cache_prefix_chars: Some(prefix_chars),
+        cache_context_size: Some(options.cache_context_size.min(model_def.context_size)),
+    };
+    let response_json = manager
+        .send(SidecarRequest {
+            json: serde_json::to_string(&request)?,
+            id: Some(id),
+            priority: Priority::Interactive,
+            timeout: options.timeout,
+            timeout_includes_queue: true,
+            cancellation_token,
+            on_abandon: OnAbandon::LetFinish,
+            tokens: Some(tokens),
+        })
+        .await?;
+    parse_stream_response(&response_json)
 }
 
 /// Shutdown the global sidecar (graceful cleanup)
@@ -462,6 +655,11 @@ mod tests {
             penalty_last_n: Some(256),
             stop_tokens: Some(vec!["<end_of_turn>".to_string()]),
             seed: Some(BUILTIN_SEED),
+            id: None,
+            stream: None,
+            cache_prompt: None,
+            cache_prefix_chars: None,
+            cache_context_size: None,
         };
 
         let json = serde_json::to_string(&request).unwrap();
@@ -560,6 +758,90 @@ mod tests {
             }
             _ => panic!("Wrong response type"),
         }
+    }
+
+    #[test]
+    fn a_preempted_background_reply_is_a_typed_error_not_partial_text() {
+        let error = parse_generate_response(
+            r#"{"type":"response","text":"half","error":null,"finish_reason":"cancelled","id":3}"#,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<SidecarError>(),
+            Some(SidecarError::Preempted)
+        ));
+    }
+
+    #[test]
+    fn summary_requests_do_not_send_the_copilot_fields() {
+        let json = serde_json::to_string(&Request::Generate {
+            prompt: "p".into(),
+            max_tokens: None,
+            context_size: None,
+            model_path: None,
+            temperature: None,
+            top_k: None,
+            top_p: None,
+            presence_penalty: None,
+            frequency_penalty: None,
+            repeat_penalty: None,
+            penalty_last_n: None,
+            stop_tokens: None,
+            seed: None,
+            id: Some(4),
+            stream: None,
+            cache_prompt: None,
+            cache_prefix_chars: None,
+            cache_context_size: None,
+        })
+        .unwrap();
+        assert!(json.contains("\"id\":4"));
+        for field in [
+            "stream",
+            "cache_prompt",
+            "cache_prefix_chars",
+            "cache_context_size",
+        ] {
+            assert!(!json.contains(field), "{field} leaked into {json}");
+        }
+    }
+
+    #[test]
+    fn the_stable_prefix_covers_the_template_head_system_and_stable_user_text() {
+        let system = "You are Copilot.";
+        let stable = "Live summary:\n[01:00] point\n\nTranscript:\n[01:10] Others: hello\n";
+        let rest = "[01:40] You: hi\n\nTask: what next?";
+        for model in ["qwen3.5:4b", "gemma3:4b"] {
+            let (full, prefix) =
+                format_builtin_prompt_with_prefix(model, system, stable, rest).unwrap();
+            let expected =
+                format_builtin_prompt(model, system, &format!("{stable}{rest}")).unwrap();
+            assert_eq!(full, expected, "{model}: same prompt as the plain path");
+            assert!(
+                full[..prefix].ends_with(stable),
+                "{model}: {:?}",
+                &full[..prefix]
+            );
+            assert!(full[prefix..].starts_with(rest));
+        }
+    }
+
+    #[test]
+    fn stream_replies_carry_reuse_stats_and_a_cancel_is_cancelled() {
+        let done = parse_stream_response(
+            r#"{"type":"response","text":"ok","error":null,"finish_reason":"stop","prompt_tokens":1200,"completion_tokens":40,"reused_tokens":1100,"tokens_per_second":14.5,"id":9}"#,
+        )
+        .unwrap();
+        assert_eq!(done.reused_tokens, Some(1100));
+        assert_eq!(done.completion_tokens, Some(40));
+        let stopped = parse_stream_response(
+            r#"{"type":"response","text":"","error":null,"finish_reason":"cancelled","id":9}"#,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            stopped.downcast_ref::<SidecarError>(),
+            Some(SidecarError::Cancelled)
+        ));
     }
 
     #[test]

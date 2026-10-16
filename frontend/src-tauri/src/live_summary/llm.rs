@@ -28,7 +28,8 @@ pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 /// The generation settings every live summary request uses, whatever the
 /// provider: the window must never interrupt or slow the meeting's summary,
 /// so an abandoned built-in request finishes in the background instead of
-/// stopping the shared sidecar.
+/// stopping the shared sidecar. It runs at background priority: Copilot may
+/// pre-empt it, and the window is then retried.
 pub(crate) fn generation_options() -> GenerationOptions {
     GenerationOptions {
         max_tokens: Some(MAX_OUTPUT_TOKENS),
@@ -37,7 +38,7 @@ pub(crate) fn generation_options() -> GenerationOptions {
         sampling_temperature: Some(TEMPERATURE),
         seed: Some(SUMMARY_SEED),
         timeout: Some(REQUEST_TIMEOUT),
-        on_abandon: OnAbandon::LetFinish,
+        on_abandon: OnAbandon::Yield,
         ..Default::default()
     }
 }
@@ -58,6 +59,9 @@ pub enum FailureKind {
     /// The provider refused us (bad key, quota, rate limit): retrying every
     /// minute only adds noise, so the worker backs off for long and says so.
     Unavailable,
+    /// Copilot needed the built-in model: not a failure. The window's text
+    /// goes back in the queue and is retried shortly, without a notice.
+    Preempted,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -77,13 +81,21 @@ impl GenerateError {
 
     /// Classifies a `generate_summary` error message.
     pub fn from_provider_error(message: String) -> Self {
-        let kind = if is_unavailable_error(&message) {
+        let kind = if is_preempted_error(&message) {
+            FailureKind::Preempted
+        } else if is_unavailable_error(&message) {
             FailureKind::Unavailable
         } else {
             FailureKind::Transient
         };
         Self { kind, message }
     }
+}
+
+/// The sidecar stopped this request for a Copilot request
+/// (`SidecarError::Preempted`).
+fn is_preempted_error(message: &str) -> bool {
+    message.contains("preempted by an interactive request")
 }
 
 /// Auth and quota failures from the providers' HTTP APIs.
@@ -208,7 +220,7 @@ mod tests {
         let ollama = build_ollama_chat_body("m", "s", "u", &options);
         assert_eq!(ollama["options"]["num_predict"], MAX_OUTPUT_TOKENS);
         assert_eq!(ollama["options"]["seed"], SUMMARY_SEED);
-        assert_eq!(options.on_abandon, OnAbandon::LetFinish);
+        assert_eq!(options.on_abandon, OnAbandon::Yield);
     }
 
     #[test]
@@ -225,6 +237,11 @@ mod tests {
         assert_eq!(
             GenerateError::from_provider_error("connection reset".into()).kind,
             FailureKind::Transient
+        );
+        let preempted = crate::summary::summary_engine::sidecar::SidecarError::Preempted;
+        assert_eq!(
+            GenerateError::from_provider_error(preempted.to_string()).kind,
+            FailureKind::Preempted
         );
     }
 }
