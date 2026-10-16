@@ -18,6 +18,7 @@ import {
 import { Sparkles, Settings, FileText, Check, Square } from 'lucide-react';
 import { useState, useEffect, ReactNode } from 'react';
 import { useConfig } from '@/contexts/ConfigContext';
+import { SUMMARY_TEMPLATE_PICKER_ENABLED } from '@/lib/summaryFeatures';
 
 interface SummaryGeneratorButtonGroupProps {
   languageSlot?: ReactNode;
@@ -114,21 +115,23 @@ export function SummaryGeneratorButtonGroup({
         </DialogContent>
       </Dialog>
 
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <Button variant="ghost" size="sm" className="h-8 max-w-44 gap-1.5 rounded-full border border-hairline px-3 text-xs">
-            <FileText className="h-3.5 w-3.5" /> <span className="truncate">{selectedTemplateName}</span>
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="end">
-          {availableTemplates.map((template) => (
-            <DropdownMenuItem key={template.id} onSelect={() => onTemplateSelect(template.id, template.name)}>
-              <Check className={`mr-2 h-3.5 w-3.5 ${selectedTemplate === template.id ? 'opacity-100' : 'opacity-0'}`} />
-              {template.name}
-            </DropdownMenuItem>
-          ))}
-        </DropdownMenuContent>
-      </DropdownMenu>
+      {SUMMARY_TEMPLATE_PICKER_ENABLED && (
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button variant="ghost" size="sm" className="h-8 max-w-44 gap-1.5 rounded-full border border-hairline px-3 text-xs">
+              <FileText className="h-3.5 w-3.5" /> <span className="truncate">{selectedTemplateName}</span>
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            {availableTemplates.map((template) => (
+              <DropdownMenuItem key={template.id} onSelect={() => onTemplateSelect(template.id, template.name)}>
+                <Check className={`mr-2 h-3.5 w-3.5 ${selectedTemplate === template.id ? 'opacity-100' : 'opacity-0'}`} />
+                {template.name}
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      )}
       <Button
         size="sm"
         variant={isGenerating ? 'error' : 'default'}

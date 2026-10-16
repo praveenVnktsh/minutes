@@ -3,14 +3,15 @@ use crate::database::repositories::{
     meeting::MeetingsRepository, setting::SettingsRepository, summary::SummaryProcessesRepository,
 };
 use crate::ollama::metadata::ModelMetadataCache;
+use crate::summary::budget::ContextBudget;
 use crate::summary::language_detection::detect_summary_language;
-use crate::summary::llm_client::{generate_summary, LLMProvider};
+use crate::summary::llm_client::{generate_summary, GenerationOptions, LLMProvider};
 use crate::summary::metadata::read_detected_summary_language_from_metadata;
 use crate::summary::processor::{
-    build_title_user_prompt, clean_llm_markdown_detailed, default_notes_system_prompt,
-    extract_meeting_name_from_markdown, generate_meeting_summary, is_prompt_echo_title,
-    language_name_from_code, require_visible_markdown, sanitize_generated_title,
-    title_system_prompt,
+    build_title_user_prompt, clean_llm_markdown_detailed, extract_meeting_name_from_markdown,
+    generate_meeting_summary, is_prompt_echo_title, language_name_from_code,
+    require_visible_markdown, resolve_summary_system_prompt, sanitize_generated_title,
+    title_system_prompt, ProviderBackend,
 };
 use crate::summary::templates::{self, Template};
 use chrono::{DateTime, Utc};
@@ -23,6 +24,12 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
+
+/// Context assumed for an Ollama model whose metadata cannot be read.
+const OLLAMA_FALLBACK_CONTEXT: usize = 8192;
+/// Cache-key threshold recorded for hosted models, which run single-pass.
+const HOSTED_TOKEN_THRESHOLD: usize = 100_000;
+const TITLE_OLLAMA_NUM_CTX: u32 = 8192;
 
 static METADATA_CACHE: LazyLock<ModelMetadataCache> =
     LazyLock::new(|| ModelMetadataCache::new(Duration::from_secs(300)));
@@ -488,63 +495,56 @@ impl SummaryService {
             }
         };
 
-        // Dynamically fetch context size based on provider and model
-        let token_threshold = if provider == LLMProvider::Ollama {
-            match METADATA_CACHE
+        // Local models get a context budget: the window the model runs with.
+        // Ollama is sent the same value as num_ctx; hosted models take the
+        // whole transcript in one pass.
+        let context_budget = if provider == LLMProvider::Ollama {
+            let model_context = match METADATA_CACHE
                 .get_or_fetch(&model_name, ollama_endpoint.as_deref())
                 .await
             {
-                Ok(metadata) => {
-                    // Reserve 300 tokens for prompt overhead
-                    let optimal = metadata.context_size.saturating_sub(300);
-                    info!(
-                        "✓ Using dynamic context for {}: {} tokens (chunk size: {})",
-                        model_name, metadata.context_size, optimal
-                    );
-                    optimal
-                }
+                Ok(metadata) => metadata.context_size,
                 Err(e) => {
                     warn!(
-                        "Failed to fetch context for {}: {}. Using default 4000",
-                        model_name, e
+                        "Failed to fetch context for {}: {}. Using {} tokens",
+                        model_name, e, OLLAMA_FALLBACK_CONTEXT
                     );
-                    4000 // Fallback to safe default
+                    OLLAMA_FALLBACK_CONTEXT
                 }
-            }
+            };
+            let budget = ContextBudget::for_ollama(model_context);
+            info!(
+                "✓ Ollama context for {}: model max {} tokens, running with num_ctx {}",
+                model_name, model_context, budget.n_ctx
+            );
+            Some(budget)
         } else if provider == LLMProvider::BuiltInAI {
-            // Get model's context size from registry
             use crate::summary::summary_engine::models;
-            let model = models::get_model_by_name(&model_name)
-                .ok_or_else(|| format!("Unknown model: {}", model_name));
-
-            match model {
-                Ok(model_def) => {
-                    // Reserve 300 tokens for prompt overhead
-                    let optimal = model_def.context_size.saturating_sub(300) as usize;
+            match models::get_model_by_name(&model_name) {
+                Some(model_def) => {
                     info!(
-                        "✓ Using BuiltInAI context size: {} tokens (chunk size: {})",
-                        model_def.context_size, optimal
+                        "✓ Using BuiltInAI context size: {} tokens",
+                        model_def.context_size
                     );
-                    optimal
+                    Some(ContextBudget::new(model_def.context_size as usize))
                 }
-                Err(e) => {
-                    warn!("{}, using default 2048", e);
-                    1748 // 2048 - 300 for overhead
+                None => {
+                    warn!("Unknown model: {}, using a 2048-token budget", model_name);
+                    Some(ContextBudget::new(2048))
                 }
             }
         } else {
-            // Cloud providers (OpenAI, Claude, Groq, CustomOpenAI) handle large contexts automatically
-            100000 // Effectively unlimited for single-pass processing
+            None
         };
+        // Recorded in the cache key; hosted models keep the legacy value.
+        let token_threshold = context_budget.map_or(HOSTED_TOKEN_THRESHOLD, |budget| budget.n_ctx);
 
         // Get app data directory for BuiltInAI provider
         let app_data_dir = app.path().app_data_dir().ok();
 
         let notes_prompt_override = crate::summary::prompt_settings::load_notes_prompt(&app);
-        let effective_notes_prompt = match notes_prompt_override.as_deref().map(str::trim) {
-            Some(trimmed) if !trimmed.is_empty() => trimmed.to_string(),
-            _ => default_notes_system_prompt(),
-        };
+        let effective_notes_prompt =
+            resolve_summary_system_prompt(notes_prompt_override.as_deref(), &custom_prompt);
 
         if let Some(code) = &summary_language {
             info!("📝 Summary language preference: {}", code);
@@ -614,24 +614,29 @@ impl SummaryService {
         };
 
         let client = reqwest::Client::new();
+        let backend = ProviderBackend {
+            client: &client,
+            provider: &provider,
+            model_name: &model_name,
+            api_key: &final_api_key,
+            ollama_endpoint: ollama_endpoint.as_deref(),
+            custom_openai_endpoint: custom_openai_endpoint.as_deref(),
+            app_data_dir: app_data_dir.as_ref(),
+            cancellation_token: Some(&cancellation_token),
+        };
         let result = generate_meeting_summary(
-            &client,
-            &provider,
+            &backend,
             &model_name,
-            &final_api_key,
             &text,
             &custom_prompt,
-            &template_id,
-            &template,
-            Some(effective_notes_prompt.as_str()),
-            token_threshold,
-            ollama_endpoint.as_deref(),
-            custom_openai_endpoint.as_deref(),
-            custom_openai_max_tokens,
-            custom_openai_temperature,
-            custom_openai_top_p,
-            app_data_dir.as_ref(),
-            Some(&cancellation_token),
+            &effective_notes_prompt,
+            context_budget,
+            &GenerationOptions {
+                max_tokens: custom_openai_max_tokens,
+                temperature: custom_openai_temperature,
+                top_p: custom_openai_top_p,
+                num_ctx: None,
+            },
             summary_language.as_deref(),
             detected_summary_language.as_deref(),
             cached_english.as_deref(),
@@ -788,9 +793,14 @@ impl SummaryService {
             &build_title_user_prompt(&transcript, notes.as_deref()),
             config.ollama_endpoint.as_deref(),
             config.custom_openai_endpoint.as_deref(),
-            config.max_tokens,
-            config.temperature,
-            config.top_p,
+            &GenerationOptions {
+                max_tokens: config.max_tokens,
+                temperature: config.temperature,
+                top_p: config.top_p,
+                // The title prompt carries up to 12k characters of transcript,
+                // more than Ollama's small default context holds.
+                num_ctx: (config.provider == LLMProvider::Ollama).then_some(TITLE_OLLAMA_NUM_CTX),
+            },
             app_data_dir.as_ref(),
             None,
         )

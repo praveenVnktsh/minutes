@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { invoke as invokeTauri } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
 import Analytics from '@/lib/analytics';
+import { SUMMARY_TEMPLATE_PICKER_ENABLED } from '@/lib/summaryFeatures';
 
 export function useTemplates() {
   const [availableTemplates, setAvailableTemplates] = useState<Array<{
@@ -11,8 +12,9 @@ export function useTemplates() {
   }>>([]);
   const [selectedTemplate, setSelectedTemplate] = useState<string>('standard_meeting');
 
-  // Fetch available templates on mount
+  // Fetch available templates on mount, only while the picker is shown.
   useEffect(() => {
+    if (!SUMMARY_TEMPLATE_PICKER_ENABLED) return;
     const fetchTemplates = async () => {
       try {
         const templates = await invokeTauri('api_list_templates') as Array<{

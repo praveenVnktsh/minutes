@@ -37,14 +37,97 @@ enum Request {
         repeat_penalty: Option<f32>,
         penalty_last_n: Option<i32>,
         stop_tokens: Option<Vec<String>>,
+        seed: Option<u32>,
+    },
+    Tokenize {
+        text: String,
+        context_size: Option<u32>,
+        model_path: Option<String>,
     },
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+// The variant name preserves the established `{"type":"response"}` wire protocol.
+#[allow(clippy::enum_variant_names)]
 enum Response {
-    Response { text: String, error: Option<String> },
-    Error { message: String },
+    Response {
+        text: String,
+        error: Option<String>,
+        #[serde(default)]
+        finish_reason: Option<String>,
+        #[serde(default)]
+        prompt_tokens: Option<u32>,
+        #[serde(default)]
+        error_kind: Option<String>,
+    },
+    TokenCount {
+        count: u32,
+    },
+    Error {
+        message: String,
+    },
+}
+
+/// Fixed sampling seed for built-in generation, so the same prompt gives the same output.
+pub const BUILTIN_SEED: u32 = 42;
+
+/// Error text llama-helper uses when prompt + output budget exceeds the context.
+/// `summary::budget::is_context_overflow_error` recognises it.
+pub const CONTEXT_OVERFLOW_MARKER: &str = "context overflow";
+
+/// A built-in generation result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuiltinCompletion {
+    pub text: String,
+    /// True when generation stopped at `max_tokens` rather than at end-of-turn.
+    pub truncated: bool,
+    pub prompt_tokens: Option<u32>,
+}
+
+fn parse_generate_response(response_json: &str) -> Result<BuiltinCompletion> {
+    let response: Response = serde_json::from_str(response_json)
+        .with_context(|| format!("Failed to parse response: {}", response_json))?;
+    match response {
+        Response::Response {
+            text,
+            error,
+            finish_reason,
+            prompt_tokens,
+            error_kind,
+        } => {
+            if let Some(err_msg) = error {
+                if error_kind.as_deref() == Some("context_overflow")
+                    && !err_msg.contains(CONTEXT_OVERFLOW_MARKER)
+                {
+                    return Err(anyhow!(
+                        "Generation failed ({CONTEXT_OVERFLOW_MARKER}): {err_msg}"
+                    ));
+                }
+                return Err(anyhow!("Generation failed: {}", err_msg));
+            }
+            Ok(BuiltinCompletion {
+                text,
+                truncated: finish_reason.as_deref() == Some("length"),
+                prompt_tokens,
+            })
+        }
+        Response::TokenCount { .. } => Err(anyhow!("Unexpected token count response")),
+        Response::Error { message } => Err(anyhow!("Sidecar error: {}", message)),
+    }
+}
+
+fn parse_token_count_response(response_json: &str) -> Result<usize> {
+    let response: Response = serde_json::from_str(response_json)
+        .with_context(|| format!("Failed to parse response: {}", response_json))?;
+    match response {
+        Response::TokenCount { count } => Ok(count as usize),
+        Response::Error { message } => Err(anyhow!("Sidecar error: {}", message)),
+        Response::Response { error, .. } => Err(anyhow!(
+            "Unexpected generate response to tokenize request: {:?}",
+            error
+        )),
+    }
 }
 
 // ============================================================================
@@ -118,44 +201,14 @@ fn get_cached_model_path(app_data_dir: &Path, model_name: &str) -> Result<PathBu
 // Public API
 // ============================================================================
 
-/// Generate text using built-in AI
-///
-/// # Arguments
-/// * `app_data_dir` - Application data directory (for model resolution)
-/// * `model_name` - Model name (e.g., "gemma3:1b")
-/// * `system_prompt` - System instructions for the model
-/// * `user_prompt` - User message/task
-/// * `cancellation_token` - Optional token for cancellation
-///
-/// # Returns
-/// Generated text
-pub async fn generate_with_builtin(
+async fn running_manager(
     app_data_dir: &Path,
     model_name: &str,
-    system_prompt: &str,
-    user_prompt: &str,
-    cancellation_token: Option<&CancellationToken>,
-) -> Result<String> {
-    // Check cancellation at start
-    if let Some(token) = cancellation_token {
-        if token.is_cancelled() {
-            return Err(anyhow!("Generation cancelled before starting"));
-        }
-    }
-
-    log::info!("Built-in AI generation request");
-    log::info!("Model: {}", model_name);
-
-    // Get model definition
+) -> Result<(Arc<SidecarManager>, models::ModelDef, PathBuf)> {
     let model_def = models::get_model_by_name(model_name)
         .ok_or_else(|| anyhow!("Unknown model: {}", model_name))?;
-
     // Resolve model path with caching (avoids repeated filesystem I/O)
     let model_path = get_cached_model_path(app_data_dir, model_name)?;
-
-    // Apply model-specific chat template
-    let formatted_prompt = models::format_prompt(&model_def.template, system_prompt, user_prompt)?;
-    // Get or initialize sidecar manager
     let manager = {
         let mut global_manager = SIDECAR_MANAGER.lock().await;
         if global_manager.is_none() {
@@ -165,22 +218,112 @@ pub async fn generate_with_builtin(
         }
         global_manager.clone().unwrap()
     };
-
-    // Ensure sidecar is running with this model
     manager.ensure_running(model_path.clone()).await?;
+    Ok((manager, model_def, model_path))
+}
 
-    // Check cancellation after sidecar startup
-    if let Some(token) = cancellation_token {
-        if token.is_cancelled() {
-            return Err(anyhow!("Generation cancelled during sidecar startup"));
+async fn send_cancellable(
+    manager: &SidecarManager,
+    request_json: String,
+    timeout: Duration,
+    cancellation_token: Option<&CancellationToken>,
+) -> Result<String> {
+    let Some(token) = cancellation_token else {
+        return manager.send_request(request_json, timeout).await;
+    };
+    tokio::select! {
+        result = manager.send_request(request_json, timeout) => result,
+        _ = token.cancelled() => {
+            log::warn!("Generation cancelled by user, shutting down sidecar");
+            // Shutdown sidecar to stop generation immediately
+            if let Err(e) = manager.shutdown().await {
+                log::error!("Failed to shutdown sidecar during cancellation: {}", e);
+            }
+            Err(anyhow!("Generation cancelled by user"))
         }
+    }
+}
+
+/// Formats the prompt exactly as `generate_with_builtin` will, so token counts
+/// of it match what llama-helper sees.
+pub fn format_builtin_prompt(
+    model_name: &str,
+    system_prompt: &str,
+    user_prompt: &str,
+) -> Result<String> {
+    let model_def = models::get_model_by_name(model_name)
+        .ok_or_else(|| anyhow!("Unknown model: {}", model_name))?;
+    models::format_prompt(&model_def.template, system_prompt, user_prompt)
+}
+
+/// Counts `text`'s tokens with the built-in model's own tokenizer.
+pub async fn count_builtin_tokens(
+    app_data_dir: &Path,
+    model_name: &str,
+    text: &str,
+    cancellation_token: Option<&CancellationToken>,
+) -> Result<usize> {
+    let (manager, model_def, model_path) = running_manager(app_data_dir, model_name).await?;
+    let request_json = serde_json::to_string(&Request::Tokenize {
+        text: text.to_string(),
+        context_size: Some(model_def.context_size),
+        model_path: Some(model_path.to_string_lossy().to_string()),
+    })?;
+    let response_json = send_cancellable(
+        &manager,
+        request_json,
+        Duration::from_secs(TOKENIZE_TIMEOUT_SECS),
+        cancellation_token,
+    )
+    .await?;
+    parse_token_count_response(&response_json)
+}
+
+const TOKENIZE_TIMEOUT_SECS: u64 = 120;
+
+/// Generate text using built-in AI
+///
+/// # Arguments
+/// * `app_data_dir` - Application data directory (for model resolution)
+/// * `model_name` - Model name (e.g., "gemma3:1b")
+/// * `system_prompt` - System instructions for the model
+/// * `user_prompt` - User message/task
+/// * `max_tokens` - Output budget; `None` uses `models::DEFAULT_MAX_TOKENS`
+/// * `cancellation_token` - Optional token for cancellation
+///
+/// # Returns
+/// The generated text, and whether it stopped at the output budget.
+pub async fn generate_with_builtin(
+    app_data_dir: &Path,
+    model_name: &str,
+    system_prompt: &str,
+    user_prompt: &str,
+    max_tokens: Option<u32>,
+    cancellation_token: Option<&CancellationToken>,
+) -> Result<BuiltinCompletion> {
+    if cancellation_token.is_some_and(CancellationToken::is_cancelled) {
+        return Err(anyhow!("Generation cancelled before starting"));
+    }
+
+    log::info!("Built-in AI generation request");
+    log::info!("Model: {}", model_name);
+
+    let formatted_prompt = format_builtin_prompt(model_name, system_prompt, user_prompt)?;
+    let (manager, model_def, model_path) = running_manager(app_data_dir, model_name).await?;
+
+    if cancellation_token.is_some_and(CancellationToken::is_cancelled) {
+        return Err(anyhow!("Generation cancelled during sidecar startup"));
     }
 
     // Prepare generation request with model-specific sampling parameters
     let sampling = model_def.sampling.sanitize_for_llama_helper();
+    let max_tokens = max_tokens
+        .and_then(|value| i32::try_from(value).ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(models::DEFAULT_MAX_TOKENS);
     let request = Request::Generate {
         prompt: formatted_prompt,
-        max_tokens: Some(models::DEFAULT_MAX_TOKENS),
+        max_tokens: Some(max_tokens),
         context_size: Some(model_def.context_size),
         model_path: Some(model_path.to_string_lossy().to_string()),
         temperature: Some(sampling.temperature),
@@ -191,56 +334,27 @@ pub async fn generate_with_builtin(
         repeat_penalty: Some(sampling.repeat_penalty),
         penalty_last_n: Some(sampling.penalty_last_n),
         stop_tokens: Some(sampling.stop_tokens),
+        seed: Some(BUILTIN_SEED),
     };
 
     let request_json = serde_json::to_string(&request)?;
-
-    // Send request with timeout
     let timeout = Duration::from_secs(models::GENERATION_TIMEOUT_SECS);
 
-    log::info!("Sending generation request to sidecar");
+    log::info!("Sending generation request to sidecar (max_tokens: {max_tokens})");
+    let response_json =
+        send_cancellable(&manager, request_json, timeout, cancellation_token).await?;
 
-    // Race between send_request and cancellation token
-    let response_json = if let Some(token) = cancellation_token {
-        tokio::select! {
-            result = manager.send_request(request_json, timeout) => {
-                result?
-            }
-            _ = token.cancelled() => {
-                log::warn!("Generation cancelled by user, shutting down sidecar");
-                // Shutdown sidecar to stop generation immediately
-                if let Err(e) = manager.shutdown().await {
-                    log::error!("Failed to shutdown sidecar during cancellation: {}", e);
-                }
-                return Err(anyhow!("Generation cancelled by user"));
-            }
-        }
-    } else {
-        manager.send_request(request_json, timeout).await?
-    };
-
-    // Check cancellation before parsing response
-    if let Some(token) = cancellation_token {
-        if token.is_cancelled() {
-            return Err(anyhow!("Generation cancelled"));
-        }
+    if cancellation_token.is_some_and(CancellationToken::is_cancelled) {
+        return Err(anyhow!("Generation cancelled"));
     }
 
-    // Parse response
-    let response: Response = serde_json::from_str(&response_json)
-        .with_context(|| format!("Failed to parse response: {}", response_json))?;
-
-    match response {
-        Response::Response { text, error } => {
-            if let Some(err_msg) = error {
-                Err(anyhow!("Generation failed: {}", err_msg))
-            } else {
-                log::info!("Generation completed: {} chars", text.len());
-                Ok(text)
-            }
-        }
-        Response::Error { message } => Err(anyhow!("Sidecar error: {}", message)),
-    }
+    let completion = parse_generate_response(&response_json)?;
+    log::info!(
+        "Generation completed: {} chars, truncated: {}",
+        completion.text.len(),
+        completion.truncated
+    );
+    Ok(completion)
 }
 
 /// Shutdown the global sidecar (graceful cleanup)
@@ -315,6 +429,7 @@ mod tests {
             repeat_penalty: Some(1.05),
             penalty_last_n: Some(256),
             stop_tokens: Some(vec!["<end_of_turn>".to_string()]),
+            seed: Some(BUILTIN_SEED),
         };
 
         let json = serde_json::to_string(&request).unwrap();
@@ -326,6 +441,64 @@ mod tests {
         assert!(json.contains("\"frequency_penalty\":0.0"));
         assert!(json.contains("\"repeat_penalty\":1.05"));
         assert!(json.contains("\"penalty_last_n\":256"));
+        assert!(json.contains("\"seed\":42"));
+    }
+
+    #[test]
+    fn generate_response_reports_truncation_from_finish_reason() {
+        let done = parse_generate_response(
+            r#"{"type":"response","text":"ok","error":null,"finish_reason":"stop","prompt_tokens":10}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            done,
+            BuiltinCompletion {
+                text: "ok".to_string(),
+                truncated: false,
+                prompt_tokens: Some(10),
+            }
+        );
+        let cut = parse_generate_response(
+            r#"{"type":"response","text":"par","error":null,"finish_reason":"length"}"#,
+        )
+        .unwrap();
+        assert!(cut.truncated);
+        // Responses from an older helper carry no finish_reason.
+        let legacy =
+            parse_generate_response(r#"{"type":"response","text":"x","error":null}"#).unwrap();
+        assert!(!legacy.truncated);
+    }
+
+    #[test]
+    fn generate_response_overflow_error_keeps_marker() {
+        let error = parse_generate_response(
+            r#"{"type":"response","text":"","error":"Generation failed: context overflow: prompt has 9 tokens","error_kind":"context_overflow"}"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains(CONTEXT_OVERFLOW_MARKER));
+        let other = parse_generate_response(
+            r#"{"type":"response","text":"","error":"boom","error_kind":"context_overflow"}"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(other.contains(CONTEXT_OVERFLOW_MARKER));
+    }
+
+    #[test]
+    fn tokenize_request_and_count_response() {
+        let json = serde_json::to_string(&Request::Tokenize {
+            text: "hi".to_string(),
+            context_size: Some(4096),
+            model_path: None,
+        })
+        .unwrap();
+        assert!(json.contains("\"type\":\"tokenize\""));
+        assert_eq!(
+            parse_token_count_response(r#"{"type":"token_count","count":17}"#).unwrap(),
+            17
+        );
+        assert!(parse_token_count_response(r#"{"type":"error","message":"no"}"#).is_err());
     }
 
     #[test]
@@ -334,7 +507,7 @@ mod tests {
         let response: Response = serde_json::from_str(json).unwrap();
 
         match response {
-            Response::Response { text, error } => {
+            Response::Response { text, error, .. } => {
                 assert_eq!(text, "generated text");
                 assert!(error.is_none());
             }
