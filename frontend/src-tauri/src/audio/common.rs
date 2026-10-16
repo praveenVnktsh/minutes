@@ -15,14 +15,31 @@ pub(crate) async fn acquire_engine_lifecycle_lock() -> OwnedMutexGuard<()> {
     ENGINE_LIFECYCLE_LOCK.clone().lock_owned().await
 }
 
-/// Unload the transcription engine after a batch job (import or retranscription).
-/// Skips unloading if a live recording is currently in progress, since recording
-/// uses the same global engine instances.
+/// Unload the transcription engine after a batch job (import, retranscription
+/// or the final pass). Skips unloading only while a live recording is using
+/// the same engine family for chunked live text (the engines are process-wide);
+/// a recording streaming with Nemotron, or chunking with the other family,
+/// does not need it, and nothing else would unload it afterwards.
 pub(crate) async fn unload_engine_after_batch(use_parakeet: bool) {
     let _engine_lifecycle_guard = acquire_engine_lifecycle_lock().await;
 
-    if crate::audio::recording_commands::is_recording().await {
-        log::info!("Skipping model unload after batch: recording in progress");
+    let pass_provider = if use_parakeet {
+        "parakeet"
+    } else {
+        "localWhisper"
+    };
+    let live_provider = match crate::audio::transcription::live::prepared_chunked_provider() {
+        Some(prepared) => Some(prepared),
+        None if crate::audio::recording_commands::is_recording().await => {
+            crate::audio::transcription::live::chunked_live_provider()
+        }
+        None => None,
+    };
+    if crate::audio::transcription::live::live_conflicts(
+        live_provider.as_deref(),
+        Some(pass_provider),
+    ) {
+        log::info!("Skipping model unload after batch: the live recording uses this engine");
         return;
     }
 

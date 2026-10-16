@@ -1,7 +1,7 @@
 use crate::database::repositories::setting::SettingsRepository;
 use crate::state::AppState;
-use crate::summary::llm_client::{generate_summary, LLMProvider};
-use crate::summary::processor::clean_llm_markdown_detailed;
+use crate::summary::llm_client::{generate_summary, GenerationOptions, LLMProvider};
+use crate::summary::processor::{clean_llm_markdown_detailed, fit_builtin_output};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, Runtime, State};
@@ -203,24 +203,39 @@ pub async fn chat_with_meeting<R: Runtime>(
     });
     let system_prompt = r#"You are the meeting assistant. Answer the user's question about this meeting using only the material the app supplies: enhancedNotesMarkdown, rawNotesMarkdown, transcriptSegments, and the recent conversation. Ground your answer in the enhanced notes when they exist, and in the transcript otherwise. If enhancedNotesMarkdown is empty, say there are no enhanced notes yet rather than inventing any. If the supplied material does not answer the question, say so plainly instead of guessing. You cannot change anything: never claim to have edited the notes or the transcript, and when the user asks for the notes to change, tell them to use the re-enhance button on the notes panel. Reply in plain Markdown prose, with no JSON envelope and no preamble about these instructions."#;
     let app_data_dir = app.path().app_data_dir().ok();
-    let completion = generate_summary(
-        &reqwest::Client::new(),
+    let model_name = custom
+        .as_ref()
+        .map(|value| value.model.as_str())
+        .unwrap_or(&config.model);
+    let user_prompt = context.to_string();
+    let max_tokens = fit_builtin_output(
         &provider,
-        custom
-            .as_ref()
-            .map(|value| value.model.as_str())
-            .unwrap_or(&config.model),
-        &api_key,
+        model_name,
+        app_data_dir.as_ref(),
         system_prompt,
-        &context.to_string(),
-        config.ollama_endpoint.as_deref(),
-        custom.as_ref().map(|value| value.endpoint.as_str()),
+        &user_prompt,
         custom
             .as_ref()
             .and_then(|value| value.max_tokens)
             .map(|value| value as u32),
-        custom.as_ref().and_then(|value| value.temperature),
-        custom.as_ref().and_then(|value| value.top_p),
+    )
+    .await;
+    let completion = generate_summary(
+        &reqwest::Client::new(),
+        &provider,
+        model_name,
+        &api_key,
+        system_prompt,
+        &user_prompt,
+        config.ollama_endpoint.as_deref(),
+        custom.as_ref().map(|value| value.endpoint.as_str()),
+        &GenerationOptions {
+            max_tokens,
+            temperature: custom.as_ref().and_then(|value| value.temperature),
+            top_p: custom.as_ref().and_then(|value| value.top_p),
+            num_ctx: None,
+            ..Default::default()
+        },
         app_data_dir.as_ref(),
         None,
     )

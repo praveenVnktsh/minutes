@@ -1105,6 +1105,7 @@ pub async fn start_import_audio_command<R: Runtime>(
         language,
         model,
         provider,
+        final_pass: false,
     };
 
     let task_id = get_queue().enqueue(&app, task).await;

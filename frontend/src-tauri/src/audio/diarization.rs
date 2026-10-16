@@ -54,7 +54,7 @@ const PYANNOTE_ENGINE: EngineInfo = EngineInfo {
 const NEMOTRON_DIR: &str = "nemotron-3";
 /// Give up on a stalled model download after this long without data.
 const DOWNLOAD_READ_TIMEOUT: Duration = Duration::from_secs(60);
-const DOWNLOAD_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const DOWNLOAD_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[cfg(target_os = "macos")]
 const PYANNOTE_SEGMENTATION_DIR: &str = "sherpa-onnx-pyannote-segmentation-3-0";
@@ -161,7 +161,7 @@ fn segmenting_stage_percentage(fraction: f32) -> u32 {
 /// (the model is ~400 MB, too big to buffer) and the partial file is removed on
 /// any failure, so `destination` only ever exists fully verified.
 /// `on_percent` is called each time the whole-number percentage changes.
-async fn download_verified(
+pub(crate) async fn download_verified(
     client: &reqwest::Client,
     url: &str,
     destination: &Path,
@@ -951,8 +951,13 @@ struct RunningSlot(String);
 
 impl RunningSlot {
     fn acquire(meeting_id: &str) -> Result<Self> {
-        let mut running = RUNNING.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !running.get_or_insert_with(HashSet::new).insert(meeting_id.to_string()) {
+        let mut running = RUNNING
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !running
+            .get_or_insert_with(HashSet::new)
+            .insert(meeting_id.to_string())
+        {
             bail!("Speaker identification is already running for this meeting");
         }
         Ok(Self(meeting_id.to_string()))
@@ -961,7 +966,9 @@ impl RunningSlot {
 
 impl Drop for RunningSlot {
     fn drop(&mut self) {
-        let mut running = RUNNING.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut running = RUNNING
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(running) = running.as_mut() {
             running.remove(&self.0);
         }
@@ -1195,7 +1202,10 @@ pub enum DiarizationStatus {
     Missing,
 }
 
-async fn diarization_status(pool: &sqlx::SqlitePool, meeting_id: &str) -> Result<DiarizationStatus> {
+async fn diarization_status(
+    pool: &sqlx::SqlitePool,
+    meeting_id: &str,
+) -> Result<DiarizationStatus> {
     if is_running(meeting_id) {
         return Ok(DiarizationStatus::Running);
     }
@@ -1348,7 +1358,10 @@ mod tests {
     #[tokio::test]
     async fn status_follows_a_meeting_through_failure_retry_and_retranscription() {
         let pool = state_pool().await;
-        assert_eq!(diarization_status(&pool, "m1").await.unwrap(), DiarizationStatus::Missing);
+        assert_eq!(
+            diarization_status(&pool, "m1").await.unwrap(),
+            DiarizationStatus::Missing
+        );
 
         record_started(&pool, "m1").await.unwrap();
         assert_eq!(
@@ -1358,13 +1371,20 @@ mod tests {
         );
         {
             let _slot = RunningSlot::acquire("m1").unwrap();
-            assert_eq!(diarization_status(&pool, "m1").await.unwrap(), DiarizationStatus::Running);
+            assert_eq!(
+                diarization_status(&pool, "m1").await.unwrap(),
+                DiarizationStatus::Running
+            );
         }
 
-        record_finished(&pool, "m1", Some("No speaker turns were detected")).await.unwrap();
+        record_finished(&pool, "m1", Some("No speaker turns were detected"))
+            .await
+            .unwrap();
         assert_eq!(
             diarization_status(&pool, "m1").await.unwrap(),
-            DiarizationStatus::Failed { error: "No speaker turns were detected".into() }
+            DiarizationStatus::Failed {
+                error: "No speaker turns were detected".into()
+            }
         );
 
         record_started(&pool, "m1").await.unwrap();
@@ -1373,7 +1393,10 @@ mod tests {
             DiarizationStatus::Pending { attempts: 2 }
         );
         record_finished(&pool, "m1", None).await.unwrap();
-        assert_eq!(diarization_status(&pool, "m1").await.unwrap(), DiarizationStatus::Done);
+        assert_eq!(
+            diarization_status(&pool, "m1").await.unwrap(),
+            DiarizationStatus::Done
+        );
 
         // A retranscription replaces the rows, so speakers are owed again.
         let mut conn = pool.acquire().await.unwrap();
@@ -1392,7 +1415,10 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        assert_eq!(diarization_status(&pool, "m2").await.unwrap(), DiarizationStatus::Done);
+        assert_eq!(
+            diarization_status(&pool, "m2").await.unwrap(),
+            DiarizationStatus::Done
+        );
     }
 
     #[tokio::test]
@@ -1407,7 +1433,10 @@ mod tests {
         // m3: finished — nothing to resume.
         record_started(&pool, "m3").await.unwrap();
         record_finished(&pool, "m3", None).await.unwrap();
-        assert_eq!(interrupted_meetings(&pool).await.unwrap(), vec!["m1".to_string()]);
+        assert_eq!(
+            interrupted_meetings(&pool).await.unwrap(),
+            vec!["m1".to_string()]
+        );
 
         // A pending meeting older than the window is left for a manual retry.
         let stale = (Utc::now() - chrono::Duration::days(RESUME_WINDOW_DAYS + 1)).to_rfc3339();

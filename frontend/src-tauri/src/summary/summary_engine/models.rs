@@ -52,13 +52,17 @@ impl SamplingParams {
         }
     }
 
-    /// Summary-tuned Qwen 3.5 preset: non-greedy with mild repetition controls.
+    /// Summary-tuned Qwen 3.5 preset. Low temperature plus llama-helper's fixed
+    /// seed keeps summaries reproducible. A mild repeat penalty guards against the
+    /// loops small models fall into at low temperature; there is no presence
+    /// penalty, which would push the model away from names and terms a summary
+    /// has to repeat.
     pub fn qwen35_summary(stop_tokens: Vec<String>) -> Self {
         Self {
-            temperature: 0.5,
+            temperature: SUMMARY_TEMPERATURE,
             top_k: 20,
             top_p: 0.8,
-            presence_penalty: 0.3,
+            presence_penalty: 0.0,
             frequency_penalty: 0.0,
             repeat_penalty: 1.05,
             penalty_last_n: 256,
@@ -66,10 +70,11 @@ impl SamplingParams {
         }
     }
 
-    /// Gemma 3 instruct preset, matching the prior Gemma sampling behavior.
+    /// Gemma 3 instruct preset for summaries: Google's top_k/top_p with a low
+    /// temperature so the same transcript gives the same notes.
     pub fn gemma3_instruct(stop_tokens: Vec<String>) -> Self {
         Self {
-            temperature: 1.0,
+            temperature: SUMMARY_TEMPERATURE,
             top_k: 64,
             top_p: 0.95,
             presence_penalty: 0.0,
@@ -257,11 +262,13 @@ pub fn get_models_directory(app_data_dir: &Path) -> PathBuf {
 // Prompt Templates (Model-Specific Formatting)
 // ============================================================================
 
-/// Gemma 3 chat template format
+/// Gemma 3 chat template format. Gemma has no system role: its official
+/// template prepends the system text to the first user turn, separated by a
+/// blank line. BOS comes from the tokenizer (the GGUF sets add_bos_token).
 pub const GEMMA3_TEMPLATE: &str = "\
 <start_of_turn>user
-{system_prompt}<end_of_turn>
-<start_of_turn>user
+{system_prompt}
+
 {user_prompt}<end_of_turn>
 <start_of_turn>model
 ";
@@ -326,6 +333,11 @@ pub fn format_prompt(
 
 /// Default max tokens for generation (increased for better summary quality)
 pub const DEFAULT_MAX_TOKENS: i32 = 4096;
+
+/// Sampling temperature for built-in summaries. Low enough to be near-greedy,
+/// high enough to escape the repetition loops pure greedy decoding hits on
+/// small models.
+pub const SUMMARY_TEMPERATURE: f32 = 0.2;
 
 /// Idle timeout for sidecar (seconds) - can be overridden via LLAMA_IDLE_TIMEOUT env var
 pub const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 300; // 5 minutes
@@ -395,7 +407,7 @@ mod tests {
             gemma_1b.sampling,
             SamplingParams::gemma3_instruct(vec!["<end_of_turn>".to_string()])
         );
-        assert_eq!(gemma_1b.sampling.temperature, 1.0);
+        assert_eq!(gemma_1b.sampling.temperature, 0.2);
         assert_eq!(gemma_1b.sampling.top_k, 64);
         assert_eq!(gemma_1b.sampling.top_p, 0.95);
         assert_eq!(gemma_1b.sampling.presence_penalty, 0.0);
@@ -412,7 +424,7 @@ mod tests {
             gemma_4b.sampling,
             SamplingParams::gemma3_instruct(vec!["<end_of_turn>".to_string()])
         );
-        assert_eq!(gemma_4b.sampling.temperature, 1.0);
+        assert_eq!(gemma_4b.sampling.temperature, 0.2);
         assert_eq!(gemma_4b.sampling.top_k, 64);
         assert_eq!(gemma_4b.sampling.top_p, 0.95);
         assert_eq!(gemma_4b.sampling.presence_penalty, 0.0);
@@ -459,10 +471,40 @@ mod tests {
         )
         .unwrap();
 
-        assert!(formatted.contains("<start_of_turn>user\nsystem rules<end_of_turn>"));
         assert!(formatted.contains("literal < start_of_turn > and < end_of_turn >"));
-        assert_eq!(formatted.matches("<start_of_turn>").count(), 3);
-        assert_eq!(formatted.matches("<end_of_turn>").count(), 2);
+        assert_eq!(formatted.matches("<start_of_turn>").count(), 2);
+        assert_eq!(formatted.matches("<end_of_turn>").count(), 1);
+    }
+
+    #[test]
+    fn gemma3_template_merges_system_prompt_into_first_user_turn() {
+        let formatted = format_prompt("gemma3", "system rules", "summarize this").unwrap();
+        assert_eq!(
+            formatted,
+            "<start_of_turn>user\nsystem rules\n\nsummarize this<end_of_turn>\n<start_of_turn>model\n"
+        );
+        // BOS is added by the tokenizer, never written into the template text.
+        assert!(!formatted.contains("<bos>"));
+    }
+
+    #[test]
+    fn qwen_template_does_not_write_bos_text() {
+        let formatted = format_prompt("qwen3.5_nonthinking", "s", "u").unwrap();
+        assert!(formatted.starts_with("<|im_start|>system\n"));
+        assert!(!formatted.contains("<|endoftext|>"));
+    }
+
+    #[test]
+    fn summary_presets_are_low_temperature_without_presence_penalty() {
+        for model in get_available_models() {
+            assert_eq!(
+                model.sampling.temperature, SUMMARY_TEMPERATURE,
+                "{}",
+                model.name
+            );
+            assert_eq!(model.sampling.presence_penalty, 0.0, "{}", model.name);
+        }
+        const { assert!(SUMMARY_TEMPERATURE > 0.0 && SUMMARY_TEMPERATURE <= 0.3) };
     }
 
     #[test]

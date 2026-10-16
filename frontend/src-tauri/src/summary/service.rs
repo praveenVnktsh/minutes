@@ -3,14 +3,15 @@ use crate::database::repositories::{
     meeting::MeetingsRepository, setting::SettingsRepository, summary::SummaryProcessesRepository,
 };
 use crate::ollama::metadata::ModelMetadataCache;
+use crate::summary::budget::ContextBudget;
 use crate::summary::language_detection::detect_summary_language;
-use crate::summary::llm_client::{generate_summary, LLMProvider};
+use crate::summary::llm_client::{generate_summary, GenerationOptions, LLMProvider};
 use crate::summary::metadata::read_detected_summary_language_from_metadata;
 use crate::summary::processor::{
-    build_title_user_prompt, clean_llm_markdown_detailed, default_notes_system_prompt,
-    extract_meeting_name_from_markdown, generate_meeting_summary, is_prompt_echo_title,
-    language_name_from_code, require_visible_markdown, sanitize_generated_title,
-    title_system_prompt,
+    build_title_user_prompt, clean_llm_markdown_detailed, extract_meeting_name_from_markdown,
+    generate_meeting_summary, is_prompt_echo_title, language_name_from_code,
+    require_visible_markdown, resolve_summary_system_prompt, sanitize_generated_title,
+    title_system_prompt, ProviderBackend,
 };
 use crate::summary::templates::{self, Template};
 use chrono::{DateTime, Utc};
@@ -23,6 +24,12 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
+
+/// Context assumed for an Ollama model whose metadata cannot be read.
+const OLLAMA_FALLBACK_CONTEXT: usize = 8192;
+/// Cache-key threshold recorded for hosted models, which run single-pass.
+const HOSTED_TOKEN_THRESHOLD: usize = 100_000;
+const TITLE_OLLAMA_NUM_CTX: u32 = 8192;
 
 static METADATA_CACHE: LazyLock<ModelMetadataCache> =
     LazyLock::new(|| ModelMetadataCache::new(Duration::from_secs(300)));
@@ -217,21 +224,21 @@ fn extract_cached_english_markdown(
 }
 
 /// Everything an LLM call needs beyond the prompts, resolved from saved settings.
-struct LlmConfig {
-    provider: LLMProvider,
-    model_name: String,
-    api_key: String,
-    ollama_endpoint: Option<String>,
-    custom_openai_endpoint: Option<String>,
-    max_tokens: Option<u32>,
-    temperature: Option<f32>,
-    top_p: Option<f32>,
+pub(crate) struct LlmConfig {
+    pub(crate) provider: LLMProvider,
+    pub(crate) model_name: String,
+    pub(crate) api_key: String,
+    pub(crate) ollama_endpoint: Option<String>,
+    pub(crate) custom_openai_endpoint: Option<String>,
+    pub(crate) max_tokens: Option<u32>,
+    pub(crate) temperature: Option<f32>,
+    pub(crate) top_p: Option<f32>,
 }
 
 /// Resolves the API key, Ollama endpoint and CustomOpenAI settings for a provider/model pair.
 /// `settings` is the already-loaded settings row, when the caller has one, so Ollama's
 /// endpoint lookup does not read it again.
-async fn load_llm_config(
+pub(crate) async fn load_llm_config(
     pool: &SqlitePool,
     model_provider: &str,
     model_name: &str,
@@ -322,6 +329,11 @@ fn title_transcript_text(segments: &[Transcript]) -> String {
         .join("\n")
 }
 
+/// The error a summary gets when the job running it is gone: the app quit or
+/// crashed mid-run, so nothing will ever finish the pending row.
+pub const INTERRUPTED_SUMMARY_ERROR: &str =
+    "Interrupted: the app was closed while this summary was running. Generate it again.";
+
 /// Summary service - handles all summary generation logic
 pub struct SummaryService;
 
@@ -346,6 +358,16 @@ impl SummaryService {
         }
         info!("Registered cancellation token for meeting: {}", meeting_id);
         token
+    }
+
+    /// True while this process runs the generation identified by `started_at`.
+    /// A pending row without one was orphaned by a quit, crash or lost write.
+    pub(crate) fn has_active_job(meeting_id: &str, started_at: DateTime<Utc>) -> bool {
+        CANCELLATION_REGISTRY
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(meeting_id)
+            .is_some_and(|entry| entry.started_at == started_at)
     }
 
     /// Cancels only the active generation identified by `started_at`.
@@ -488,63 +510,59 @@ impl SummaryService {
             }
         };
 
-        // Dynamically fetch context size based on provider and model
-        let token_threshold = if provider == LLMProvider::Ollama {
-            match METADATA_CACHE
+        // Local models get a context budget: the window the model runs with.
+        // Ollama is sent the same value as num_ctx; hosted models take the
+        // whole transcript in one pass.
+        let context_budget = if provider == LLMProvider::Ollama {
+            let model_context = match METADATA_CACHE
                 .get_or_fetch(&model_name, ollama_endpoint.as_deref())
                 .await
             {
-                Ok(metadata) => {
-                    // Reserve 300 tokens for prompt overhead
-                    let optimal = metadata.context_size.saturating_sub(300);
-                    info!(
-                        "✓ Using dynamic context for {}: {} tokens (chunk size: {})",
-                        model_name, metadata.context_size, optimal
-                    );
-                    optimal
-                }
+                Ok(metadata) => metadata.context_size,
                 Err(e) => {
                     warn!(
-                        "Failed to fetch context for {}: {}. Using default 4000",
-                        model_name, e
+                        "Failed to fetch context for {}: {}. Using {} tokens",
+                        model_name, e, OLLAMA_FALLBACK_CONTEXT
                     );
-                    4000 // Fallback to safe default
+                    OLLAMA_FALLBACK_CONTEXT
                 }
-            }
+            };
+            let budget = ContextBudget::for_ollama(model_context);
+            info!(
+                "✓ Ollama context for {}: model max {} tokens, running with num_ctx {}",
+                model_name, model_context, budget.n_ctx
+            );
+            Some(budget)
         } else if provider == LLMProvider::BuiltInAI {
-            // Get model's context size from registry
             use crate::summary::summary_engine::models;
-            let model = models::get_model_by_name(&model_name)
-                .ok_or_else(|| format!("Unknown model: {}", model_name));
-
-            match model {
-                Ok(model_def) => {
-                    // Reserve 300 tokens for prompt overhead
-                    let optimal = model_def.context_size.saturating_sub(300) as usize;
+            match models::get_model_by_name(&model_name) {
+                Some(model_def) => {
                     info!(
-                        "✓ Using BuiltInAI context size: {} tokens (chunk size: {})",
-                        model_def.context_size, optimal
+                        "✓ Using BuiltInAI context size: {} tokens",
+                        model_def.context_size
                     );
-                    optimal
+                    Some(ContextBudget::new(model_def.context_size as usize))
                 }
-                Err(e) => {
-                    warn!("{}, using default 2048", e);
-                    1748 // 2048 - 300 for overhead
+                None => {
+                    warn!("Unknown model: {}, using a 2048-token budget", model_name);
+                    Some(ContextBudget::new(2048))
                 }
             }
         } else {
-            // Cloud providers (OpenAI, Claude, Groq, CustomOpenAI) handle large contexts automatically
-            100000 // Effectively unlimited for single-pass processing
+            None
         };
+        // Recorded in the cache key; hosted models keep the legacy value.
+        let token_threshold = context_budget.map_or(HOSTED_TOKEN_THRESHOLD, |budget| budget.n_ctx);
 
         // Get app data directory for BuiltInAI provider
         let app_data_dir = app.path().app_data_dir().ok();
 
-        let notes_prompt_override = crate::summary::prompt_settings::load_notes_prompt(&app);
-        let effective_notes_prompt = match notes_prompt_override.as_deref().map(str::trim) {
-            Some(trimmed) if !trimmed.is_empty() => trimmed.to_string(),
-            _ => default_notes_system_prompt(),
-        };
+        use crate::summary::prompt_settings::{load_prompt, PromptKind};
+        let effective_notes_prompt = resolve_summary_system_prompt(
+            load_prompt(&app, PromptKind::Notes).as_deref(),
+            load_prompt(&app, PromptKind::TranscriptOnly).as_deref(),
+            &custom_prompt,
+        );
 
         if let Some(code) = &summary_language {
             info!("📝 Summary language preference: {}", code);
@@ -568,7 +586,7 @@ impl SummaryService {
         };
         let template_fingerprint = template_cache_fingerprint(&template);
 
-        let notes_prompt_fingerprint = stable_text_fingerprint(&effective_notes_prompt);
+        let notes_prompt_fingerprint = stable_text_fingerprint(&effective_notes_prompt.text);
 
         let cache_source = build_summary_cache_source(
             &text,
@@ -614,24 +632,30 @@ impl SummaryService {
         };
 
         let client = reqwest::Client::new();
+        let backend = ProviderBackend {
+            client: &client,
+            provider: &provider,
+            model_name: &model_name,
+            api_key: &final_api_key,
+            ollama_endpoint: ollama_endpoint.as_deref(),
+            custom_openai_endpoint: custom_openai_endpoint.as_deref(),
+            app_data_dir: app_data_dir.as_ref(),
+            cancellation_token: Some(&cancellation_token),
+        };
         let result = generate_meeting_summary(
-            &client,
-            &provider,
+            &backend,
             &model_name,
-            &final_api_key,
             &text,
             &custom_prompt,
-            &template_id,
-            &template,
-            Some(effective_notes_prompt.as_str()),
-            token_threshold,
-            ollama_endpoint.as_deref(),
-            custom_openai_endpoint.as_deref(),
-            custom_openai_max_tokens,
-            custom_openai_temperature,
-            custom_openai_top_p,
-            app_data_dir.as_ref(),
-            Some(&cancellation_token),
+            &effective_notes_prompt,
+            context_budget,
+            &GenerationOptions {
+                max_tokens: custom_openai_max_tokens,
+                temperature: custom_openai_temperature,
+                top_p: custom_openai_top_p,
+                num_ctx: None,
+                ..Default::default()
+            },
             summary_language.as_deref(),
             detected_summary_language.as_deref(),
             cached_english.as_deref(),
@@ -779,18 +803,34 @@ impl SummaryService {
         );
         let app_data_dir = app.path().app_data_dir().ok();
         let client = reqwest::Client::new();
+        let title_user_prompt = build_title_user_prompt(&transcript, notes.as_deref());
+        let title_max_tokens = crate::summary::processor::fit_builtin_output(
+            &config.provider,
+            &config.model_name,
+            app_data_dir.as_ref(),
+            title_system_prompt(),
+            &title_user_prompt,
+            config.max_tokens,
+        )
+        .await;
         let completion = generate_summary(
             &client,
             &config.provider,
             &config.model_name,
             &config.api_key,
             title_system_prompt(),
-            &build_title_user_prompt(&transcript, notes.as_deref()),
+            &title_user_prompt,
             config.ollama_endpoint.as_deref(),
             config.custom_openai_endpoint.as_deref(),
-            config.max_tokens,
-            config.temperature,
-            config.top_p,
+            &GenerationOptions {
+                max_tokens: title_max_tokens,
+                temperature: config.temperature,
+                top_p: config.top_p,
+                // The title prompt carries up to 12k characters of transcript,
+                // more than Ollama's small default context holds.
+                num_ctx: (config.provider == LLMProvider::Ollama).then_some(TITLE_OLLAMA_NUM_CTX),
+                ..Default::default()
+            },
             app_data_dir.as_ref(),
             None,
         )

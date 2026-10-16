@@ -218,8 +218,10 @@ export default function PageContent({
     return () => { cancelled = true; };
   }, [isRecordingThisMeeting]);
 
-  // A finished pass replaces every transcript row with fresh ids, so refetch once per task
+  // A finished pass replaces every transcript row with fresh ids, so reload once per task
   // that reaches 'ready'. Cancelled and failed passes leave the existing rows in place.
+  // The reload swaps rows in place (no empty flash), and the transcript view keeps
+  // the reader's place by time.
   const refetchedTaskIdsRef = useRef(new Set<string>());
   const refetchedMeetingIdRef = useRef(meeting.id);
   useEffect(() => {
@@ -233,8 +235,8 @@ export default function PageContent({
       refetchedTaskIdsRef.current.add(item.task_id);
       hasNewlyReadyTask = true;
     }
-    if (hasNewlyReadyTask) void onRefetchTranscripts?.();
-  }, [meeting.id, meetingActivities, onRefetchTranscripts]);
+    if (hasNewlyReadyTask) void (onRefreshTranscripts ?? onRefetchTranscripts)?.();
+  }, [meeting.id, meetingActivities, onRefreshTranscripts, onRefetchTranscripts]);
 
   // The Rust core saves a pass's transcript before it starts diarizing, and saves
   // speaker labels when diarization finishes. Show each as soon as it lands.
@@ -302,7 +304,13 @@ export default function PageContent({
     </span>
   ) : isTranscribing ? (
     <span className={`flex shrink-0 items-center gap-1.5 rounded-full px-3 py-1.5 text-[11px] font-medium ${badge.info}`} role="status">
-      <Loader2 className="h-3.5 w-3.5 animate-spin" /> {inFlightActivity?.progress_percentage == null ? 'Transcribing…' : `Transcribing ${Math.round(inFlightActivity.progress_percentage)}%`}
+      <Loader2 className="h-3.5 w-3.5 animate-spin" /> {(() => {
+        // Over an existing transcript the pass is improving it, in the background.
+        const label = meetingData.transcripts.length > 0 ? 'Improving transcript' : 'Transcribing';
+        return inFlightActivity?.progress_percentage == null
+          ? `${label}…`
+          : `${label} ${Math.round(inFlightActivity.progress_percentage)}%`;
+      })()}
     </span>
   ) : activityError ? <span role="alert" className="text-xs font-medium text-error">{activityError}</span> : null;
 

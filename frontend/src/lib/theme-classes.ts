@@ -122,3 +122,13 @@ export const transcriptHighlight = {
   /** The segment the audio player is on. */
   playing: 'bg-info/15 shadow-[inset_3px_0_0_0_rgb(var(--info-rgb))] ring-1 ring-inset ring-info/35',
 };
+
+/** The brief flash on a transcript row the view just jumped to (a search
+ * match or a chapter). Resolved from the warning token at call time, so it
+ * follows the light/dark theme; the Web Animations API needs a concrete
+ * colour rather than a utility class. */
+export function jumpFlashKeyframes(root: Element = document.documentElement): Keyframe[] {
+  const rgb = getComputedStyle(root).getPropertyValue('--warning-rgb').trim();
+  const from = rgb ? `rgb(${rgb} / 0.22)` : 'transparent';
+  return [{ backgroundColor: from }, { backgroundColor: 'transparent' }];
+}

@@ -1,6 +1,7 @@
 'use client';
 
 import { ModelConfigForm } from '@/components/settings/ModelConfigForm';
+import { LiveSummarySettings } from '@/components/LiveSummarySettings';
 import { SummaryLanguageSettings } from '@/components/SummaryLanguageSettings';
 import { SummaryPromptSettings } from '@/components/SummaryPromptSettings';
 import { Switch } from '@/components/ui/switch';
@@ -32,13 +33,17 @@ export function SummaryModelSettings({ refetchTrigger: _refetchTrigger }: Summar
         </div>
       </div>
 
+      <LiveSummarySettings />
+
       <SummaryLanguageSettings />
 
       <div className="rounded-lg border border-hairline bg-surface-raised p-6 shadow-sm">
         <ModelConfigForm />
       </div>
 
-      <SummaryPromptSettings />
+      <SummaryPromptSettings kind="notes" />
+
+      <SummaryPromptSettings kind="transcriptOnly" />
     </div>
   );
 }

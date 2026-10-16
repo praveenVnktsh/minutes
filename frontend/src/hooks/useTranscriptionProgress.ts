@@ -50,6 +50,7 @@ const RETRANSCRIPTION_STAGES: Record<string, string> = {
   resampling: 'Converting audio',
   vad: 'Detecting speech',
   transcribing: 'Transcribing',
+  waiting: 'Paused while recording',
   saving: 'Saving transcript',
   complete: 'Finishing up',
 };

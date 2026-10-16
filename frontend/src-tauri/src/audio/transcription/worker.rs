@@ -72,6 +72,58 @@ fn next_sequence_id_if_not_duplicate(
     }
 }
 
+/// Emit one finished segment as the chunk workers do: latch the first-speech
+/// event, drop duplicates, draw a sequence id, and send `transcript-update`.
+/// Times are on the recording timeline, already shifted by any resume offset.
+/// Returns whether the segment was emitted. Used by the streaming worker.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn emit_final_segment<R: Runtime>(
+    app: &AppHandle<R>,
+    deduper: &mut TranscriptDeduper,
+    text: String,
+    source: &str,
+    audio_start_time: f64,
+    audio_end_time: f64,
+    confidence: f32,
+) -> bool {
+    if !should_emit_transcript(&text) {
+        return false;
+    }
+    if !SPEECH_DETECTED_EMITTED.swap(true, Ordering::SeqCst) {
+        let _ = app.emit(
+            "speech-detected",
+            serde_json::json!({ "message": "Speech activity detected" }),
+        );
+    }
+    let Some(sequence_id) = next_sequence_id_if_not_duplicate(
+        deduper,
+        &SEQUENCE_COUNTER,
+        &text,
+        source,
+        audio_start_time,
+        audio_end_time,
+    ) else {
+        return false;
+    };
+    let update = TranscriptUpdate {
+        text,
+        timestamp: format_current_timestamp(),
+        source: source.to_string(),
+        sequence_id,
+        chunk_start_time: audio_start_time,
+        is_partial: false,
+        confidence,
+        audio_start_time,
+        audio_end_time,
+        duration: (audio_end_time - audio_start_time).max(0.0),
+    };
+    if let Err(error) = app.emit("transcript-update", &update) {
+        error!("Failed to emit streaming transcript update: {}", error);
+        return false;
+    }
+    true
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TranscriptUpdate {
     pub text: String,
@@ -121,7 +173,42 @@ pub fn start_transcription_task<R: Runtime>(
                 return;
             }
         };
+        run_chunk_worker(
+            app,
+            transcription_receiver,
+            transcription_engine,
+            audio_time_offset,
+        )
+        .await;
+    })
+}
 
+/// The chunk worker with an engine the caller already loaded (the live plan's
+/// chunked engine).
+pub fn start_transcription_task_with_engine<R: Runtime>(
+    app: AppHandle<R>,
+    transcription_receiver: tokio::sync::mpsc::UnboundedReceiver<AudioChunk>,
+    transcription_engine: TranscriptionEngine,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let audio_time_offset = crate::audio::recording_state::audio_time_offset_seconds();
+        run_chunk_worker(
+            app,
+            transcription_receiver,
+            transcription_engine,
+            audio_time_offset,
+        )
+        .await;
+    })
+}
+
+async fn run_chunk_worker<R: Runtime>(
+    app: AppHandle<R>,
+    transcription_receiver: tokio::sync::mpsc::UnboundedReceiver<AudioChunk>,
+    transcription_engine: TranscriptionEngine,
+    audio_time_offset: f64,
+) {
+    {
         // Create parallel workers for faster processing while preserving ALL chunks
         const NUM_WORKERS: usize = 1; // Serial processing ensures transcripts emit in chronological order
         let (work_sender, work_receiver) = tokio::sync::mpsc::unbounded_channel::<AudioChunk>();
@@ -507,7 +594,7 @@ pub fn start_transcription_task<R: Runtime>(
         }
 
         info!("✅ Parallel transcription task completed - all workers finished, ready for model unload");
-    })
+    }
 }
 
 /// Transcribe audio chunk using the appropriate provider (Whisper, Parakeet, or trait-based)
