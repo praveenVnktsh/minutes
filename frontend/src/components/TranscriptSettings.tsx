@@ -137,8 +137,12 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                 <div className="space-y-4 pb-6">
                     <div>
                         <Label className="block text-sm font-medium text-ink mb-1">
-                            Transcript Model
+                            Final transcript model
                         </Label>
+                        <p className="text-xs text-ink-muted mb-2 mx-1">
+                            Re-transcribes the whole recording after each meeting and becomes the kept transcript.
+                            Whisper is recommended: it handles accents well and uses your custom vocabulary.
+                        </p>
                         <div className="flex space-x-2 mx-1">
                             <Select
                                 value={uiProvider}
@@ -154,8 +158,8 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                                     <SelectValue placeholder="Select provider" />
                                 </SelectTrigger>
                                 <SelectContent>
-                                    <SelectItem value="parakeet">Parakeet (Recommended)</SelectItem>
-                                    <SelectItem value="localWhisper">Whisper</SelectItem>
+                                    <SelectItem value="localWhisper">Whisper (Recommended)</SelectItem>
+                                    <SelectItem value="parakeet">Parakeet</SelectItem>
                                     {/* <SelectItem value="deepgram">☁️ Deepgram (Backup)</SelectItem>
                                     <SelectItem value="elevenLabs">☁️ ElevenLabs</SelectItem>
                                     <SelectItem value="groq">☁️ Groq</SelectItem>

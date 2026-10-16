@@ -32,6 +32,8 @@ import {
   type ModelWithStatus,
 } from '@/lib/transcription-model-readiness';
 import { markDeferredMeetingForAutoSummary } from '@/lib/autoSummary';
+import { finalPassNotice, finalPassTookOver } from '@/lib/liveTranscriptionModels';
+import { toast } from 'sonner';
 import Analytics from '@/lib/analytics';
 import { showRecordingNotification } from '@/lib/recordingNotification';
 import {
@@ -820,15 +822,45 @@ export function RecordingControllerProvider({
           return;
         }
 
-        if (!finalization.postProcessingStarted && deferred) {
-          if (!session.folderPath) throw new Error('The recording has no audio folder for deferred transcription.');
-          await invoke('start_retranscription_command', {
+        const passLanguage = selectedLanguage === 'auto' || selectedLanguage === 'auto-translate'
+          ? null
+          : selectedLanguage;
+        // The final pass re-transcribes the whole recording with the final
+        // model, replaces the live transcript and rediarizes; its completion
+        // (final-transcript-pass-complete / the task turning ready) drives the
+        // summary. Deferred mode forces it, since it is the only transcription.
+        const startFinalPass = async (force: boolean): Promise<unknown> => {
+          if (!session.folderPath) return null;
+          const result = await invoke('start_final_transcript_pass', {
             meetingId: savedMeetingId,
             meetingFolderPath: session.folderPath,
-            language: selectedLanguage === 'auto' || selectedLanguage === 'auto-translate' ? null : selectedLanguage,
-            model: transcriptModelConfig.model || null,
-            provider: transcriptModelConfig.provider || null,
+            language: passLanguage,
+            force,
+          }).catch((error) => {
+            console.warn('Final transcript pass could not be queued:', error);
+            return null;
           });
+          const notice = finalPassNotice(result);
+          if (notice) toast.info('Final transcript', { description: notice });
+          return result;
+        };
+        let finalPassQueued = false;
+        if (!finalization.postProcessingStarted && deferred) {
+          if (!session.folderPath) throw new Error('The recording has no audio folder for deferred transcription.');
+          if (!finalPassTookOver(await startFinalPass(true))) {
+            await invoke('start_retranscription_command', {
+              meetingId: savedMeetingId,
+              meetingFolderPath: session.folderPath,
+              language: passLanguage,
+              model: transcriptModelConfig.model || null,
+              provider: transcriptModelConfig.provider || null,
+            });
+          }
+          markDeferredMeetingForAutoSummary(savedMeetingId);
+          finalization.postProcessingStarted = true;
+          checkpointFinalization(session, finalization, sessionsRef.current);
+        } else if (!finalization.postProcessingStarted && finalPassTookOver(await startFinalPass(false))) {
+          finalPassQueued = true;
           markDeferredMeetingForAutoSummary(savedMeetingId);
           finalization.postProcessingStarted = true;
           checkpointFinalization(session, finalization, sessionsRef.current);
@@ -880,7 +912,7 @@ export function RecordingControllerProvider({
           recordingState.setStatus(RecordingStatus.IDLE);
         }
         window.dispatchEvent(new CustomEvent('meetily:recording-finalized', {
-          detail: { meetingId: savedMeetingId, transcribing: deferred },
+          detail: { meetingId: savedMeetingId, transcribing: deferred || finalPassQueued },
         }));
         finalization.completed = true;
         sessionsRef.current.delete(sessionId);
