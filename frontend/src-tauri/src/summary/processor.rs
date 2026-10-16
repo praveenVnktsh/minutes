@@ -924,7 +924,23 @@ pub(crate) async fn fit_builtin_output(
 
 /// The user-facing error for an output that hit the model's limit. Such output
 /// is incomplete and must never be saved as a finished summary.
-pub(crate) fn truncation_error(stage: &str, provider: &LLMProvider) -> String {
+/// A small context window is named as the likely cause.
+pub(crate) fn truncation_error_for(
+    stage: &str,
+    provider: &LLMProvider,
+    budget: Option<&ContextBudget>,
+) -> String {
+    if let Some(budget) = budget.filter(|budget| budget.is_small()) {
+        let fix = if *provider == LLMProvider::Ollama {
+            "Pick a model with a context window of at least 8k tokens, or set num_ctx in its Modelfile so Ollama reports it."
+        } else {
+            "Pick a model with a context window of at least 8k tokens."
+        };
+        return format!(
+            "{stage} was cut off because the model runs with a context window of only {} tokens, too little room for the summary, so the incomplete summary was not saved. {fix}",
+            budget.n_ctx
+        );
+    }
     let hint = match provider {
         LLMProvider::CustomOpenAI => {
             "Raise Max tokens in the custom endpoint settings, then try again."
@@ -1039,9 +1055,10 @@ impl<'a, B: SummaryBackend> SummaryPipeline<'a, B> {
             break;
         }
         error!("{} was truncated at the output limit", stage);
-        Err(StageError::Truncated(truncation_error(
+        Err(StageError::Truncated(truncation_error_for(
             stage,
             self.backend.provider(),
+            self.budget.as_ref(),
         )))
     }
 
@@ -1058,14 +1075,17 @@ impl<'a, B: SummaryBackend> SummaryPipeline<'a, B> {
         let current = options
             .max_tokens
             .map_or(budget.max_output, |tokens| tokens as usize);
-        let prompt_tokens = match completion.prompt_tokens {
-            Some(tokens) => tokens as usize,
-            None => {
-                self.backend
-                    .count_prompt_tokens(system_prompt, user_prompt)
-                    .await?
-            }
-        };
+        // A reported count is not the whole prompt when the server reused a
+        // cached prefix: Ollama's prompt_eval_count only counts the tokens it
+        // evaluated, so a regenerate reports a fraction of the prompt and the
+        // grown request would overflow num_ctx. Take the larger of the two.
+        let counted = self
+            .backend
+            .count_prompt_tokens(system_prompt, user_prompt)
+            .await?;
+        let prompt_tokens = completion
+            .prompt_tokens
+            .map_or(counted, |reported| counted.max(reported as usize));
         Ok(budget
             .grown_output(current, prompt_tokens)
             .map(|tokens| u32::try_from(tokens).unwrap_or(u32::MAX)))
@@ -1089,7 +1109,12 @@ impl<'a, B: SummaryBackend> SummaryPipeline<'a, B> {
                     .await?;
                 let input_budget = budget.input_budget(overhead);
                 if input_budget < MIN_CHUNK_TOKENS {
-                    return Err(StageError::Failed("Your meeting notes are too long for this model's context window. Shorten the notes, or pick a model with a larger context window.".to_string()));
+                    let message = if notes.trim().is_empty() {
+                        format!("This model runs with only {} tokens of context, too little for the summary prompt and a transcript. Pick a model with at least 8k tokens of context.", budget.n_ctx)
+                    } else {
+                        "Your meeting notes are too long for this model's context window. Shorten the notes, or pick a model with a larger context window.".to_string()
+                    };
+                    return Err(StageError::Failed(message));
                 }
                 let transcript_tokens = self.backend.count_tokens(text).await?;
                 info!(
@@ -1669,12 +1694,30 @@ mod tests {
 
     #[test]
     fn truncation_error_is_clear_and_provider_specific() {
-        let custom = truncation_error("Final summary", &LLMProvider::CustomOpenAI);
+        let custom = truncation_error_for("Final summary", &LLMProvider::CustomOpenAI, None);
         assert!(custom.starts_with("Final summary was cut off"));
         assert!(custom.contains("not saved"));
         assert!(custom.contains("Max tokens"));
-        assert!(truncation_error("Final summary", &LLMProvider::BuiltInAI)
-            .contains("larger context window"));
+        assert!(
+            truncation_error_for("Final summary", &LLMProvider::BuiltInAI, None)
+                .contains("larger context window")
+        );
+        let small = truncation_error_for(
+            "Final summary",
+            &LLMProvider::Ollama,
+            Some(&ContextBudget::new(4_000)),
+        );
+        assert!(
+            small.contains("context window of only 4000 tokens"),
+            "{small}"
+        );
+        assert!(small.contains("num_ctx"), "{small}");
+        assert!(!truncation_error_for(
+            "Final summary",
+            &LLMProvider::Ollama,
+            Some(&ContextBudget::new(16_384)),
+        )
+        .contains("only"));
     }
 
     #[test]
@@ -2021,6 +2064,38 @@ mod tests {
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[1].2.max_tokens, Some(8_192));
         assert_eq!(calls[0].1, calls[1].1);
+    }
+
+    #[tokio::test]
+    async fn grown_retry_fits_even_when_ollama_reports_a_cached_prompt() {
+        // Regression: Ollama's prompt_eval_count leaves out a reused prefix,
+        // so a regenerate reported a few tokens and the grown retry asked for
+        // prompt + num_predict > num_ctx.
+        let budget = ContextBudget::for_ollama(8_192);
+        let backend = FakeBackend::new(LLMProvider::Ollama, |index, _, _, _| {
+            if index == 0 {
+                Ok(LlmCompletion {
+                    content: "# Notes\n- half".to_string(),
+                    reasoning_stripped: false,
+                    truncated: true,
+                    prompt_tokens: Some(12),
+                })
+            } else {
+                reply("# Notes\n- complete")
+            }
+        });
+        let text = "x".repeat(2_400);
+        run(&backend, &text, Some(budget), None).await.unwrap();
+        let calls = backend.calls();
+        assert_eq!(calls.len(), 2, "one chunk, one grown retry");
+        let (system, user, options) = &calls[1];
+        let prompt = system.chars().count() + user.chars().count();
+        let output = options.max_tokens.unwrap() as usize;
+        assert!(
+            prompt + output + budget.safety_margin() <= budget.n_ctx,
+            "prompt {prompt} + output {output} must fit num_ctx {}",
+            budget.n_ctx
+        );
     }
 
     #[tokio::test]

@@ -29,7 +29,38 @@ use tracing::{error, info, warn};
 const OLLAMA_FALLBACK_CONTEXT: usize = 8192;
 /// Cache-key threshold recorded for hosted models, which run single-pass.
 const HOSTED_TOKEN_THRESHOLD: usize = 100_000;
-const TITLE_OLLAMA_NUM_CTX: u32 = 8192;
+
+/// The model's advertised context, from Ollama's metadata (cached), or a
+/// fallback when it cannot be read.
+async fn ollama_model_context(model_name: &str, endpoint: Option<&str>) -> usize {
+    match METADATA_CACHE.get_or_fetch(model_name, endpoint).await {
+        Ok(metadata) => metadata.context_size,
+        Err(e) => {
+            warn!(
+                "Failed to fetch context for {}: {}. Using {} tokens",
+                model_name, e, OLLAMA_FALLBACK_CONTEXT
+            );
+            OLLAMA_FALLBACK_CONTEXT
+        }
+    }
+}
+
+/// The `num_ctx` every app call to an Ollama model runs with: summaries,
+/// titles, meeting chat and the live summary timeline. Ollama reloads the
+/// model whenever `num_ctx` changes, so differing values per call (8192 for
+/// titles, the server default for chat) reloaded it on every switch. None for
+/// other providers.
+pub(crate) async fn ollama_num_ctx(
+    provider: &LLMProvider,
+    model_name: &str,
+    endpoint: Option<&str>,
+) -> Option<u32> {
+    if *provider != LLMProvider::Ollama {
+        return None;
+    }
+    let budget = ContextBudget::for_ollama(ollama_model_context(model_name, endpoint).await);
+    Some(u32::try_from(budget.n_ctx).unwrap_or(u32::MAX))
+}
 
 static METADATA_CACHE: LazyLock<ModelMetadataCache> =
     LazyLock::new(|| ModelMetadataCache::new(Duration::from_secs(300)));
@@ -514,19 +545,7 @@ impl SummaryService {
         // Ollama is sent the same value as num_ctx; hosted models take the
         // whole transcript in one pass.
         let context_budget = if provider == LLMProvider::Ollama {
-            let model_context = match METADATA_CACHE
-                .get_or_fetch(&model_name, ollama_endpoint.as_deref())
-                .await
-            {
-                Ok(metadata) => metadata.context_size,
-                Err(e) => {
-                    warn!(
-                        "Failed to fetch context for {}: {}. Using {} tokens",
-                        model_name, e, OLLAMA_FALLBACK_CONTEXT
-                    );
-                    OLLAMA_FALLBACK_CONTEXT
-                }
-            };
+            let model_context = ollama_model_context(&model_name, ollama_endpoint.as_deref()).await;
             let budget = ContextBudget::for_ollama(model_context);
             info!(
                 "✓ Ollama context for {}: model max {} tokens, running with num_ctx {}",
@@ -827,8 +846,14 @@ impl SummaryService {
                 temperature: config.temperature,
                 top_p: config.top_p,
                 // The title prompt carries up to 12k characters of transcript,
-                // more than Ollama's small default context holds.
-                num_ctx: (config.provider == LLMProvider::Ollama).then_some(TITLE_OLLAMA_NUM_CTX),
+                // more than Ollama's small default context holds; the same
+                // num_ctx as every other call keeps the model loaded.
+                num_ctx: ollama_num_ctx(
+                    &config.provider,
+                    &config.model_name,
+                    config.ollama_endpoint.as_deref(),
+                )
+                .await,
                 ..Default::default()
             },
             app_data_dir.as_ref(),

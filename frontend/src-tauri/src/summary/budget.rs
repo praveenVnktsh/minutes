@@ -20,6 +20,10 @@ pub const OLLAMA_MAX_NUM_CTX: usize = 16_384;
 /// Smallest context we will budget against; below this a summary cannot fit.
 const MIN_NUM_CTX: usize = 2_048;
 
+/// Contexts below this get a larger output share and a "pick a model with
+/// more context" hint when a summary still does not fit.
+pub const SMALL_CONTEXT: usize = 8_192;
+
 /// Default output budget for one local summary call.
 pub const DEFAULT_MAX_OUTPUT_TOKENS: usize = 4_096;
 
@@ -43,13 +47,28 @@ pub struct ContextBudget {
 
 impl ContextBudget {
     /// Budget for a context of `n_ctx` tokens: reserve at most a quarter of it
-    /// for output, capped at `DEFAULT_MAX_OUTPUT_TOKENS`.
+    /// for output, capped at `DEFAULT_MAX_OUTPUT_TOKENS`. A small context
+    /// (an Ollama model whose metadata fell back to 4000 or 2048 tokens)
+    /// reserves 3/8 instead: a quarter left 1000/512 output tokens, which a
+    /// notes-length summary overruns, so summaries failed as truncated. The
+    /// transcript is chunked smaller to make room.
     pub fn new(n_ctx: usize) -> Self {
         let n_ctx = n_ctx.max(MIN_NUM_CTX);
+        let max_output = if n_ctx < SMALL_CONTEXT {
+            n_ctx * 3 / 8
+        } else {
+            n_ctx / 4
+        };
         Self {
             n_ctx,
-            max_output: DEFAULT_MAX_OUTPUT_TOKENS.min(n_ctx / 4),
+            max_output: DEFAULT_MAX_OUTPUT_TOKENS.min(max_output),
         }
+    }
+
+    /// Whether the context is small enough that summaries may not fit well,
+    /// for guidance in errors.
+    pub fn is_small(&self) -> bool {
+        self.n_ctx < SMALL_CONTEXT
     }
 
     /// Ollama budget: the model's advertised context, capped for memory. The
@@ -197,11 +216,18 @@ mod tests {
     }
 
     #[test]
-    fn small_contexts_reserve_a_quarter_for_output() {
-        let budget = ContextBudget::new(4_096);
-        assert_eq!(budget.max_output, 1_024);
+    fn small_contexts_reserve_more_room_for_output() {
+        // Regression: a quarter of Ollama's 4000/2048-token fallback contexts
+        // (1000/512 tokens) truncated ordinary summaries.
+        let budget = ContextBudget::new(4_000);
+        assert_eq!(budget.max_output, 1_500);
         assert_eq!(budget.safety_margin(), 256);
+        assert!(budget.is_small());
         assert_eq!(ContextBudget::new(100).n_ctx, 2_048);
+        assert_eq!(ContextBudget::new(2_048).max_output, 768);
+        // From 8k up, a quarter (capped) as before.
+        assert_eq!(ContextBudget::new(8_192).max_output, 2_048);
+        assert!(!ContextBudget::new(8_192).is_small());
     }
 
     #[test]

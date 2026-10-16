@@ -233,7 +233,13 @@ pub async fn chat_with_meeting<R: Runtime>(
             max_tokens,
             temperature: custom.as_ref().and_then(|value| value.temperature),
             top_p: custom.as_ref().and_then(|value| value.top_p),
-            num_ctx: None,
+            // The same num_ctx as summaries, so Ollama does not reload.
+            num_ctx: crate::summary::service::ollama_num_ctx(
+                &provider,
+                model_name,
+                config.ollama_endpoint.as_deref(),
+            )
+            .await,
             ..Default::default()
         },
         app_data_dir.as_ref(),
