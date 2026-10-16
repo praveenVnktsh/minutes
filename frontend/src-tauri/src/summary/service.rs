@@ -542,9 +542,12 @@ impl SummaryService {
         // Get app data directory for BuiltInAI provider
         let app_data_dir = app.path().app_data_dir().ok();
 
-        let notes_prompt_override = crate::summary::prompt_settings::load_notes_prompt(&app);
-        let effective_notes_prompt =
-            resolve_summary_system_prompt(notes_prompt_override.as_deref(), &custom_prompt);
+        use crate::summary::prompt_settings::{load_prompt, PromptKind};
+        let effective_notes_prompt = resolve_summary_system_prompt(
+            load_prompt(&app, PromptKind::Notes).as_deref(),
+            load_prompt(&app, PromptKind::TranscriptOnly).as_deref(),
+            &custom_prompt,
+        );
 
         if let Some(code) = &summary_language {
             info!("📝 Summary language preference: {}", code);
@@ -568,7 +571,7 @@ impl SummaryService {
         };
         let template_fingerprint = template_cache_fingerprint(&template);
 
-        let notes_prompt_fingerprint = stable_text_fingerprint(&effective_notes_prompt);
+        let notes_prompt_fingerprint = stable_text_fingerprint(&effective_notes_prompt.text);
 
         let cache_source = build_summary_cache_source(
             &text,
@@ -785,17 +788,27 @@ impl SummaryService {
         );
         let app_data_dir = app.path().app_data_dir().ok();
         let client = reqwest::Client::new();
+        let title_user_prompt = build_title_user_prompt(&transcript, notes.as_deref());
+        let title_max_tokens = crate::summary::processor::fit_builtin_output(
+            &config.provider,
+            &config.model_name,
+            app_data_dir.as_ref(),
+            title_system_prompt(),
+            &title_user_prompt,
+            config.max_tokens,
+        )
+        .await;
         let completion = generate_summary(
             &client,
             &config.provider,
             &config.model_name,
             &config.api_key,
             title_system_prompt(),
-            &build_title_user_prompt(&transcript, notes.as_deref()),
+            &title_user_prompt,
             config.ollama_endpoint.as_deref(),
             config.custom_openai_endpoint.as_deref(),
             &GenerationOptions {
-                max_tokens: config.max_tokens,
+                max_tokens: title_max_tokens,
                 temperature: config.temperature,
                 top_p: config.top_p,
                 // The title prompt carries up to 12k characters of transcript,

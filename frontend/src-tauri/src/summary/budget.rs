@@ -23,6 +23,9 @@ const MIN_NUM_CTX: usize = 2_048;
 /// Default output budget for one local summary call.
 pub const DEFAULT_MAX_OUTPUT_TOKENS: usize = 4_096;
 
+/// Smallest output budget worth asking for.
+pub const MIN_OUTPUT_TOKENS: usize = 256;
+
 /// Chunks smaller than this are not worth re-splitting; a context overflow at
 /// this size means the prompt overhead itself does not fit.
 pub const MIN_CHUNK_TOKENS: usize = 256;
@@ -65,6 +68,17 @@ impl ContextBudget {
     pub fn input_budget(&self, prompt_overhead_tokens: usize) -> usize {
         self.n_ctx
             .saturating_sub(self.max_output + prompt_overhead_tokens + self.safety_margin())
+    }
+
+    /// Output budget for a one-off call whose prompt is `prompt_tokens` long:
+    /// `max_output`, shrunk to what is left after the prompt and the margin.
+    /// None when not even `MIN_OUTPUT_TOKENS` fit.
+    pub fn output_for_prompt(&self, prompt_tokens: usize) -> Option<usize> {
+        let room = self
+            .n_ctx
+            .saturating_sub(prompt_tokens + self.safety_margin());
+        let output = self.max_output.min(room);
+        (output >= MIN_OUTPUT_TOKENS).then_some(output)
     }
 
     /// A larger output budget for retrying a truncated reply, or None when the
@@ -112,7 +126,10 @@ pub fn shrink_chunk_tokens(current_tokens: usize) -> Option<usize> {
     (shrunk >= MIN_CHUNK_TOKENS && shrunk < current_tokens).then_some(shrunk)
 }
 
-/// True when a provider error says the prompt did not fit the context window.
+/// True when a hosted provider's HTTP error body says the prompt did not fit
+/// the context window. Only for raw provider bodies: the app's own errors are
+/// typed (`llm_client::LlmErrorKind`, `processor::StageError`), and its
+/// truncation message mentions "context window" too.
 pub fn is_context_overflow_error(error: &str) -> bool {
     let error = error.to_ascii_lowercase();
     [
@@ -200,6 +217,18 @@ mod tests {
         // Only 32768 - 26000 - 1024 = 5744 tokens are left.
         assert_eq!(budget.grown_output(4_096, 26_000), Some(5_744));
         assert_eq!(budget.grown_output(4_096, 28_000), None);
+    }
+
+    #[test]
+    fn one_off_output_shrinks_to_the_room_left_after_the_prompt() {
+        let budget = ContextBudget::new(32_768);
+        assert_eq!(budget.output_for_prompt(10_000), Some(4_096));
+        // A 30k-token chat prompt used to ask for 4096 and be refused.
+        assert_eq!(
+            budget.output_for_prompt(30_000),
+            Some(32_768 - 30_000 - 1_024)
+        );
+        assert_eq!(budget.output_for_prompt(31_600), None);
     }
 
     #[test]

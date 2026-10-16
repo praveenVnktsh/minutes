@@ -41,7 +41,9 @@ export function SummaryModelSettings({ refetchTrigger: _refetchTrigger }: Summar
         <ModelConfigForm />
       </div>
 
-      <SummaryPromptSettings />
+      <SummaryPromptSettings kind="notes" />
+
+      <SummaryPromptSettings kind="transcriptOnly" />
     </div>
   );
 }

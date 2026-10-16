@@ -513,10 +513,132 @@ pub(crate) async fn generate_summary(
     app_data_dir: Option<&PathBuf>,
     cancellation_token: Option<&CancellationToken>,
 ) -> Result<LlmCompletion, String> {
+    generate_completion(
+        client,
+        provider,
+        model_name,
+        api_key,
+        system_prompt,
+        user_prompt,
+        ollama_endpoint,
+        custom_openai_endpoint,
+        options,
+        app_data_dir,
+        cancellation_token,
+    )
+    .await
+    .map_err(String::from)
+}
+
+/// Why a model call failed, for callers that react differently to each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LlmErrorKind {
+    /// The prompt (plus output budget) does not fit the model's context.
+    ContextOverflow,
+    Cancelled,
+    Other,
+}
+
+/// A failed model call. The kind is decided where the failure is first
+/// observed (llama-helper's `error_kind`, the provider's HTTP rejection),
+/// so nothing downstream has to guess it from message text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LlmError {
+    pub kind: LlmErrorKind,
+    pub message: String,
+}
+
+impl LlmError {
+    pub(crate) fn new(kind: LlmErrorKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for LlmError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl From<String> for LlmError {
+    fn from(message: String) -> Self {
+        Self::new(LlmErrorKind::Other, message)
+    }
+}
+
+impl From<&str> for LlmError {
+    fn from(message: &str) -> Self {
+        Self::new(LlmErrorKind::Other, message)
+    }
+}
+
+impl From<LlmError> for String {
+    fn from(error: LlmError) -> Self {
+        error.message
+    }
+}
+
+/// Classifies a built-in (llama-helper) failure by its typed error.
+fn builtin_error(error: anyhow::Error) -> LlmError {
+    use crate::summary::summary_engine::sidecar::SidecarError;
+    use crate::summary::summary_engine::BuiltinError;
+    let kind = if matches!(
+        error.downcast_ref::<BuiltinError>(),
+        Some(BuiltinError::ContextOverflow(_))
+    ) {
+        LlmErrorKind::ContextOverflow
+    } else if matches!(
+        error.downcast_ref::<SidecarError>(),
+        Some(SidecarError::Cancelled)
+    ) {
+        LlmErrorKind::Cancelled
+    } else {
+        LlmErrorKind::Other
+    };
+    LlmError::new(kind, error.to_string())
+}
+
+/// Classifies a provider's HTTP rejection. The body is the provider's own
+/// error text, the only place an overflow is reported for hosted APIs.
+fn http_status_error(status: reqwest::StatusCode, body: &str) -> LlmError {
+    let kind = if matches!(status.as_u16(), 400 | 413 | 422)
+        && crate::summary::budget::is_context_overflow_error(body)
+    {
+        LlmErrorKind::ContextOverflow
+    } else {
+        LlmErrorKind::Other
+    };
+    LlmError::new(
+        kind,
+        format!("LLM API request failed with status {}: {}", status, body),
+    )
+}
+
+/// [`generate_summary`] with a typed error.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn generate_completion(
+    client: &Client,
+    provider: &LLMProvider,
+    model_name: &str,
+    api_key: &str,
+    system_prompt: &str,
+    user_prompt: &str,
+    ollama_endpoint: Option<&str>,
+    custom_openai_endpoint: Option<&str>,
+    options: &GenerationOptions,
+    app_data_dir: Option<&PathBuf>,
+    cancellation_token: Option<&CancellationToken>,
+) -> Result<LlmCompletion, LlmError> {
     // Check if cancelled before starting
     if let Some(token) = cancellation_token {
         if token.is_cancelled() {
-            return Err("Summary generation was cancelled".to_string());
+            return Err(LlmError::new(
+                LlmErrorKind::Cancelled,
+                "Summary generation was cancelled",
+            ));
         }
     }
 
@@ -546,7 +668,7 @@ pub(crate) async fn generate_summary(
             truncated: completion.truncated,
             prompt_tokens: completion.prompt_tokens,
         })
-        .map_err(|e| e.to_string());
+        .map_err(builtin_error);
     }
 
     let (api_url, mut headers) = match provider {
@@ -666,10 +788,7 @@ pub(crate) async fn generate_summary(
         let Some(retry_body) =
             compatibility_retry_body(provider, &request_body, status, &error_body)
         else {
-            return Err(format!(
-                "LLM API request failed with status {}: {}",
-                status, error_body
-            ));
+            return Err(http_status_error(status, &error_body));
         };
         let retry_future = client
             .post(api_url)
@@ -687,10 +806,7 @@ pub(crate) async fn generate_summary(
         let error_body = await_or_cancel(response.text(), cancellation_token)
             .await?
             .unwrap_or_else(|error| format!("Failed to read LLM error response body: {error}"));
-        return Err(format!(
-            "LLM API request failed with status {}: {}",
-            status, error_body
-        ));
+        return Err(http_status_error(status, &error_body));
     }
 
     // Parse response based on provider
@@ -881,6 +997,32 @@ mod tests {
     }
 
     #[test]
+    fn http_rejections_are_typed_by_the_provider_body() {
+        let overflow = http_status_error(
+            reqwest::StatusCode::BAD_REQUEST,
+            r#"{"error":{"code":"context_length_exceeded","message":"maximum context length is 8192"}}"#,
+        );
+        assert_eq!(overflow.kind, LlmErrorKind::ContextOverflow);
+        let auth = http_status_error(reqwest::StatusCode::UNAUTHORIZED, "context window");
+        assert_eq!(auth.kind, LlmErrorKind::Other);
+        let other = http_status_error(reqwest::StatusCode::BAD_REQUEST, "bad field");
+        assert_eq!(other.kind, LlmErrorKind::Other);
+    }
+
+    #[test]
+    fn builtin_failures_are_typed_by_their_error_not_their_text() {
+        use crate::summary::summary_engine::BuiltinError;
+        let overflow = builtin_error(anyhow::anyhow!(BuiltinError::ContextOverflow(
+            "prompt has 9 tokens".into()
+        )));
+        assert_eq!(overflow.kind, LlmErrorKind::ContextOverflow);
+        let text_only = builtin_error(anyhow::anyhow!(
+            "Generation failed: exceeds the context window"
+        ));
+        assert_eq!(text_only.kind, LlmErrorKind::Other);
+    }
+
+    #[test]
     fn truncation_is_read_from_every_provider_shape() {
         let openai: ChatResponse = serde_json::from_value(json!({
             "choices": [{"message": {"content": "partial"}, "finish_reason": "length"}]
@@ -899,6 +1041,18 @@ mod tests {
         }))
         .unwrap();
         assert!(claude.completion().unwrap().truncated);
+        let claude_context: ClaudeChatResponse = serde_json::from_value(json!({
+            "content": [{"type": "text", "text": "partial"}],
+            "stop_reason": "model_context_window_exceeded"
+        }))
+        .unwrap();
+        assert!(claude_context.completion().unwrap().truncated);
+        let claude_done: ClaudeChatResponse = serde_json::from_value(json!({
+            "content": [{"type": "text", "text": "done"}],
+            "stop_reason": "end_turn"
+        }))
+        .unwrap();
+        assert!(!claude_done.completion().unwrap().truncated);
 
         let ollama: OllamaChatResponse = serde_json::from_value(json!({
             "message": {"role": "assistant", "content": "partial", "thinking": "hmm"},

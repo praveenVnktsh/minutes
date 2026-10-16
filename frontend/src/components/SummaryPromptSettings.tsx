@@ -15,16 +15,39 @@ export interface SummaryPromptSettingsData {
   isCustom: boolean;
 }
 
+/** Which final-pass prompt the card edits: for meetings with notes, or without. */
+export type SummaryPromptKind = 'notes' | 'transcriptOnly';
+
+const COPY: Record<
+  SummaryPromptKind,
+  { title: string; description: string; noun: string }
+> = {
+  notes: {
+    title: 'Notes prompt',
+    description:
+      'The instruction sent to the model for meetings where you typed notes: it enriches your notes from the transcript. Edit it to change the tone, structure or focus of generated notes. It applies to summaries generated after you save.',
+    noun: 'Notes prompt',
+  },
+  transcriptOnly: {
+    title: 'No-notes prompt',
+    description:
+      'The instruction sent to the model for meetings without notes: it writes notes from the transcript alone. It applies to summaries generated after you save.',
+    noun: 'No-notes prompt',
+  },
+};
+
 type LoadState =
   | { status: 'loading' }
   | { status: 'error'; message: string }
   | { status: 'ready'; saved: SummaryPromptSettingsData };
 
 /**
- * Settings card for the system prompt sent to the model when it writes meeting notes. The
+ * Settings card for a system prompt sent to the model when it writes meeting notes. The
  * Rust core owns the default and the saved override; this card only edits and resets it.
  */
-export function SummaryPromptSettings() {
+export function SummaryPromptSettings({ kind = 'notes' }: { kind?: SummaryPromptKind }) {
+  const copy = COPY[kind];
+  const descriptionId = `summary-prompt-description-${kind}`;
   const [state, setState] = useState<LoadState>({ status: 'loading' });
   const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState<'saving' | 'resetting' | null>(null);
@@ -37,11 +60,11 @@ export function SummaryPromptSettings() {
   const load = useCallback(async () => {
     setState({ status: 'loading' });
     try {
-      applySettings(await invoke<SummaryPromptSettingsData>('api_get_summary_prompt'));
+      applySettings(await invoke<SummaryPromptSettingsData>('api_get_summary_prompt', { kind }));
     } catch (error) {
       setState({ status: 'error', message: String(error) });
     }
-  }, [applySettings]);
+  }, [applySettings, kind]);
 
   useEffect(() => {
     void load();
@@ -50,10 +73,12 @@ export function SummaryPromptSettings() {
   const save = async () => {
     setBusy('saving');
     try {
-      applySettings(await invoke<SummaryPromptSettingsData>('api_save_summary_prompt', { prompt: draft }));
-      toast.success('Notes prompt saved');
+      applySettings(
+        await invoke<SummaryPromptSettingsData>('api_save_summary_prompt', { prompt: draft, kind }),
+      );
+      toast.success(`${copy.noun} saved`);
     } catch (error) {
-      toast.error('Could not save the notes prompt', { description: String(error) });
+      toast.error(`Could not save the ${copy.noun.toLowerCase()}`, { description: String(error) });
     } finally {
       setBusy(null);
     }
@@ -62,10 +87,10 @@ export function SummaryPromptSettings() {
   const reset = async () => {
     setBusy('resetting');
     try {
-      applySettings(await invoke<SummaryPromptSettingsData>('api_reset_summary_prompt'));
-      toast.success('Notes prompt reset to default');
+      applySettings(await invoke<SummaryPromptSettingsData>('api_reset_summary_prompt', { kind }));
+      toast.success(`${copy.noun} reset to default`);
     } catch (error) {
-      toast.error('Could not reset the notes prompt', { description: String(error) });
+      toast.error(`Could not reset the ${copy.noun.toLowerCase()}`, { description: String(error) });
     } finally {
       setBusy(null);
     }
@@ -80,7 +105,7 @@ export function SummaryPromptSettings() {
       <div className="mb-2 flex items-center justify-between gap-4">
         <div className="flex items-center gap-2">
           <FileText size={18} className="text-ink-muted" />
-          <h3 className="text-lg font-semibold text-ink">Notes prompt</h3>
+          <h3 className="text-lg font-semibold text-ink">{copy.title}</h3>
         </div>
         {saved && (
           <span
@@ -91,17 +116,17 @@ export function SummaryPromptSettings() {
           </span>
         )}
       </div>
-      <p id="summary-prompt-description" className="mb-4 text-sm text-ink-muted">
-        The instruction sent to the model when it writes meeting notes. Edit it to change the
-        tone, structure or focus of generated notes. It applies to summaries generated after you
-        save.
+      <p id={descriptionId} className="mb-4 text-sm text-ink-muted">
+        {copy.description}
       </p>
 
       {state.status === 'loading' && <p className="text-sm text-ink-muted">Loading prompt…</p>}
 
       {state.status === 'error' && (
         <div role="alert" className={`flex items-center justify-between gap-4 rounded-md p-3 text-sm ${panel.error}`}>
-          <span>Could not load the notes prompt: {state.message}</span>
+          <span>
+            Could not load the {copy.noun.toLowerCase()}: {state.message}
+          </span>
           <Button variant="outline" size="sm" onClick={() => void load()}>
             Retry
           </Button>
@@ -111,8 +136,8 @@ export function SummaryPromptSettings() {
       {saved && (
         <>
           <Textarea
-            aria-label="Notes prompt"
-            aria-describedby="summary-prompt-description"
+            aria-label={copy.title}
+            aria-describedby={descriptionId}
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
             disabled={busy !== null}
