@@ -781,6 +781,18 @@ pub fn run() {
             // Initialize transcription queue worker (processes import/retranscribe tasks sequentially)
             audio::transcription_queue::init_queue_worker(_app.handle());
 
+            // Live/final transcription defaults: migrate the final model and
+            // fetch missing default models in the background. Onboarding fires
+            // the event when it finishes, since this skips until then.
+            audio::live_streaming::commands::spawn_default_model_setup(_app.handle().clone());
+            {
+                use tauri::Listener;
+                let handle = _app.handle().clone();
+                _app.listen(onboarding::ONBOARDING_COMPLETED_EVENT, move |_| {
+                    audio::live_streaming::commands::spawn_default_model_setup(handle.clone());
+                });
+            }
+
             // Finish speaker identification that was cut off when the app last quit.
             audio::diarization::init_resume_worker(_app.handle());
 
@@ -1065,6 +1077,13 @@ pub fn run() {
             utils::open_system_settings,
             // Retranscription commands
             audio::retranscription::start_retranscription_command,
+            audio::final_pass::start_final_transcript_pass,
+            audio::live_streaming::commands::get_live_transcription_settings,
+            audio::live_streaming::commands::set_live_transcription_settings,
+            audio::live_streaming::commands::live_model_get_status,
+            audio::live_streaming::commands::live_model_download,
+            audio::live_streaming::commands::live_model_cancel_download,
+            audio::live_streaming::commands::live_model_delete,
             audio::retranscription::cancel_retranscription_command,
             audio::retranscription::is_retranscription_in_progress_command,
             audio::diarization::run_speaker_diarization,

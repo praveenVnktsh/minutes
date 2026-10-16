@@ -1,11 +1,14 @@
 use anyhow::Result;
 use log::{error, info, warn};
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Runtime};
+use tauri::{AppHandle, Emitter, Runtime};
 use tauri_plugin_store::StoreExt;
 
 use crate::database::repositories::setting::SettingsRepository;
 use crate::state::AppState;
+
+/// Emitted when onboarding finishes, so startup work that waits for it runs.
+pub const ONBOARDING_COMPLETED_EVENT: &str = "onboarding-completed";
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct OnboardingStatus {
@@ -271,6 +274,8 @@ pub async fn complete_onboarding<R: Runtime>(
         .map_err(|e| format!("Failed to save completed onboarding status: {}", e))?;
 
     info!("Onboarding completed successfully with model: {}", model);
+    // Apply the live/final transcription defaults now rather than next launch.
+    let _ = app.emit(ONBOARDING_COMPLETED_EVENT, ());
     Ok(())
 }
 

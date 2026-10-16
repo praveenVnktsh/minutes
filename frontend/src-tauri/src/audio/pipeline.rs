@@ -12,6 +12,12 @@ pub static LIVE_TRANSCRIPTION_ENABLED: AtomicBool = AtomicBool::new(true);
 /// the next recording rather than disturbing audio the canceller is holding.
 pub static MIC_ECHO_CANCELLATION_ENABLED: AtomicBool = AtomicBool::new(false);
 
+/// Live path mode for the next pipeline: `true` sends every aligned window of
+/// each source, continuously, to a streaming recognizer (Nemotron); `false`
+/// cuts speech with the VAD for chunk-based engines. Set from the recording's
+/// live plan before capture starts, read once when the pipeline is built.
+pub static LIVE_STREAMING_MODE: AtomicBool = AtomicBool::new(false);
+
 /// RMS of the latest mixed recording window (an `f32` stored as its bits), for
 /// the record bar's live waveform. Written every ~50ms while a pipeline runs
 /// and reset to 0 when it ends; read by the `get_recording_level` command.
@@ -877,6 +883,15 @@ pub struct AudioPipeline {
     // the reference, so remote speech is not transcribed a second time as "mic".
     // `None` when the beta flag was off as this recording started.
     mic_echo_canceller: Option<MicEchoCanceller>,
+    /// Streaming live model: skip the VAD and send continuous windows.
+    streaming_mode: bool,
+    /// System samples handed to the live path so far: the recording position
+    /// stamped on streaming windows.
+    live_position_samples: u64,
+    /// The same for the microphone. It differs from the system count only
+    /// while the echo canceller holds mic audio back; every cleaned sample
+    /// keeps its original position, so counting output samples is exact.
+    live_mic_position_samples: u64,
     sample_rate: u32,
     chunk_id_counter: u64,
     // Timestamp of the latest audio chunk, for mixed audio drained on flush
@@ -974,6 +989,9 @@ impl AudioPipeline {
             mic_echo_canceller: MIC_ECHO_CANCELLATION_ENABLED
                 .load(Ordering::SeqCst)
                 .then(|| MicEchoCanceller::new(sample_rate)),
+            streaming_mode: LIVE_STREAMING_MODE.load(Ordering::SeqCst),
+            live_position_samples: 0,
+            live_mic_position_samples: 0,
             sample_rate,
             chunk_id_counter: 0,
             last_chunk_timestamp: 0.0,
@@ -1098,7 +1116,8 @@ impl AudioPipeline {
         // Simple mixing without aggressive ducking
         let mixed_clean = self.mixer.mix_window(&mic_window, &sys_window);
         if !mixed_clean.is_empty() {
-            let rms = (mixed_clean.iter().map(|&x| x * x).sum::<f32>() / mixed_clean.len() as f32).sqrt();
+            let rms =
+                (mixed_clean.iter().map(|&x| x * x).sum::<f32>() / mixed_clean.len() as f32).sqrt();
             RECORDING_LEVEL.store(rms.to_bits(), Ordering::Relaxed);
         }
 
@@ -1116,15 +1135,35 @@ impl AudioPipeline {
         // every sample at its original position, so the mic timeline is unchanged. Only the
         // transcription path gets the cleaned mic; the recording keeps the raw one.
         // Skip VAD processing entirely when live transcription is disabled (saves CPU/GPU)
+        let window_start = self.live_position_samples;
+        self.live_position_samples += mic_window.len() as u64;
         if LIVE_TRANSCRIPTION_ENABLED.load(Ordering::Relaxed) {
-            match self.mic_echo_canceller.as_mut() {
-                Some(canceller) => {
-                    let cleaned_mic = canceller.process(&mic_window, &sys_window);
-                    self.process_source_audio(&cleaned_mic, DeviceType::Microphone);
+            let cleaned_mic = self
+                .mic_echo_canceller
+                .as_mut()
+                .map(|canceller| canceller.process(&mic_window, &sys_window));
+            let mic_for_live = cleaned_mic.as_deref().unwrap_or(&mic_window);
+            if self.streaming_mode {
+                // Streaming models keep their own context: send everything,
+                // continuously, on the recording timeline.
+                let mic_start = self.live_mic_position_samples;
+                self.live_mic_position_samples += mic_for_live.len() as u64;
+                if !mic_for_live.is_empty() {
+                    self.send_stream_window(
+                        mic_for_live.to_vec(),
+                        DeviceType::Microphone,
+                        mic_start,
+                    );
                 }
-                None => self.process_source_audio(&mic_window, DeviceType::Microphone),
+                self.send_stream_window(sys_window.clone(), DeviceType::System, window_start);
+            } else {
+                self.process_source_audio(mic_for_live, DeviceType::Microphone);
+                self.process_source_audio(&sys_window, DeviceType::System);
             }
-            self.process_source_audio(&sys_window, DeviceType::System);
+        } else {
+            // Nothing reaches the canceller while live text is off, so the mic
+            // resumes in step with the system timeline if it is turned on.
+            self.live_mic_position_samples = self.live_position_samples;
         }
 
         // STEP 4: Send mixed audio for recording (WAV file)
@@ -1159,6 +1198,26 @@ impl AudioPipeline {
             return Ok(());
         }
 
+        if self.streaming_mode {
+            // Hand over the mic audio the echo canceller still holds, at its
+            // own position, so the end of the last utterance is not lost.
+            if let Some(canceller) = self.mic_echo_canceller.as_mut() {
+                let held_mic = canceller.flush();
+                if !held_mic.is_empty() {
+                    let start = self.live_mic_position_samples;
+                    self.live_mic_position_samples += held_mic.len() as u64;
+                    self.send_stream_window(held_mic, DeviceType::Microphone, start);
+                }
+            }
+            // An empty window tells the streaming worker to close the
+            // utterance in progress on that source.
+            let mic_position = self.live_mic_position_samples;
+            let system_position = self.live_position_samples;
+            self.send_stream_window(Vec::new(), DeviceType::Microphone, mic_position);
+            self.send_stream_window(Vec::new(), DeviceType::System, system_position);
+            return Ok(());
+        }
+
         // Hand the mic audio the echo canceller is still holding to the VAD
         // before flushing it, or the end of the last utterance would be lost.
         if let Some(canceller) = self.mic_echo_canceller.as_mut() {
@@ -1172,6 +1231,27 @@ impl AudioPipeline {
         self.send_source_segments(system_segments, DeviceType::System, true);
 
         Ok(())
+    }
+
+    /// Streaming mode: forward one source window at its recording position.
+    /// Empty `samples` is the flush marker.
+    fn send_stream_window(
+        &mut self,
+        samples: Vec<f32>,
+        device_type: DeviceType,
+        start_samples: u64,
+    ) {
+        let chunk = AudioChunk {
+            data: samples,
+            sample_rate: self.sample_rate,
+            timestamp: start_samples as f64 / self.sample_rate as f64,
+            chunk_id: self.chunk_id_counter,
+            device_type,
+        };
+        self.chunk_id_counter += 1;
+        if self.transcription_sender.send(chunk).is_err() {
+            perf_debug!("Streaming live window dropped: transcription worker gone");
+        }
     }
 
     fn process_source_audio(&mut self, samples: &[f32], device_type: DeviceType) {

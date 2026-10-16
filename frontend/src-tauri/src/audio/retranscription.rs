@@ -681,7 +681,7 @@ fn emit_progress<R: Runtime>(
 
 /// Get or initialize the Whisper engine, auto-loading the model if needed
 /// If `requested_model` is provided, ensures that specific model is loaded
-async fn get_or_init_whisper<R: Runtime>(
+pub(crate) async fn get_or_init_whisper<R: Runtime>(
     app: &AppHandle<R>,
     requested_model: Option<&str>,
 ) -> Result<Arc<WhisperEngine>> {
@@ -799,7 +799,7 @@ async fn get_configured_whisper_model<R: Runtime>(app: &AppHandle<R>) -> Result<
 }
 
 /// Get or initialize the Parakeet engine, auto-loading the model if needed
-async fn get_or_init_parakeet<R: Runtime>(
+pub(crate) async fn get_or_init_parakeet<R: Runtime>(
     app: &AppHandle<R>,
     requested_model: Option<&str>,
 ) -> Result<Arc<ParakeetEngine>> {
@@ -995,6 +995,7 @@ pub async fn start_retranscription_command<R: Runtime>(
         language,
         model,
         provider,
+        final_pass: false,
     };
 
     let task_id = get_queue().enqueue(&app, task).await;

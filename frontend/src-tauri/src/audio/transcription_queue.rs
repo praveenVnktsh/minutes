@@ -45,6 +45,11 @@ pub struct TranscriptionTask {
     pub language: Option<String>,
     pub model: Option<String>,
     pub provider: Option<String>,
+    /// The automatic final pass after a recording: on failure or cancellation
+    /// the live transcript is kept, diarized and marked ready instead of the
+    /// task failing, so the meeting still gets speakers and a summary.
+    #[serde(default)]
+    pub final_pass: bool,
 }
 
 /// Progress event emitted by the queue
@@ -713,7 +718,17 @@ async fn process_retranscribe_task<R: Runtime>(app: &AppHandle<R>, task: &Transc
     use super::retranscription::RETRANSCRIPTION_CANCELLED;
     RETRANSCRIPTION_CANCELLED.store(false, Ordering::SeqCst);
     if is_task_cancelled(&task.task_id) {
-        emit_cancelled(app, task, "Retranscription cancelled");
+        if task.final_pass {
+            super::final_pass::keep_live_transcript(
+                app,
+                task,
+                &meeting_id,
+                "the final pass was cancelled",
+            )
+            .await;
+        } else {
+            emit_cancelled(app, task, "Retranscription cancelled");
+        }
         return;
     }
 
@@ -856,6 +871,30 @@ async fn process_retranscribe_task<R: Runtime>(app: &AppHandle<R>, task: &Transc
                     "warning": retranscription_result.warning
                 }),
             );
+
+            if task.final_pass {
+                super::final_pass::emit_complete(
+                    app,
+                    super::final_pass::FinalPassComplete {
+                        meeting_id: retranscription_result.meeting_id.clone(),
+                        task_id: task.task_id.clone(),
+                        outcome: "replaced",
+                        provider: task.provider.clone(),
+                        model: task.model.clone(),
+                        warning: retranscription_result.warning.clone(),
+                    },
+                );
+            }
+        }
+        Err(e) if task.final_pass => {
+            let error_msg = e.to_string();
+            let reason = if error_msg.contains("cancelled") {
+                "the final pass was cancelled".to_string()
+            } else {
+                warn!("Final pass {} failed: {}", task.task_id, error_msg);
+                format!("the final pass failed ({error_msg})")
+            };
+            super::final_pass::keep_live_transcript(app, task, &meeting_id, &reason).await;
         }
         Err(e) => {
             let error_msg = e.to_string();
@@ -978,6 +1017,23 @@ pub async fn cancel_transcription_task<R: Runtime>(
 ) -> Result<bool, String> {
     let queue = get_queue();
     let cancellation = queue.cancel_task(&task_id).await;
+    // A final pass cancelled before it started keeps the live transcript, which
+    // still needs its speakers and summary.
+    if let Some((task, true)) = cancellation.as_ref().filter(|(task, _)| task.final_pass) {
+        if let Some(meeting_id) = task.meeting_id.clone() {
+            let (app, task) = (app.clone(), task.clone());
+            tauri::async_runtime::spawn(async move {
+                super::final_pass::keep_live_transcript(
+                    &app,
+                    &task,
+                    &meeting_id,
+                    "the final pass was cancelled",
+                )
+                .await;
+            });
+            return Ok(true);
+        }
+    }
     if let Some((task, true)) = cancellation.as_ref() {
         crate::meeting_activity::update_task(
             &app,
@@ -1072,6 +1128,7 @@ mod tests {
             language: None,
             model: None,
             provider: None,
+            final_pass: false,
         }
     }
 
