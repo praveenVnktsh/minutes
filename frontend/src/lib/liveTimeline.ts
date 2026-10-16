@@ -95,7 +95,11 @@ export function statusNotice(snapshot: TimelineSnapshot | null): { tone: Tone; t
     case 'failed':
       return { tone: 'warning', text: 'Live summary paused. It will try again with the next minute of conversation.' };
     case 'unavailable':
-      return { tone: 'neutral', text: 'Live summary needs a summary model. Choose one in Settings → Summary.' };
+      // With an error, the provider refused the request (key, quota, rate
+      // limit); without one, no summary model is set up.
+      return snapshot.error
+        ? { tone: 'warning', text: snapshot.error }
+        : { tone: 'neutral', text: 'Live summary needs a summary model. Choose one in Settings → Summary.' };
     case 'disabled':
       return { tone: 'neutral', text: 'Live summary is off. Turn it on in Settings → Summary.' };
     default:

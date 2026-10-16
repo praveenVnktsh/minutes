@@ -14,7 +14,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { TranscriptSegmentData } from "@/types";
 import { isWholesaleReplacement, nearestSegmentIndex } from "@/lib/transcriptAnchor";
 import { JUMP_TO_TIME_EVENT } from "@/lib/liveTimeline";
-import { recordingFill, speakerPalette, transcriptHighlight } from "@/lib/theme-classes";
+import { jumpFlashKeyframes, recordingFill, speakerPalette, transcriptHighlight } from "@/lib/theme-classes";
 
 export interface VirtualizedTranscriptViewProps {
     /** Transcript segments to display */
@@ -57,6 +57,16 @@ export interface VirtualizedTranscriptViewProps {
 
 // Threshold for enabling virtualization (below this, use simple rendering)
 const VIRTUALIZATION_THRESHOLD = 10;
+
+/** Flash a row once it is in the DOM: a virtualized row far from the
+ * viewport only renders after the smooth scroll reaches it. */
+function flashSegmentWhenRendered(id: string, attemptsLeft = 20) {
+    window.setTimeout(() => {
+        const node = document.getElementById(`segment-${id}`);
+        if (node) node.animate(jumpFlashKeyframes(), { duration: 1600 });
+        else if (attemptsLeft > 0) flashSegmentWhenRendered(id, attemptsLeft - 1);
+    }, attemptsLeft === 20 ? 250 : 100);
+}
 
 function speakerChipClass(key: string): string {
     let hash = 0;
@@ -506,12 +516,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
             } else {
                 document.getElementById(`segment-${id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
             }
-            window.setTimeout(() => {
-                document.getElementById(`segment-${id}`)?.animate(
-                    [{ backgroundColor: 'rgba(251, 191, 36, .22)' }, { backgroundColor: 'transparent' }],
-                    { duration: 1600 },
-                );
-            }, 250);
+            flashSegmentWhenRendered(id);
         };
         window.addEventListener('meetily:jump-to-transcript', handleJump);
         return () => window.removeEventListener('meetily:jump-to-transcript', handleJump);
@@ -520,28 +525,43 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
     // Chapters jump by recording time, not by row: rows change when the final
     // pass replaces the live transcript, times do not. Same nearest-row rule
     // as keeping the reader's place across that swap.
+    // A chapter clicked before the rows it points at have loaded (a long
+    // meeting still paging in) waits here and is applied once they arrive.
+    const pendingJumpSecondsRef = useRef<number | null>(null);
+    const jumpToSeconds = useCallback((seconds: number): boolean => {
+        const index = nearestSegmentIndex(segments, seconds);
+        if (index < 0) return false;
+        // Past the last loaded row while more are coming: not there yet.
+        const last = segments[segments.length - 1];
+        if (hasMore && last && last.timestamp < seconds) {
+            onLoadMore?.();
+            return false;
+        }
+        const id = segments[index].id;
+        if (useVirtualization) {
+            virtualizer.scrollToIndex(index, { align: 'start', behavior: 'smooth' });
+        } else {
+            document.getElementById(`segment-${id}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+        flashSegmentWhenRendered(id);
+        return true;
+    }, [hasMore, onLoadMore, segments, useVirtualization, virtualizer]);
+
     useEffect(() => {
         const handleJumpToTime = (event: Event) => {
             const { seconds } = (event as CustomEvent<{ seconds: number }>).detail ?? {};
             if (typeof seconds !== 'number' || !Number.isFinite(seconds)) return;
-            const index = nearestSegmentIndex(segments, seconds);
-            if (index < 0) return;
-            const id = segments[index].id;
-            if (useVirtualization) {
-                virtualizer.scrollToIndex(index, { align: 'start', behavior: 'smooth' });
-            } else {
-                document.getElementById(`segment-${id}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-            }
-            window.setTimeout(() => {
-                document.getElementById(`segment-${id}`)?.animate(
-                    [{ backgroundColor: 'rgba(251, 191, 36, .22)' }, { backgroundColor: 'transparent' }],
-                    { duration: 1600 },
-                );
-            }, 250);
+            pendingJumpSecondsRef.current = jumpToSeconds(seconds) ? null : seconds;
         };
         window.addEventListener(JUMP_TO_TIME_EVENT, handleJumpToTime);
         return () => window.removeEventListener(JUMP_TO_TIME_EVENT, handleJumpToTime);
-    }, [segments, useVirtualization, virtualizer]);
+    }, [jumpToSeconds]);
+
+    useEffect(() => {
+        const seconds = pendingJumpSecondsRef.current;
+        if (seconds === null) return;
+        if (jumpToSeconds(seconds)) pendingJumpSecondsRef.current = null;
+    }, [jumpToSeconds]);
 
     // Keep the reader's place when the transcript is replaced wholesale (the
     // final pass swapping in a better transcript): remember the recording time
