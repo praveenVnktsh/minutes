@@ -73,8 +73,21 @@ enum Response {
 pub const BUILTIN_SEED: u32 = 42;
 
 /// Error text llama-helper uses when prompt + output budget exceeds the context.
-/// `summary::budget::is_context_overflow_error` recognises it.
 pub const CONTEXT_OVERFLOW_MARKER: &str = "context overflow";
+
+/// Typed built-in failures callers branch on. They travel inside
+/// `anyhow::Error`; use `downcast_ref` rather than matching message text.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum BuiltinError {
+    /// llama-helper refused the request because prompt + output budget does
+    /// not fit the context (`error_kind: "context_overflow"`).
+    #[error("Generation failed ({CONTEXT_OVERFLOW_MARKER}): {0}")]
+    ContextOverflow(String),
+    /// The helper does not understand the request (an older llama-helper
+    /// without `tokenize`).
+    #[error("Sidecar error: {0}")]
+    UnsupportedRequest(String),
+}
 
 /// A built-in generation result.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,12 +110,8 @@ fn parse_generate_response(response_json: &str) -> Result<BuiltinCompletion> {
             error_kind,
         } => {
             if let Some(err_msg) = error {
-                if error_kind.as_deref() == Some("context_overflow")
-                    && !err_msg.contains(CONTEXT_OVERFLOW_MARKER)
-                {
-                    return Err(anyhow!(
-                        "Generation failed ({CONTEXT_OVERFLOW_MARKER}): {err_msg}"
-                    ));
+                if error_kind.as_deref() == Some("context_overflow") {
+                    return Err(anyhow!(BuiltinError::ContextOverflow(err_msg)));
                 }
                 return Err(anyhow!("Generation failed: {}", err_msg));
             }
@@ -122,6 +131,11 @@ fn parse_token_count_response(response_json: &str) -> Result<usize> {
         .with_context(|| format!("Failed to parse response: {}", response_json))?;
     match response {
         Response::TokenCount { count } => Ok(count as usize),
+        // llama-helper answers a request type it cannot parse with
+        // "Invalid request: unknown variant ...".
+        Response::Error { message } if message.starts_with("Invalid request") => {
+            Err(anyhow!(BuiltinError::UnsupportedRequest(message)))
+        }
         Response::Error { message } => Err(anyhow!("Sidecar error: {}", message)),
         Response::Response { error, .. } => Err(anyhow!(
             "Unexpected generate response to tokenize request: {:?}",
@@ -492,15 +506,30 @@ mod tests {
         let error = parse_generate_response(
             r#"{"type":"response","text":"","error":"Generation failed: context overflow: prompt has 9 tokens","error_kind":"context_overflow"}"#,
         )
-        .unwrap_err()
-        .to_string();
-        assert!(error.contains(CONTEXT_OVERFLOW_MARKER));
-        let other = parse_generate_response(
-            r#"{"type":"response","text":"","error":"boom","error_kind":"context_overflow"}"#,
+        .unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<BuiltinError>(),
+            Some(BuiltinError::ContextOverflow(_))
+        ));
+        assert!(error.to_string().contains(CONTEXT_OVERFLOW_MARKER));
+        // Only error_kind decides, never the message text.
+        let plain = parse_generate_response(
+            r#"{"type":"response","text":"","error":"exceeds the context window"}"#,
         )
-        .unwrap_err()
-        .to_string();
-        assert!(other.contains(CONTEXT_OVERFLOW_MARKER));
+        .unwrap_err();
+        assert!(plain.downcast_ref::<BuiltinError>().is_none());
+    }
+
+    #[test]
+    fn old_helper_rejecting_tokenize_is_typed_as_unsupported() {
+        let error = parse_token_count_response(
+            r#"{"type":"error","message":"Invalid request: unknown variant `tokenize`"}"#,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<BuiltinError>(),
+            Some(BuiltinError::UnsupportedRequest(_))
+        ));
     }
 
     #[test]

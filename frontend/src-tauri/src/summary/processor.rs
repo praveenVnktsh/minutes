@@ -1,8 +1,10 @@
 use crate::summary::budget::{
-    chars_per_token, estimate_tokens, group_within_budget, is_context_overflow_error,
-    shrink_chunk_tokens, ContextBudget, MIN_CHUNK_TOKENS,
+    chars_per_token, estimate_tokens, group_within_budget, shrink_chunk_tokens, ContextBudget,
+    MIN_CHUNK_TOKENS, SUMMARY_SEED,
 };
-use crate::summary::llm_client::{generate_summary, GenerationOptions, LLMProvider, LlmCompletion};
+use crate::summary::llm_client::{
+    generate_completion, GenerationOptions, LLMProvider, LlmCompletion, LlmError, LlmErrorKind,
+};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use reqwest::Client;
@@ -75,6 +77,17 @@ const MAX_CHUNK_ATTEMPTS: usize = 2;
 
 fn should_retry_chunk_failure(attempt: usize, cancelled: bool) -> bool {
     attempt < MAX_CHUNK_ATTEMPTS && !cancelled
+}
+
+/// Seed for the `attempt`th try (1-based). The first try keeps the fixed
+/// seed, so a summary is reproducible; a retry of an identical prompt with the
+/// same seed would just reproduce the failure, so later tries step the seed.
+fn seed_for_attempt(base: Option<u32>, attempt: usize) -> Option<u32> {
+    if attempt <= 1 {
+        return base;
+    }
+    let offset = u32::try_from(attempt - 1).unwrap_or(u32::MAX);
+    Some(base.unwrap_or(SUMMARY_SEED).wrapping_add(offset))
 }
 
 const ENGLISH_BASE_SUMMARY_INSTRUCTION: &str =
@@ -262,8 +275,9 @@ The user typed their own notes during the meeting. Your job is to ENRICH those n
 4. Do NOT re-order, merge, or rewrite the user's notes into new themes.
 5. Start with a single Markdown H1 title (max 6 words) naming the main topic this specific meeting actually discussed, drawn from `<transcript>` and `<my_notes>`. Never use a generic or placeholder title.
 6. After the enriched notes, add a `## Also discussed` section with at most 4 short bullets for important transcript items the notes do not cover. Omit the section entirely if there is nothing important.
-7. {ENGLISH_BASE_SUMMARY_INSTRUCTION}
-8. Output ONLY the Markdown notes — no reasoning, thinking, self-correction, or meta-commentary."#
+7. If `<my_notes>` is missing or empty, write concise bullet notes from the transcript alone: the title, then the decisions, action items with owners, and open questions it actually contains.
+8. {ENGLISH_BASE_SUMMARY_INSTRUCTION}
+9. Output ONLY the Markdown notes — no reasoning, thinking, self-correction, or meta-commentary."#
     )
 }
 
@@ -310,14 +324,62 @@ The team agreed to move to the new office on 3 June. Movers are booked, but desk
     )
 }
 
-/// The final-pass system prompt: the user's saved override when there is one,
-/// otherwise the enrich-my-notes prompt when they typed notes, or the
-/// fixed-section prompt when they did not.
-pub(crate) fn resolve_summary_system_prompt(override_prompt: Option<&str>, notes: &str) -> String {
-    match override_prompt.map(str::trim) {
-        Some(trimmed) if !trimmed.is_empty() => trimmed.to_string(),
-        _ if notes.trim().is_empty() => default_transcript_only_system_prompt(),
-        _ => default_notes_system_prompt(),
+/// Where the final-pass system prompt came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SummaryPromptKind {
+    /// The built-in fixed-section prompt for meetings without notes.
+    DefaultTranscriptOnly,
+    /// The built-in enrich-my-notes prompt.
+    DefaultNotes,
+    /// A prompt the user saved in Settings.
+    Custom,
+}
+
+/// The final-pass system prompt and its origin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SummaryPrompt {
+    pub text: String,
+    pub kind: SummaryPromptKind,
+}
+
+impl SummaryPrompt {
+    /// Placeholder sections ("## Decisions\n- None") are tidied away only for
+    /// the fixed-section default prompt, which asks for those sections. A
+    /// user's notes, or a custom prompt's output, may legitimately say "None".
+    fn drops_placeholder_sections(&self) -> bool {
+        self.kind == SummaryPromptKind::DefaultTranscriptOnly
+    }
+}
+
+fn custom_prompt(override_prompt: Option<&str>) -> Option<SummaryPrompt> {
+    override_prompt
+        .map(str::trim)
+        .filter(|trimmed| !trimmed.is_empty())
+        .map(|trimmed| SummaryPrompt {
+            text: trimmed.to_string(),
+            kind: SummaryPromptKind::Custom,
+        })
+}
+
+/// The final-pass system prompt. With notes: the user's saved notes prompt,
+/// else the enrich-my-notes default. Without notes: the user's saved
+/// no-notes prompt, else the fixed-section default. A custom notes prompt is
+/// written around `<my_notes>`, so it never applies to a meeting without any.
+pub(crate) fn resolve_summary_system_prompt(
+    notes_override: Option<&str>,
+    transcript_only_override: Option<&str>,
+    notes: &str,
+) -> SummaryPrompt {
+    if notes.trim().is_empty() {
+        custom_prompt(transcript_only_override).unwrap_or_else(|| SummaryPrompt {
+            text: default_transcript_only_system_prompt(),
+            kind: SummaryPromptKind::DefaultTranscriptOnly,
+        })
+    } else {
+        custom_prompt(notes_override).unwrap_or_else(|| SummaryPrompt {
+            text: default_notes_system_prompt(),
+            kind: SummaryPromptKind::DefaultNotes,
+        })
     }
 }
 
@@ -622,6 +684,52 @@ pub(crate) struct GeneratedMeetingSummary {
 
 const CANCELLED_ERROR: &str = "Summary generation was cancelled";
 
+/// Why a summary pass failed. Branching (re-split the chunk, retry, give up)
+/// goes by the variant, never by the message text: a truncation message that
+/// mentions "context window" is still a truncation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum StageError {
+    Cancelled,
+    /// The prompt does not fit the model's context; a smaller input can.
+    ContextOverflow(String),
+    /// The reply hit the output limit and is incomplete.
+    Truncated(String),
+    Failed(String),
+}
+
+impl std::fmt::Display for StageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Cancelled => f.write_str(CANCELLED_ERROR),
+            Self::ContextOverflow(message) | Self::Truncated(message) | Self::Failed(message) => {
+                f.write_str(message)
+            }
+        }
+    }
+}
+
+impl From<String> for StageError {
+    fn from(message: String) -> Self {
+        Self::Failed(message)
+    }
+}
+
+impl From<LlmError> for StageError {
+    fn from(error: LlmError) -> Self {
+        match error.kind {
+            LlmErrorKind::ContextOverflow => Self::ContextOverflow(error.message),
+            LlmErrorKind::Cancelled => Self::Cancelled,
+            LlmErrorKind::Other => Self::Failed(error.message),
+        }
+    }
+}
+
+impl From<StageError> for String {
+    fn from(error: StageError) -> Self {
+        error.to_string()
+    }
+}
+
 /// Tokens a chat template adds around system and user text, for estimates.
 const CHAT_TEMPLATE_TOKENS: usize = 32;
 /// Overlap between consecutive transcript chunks.
@@ -640,7 +748,7 @@ pub(crate) trait SummaryBackend: Sync {
         system_prompt: &str,
         user_prompt: &str,
         options: &GenerationOptions,
-    ) -> impl Future<Output = Result<LlmCompletion, String>> + Send;
+    ) -> impl Future<Output = Result<LlmCompletion, LlmError>> + Send;
 
     /// Tokens in `text` alone.
     fn count_tokens(&self, text: &str) -> impl Future<Output = Result<usize, String>> + Send;
@@ -684,8 +792,8 @@ impl SummaryBackend for ProviderBackend<'_> {
         system_prompt: &str,
         user_prompt: &str,
         options: &GenerationOptions,
-    ) -> Result<LlmCompletion, String> {
-        generate_summary(
+    ) -> Result<LlmCompletion, LlmError> {
+        generate_completion(
             self.client,
             self.provider,
             self.model_name,
@@ -705,14 +813,27 @@ impl SummaryBackend for ProviderBackend<'_> {
         if *self.provider != LLMProvider::BuiltInAI {
             return Ok(estimate_tokens(text));
         }
-        crate::summary::summary_engine::count_builtin_tokens(
+        match crate::summary::summary_engine::count_builtin_tokens(
             self.builtin_dir()?,
             self.model_name,
             text,
             self.cancellation_token,
         )
         .await
-        .map_err(|error| format!("Could not count transcript tokens: {error}"))
+        {
+            Ok(count) => Ok(count),
+            // An older llama-helper without `tokenize`: budget on the estimate.
+            Err(error)
+                if matches!(
+                    error.downcast_ref::<crate::summary::summary_engine::BuiltinError>(),
+                    Some(crate::summary::summary_engine::BuiltinError::UnsupportedRequest(_))
+                ) =>
+            {
+                warn!("llama-helper cannot count tokens ({error}); using an estimate");
+                Ok(estimate_tokens(text))
+            }
+            Err(error) => Err(format!("Could not count transcript tokens: {error}")),
+        }
     }
 
     async fn count_prompt_tokens(
@@ -741,6 +862,63 @@ impl SummaryBackend for ProviderBackend<'_> {
     fn is_cancelled(&self) -> bool {
         self.cancellation_token
             .is_some_and(CancellationToken::is_cancelled)
+    }
+}
+
+/// Output budget for a one-off built-in AI call (meeting chat, title): the
+/// requested budget (or the model default), shrunk so prompt + output fit the
+/// model's context. llama-helper refuses a request that does not fit up
+/// front, so a long prompt asking for the full default would fail outright.
+/// Other providers keep `requested`. When the prompt leaves no useful room,
+/// `requested` is kept and llama-helper reports the overflow.
+pub(crate) async fn fit_builtin_output(
+    provider: &LLMProvider,
+    model_name: &str,
+    app_data_dir: Option<&PathBuf>,
+    system_prompt: &str,
+    user_prompt: &str,
+    requested: Option<u32>,
+) -> Option<u32> {
+    if *provider != LLMProvider::BuiltInAI {
+        return requested;
+    }
+    let Some(model) = crate::summary::summary_engine::get_model_by_name(model_name) else {
+        return requested;
+    };
+    let mut budget = ContextBudget::new(model.context_size as usize);
+    if let Some(requested) = requested {
+        budget.max_output = requested as usize;
+    }
+    let client = Client::new();
+    let backend = ProviderBackend {
+        client: &client,
+        provider,
+        model_name,
+        api_key: "",
+        ollama_endpoint: None,
+        custom_openai_endpoint: None,
+        app_data_dir,
+        cancellation_token: None,
+    };
+    let prompt_tokens = match backend
+        .count_prompt_tokens(system_prompt, user_prompt)
+        .await
+    {
+        Ok(tokens) => tokens,
+        Err(error) => {
+            warn!("Could not count prompt tokens ({error}); using an estimate");
+            estimate_tokens(system_prompt) + estimate_tokens(user_prompt) + CHAT_TEMPLATE_TOKENS
+        }
+    };
+    match budget.output_for_prompt(prompt_tokens) {
+        Some(output) => Some(u32::try_from(output).unwrap_or(u32::MAX)),
+        None => {
+            warn!(
+                "Prompt of {prompt_tokens} tokens leaves no output room in a {}-token context",
+                budget.n_ctx
+            );
+            requested
+        }
     }
 }
 
@@ -806,11 +984,26 @@ impl<'a, B: SummaryBackend> SummaryPipeline<'a, B> {
         system_prompt: &str,
         user_prompt: &str,
         require_visible: bool,
-    ) -> Result<CleanedLlmMarkdown, String> {
+    ) -> Result<CleanedLlmMarkdown, StageError> {
+        self.complete_attempt(stage, system_prompt, user_prompt, require_visible, 1)
+            .await
+    }
+
+    /// [`Self::complete`] for the `attempt`th try of the same prompt, which
+    /// samples with a different seed after the first.
+    async fn complete_attempt(
+        &self,
+        stage: &str,
+        system_prompt: &str,
+        user_prompt: &str,
+        require_visible: bool,
+        attempt: usize,
+    ) -> Result<CleanedLlmMarkdown, StageError> {
         if self.backend.is_cancelled() {
-            return Err(CANCELLED_ERROR.to_string());
+            return Err(StageError::Cancelled);
         }
         let mut options = self.options.clone();
+        options.seed = seed_for_attempt(options.seed, attempt);
         for attempt in 1..=2 {
             let completion = self
                 .backend
@@ -826,7 +1019,7 @@ impl<'a, B: SummaryBackend> SummaryPipeline<'a, B> {
                     self.reasoning_stripped.store(true, Ordering::Relaxed);
                 }
                 if require_visible {
-                    require_visible_markdown(stage, &cleaned)?;
+                    require_visible_markdown(stage, &cleaned).map_err(StageError::Failed)?;
                 }
                 return Ok(cleaned);
             }
@@ -846,7 +1039,10 @@ impl<'a, B: SummaryBackend> SummaryPipeline<'a, B> {
             break;
         }
         error!("{} was truncated at the output limit", stage);
-        Err(truncation_error(stage, self.backend.provider()))
+        Err(StageError::Truncated(truncation_error(
+            stage,
+            self.backend.provider(),
+        )))
     }
 
     async fn grown_output(
@@ -881,8 +1077,9 @@ impl<'a, B: SummaryBackend> SummaryPipeline<'a, B> {
         &self,
         text: &str,
         notes: &str,
-        final_system_prompt: &str,
-    ) -> Result<(String, i64), String> {
+        final_prompt: &SummaryPrompt,
+    ) -> Result<(String, i64), StageError> {
+        let final_system_prompt = final_prompt.text.as_str();
         let (content, chunk_count) = match self.budget {
             None => (text.to_string(), 1),
             Some(budget) => {
@@ -892,7 +1089,7 @@ impl<'a, B: SummaryBackend> SummaryPipeline<'a, B> {
                     .await?;
                 let input_budget = budget.input_budget(overhead);
                 if input_budget < MIN_CHUNK_TOKENS {
-                    return Err("Your meeting notes are too long for this model's context window. Shorten the notes, or pick a model with a larger context window.".to_string());
+                    return Err(StageError::Failed("Your meeting notes are too long for this model's context window. Shorten the notes, or pick a model with a larger context window.".to_string()));
                 }
                 let transcript_tokens = self.backend.count_tokens(text).await?;
                 info!(
@@ -929,7 +1126,12 @@ impl<'a, B: SummaryBackend> SummaryPipeline<'a, B> {
                 true,
             )
             .await?;
-        Ok((drop_placeholder_sections(&cleaned.markdown), chunk_count))
+        let markdown = if final_prompt.drops_placeholder_sections() {
+            drop_placeholder_sections(&cleaned.markdown)
+        } else {
+            cleaned.markdown
+        };
+        Ok((markdown, chunk_count))
     }
 
     /// Summarises each transcript chunk. A chunk that overflows the context is
@@ -939,7 +1141,7 @@ impl<'a, B: SummaryBackend> SummaryPipeline<'a, B> {
         text: &str,
         chunk_budget: usize,
         chars_per_token: f64,
-    ) -> Result<Vec<String>, String> {
+    ) -> Result<Vec<String>, StageError> {
         let system_prompt = chunk_system_prompt();
         let overlap = chars_for_tokens(CHUNK_OVERLAP_TOKENS, chars_per_token);
         let mut queue: VecDeque<(String, usize)> = chunk_text_by_chars(
@@ -959,7 +1161,7 @@ impl<'a, B: SummaryBackend> SummaryPipeline<'a, B> {
             let prompt = build_chunk_summary_user_prompt(&chunk);
             for attempt in 1..=MAX_CHUNK_ATTEMPTS {
                 match self
-                    .complete("Summary chunk", &system_prompt, &prompt, true)
+                    .complete_attempt("Summary chunk", &system_prompt, &prompt, true, attempt)
                     .await
                 {
                     Ok(cleaned) => {
@@ -967,13 +1169,17 @@ impl<'a, B: SummaryBackend> SummaryPipeline<'a, B> {
                         break;
                     }
                     Err(_) if self.backend.is_cancelled() => {
-                        return Err(CANCELLED_ERROR.to_string());
+                        return Err(StageError::Cancelled);
                     }
-                    Err(error) if is_context_overflow_error(&error) => {
+                    Err(StageError::Cancelled) => return Err(StageError::Cancelled),
+                    // Already retried with a larger output budget; splitting
+                    // the input would not make the reply shorter.
+                    Err(error @ StageError::Truncated(_)) => return Err(error),
+                    Err(StageError::ContextOverflow(error)) => {
                         let Some(smaller) = shrink_chunk_tokens(chunk_tokens) else {
-                            return Err(format!(
+                            return Err(StageError::Failed(format!(
                                 "Transcript section {section} of {total} does not fit the model's context window even after splitting it: {error}"
-                            ));
+                            )));
                         };
                         warn!(
                             "Transcript section {}/{} overflowed the context at ~{} tokens; splitting to ~{} tokens",
@@ -1002,10 +1208,10 @@ impl<'a, B: SummaryBackend> SummaryPipeline<'a, B> {
                             "Failed processing chunk {}/{} on attempt {}/{}: {}",
                             section, total, attempt, MAX_CHUNK_ATTEMPTS, error
                         );
-                        return Err(format!(
+                        return Err(StageError::Failed(format!(
                             "Summary generation could not complete because transcript section {} of {} failed after {} attempts: {}. Please retry.",
                             section, total, MAX_CHUNK_ATTEMPTS, error
-                        ));
+                        )));
                     }
                 }
             }
@@ -1019,12 +1225,12 @@ impl<'a, B: SummaryBackend> SummaryPipeline<'a, B> {
         &self,
         mut summaries: Vec<String>,
         budget: ContextBudget,
-    ) -> Result<String, String> {
+    ) -> Result<String, StageError> {
         if summaries.is_empty() {
-            return Err(
+            return Err(StageError::Failed(
                 "Multi-level summarization failed: No chunks were processed successfully."
                     .to_string(),
-            );
+            ));
         }
         let overhead = self
             .backend
@@ -1074,7 +1280,7 @@ impl<'a, B: SummaryBackend> SummaryPipeline<'a, B> {
         &self,
         english_markdown: &str,
         target_language: &str,
-    ) -> Result<CleanedLlmMarkdown, String> {
+    ) -> Result<CleanedLlmMarkdown, StageError> {
         let system_prompt = translation_system_prompt(target_language);
         let user_prompt = format!(
             "Translate the following Markdown document into {target_language}. Return ONLY the translated Markdown, nothing else.\n\n<document>\n{english_markdown}\n</document>"
@@ -1097,7 +1303,10 @@ impl<'a, B: SummaryBackend> SummaryPipeline<'a, B> {
             false,
         )
         .await
-        .map_err(|error| format!("English normalization pass failed: {error}"))
+        .map_err(|error| match error {
+            StageError::Cancelled => CANCELLED_ERROR.to_string(),
+            error => format!("English normalization pass failed: {error}"),
+        })
     }
 }
 
@@ -1111,7 +1320,7 @@ pub(crate) async fn generate_meeting_summary<B: SummaryBackend>(
     model_name: &str,
     text: &str,
     custom_prompt: &str,
-    final_system_prompt: &str,
+    final_prompt: &SummaryPrompt,
     context_budget: Option<ContextBudget>,
     options: &GenerationOptions,
     summary_language: Option<&str>,
@@ -1137,7 +1346,7 @@ pub(crate) async fn generate_meeting_summary<B: SummaryBackend>(
             (cached.to_string(), 1_i64)
         } else {
             pipeline
-                .english_notes(text, custom_prompt, final_system_prompt)
+                .english_notes(text, custom_prompt, final_prompt)
                 .await?
         };
 
@@ -1332,35 +1541,53 @@ mod tests {
     }
 
     #[test]
-    fn summary_prompt_uses_override_when_present() {
-        for notes in ["", "my notes"] {
-            assert_eq!(
-                resolve_summary_system_prompt(Some("Custom prompt text"), notes),
-                "Custom prompt text"
-            );
-        }
+    fn custom_notes_prompt_applies_only_when_there_are_notes() {
+        let with_notes = resolve_summary_system_prompt(Some("Custom prompt text"), None, "ship?");
+        assert_eq!(with_notes.text, "Custom prompt text");
+        assert_eq!(with_notes.kind, SummaryPromptKind::Custom);
+        // A notes prompt is written around <my_notes>: a meeting without
+        // notes gets the fixed-section prompt instead.
+        let without = resolve_summary_system_prompt(Some("Custom prompt text"), None, " \n");
+        assert_eq!(without.text, default_transcript_only_system_prompt());
+        assert_eq!(without.kind, SummaryPromptKind::DefaultTranscriptOnly);
     }
 
     #[test]
-    fn summary_prompt_trims_override() {
-        assert_eq!(
-            resolve_summary_system_prompt(Some("  Custom prompt  \n"), "notes"),
-            "Custom prompt"
-        );
+    fn custom_no_notes_prompt_applies_only_without_notes() {
+        let without = resolve_summary_system_prompt(None, Some(" Mine \n"), "");
+        assert_eq!(without.text, "Mine");
+        assert_eq!(without.kind, SummaryPromptKind::Custom);
+        let with_notes = resolve_summary_system_prompt(None, Some("Mine"), "ship?");
+        assert_eq!(with_notes.text, default_notes_system_prompt());
+        assert_eq!(with_notes.kind, SummaryPromptKind::DefaultNotes);
     }
 
     #[test]
     fn summary_prompt_without_override_depends_on_notes() {
         for override_prompt in [None, Some("   \n\t")] {
             assert_eq!(
-                resolve_summary_system_prompt(override_prompt, "launch date?"),
+                resolve_summary_system_prompt(override_prompt, override_prompt, "launch date?")
+                    .text,
                 default_notes_system_prompt()
             );
             assert_eq!(
-                resolve_summary_system_prompt(override_prompt, "  \n "),
+                resolve_summary_system_prompt(override_prompt, override_prompt, "  \n ").text,
                 default_transcript_only_system_prompt()
             );
         }
+    }
+
+    #[test]
+    fn notes_prompt_still_says_what_to_do_without_notes() {
+        assert!(default_notes_system_prompt().contains("If `<my_notes>` is missing or empty"));
+    }
+
+    #[test]
+    fn retries_step_the_seed_but_the_first_attempt_keeps_it() {
+        assert_eq!(seed_for_attempt(None, 1), None);
+        assert_eq!(seed_for_attempt(Some(7), 1), Some(7));
+        assert_eq!(seed_for_attempt(None, 2), Some(SUMMARY_SEED + 1));
+        assert_eq!(seed_for_attempt(Some(7), 3), Some(9));
     }
 
     #[test]
@@ -1607,7 +1834,7 @@ mod tests {
 
     // Pipeline tests against a scripted backend -----------------------------
 
-    type Responder = dyn Fn(usize, &str, &str, &GenerationOptions) -> Result<LlmCompletion, String>
+    type Responder = dyn Fn(usize, &str, &str, &GenerationOptions) -> Result<LlmCompletion, LlmError>
         + Send
         + Sync;
 
@@ -1621,7 +1848,7 @@ mod tests {
     impl FakeBackend {
         fn new(
             provider: LLMProvider,
-            respond: impl Fn(usize, &str, &str, &GenerationOptions) -> Result<LlmCompletion, String>
+            respond: impl Fn(usize, &str, &str, &GenerationOptions) -> Result<LlmCompletion, LlmError>
                 + Send
                 + Sync
                 + 'static,
@@ -1644,7 +1871,7 @@ mod tests {
             system_prompt: &str,
             user_prompt: &str,
             options: &GenerationOptions,
-        ) -> Result<LlmCompletion, String> {
+        ) -> Result<LlmCompletion, LlmError> {
             let index = {
                 let mut calls = self.calls.lock().unwrap();
                 calls.push((
@@ -1678,7 +1905,7 @@ mod tests {
         }
     }
 
-    fn reply(content: &str) -> Result<LlmCompletion, String> {
+    fn reply(content: &str) -> Result<LlmCompletion, LlmError> {
         Ok(LlmCompletion {
             content: content.to_string(),
             reasoning_stripped: false,
@@ -1687,7 +1914,7 @@ mod tests {
         })
     }
 
-    fn truncated(content: &str) -> Result<LlmCompletion, String> {
+    fn truncated(content: &str) -> Result<LlmCompletion, LlmError> {
         Ok(LlmCompletion {
             content: content.to_string(),
             reasoning_stripped: false,
@@ -1702,12 +1929,31 @@ mod tests {
         budget: Option<ContextBudget>,
         detected_language: Option<&str>,
     ) -> Result<GeneratedMeetingSummary, String> {
+        run_with_prompt(
+            backend,
+            text,
+            "",
+            &resolve_summary_system_prompt(None, None, ""),
+            budget,
+            detected_language,
+        )
+        .await
+    }
+
+    async fn run_with_prompt(
+        backend: &FakeBackend,
+        text: &str,
+        notes: &str,
+        prompt: &SummaryPrompt,
+        budget: Option<ContextBudget>,
+        detected_language: Option<&str>,
+    ) -> Result<GeneratedMeetingSummary, String> {
         generate_meeting_summary(
             backend,
             "model",
             text,
-            "",
-            &default_transcript_only_system_prompt(),
+            notes,
+            prompt,
             budget,
             &GenerationOptions::default(),
             None,
@@ -1829,7 +2075,10 @@ mod tests {
         // The "model" can only take chunk prompts below 1,800 characters.
         let backend = FakeBackend::new(LLMProvider::BuiltInAI, |_, system, user, _| {
             if system == chunk_system_prompt() && user.chars().count() > 1_800 {
-                Err("Generation failed: context overflow: prompt has 3000 tokens".to_string())
+                Err(LlmError::new(
+                    LlmErrorKind::ContextOverflow,
+                    "Generation failed: context overflow: prompt has 3000 tokens",
+                ))
             } else {
                 reply("summary")
             }
@@ -1869,6 +2118,84 @@ mod tests {
             .any(|user| user.chars().count() <= 1_800));
     }
 
+    #[tokio::test]
+    async fn a_truncated_chunk_fails_without_resplitting() {
+        let budget = ContextBudget::new(4_096);
+        // The truncation message mentions "context window"; it must still
+        // not be treated as an overflow.
+        let backend = FakeBackend::new(LLMProvider::BuiltInAI, |_, system, _, _| {
+            if system == chunk_system_prompt() {
+                truncated("partial")
+            } else {
+                reply("summary")
+            }
+        });
+        let line = "[00:01] [Others] we discussed the quarterly plan in detail today.\n";
+        let error = run(&backend, &line.repeat(120), Some(budget), None)
+            .await
+            .unwrap_err();
+        assert!(error.contains("cut off"), "{error}");
+        assert!(error.contains("context window"), "{error}");
+        let chunk_calls = backend
+            .calls()
+            .into_iter()
+            .filter(|(system, _, _)| *system == chunk_system_prompt())
+            .count();
+        // One chunk: the first try plus its larger-budget retry, no splits.
+        assert_eq!(chunk_calls, 2);
+    }
+
+    #[tokio::test]
+    async fn a_failed_chunk_is_retried_with_a_new_seed() {
+        let budget = ContextBudget::new(4_096);
+        let backend = FakeBackend::new(LLMProvider::BuiltInAI, |index, system, _, _| {
+            if system == chunk_system_prompt() && index == 0 {
+                Err(LlmError::from("connection reset"))
+            } else {
+                reply("summary")
+            }
+        });
+        let line = "[00:01] [Others] we discussed the quarterly plan in detail today.\n";
+        run(&backend, &line.repeat(120), Some(budget), None)
+            .await
+            .unwrap();
+        let calls = backend.calls();
+        assert_eq!(calls[0].1, calls[1].1, "the same chunk was retried");
+        assert_eq!(calls[0].2.seed, None, "the first try keeps the fixed seed");
+        assert_eq!(calls[1].2.seed, Some(SUMMARY_SEED + 1));
+    }
+
+    #[tokio::test]
+    async fn placeholder_sections_are_kept_unless_the_fixed_section_default_ran() {
+        let markdown = "# Plan\n\n## Blockers\n- None\n";
+        let backend = FakeBackend::new(LLMProvider::Claude, move |_, _, _, _| reply(markdown));
+        let notes = "## Blockers\n- None";
+        let enriched = run_with_prompt(
+            &backend,
+            "short",
+            notes,
+            &resolve_summary_system_prompt(None, None, notes),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(enriched.final_markdown, markdown.trim_end());
+        let custom = run_with_prompt(
+            &backend,
+            "short",
+            "",
+            &resolve_summary_system_prompt(None, Some("Mine"), ""),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(custom.final_markdown, markdown.trim_end());
+        let fixed = run(&backend, "short", None, None).await.unwrap();
+        assert_eq!(fixed.final_markdown, "# Plan");
+    }
+
     /// Manual smoke test against a real built-in model:
     /// MEETILY_LLAMA_HELPER=<path to llama-helper> MINUTES_SMOKE_APP_DIR=<app data dir>
     /// cargo test -p meetily builtin_summary_is_deterministic -- --ignored --nocapture
@@ -1903,7 +2230,7 @@ mod tests {
                 &model,
                 text,
                 "",
-                &default_transcript_only_system_prompt(),
+                &resolve_summary_system_prompt(None, None, ""),
                 Some(ContextBudget::new(32_768)),
                 &GenerationOptions::default(),
                 None,

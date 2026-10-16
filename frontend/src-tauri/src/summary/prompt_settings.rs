@@ -1,17 +1,48 @@
-//! User-editable system prompt for the final meeting-notes call.
+//! User-editable system prompts for the final meeting-notes call.
 //!
-//! The override lives in the shared `store.json` under `summaryNotesPrompt`.
-//! When the key is missing or blank, summary generation uses the built-in
-//! prompt from `processor::default_notes_system_prompt`.
+//! There are two, because the final pass has two jobs: enriching the notes
+//! the user typed (`summaryNotesPrompt`), and writing notes from the
+//! transcript alone when they typed none (`summaryTranscriptOnlyPrompt`).
+//! Both overrides live in the shared `store.json`. When a key is missing or
+//! blank, summary generation uses the matching built-in prompt from
+//! `processor`.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Runtime};
 use tauri_plugin_store::StoreExt;
 
-use crate::summary::processor::default_notes_system_prompt;
+use crate::summary::processor::{
+    default_notes_system_prompt, default_transcript_only_system_prompt,
+};
 
 const STORE_FILE: &str = "store.json";
-const PROMPT_KEY: &str = "summaryNotesPrompt";
+
+/// Which final-pass prompt a setting is about.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PromptKind {
+    /// Used when the user typed notes during the meeting.
+    #[default]
+    Notes,
+    /// Used when the meeting has no notes.
+    TranscriptOnly,
+}
+
+impl PromptKind {
+    fn store_key(self) -> &'static str {
+        match self {
+            Self::Notes => "summaryNotesPrompt",
+            Self::TranscriptOnly => "summaryTranscriptOnlyPrompt",
+        }
+    }
+
+    fn default_prompt(self) -> String {
+        match self {
+            Self::Notes => default_notes_system_prompt(),
+            Self::TranscriptOnly => default_transcript_only_system_prompt(),
+        }
+    }
+}
 
 /// What the Settings screen needs to show and edit the notes prompt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -58,8 +89,8 @@ fn build_settings(custom: Option<String>, default_prompt: String) -> SummaryProm
     }
 }
 
-/// The saved override, or `None` when the user has not customised the prompt.
-pub fn load_notes_prompt<R: Runtime>(app: &AppHandle<R>) -> Option<String> {
+/// The saved override for `kind`, or `None` when the user has not customised it.
+pub fn load_prompt<R: Runtime>(app: &AppHandle<R>, kind: PromptKind) -> Option<String> {
     let store = match app.store(STORE_FILE) {
         Ok(store) => store,
         Err(e) => {
@@ -67,20 +98,21 @@ pub fn load_notes_prompt<R: Runtime>(app: &AppHandle<R>) -> Option<String> {
             return None;
         }
     };
-    parse_stored(store.get(PROMPT_KEY).as_ref())
+    parse_stored(store.get(kind.store_key()).as_ref())
 }
 
-fn write_notes_prompt<R: Runtime>(
+fn write_prompt<R: Runtime>(
     app: &AppHandle<R>,
+    kind: PromptKind,
     prompt: Option<String>,
 ) -> Result<(), String> {
     let store = app
         .store(STORE_FILE)
         .map_err(|e| format!("Failed to open settings store: {}", e))?;
     match prompt {
-        Some(prompt) => store.set(PROMPT_KEY, serde_json::Value::String(prompt)),
+        Some(prompt) => store.set(kind.store_key(), serde_json::Value::String(prompt)),
         None => {
-            store.delete(PROMPT_KEY);
+            store.delete(kind.store_key());
         }
     }
     store
@@ -88,23 +120,27 @@ fn write_notes_prompt<R: Runtime>(
         .map_err(|e| format!("Failed to save settings store: {}", e))
 }
 
-fn current_settings<R: Runtime>(app: &AppHandle<R>) -> SummaryPromptSettings {
-    build_settings(load_notes_prompt(app), default_notes_system_prompt())
+fn current_settings<R: Runtime>(app: &AppHandle<R>, kind: PromptKind) -> SummaryPromptSettings {
+    build_settings(load_prompt(app, kind), kind.default_prompt())
 }
 
+/// `kind` defaults to the notes prompt, so older callers keep working.
 #[tauri::command]
 pub async fn api_get_summary_prompt<R: Runtime>(
     app: AppHandle<R>,
+    kind: Option<PromptKind>,
 ) -> Result<SummaryPromptSettings, String> {
-    Ok(current_settings(&app))
+    Ok(current_settings(&app, kind.unwrap_or_default()))
 }
 
 #[tauri::command]
 pub async fn api_save_summary_prompt<R: Runtime>(
     app: AppHandle<R>,
     prompt: String,
+    kind: Option<PromptKind>,
 ) -> Result<SummaryPromptSettings, String> {
-    let value = normalize_prompt(&prompt, &default_notes_system_prompt());
+    let kind = kind.unwrap_or_default();
+    let value = normalize_prompt(&prompt, &kind.default_prompt());
     log::info!(
         "summary prompt: saving {}",
         if value.is_some() {
@@ -113,17 +149,19 @@ pub async fn api_save_summary_prompt<R: Runtime>(
             "default (clearing override)"
         }
     );
-    write_notes_prompt(&app, value)?;
-    Ok(current_settings(&app))
+    write_prompt(&app, kind, value)?;
+    Ok(current_settings(&app, kind))
 }
 
 #[tauri::command]
 pub async fn api_reset_summary_prompt<R: Runtime>(
     app: AppHandle<R>,
+    kind: Option<PromptKind>,
 ) -> Result<SummaryPromptSettings, String> {
-    log::info!("summary prompt: resetting to default");
-    write_notes_prompt(&app, None)?;
-    Ok(current_settings(&app))
+    let kind = kind.unwrap_or_default();
+    log::info!("summary prompt: resetting {:?} to default", kind);
+    write_prompt(&app, kind, None)?;
+    Ok(current_settings(&app, kind))
 }
 
 #[cfg(test)]
@@ -195,6 +233,21 @@ mod tests {
         assert_eq!(settings.prompt, DEFAULT);
         assert_eq!(settings.default_prompt, DEFAULT);
         assert!(!settings.is_custom);
+    }
+
+    #[test]
+    fn prompt_kinds_have_their_own_keys_and_defaults() {
+        assert_ne!(
+            PromptKind::Notes.store_key(),
+            PromptKind::TranscriptOnly.store_key()
+        );
+        assert_eq!(
+            PromptKind::TranscriptOnly.default_prompt(),
+            default_transcript_only_system_prompt()
+        );
+        let kind: PromptKind = serde_json::from_value(json!("transcriptOnly")).unwrap();
+        assert_eq!(kind, PromptKind::TranscriptOnly);
+        assert_eq!(PromptKind::default(), PromptKind::Notes);
     }
 
     #[test]
