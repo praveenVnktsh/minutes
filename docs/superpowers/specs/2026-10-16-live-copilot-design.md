@@ -182,6 +182,26 @@ Qwen 3.5 4B generations push it past 1.0×. Copilot therefore:
 - and the live timeline (background priority) waits **4 s after any built-in generation**
   while recording, so the model never runs back to back with Copilot.
 
+### Review fixes (PR #97)
+
+- A healthy helper is never respawned for a different model: every request names its model
+  and llama-helper switches models itself, inside the serialized exchange. Spawning is
+  guarded by a lock; health and idle loops of an older helper exit (spawn generation).
+- Cancels are an exact set of ids (requests run out of id order), kept until the request
+  finishes, so a cancel that arrives while its request is still queued applies.
+- Only user-initiated requests are `Interactive`. Suggestion confirms and drafts run at
+  `Normal`: they jump queued timeline work but never pre-empt it. Interactive requests
+  pre-empt the timeline at most once per 2 minutes, so the live summary keeps getting entries.
+- Stop deactivates Copilot at the start of `stop_recording` (no new questions or cards,
+  in-flight requests cancelled); moments are still written after the save. Generation
+  threads stay low until the recording has fully stopped.
+- The backlog guard also reads the chunked (Whisper/Parakeet) live queue.
+- At most 3 confirms per minute; an empty or non yes/no confirm reply is "unknown", opens no
+  card and shows in the debug line. Confirm calls use `brief` (reasoning models get room).
+  Mentioning "you" alone no longer passes the rule check.
+- A confirm that times out is cancelled (so the helper hears about it), not dropped.
+- 8 GB machines: one checkpoint and a 4k cached context.
+
 ### Failure handling
 
 - 15 s timeout per copilot request, **including** time queued behind a Normal request.

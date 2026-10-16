@@ -38,6 +38,9 @@ pub struct CoreConfig {
     pub refusal_pause: Duration,
     /// Live transcription backlog above which proactive work is shed.
     pub max_live_backlog_secs: f64,
+    /// Most proactive confirm calls per minute (they cost money on cloud
+    /// providers and machine time locally).
+    pub max_confirms_per_minute: usize,
 }
 
 impl Default for CoreConfig {
@@ -50,6 +53,7 @@ impl Default for CoreConfig {
             confirm_gap: Duration::from_secs(8),
             refusal_pause: Duration::from_secs(120),
             max_live_backlog_secs: 2.0,
+            max_confirms_per_minute: 3,
         }
     }
 }
@@ -148,6 +152,8 @@ pub struct DetectorStats {
     pub rule_reject: u32,
     pub confirm_yes: u32,
     pub confirm_no: u32,
+    /// The confirm reply was empty or not a yes/no: no card.
+    pub confirm_unknown: u32,
     pub skipped: u32,
     pub false_alarms: u32,
     /// The last decision, for the debug line ("rule: question mark", …).
@@ -244,6 +250,8 @@ struct State {
     stopped: Vec<String>,
     last_card_at: Option<Instant>,
     last_confirm_at: Option<Instant>,
+    /// Confirm calls in the last minute.
+    recent_confirms: std::collections::VecDeque<Instant>,
     detector_busy: bool,
     paused_until: Option<Instant>,
     unsaved: Vec<ChatRow>,
@@ -277,6 +285,7 @@ impl Core {
                 stopped: Vec::new(),
                 last_card_at: None,
                 last_confirm_at: None,
+                recent_confirms: std::collections::VecDeque::new(),
                 detector_busy: false,
                 paused_until: None,
                 unsaved: Vec::new(),
@@ -365,7 +374,16 @@ impl Core {
                         .is_some_and(|at| now.duration_since(at) < self.config.card_ttl)
             });
             let backlog = self.host.live_backlog_secs();
-            let skip = if self.host.is_paused() {
+            while state
+                .recent_confirms
+                .front()
+                .is_some_and(|at| now.duration_since(*at) >= Duration::from_secs(60))
+            {
+                state.recent_confirms.pop_front();
+            }
+            let skip = if !state.active {
+                Some("the meeting is ending".to_string())
+            } else if self.host.is_paused() {
                 Some("paused".to_string())
             } else if card_active {
                 Some("a card is open".to_string())
@@ -381,6 +399,11 @@ impl Core {
                 .is_some_and(|at| now.duration_since(at) < self.config.confirm_gap)
             {
                 Some("rate limit".to_string())
+            } else if state.recent_confirms.len() >= self.config.max_confirms_per_minute {
+                Some(format!(
+                    "{} confirms in the last minute",
+                    state.recent_confirms.len()
+                ))
             } else if state.paused_until.is_some_and(|until| now < until) {
                 Some("provider refused".to_string())
             } else if backlog > self.config.max_live_backlog_secs {
@@ -398,6 +421,7 @@ impl Core {
             }
             state.detector_busy = true;
             state.last_confirm_at = Some(now);
+            state.recent_confirms.push_back(now);
             self.record_decision(
                 &mut state,
                 format!("rule: yes ({}), confirming", decision.reason()),
@@ -425,24 +449,45 @@ impl Core {
         let parts = self.prompt_for(&task);
         let cancel = CancellationToken::new();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let result = tokio::time::timeout(
-            self.config.first_token_timeout,
-            streamer.stream(&parts, task.max_tokens(), task.temperature(), tx, &cancel),
-        )
-        .await;
-        cancel.cancel();
+        let stream_cancel = cancel.clone();
+        let (max_tokens, temperature) = (task.max_tokens(), task.temperature());
+        // Its own task, so a timeout cancels it (which sends a cancel to the
+        // helper) instead of dropping it with the request still running.
+        let mut handle = tokio::spawn(async move {
+            streamer
+                .stream(&parts, max_tokens, temperature, false, tx, &stream_cancel)
+                .await
+        });
+        let result = tokio::select! {
+            joined = &mut handle => Ok(joined),
+            _ = tokio::time::sleep(self.config.first_token_timeout) => {
+                cancel.cancel();
+                let _ = handle.await;
+                Err(())
+            }
+        };
+        let result = result.map(|joined| {
+            joined.unwrap_or_else(|e| Err(StreamError::new(StreamErrorKind::Other, e.to_string())))
+        });
         let mut state = self.lock();
         match result {
             Ok(Ok(outcome)) => {
-                let yes = parse_yes_no(&outcome.text);
-                if yes {
-                    state.debug.detector.confirm_yes += 1;
-                } else {
-                    state.debug.detector.confirm_no += 1;
+                let verdict = parse_yes_no(&outcome.text);
+                match verdict {
+                    Some(true) => state.debug.detector.confirm_yes += 1,
+                    Some(false) => state.debug.detector.confirm_no += 1,
+                    None => state.debug.detector.confirm_unknown += 1,
                 }
-                let verdict = if yes { "yes" } else { "no" };
-                self.record_decision(&mut state, format!("model: {verdict}"));
-                yes && state.active
+                let label = match verdict {
+                    Some(true) => "yes".to_string(),
+                    Some(false) => "no".to_string(),
+                    None => format!(
+                        "unknown ({:?}), no card",
+                        outcome.text.chars().take(24).collect::<String>()
+                    ),
+                };
+                self.record_decision(&mut state, format!("model: {label}"));
+                verdict == Some(true) && state.active
             }
             Ok(Err(error)) => {
                 if matches!(
@@ -454,8 +499,8 @@ impl Core {
                 self.record_decision(&mut state, format!("model: failed ({})", error.message));
                 false
             }
-            Err(_) => {
-                self.record_decision(&mut state, "model: timed out".into());
+            Err(()) => {
+                self.record_decision(&mut state, "model: timed out (cancelled)".into());
                 false
             }
         }
@@ -712,10 +757,19 @@ impl Core {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         let max_tokens = task.max_tokens();
         let temperature = task.temperature();
+        // Suggestion drafts are proactive: they never pre-empt the timeline.
+        let interactive = !matches!(task, Task::Suggest { .. });
         let stream_cancel = cancel.clone();
         let mut handle = tokio::spawn(async move {
             streamer
-                .stream(&parts, max_tokens, temperature, tx, &stream_cancel)
+                .stream(
+                    &parts,
+                    max_tokens,
+                    temperature,
+                    interactive,
+                    tx,
+                    &stream_cancel,
+                )
                 .await
         });
 
@@ -902,11 +956,15 @@ impl Core {
         }
     }
 
-    /// The meeting ended: refuse new work, stop what is running, and write
-    /// what is left (retrying for `persist_window` while the meeting id binds).
-    pub async fn finish(self: &Arc<Self>, persist_window: Duration, retry: Duration) {
+    /// The user pressed stop: refuse new work and stop what is running at
+    /// once, so nothing competes with the final decode the save waits on.
+    /// Moments already answered are kept for `finish` to write.
+    pub fn deactivate(&self) {
         let tokens: Vec<CancellationToken> = {
             let mut state = self.lock();
+            if !state.active {
+                return;
+            }
             state.active = false;
             state.in_flight.values().cloned().collect()
         };
@@ -914,6 +972,12 @@ impl Core {
             token.cancel();
         }
         self.publish();
+    }
+
+    /// The meeting ended: refuse new work, stop what is running, and write
+    /// what is left (retrying for `persist_window` while the meeting id binds).
+    pub async fn finish(self: &Arc<Self>, persist_window: Duration, retry: Duration) {
+        self.deactivate();
         let deadline = Instant::now() + persist_window;
         // Let cancelled requests record what they had.
         while !self.lock().in_flight.is_empty() && Instant::now() < deadline {
@@ -944,6 +1008,8 @@ mod tests {
         delay: Duration,
         fail: Option<StreamErrorKind>,
         cloud: bool,
+        confirm_delay: Duration,
+        confirm_cancelled: Arc<AtomicUsize>,
     }
 
     #[async_trait]
@@ -962,14 +1028,30 @@ mod tests {
             parts: &context::PromptParts,
             max_tokens: u32,
             _temperature: f32,
+            interactive: bool,
             deltas: UnboundedSender<String>,
             cancel: &CancellationToken,
         ) -> Result<StreamOutcome, StreamError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            if max_tokens == 5 || parts.rest.contains("Draft what You could say") {
+                assert!(
+                    !interactive,
+                    "proactive work must not pre-empt the timeline"
+                );
+            } else {
+                assert!(interactive, "user requests are interactive");
+            }
             if let Some(kind) = self.fail {
                 return Err(StreamError::new(kind, "refused"));
             }
             if max_tokens == 5 {
+                tokio::select! {
+                    _ = cancel.cancelled() => {
+                        self.confirm_cancelled.fetch_add(1, Ordering::SeqCst);
+                        return Err(StreamError::new(StreamErrorKind::Cancelled, "Stopped"));
+                    }
+                    _ = tokio::time::sleep(self.confirm_delay) => {}
+                }
                 return Ok(StreamOutcome {
                     text: self.confirm_reply.into(),
                     ..Default::default()
@@ -1004,6 +1086,8 @@ mod tests {
         suggestions: AtomicBool,
         meeting_bound: AtomicBool,
         backlog: Mutex<f64>,
+        confirm_delay: Duration,
+        confirm_cancelled: Arc<AtomicUsize>,
         persisted: Mutex<Vec<ChatRow>>,
         states: Mutex<Vec<Snapshot>>,
         deltas: Mutex<Vec<Delta>>,
@@ -1021,6 +1105,8 @@ mod tests {
                 suggestions: AtomicBool::new(true),
                 meeting_bound: AtomicBool::new(true),
                 backlog: Mutex::new(0.0),
+                confirm_delay: Duration::ZERO,
+                confirm_cancelled: Arc::new(AtomicUsize::new(0)),
                 persisted: Mutex::new(Vec::new()),
                 states: Mutex::new(Vec::new()),
                 deltas: Mutex::new(Vec::new()),
@@ -1062,6 +1148,8 @@ mod tests {
                 delay: self.delay,
                 fail: if force_builtin { None } else { self.fail },
                 cloud: self.cloud && !force_builtin,
+                confirm_delay: self.confirm_delay,
+                confirm_cancelled: self.confirm_cancelled.clone(),
             }))
         }
         async fn persist(&self, rows: &[ChatRow]) -> Result<bool, String> {
@@ -1082,6 +1170,7 @@ mod tests {
             confirm_gap: Duration::ZERO,
             refusal_pause: Duration::from_secs(60),
             max_live_backlog_secs: 2.0,
+            max_confirms_per_minute: 3,
         }
     }
 
@@ -1319,6 +1408,90 @@ mod tests {
         settle().await;
         assert_eq!(host.builtin_requests.load(Ordering::SeqCst), 1);
         assert_eq!(core.snapshot().messages[0].status, MessageStatus::Done);
+    }
+
+    #[tokio::test]
+    async fn confirms_are_capped_per_minute() {
+        let mut host = FakeHost::new();
+        host.confirm_reply = "No";
+        let (host, core) = core_with(host);
+        for i in 0..6 {
+            core.on_line(line(i * 3, Speaker::Others, "Can you share the numbers?"));
+            settle().await;
+        }
+        assert_eq!(host.calls.load(Ordering::SeqCst), 3);
+        assert!(core
+            .snapshot()
+            .debug
+            .detector
+            .last
+            .unwrap()
+            .contains("last minute"));
+    }
+
+    #[tokio::test]
+    async fn an_empty_confirm_reply_is_unknown_and_opens_no_card() {
+        let mut host = FakeHost::new();
+        host.confirm_reply = "";
+        let (_host, core) = core_with(host);
+        core.on_line(line(1, Speaker::Others, "Can you send me the deck?"));
+        settle().await;
+        let snapshot = core.snapshot();
+        assert!(snapshot.messages.is_empty());
+        assert_eq!(snapshot.debug.detector.confirm_unknown, 1);
+        assert!(snapshot.debug.detector.last.unwrap().contains("unknown"));
+    }
+
+    #[tokio::test]
+    async fn a_slow_confirm_is_cancelled_not_dropped() {
+        let mut host = FakeHost::new();
+        host.confirm_delay = Duration::from_secs(5);
+        let (host, core) = core_with(host);
+        core.on_line(line(1, Speaker::Others, "Can you send me the deck?"));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(host.confirm_cancelled.load(Ordering::SeqCst), 1);
+        assert!(core
+            .snapshot()
+            .debug
+            .detector
+            .last
+            .unwrap()
+            .contains("timed out"));
+    }
+
+    #[tokio::test]
+    async fn stopping_deactivates_at_once_and_keeps_answered_moments() {
+        let mut host = FakeHost::new();
+        host.delay = Duration::from_millis(80);
+        let host = {
+            host.meeting_bound.store(false, Ordering::SeqCst);
+            host
+        };
+        let (host, core) = core_with(host);
+        core.on_line(line(5, Speaker::You, "Hello"));
+        core.ask(Some(QuickAction::CatchUp), None).unwrap();
+        settle().await; // still streaming
+        core.deactivate();
+        settle().await;
+        let snapshot = core.snapshot();
+        assert!(!snapshot.active);
+        assert_eq!(snapshot.messages[0].status, MessageStatus::Stopped);
+        assert!(core.ask(Some(QuickAction::CatchUp), None).is_err());
+        core.on_line(line(30, Speaker::Others, "Can you send it?"));
+        settle().await;
+        assert_eq!(
+            host.calls.load(Ordering::SeqCst),
+            1,
+            "no confirm after stop"
+        );
+        host.meeting_bound.store(true, Ordering::SeqCst);
+        core.finish(Duration::from_millis(300), Duration::from_millis(20))
+            .await;
+        assert_eq!(
+            host.persisted.lock().unwrap().len(),
+            2,
+            "the partial answer is kept"
+        );
     }
 
     #[tokio::test]

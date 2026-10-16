@@ -272,3 +272,13 @@ fn thread_count_can_be_lowered_per_request() {
     };
     assert_eq!(n_threads, Some(2));
 }
+
+#[test]
+fn small_machines_keep_one_checkpoint_and_a_smaller_cached_context() {
+    assert_eq!(cache_limits(Some(8 * 1024 * 1024 * 1024)), (1, Some(4096)));
+    assert_eq!(
+        cache_limits(Some(16 * 1024 * 1024 * 1024)),
+        (MAX_CHECKPOINTS, None)
+    );
+    assert_eq!(cache_limits(None), (MAX_CHECKPOINTS, None));
+}

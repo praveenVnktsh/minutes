@@ -44,6 +44,7 @@ export interface DetectorStats {
   ruleReject: number;
   confirmYes: number;
   confirmNo: number;
+  confirmUnknown: number;
   skipped: number;
   falseAlarms: number;
   last: string | null;
@@ -209,7 +210,7 @@ export function debugLine(snapshot: CopilotSnapshot): string {
   } else {
     parts.push('no answers yet');
   }
-  parts.push(`detector ${d.rulePass}✓/${d.ruleReject}✗ rule, ${d.confirmYes}✓/${d.confirmNo}✗ model, ${d.skipped} skipped`);
+  parts.push(`detector ${d.rulePass}✓/${d.ruleReject}✗ rule, ${d.confirmYes}✓/${d.confirmNo}✗/${d.confirmUnknown}? model, ${d.skipped} skipped`);
   parts.push(`false alarms ${d.falseAlarms}`);
   parts.push(`live backlog ${snapshot.debug.liveBacklogSecs.toFixed(1)}s`);
   if (d.last) parts.push(`last: ${d.last}`);

@@ -43,7 +43,7 @@ function snapshot(messages: CopilotMessage[]): CopilotSnapshot {
     debugEnabled: false,
     debug: {
       last: null,
-      detector: { rulePass: 0, ruleReject: 0, confirmYes: 0, confirmNo: 0, skipped: 0, falseAlarms: 0, last: null },
+      detector: { rulePass: 0, ruleReject: 0, confirmYes: 0, confirmNo: 0, confirmUnknown: 0, skipped: 0, falseAlarms: 0, last: null },
       liveBacklogSecs: 0,
     },
   };
@@ -123,5 +123,6 @@ describe('debugLine', () => {
     expect(line).toContain('14.2 tok/s');
     expect(line).toContain('reused 1174/1218');
     expect(line).toContain('false alarms 2');
+    expect(line).toContain('0✓/0✗/0? model');
   });
 });

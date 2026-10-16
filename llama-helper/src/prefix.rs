@@ -1,7 +1,8 @@
 //! Pure helpers for streaming and prompt-prefix reuse. Kept free of llama.cpp
 //! types so they can be tested without a model.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::VecDeque;
+use std::sync::Mutex;
 
 /// Length of the longest common prefix of two token lists.
 pub fn common_prefix_len<T: PartialEq>(a: &[T], b: &[T]) -> usize {
@@ -81,22 +82,49 @@ pub fn safe_emit_end(output: &str, stop_tokens: &[String]) -> usize {
     end
 }
 
-/// Cancellation shared between the stdin reader thread and generation. Ids
-/// grow, so a stale cancel (for a request that already finished) can never
-/// match a later one.
+/// Cancellation shared between the stdin reader thread and generation: the
+/// exact set of cancelled request ids. Ids are not cancelled in order (the
+/// app's priority queue runs requests out of id order), so no "highest id"
+/// shortcut. A cancel may arrive while its request still waits in the queue;
+/// the id stays in the set until that request finishes. Cancels for requests
+/// that already finished are bounded by `MAX_PENDING_CANCELS`.
 #[derive(Debug, Default)]
 pub struct CancelFlag {
-    highest_cancelled: AtomicU64,
+    ids: Mutex<VecDeque<u64>>,
 }
+
+/// Most cancelled ids kept at once; older (stale) ones are forgotten.
+pub const MAX_PENDING_CANCELS: usize = 256;
 
 impl CancelFlag {
     pub fn cancel(&self, id: u64) {
-        self.highest_cancelled.fetch_max(id, Ordering::SeqCst);
+        let mut ids = self.ids.lock().unwrap_or_else(|e| e.into_inner());
+        if !ids.contains(&id) {
+            ids.push_back(id);
+            if ids.len() > MAX_PENDING_CANCELS {
+                ids.pop_front();
+            }
+        }
     }
 
     /// Whether request `id` was cancelled. Requests without an id cannot be.
     pub fn is_cancelled(&self, id: Option<u64>) -> bool {
-        id.is_some_and(|id| id != 0 && self.highest_cancelled.load(Ordering::SeqCst) == id)
+        id.is_some_and(|id| {
+            self.ids
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains(&id)
+        })
+    }
+
+    /// Request `id` finished: forget its cancel, if any.
+    pub fn finished(&self, id: Option<u64>) {
+        if let Some(id) = id {
+            self.ids
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .retain(|cancelled| *cancelled != id);
+        }
     }
 }
 
@@ -203,12 +231,37 @@ mod tests {
         assert!(!flag.is_cancelled(Some(3)));
         flag.cancel(3);
         assert!(flag.is_cancelled(Some(3)));
-        assert!(
-            !flag.is_cancelled(Some(4)),
-            "a stale cancel must not hit the next request"
-        );
+        assert!(!flag.is_cancelled(Some(4)));
         assert!(!flag.is_cancelled(None));
-        flag.cancel(2);
-        assert!(flag.is_cancelled(Some(3)), "an older cancel never rewinds");
+    }
+
+    #[test]
+    fn cancels_out_of_id_order_all_take_effect() {
+        // Regression: a "highest cancelled id" ignored cancel(10) after
+        // cancel(11), so Copilot waited behind a full timeline generation.
+        let flag = CancelFlag::default();
+        flag.cancel(11);
+        flag.cancel(10);
+        assert!(flag.is_cancelled(Some(10)));
+        assert!(flag.is_cancelled(Some(11)));
+    }
+
+    #[test]
+    fn a_cancel_before_its_request_starts_still_applies_and_is_cleared_after() {
+        let flag = CancelFlag::default();
+        flag.cancel(7); // arrives while request 7 is still queued
+        assert!(flag.is_cancelled(Some(7)));
+        flag.finished(Some(7));
+        assert!(!flag.is_cancelled(Some(7)));
+    }
+
+    #[test]
+    fn stale_cancels_are_bounded() {
+        let flag = CancelFlag::default();
+        for id in 0..(MAX_PENDING_CANCELS as u64 + 10) {
+            flag.cancel(id);
+        }
+        assert!(!flag.is_cancelled(Some(0)));
+        assert!(flag.is_cancelled(Some(MAX_PENDING_CANCELS as u64 + 9)));
     }
 }

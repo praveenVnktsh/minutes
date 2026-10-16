@@ -360,8 +360,21 @@ fn live_transcription_rtf_with_copilot_running() {
 
     for (label, pause_ms, threads) in [
         ("live + Copilot back to back, default threads", 0u64, None),
-        ("live + Copilot back to back, 2 generation threads", 0u64, Some(RECORDING_LLM_THREADS)),
-        ("live + Copilot, a request every 8 s, 2 threads", 8_000u64, Some(RECORDING_LLM_THREADS)),
+        (
+            "live + Copilot back to back, 2 generation threads",
+            0u64,
+            Some(RECORDING_LLM_THREADS),
+        ),
+        (
+            "live + Copilot, a request every 8 s, 2 threads",
+            8_000u64,
+            Some(RECORDING_LLM_THREADS),
+        ),
+        (
+            "live + proactive suggestions at their cap (a request every 20 s)",
+            20_000u64,
+            Some(RECORDING_LLM_THREADS),
+        ),
     ] {
         let mut helper = Helper::start(&binary, &model);
         helper.threads = threads;

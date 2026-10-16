@@ -43,6 +43,13 @@ pub struct SidecarManager {
     /// once a reply echoes an id; reset on every spawn.
     cancel_supported: Arc<AtomicBool>,
 
+    /// Held while checking and (re)spawning the helper, so two callers can
+    /// never interleave child/stdin/stdout handles or start duplicate loops.
+    spawn_lock: Arc<Mutex<()>>,
+
+    /// Bumped on every spawn; health and idle loops of an older helper exit.
+    generation: Arc<AtomicUsize>,
+
     /// Last activity timestamp
     last_activity: Arc<RwLock<Instant>>,
 
@@ -107,6 +114,8 @@ impl SidecarManager {
             stdout_reader: Arc::new(Mutex::new(None)),
             exchange: Arc::new(ExchangeQueue::default()),
             cancel_supported: Arc::new(AtomicBool::new(false)),
+            spawn_lock: Arc::new(Mutex::new(())),
+            generation: Arc::new(AtomicUsize::new(0)),
             last_activity: Arc::new(RwLock::new(Instant::now())),
             is_healthy: Arc::new(AtomicBool::new(false)),
             should_shutdown: Arc::new(AtomicBool::new(false)),
@@ -125,6 +134,8 @@ impl SidecarManager {
             stdout_reader: Arc::new(Mutex::new(None)),
             exchange: Arc::new(ExchangeQueue::default()),
             cancel_supported: Arc::new(AtomicBool::new(false)),
+            spawn_lock: Arc::new(Mutex::new(())),
+            generation: Arc::new(AtomicUsize::new(0)),
             last_activity: Arc::new(RwLock::new(Instant::now())),
             is_healthy: Arc::new(AtomicBool::new(false)),
             should_shutdown: Arc::new(AtomicBool::new(false)),
@@ -349,30 +360,19 @@ impl SidecarManager {
         ))
     }
 
-    /// Whether switching the helper to `model_path` would stop requests that
-    /// are running (or queued) on another model. Copilot checks this and
-    /// reports "busy" rather than swap models under a summary.
-    pub async fn busy_with_other_model(&self, model_path: &std::path::Path) -> bool {
-        let current = self.current_model_path.read().await;
-        self.active_request_count.load(Ordering::SeqCst) > 0
-            && current
-                .as_deref()
-                .is_some_and(|current| current != model_path)
-    }
-
     /// Ensure sidecar is running, spawn if needed
+    ///
+    /// A running, healthy helper is never restarted for a different model:
+    /// every request names its model and the helper switches models itself,
+    /// inside the serialized exchange, so a caller asking for another model
+    /// can never kill someone else's request in flight.
     pub async fn ensure_running(&self, model_path: PathBuf) -> Result<()> {
-        // Check if already running with correct model
-        {
-            let current_model = self.current_model_path.read().await;
-            if current_model.as_ref() == Some(&model_path) && self.is_healthy() {
-                log::debug!("Sidecar already running with correct model");
-                self.update_activity().await;
-                return Ok(());
-            }
+        let _spawning = self.spawn_lock.lock().await;
+        if self.is_healthy() {
+            log::debug!("Sidecar already running");
+            self.update_activity().await;
+            return Ok(());
         }
-
-        // Need to spawn or restart
         self.spawn(model_path).await
     }
 
@@ -448,6 +448,7 @@ impl SidecarManager {
         }
 
         self.cancel_supported.store(false, Ordering::SeqCst);
+        self.generation.fetch_add(1, Ordering::SeqCst);
         self.is_healthy.store(true, Ordering::SeqCst);
         self.should_shutdown.store(false, Ordering::SeqCst);
         self.update_activity().await;
@@ -793,12 +794,15 @@ impl SidecarManager {
 
     /// Start health check loop (runs in background)
     fn start_health_check_loop(&self) {
+        let generation = self.generation.load(Ordering::SeqCst);
         let manager = Self {
             child_process: self.child_process.clone(),
             stdin_writer: self.stdin_writer.clone(),
             stdout_reader: self.stdout_reader.clone(),
             exchange: self.exchange.clone(),
             cancel_supported: self.cancel_supported.clone(),
+            spawn_lock: self.spawn_lock.clone(),
+            generation: self.generation.clone(),
             last_activity: self.last_activity.clone(),
             is_healthy: self.is_healthy.clone(),
             should_shutdown: self.should_shutdown.clone(),
@@ -815,7 +819,9 @@ impl SidecarManager {
             loop {
                 interval.tick().await;
 
-                if manager.should_shutdown.load(Ordering::SeqCst) {
+                if manager.should_shutdown.load(Ordering::SeqCst)
+                    || manager.generation.load(Ordering::SeqCst) != generation
+                {
                     log::debug!("Health check loop: shutdown flag set, exiting");
                     break;
                 }
@@ -843,12 +849,15 @@ impl SidecarManager {
 
     /// Start idle check loop (runs in background)
     fn start_idle_check_loop(&self) {
+        let generation = self.generation.load(Ordering::SeqCst);
         let manager = Self {
             child_process: self.child_process.clone(),
             stdin_writer: self.stdin_writer.clone(),
             stdout_reader: self.stdout_reader.clone(),
             exchange: self.exchange.clone(),
             cancel_supported: self.cancel_supported.clone(),
+            spawn_lock: self.spawn_lock.clone(),
+            generation: self.generation.clone(),
             last_activity: self.last_activity.clone(),
             is_healthy: self.is_healthy.clone(),
             should_shutdown: self.should_shutdown.clone(),
@@ -865,7 +874,9 @@ impl SidecarManager {
             loop {
                 interval.tick().await;
 
-                if manager.should_shutdown.load(Ordering::SeqCst) {
+                if manager.should_shutdown.load(Ordering::SeqCst)
+                    || manager.generation.load(Ordering::SeqCst) != generation
+                {
                     log::debug!("Idle check loop: shutdown flag set, exiting");
                     break;
                 }
@@ -964,6 +975,11 @@ pub struct SidecarRequest<'a> {
     pub tokens: Option<tokio::sync::mpsc::UnboundedSender<String>>,
 }
 
+/// An interactive request pre-empts background (timeline) work at most this
+/// often; in between it waits for the timeline request to finish, so the
+/// live summary always gets an entry in.
+pub const PREEMPT_MIN_GAP: Duration = Duration::from_secs(120);
+
 /// Longest an abandoned request may keep the sidecar busy before the helper is
 /// stopped to get the protocol back in step.
 pub const ABANDONED_DRAIN_LIMIT: Duration = Duration::from_secs(models::GENERATION_TIMEOUT_SECS);
@@ -995,6 +1011,8 @@ struct Holder {
 
 #[derive(Debug, Default)]
 struct QueueState {
+    /// When an interactive request last pre-empted a background one.
+    last_preempt: Option<Instant>,
     busy: bool,
     /// Waiters per priority (indexed by `Priority::index`).
     waiting: [usize; 3],
@@ -1093,10 +1111,14 @@ impl ExchangeQueue {
                 queue: self.clone(),
             });
         }
+        let recently = state
+            .last_preempt
+            .is_some_and(|at| at.elapsed() < PREEMPT_MIN_GAP);
         let preempt = match state.holder.as_mut() {
             Some(holder)
                 if priority == Priority::Interactive
                     && can_preempt
+                    && !recently
                     && holder.priority == Priority::Background
                     && !holder.preempt_sent =>
             {
@@ -1105,6 +1127,9 @@ impl ExchangeQueue {
             }
             _ => None,
         };
+        if preempt.is_some() {
+            state.last_preempt = Some(Instant::now());
+        }
         Attempt::Wait { preempt }
     }
 
@@ -1716,6 +1741,130 @@ while True:
         let summary = summary.await.unwrap().unwrap();
         assert_eq!(reply_field(&summary, "finish_reason"), "stop");
         assert!(manager.is_healthy());
+        manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn another_model_never_restarts_a_healthy_helper_under_a_request() {
+        // Regression: ensure_running respawned on a model change, so a
+        // timeline tick on another model killed an in-flight Copilot stream.
+        let (dir, manager) = running_protocol_helper().await;
+        let copilot = {
+            let manager = manager.clone();
+            tokio::spawn(async move {
+                manager
+                    .send(spec(
+                        generate_line(1, "slow copilot", false),
+                        Some(1),
+                        Priority::Interactive,
+                    ))
+                    .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        manager
+            .ensure_running(dir.path().join("other-model.gguf"))
+            .await
+            .unwrap();
+        let reply = copilot.await.unwrap().unwrap();
+        assert_eq!(reply_field(&reply, "finish_reason"), "stop");
+        assert_eq!(reply_field(&reply, "text"), "slow copilot");
+        assert!(manager.is_healthy());
+        manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn concurrent_starts_spawn_one_helper() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = protocol_helper(dir.path());
+        let manager = Arc::new(SidecarManager::new_with_binary(binary));
+        let mut starts = Vec::new();
+        for _ in 0..6 {
+            let manager = manager.clone();
+            let model = dir.path().join("model.gguf");
+            starts.push(tokio::spawn(
+                async move { manager.ensure_running(model).await },
+            ));
+        }
+        for start in starts {
+            start.await.unwrap().unwrap();
+        }
+        assert_eq!(manager.generation.load(Ordering::SeqCst), 1, "spawned once");
+        let reply = manager
+            .send(spec(
+                generate_line(3, "hello", false),
+                Some(3),
+                Priority::Normal,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(reply_field(&reply, "id"), 3);
+        manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_timeline_is_preempted_at_most_once_per_gap() {
+        let (_dir, manager) = running_protocol_helper().await;
+        for (round, (timeline_id, copilot_id)) in [(1, 2), (3, 4)].into_iter().enumerate() {
+            let background = {
+                let manager = manager.clone();
+                tokio::spawn(async move {
+                    manager
+                        .send(spec(
+                            generate_line(timeline_id, "slow timeline", false),
+                            Some(timeline_id),
+                            Priority::Background,
+                        ))
+                        .await
+                })
+            };
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            manager
+                .send(spec(
+                    generate_line(copilot_id, "copilot", false),
+                    Some(copilot_id),
+                    Priority::Interactive,
+                ))
+                .await
+                .unwrap();
+            let background = background.await.unwrap().unwrap();
+            let expected = if round == 0 { "cancelled" } else { "stop" };
+            assert_eq!(
+                reply_field(&background, "finish_reason"),
+                expected,
+                "round {round}: the second timeline request in the gap must finish"
+            );
+        }
+        manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn proactive_copilot_work_never_preempts_the_timeline() {
+        let (_dir, manager) = running_protocol_helper().await;
+        let background = {
+            let manager = manager.clone();
+            tokio::spawn(async move {
+                manager
+                    .send(spec(
+                        generate_line(1, "slow timeline", false),
+                        Some(1),
+                        Priority::Background,
+                    ))
+                    .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        // Suggestion confirms and drafts run at Normal priority.
+        manager
+            .send(spec(
+                generate_line(2, "confirm", false),
+                Some(2),
+                Priority::Normal,
+            ))
+            .await
+            .unwrap();
+        let background = background.await.unwrap().unwrap();
+        assert_eq!(reply_field(&background, "finish_reason"), "stop");
         manager.shutdown().await.unwrap();
     }
 }

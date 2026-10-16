@@ -409,7 +409,7 @@ pub async fn generate_with_builtin(
         let delay = background_pacing_delay(
             last_end,
             std::time::Instant::now(),
-            crate::audio::recording_commands::is_recording_live(),
+            crate::audio::recording_commands::is_recording_or_stopping(),
         );
         if !delay.is_zero() {
             perf_debug!("Pacing a background generation by {:?}", delay);
@@ -459,7 +459,7 @@ pub const RECORDING_LLM_THREADS: i32 = 2;
 
 /// Thread override for a generate request: fewer while recording.
 pub fn generation_threads() -> Option<i32> {
-    crate::audio::recording_commands::is_recording_live().then_some(RECORDING_LLM_THREADS)
+    crate::audio::recording_commands::is_recording_or_stopping().then_some(RECORDING_LLM_THREADS)
 }
 
 /// Minimum pause between the end of one built-in generation and the start of
@@ -576,6 +576,10 @@ pub struct BuiltinStreamOptions {
     pub timeout: Duration,
     /// n_ctx of the helper's persistent cached context.
     pub cache_context_size: u32,
+    /// The user asked (a question or quick action): served first and may
+    /// pre-empt a live timeline request. Proactive suggestion work is not:
+    /// it queues like a summary and never stops the timeline.
+    pub interactive: bool,
 }
 
 /// A streamed built-in generation's result and timings.
@@ -651,16 +655,6 @@ pub async fn generate_with_builtin_stream(
         user_rest,
         anchor,
     )?;
-    // Never swap the helper's model under a running summary or timeline
-    // request: that would stop it.
-    if let Ok(model_path) = get_cached_model_path(app_data_dir, model_name) {
-        let manager = SIDECAR_MANAGER.lock().await.clone();
-        if let Some(manager) = manager {
-            if manager.busy_with_other_model(&model_path).await {
-                return Err(anyhow!(SidecarError::Busy(options.timeout)));
-            }
-        }
-    }
     let (manager, model_def, model_path) = running_manager(app_data_dir, model_name).await?;
     let sampling = model_def.sampling.sanitize_for_llama_helper();
     let id = next_request_id();
@@ -692,7 +686,11 @@ pub async fn generate_with_builtin_stream(
         .send(SidecarRequest {
             json: serde_json::to_string(&request)?,
             id: Some(id),
-            priority: Priority::Interactive,
+            priority: if options.interactive {
+                Priority::Interactive
+            } else {
+                Priority::Normal
+            },
             timeout: options.timeout,
             timeout_includes_queue: true,
             cancellation_token,

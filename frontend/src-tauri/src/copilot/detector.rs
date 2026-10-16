@@ -199,21 +199,21 @@ pub fn rule_check(text: &str) -> RuleDecision {
     {
         return RuleDecision::Pass("request to you");
     }
-    if mentions_you {
-        return RuleDecision::Pass("mentions you");
-    }
     if had_tag {
         return RuleDecision::Reject("tag question");
     }
     RuleDecision::Reject("statement")
 }
 
-/// Reads the confirm call's one-word answer. Anything but a clear yes is no.
-pub fn parse_yes_no(reply: &str) -> bool {
+/// Reads the confirm call's one-word answer: `None` when it is empty or not a
+/// yes/no (a reasoning model that spent its budget thinking), which means no card.
+pub fn parse_yes_no(reply: &str) -> Option<bool> {
     let cleaned = super::prompt::strip_reasoning(reply);
-    words(&cleaned.to_lowercase())
-        .first()
-        .is_some_and(|w| w == "yes" || w == "y")
+    match words(&cleaned.to_lowercase()).first().map(String::as_str) {
+        Some("yes") | Some("y") => Some(true),
+        Some("no") | Some("n") => Some(false),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -261,6 +261,9 @@ mod tests {
             "Sounds good?",
             "",
             "We agreed to move the launch to Q3, okay?",
+            // Mentioning "you" is not asking you anything.
+            "I sent you the deck yesterday.",
+            "Your team did great work on the launch.",
         ] {
             let decision = rule_check(line);
             assert!(
@@ -272,12 +275,16 @@ mod tests {
 
     #[test]
     fn the_confirm_reply_is_yes_only_when_it_says_yes() {
-        assert!(parse_yes_no("Yes"));
-        assert!(parse_yes_no(" yes."));
-        assert!(parse_yes_no("<think>hmm</think>\nYes, they asked you."));
-        assert!(!parse_yes_no("No"));
-        assert!(!parse_yes_no("Maybe"));
-        assert!(!parse_yes_no(""));
-        assert!(!parse_yes_no("yesterday"));
+        assert_eq!(parse_yes_no("Yes"), Some(true));
+        assert_eq!(parse_yes_no(" yes."), Some(true));
+        assert_eq!(
+            parse_yes_no("<think>hmm</think>\nYes, they asked you."),
+            Some(true)
+        );
+        assert_eq!(parse_yes_no("No"), Some(false));
+        assert_eq!(parse_yes_no("Maybe"), None);
+        assert_eq!(parse_yes_no(""), None, "empty is unknown, not yes");
+        assert_eq!(parse_yes_no("<think>still thinking"), None);
+        assert_eq!(parse_yes_no("yesterday"), None);
     }
 }

@@ -97,6 +97,7 @@ pub trait Streamer: Send + Sync {
         parts: &PromptParts,
         max_tokens: u32,
         temperature: f32,
+        interactive: bool,
         deltas: UnboundedSender<String>,
         cancel: &CancellationToken,
     ) -> Result<StreamOutcome, StreamError>;
@@ -378,6 +379,7 @@ impl ProviderStreamer {
         parts: &PromptParts,
         max_tokens: u32,
         temperature: f32,
+        interactive: bool,
         deltas: UnboundedSender<String>,
         cancel: &CancellationToken,
     ) -> Result<StreamOutcome, StreamError> {
@@ -397,6 +399,7 @@ impl ProviderStreamer {
                 temperature,
                 timeout: HARD_TIMEOUT,
                 cache_context_size: BUILTIN_CACHE_CONTEXT,
+                interactive,
             },
             deltas,
             Some(cancel),
@@ -448,6 +451,7 @@ impl Streamer for ProviderStreamer {
         parts: &PromptParts,
         max_tokens: u32,
         temperature: f32,
+        interactive: bool,
         deltas: UnboundedSender<String>,
         cancel: &CancellationToken,
     ) -> Result<StreamOutcome, StreamError> {
@@ -455,7 +459,7 @@ impl Streamer for ProviderStreamer {
             return Err(StreamError::cancelled());
         }
         if self.config.provider == LLMProvider::BuiltInAI {
-            self.stream_builtin(parts, max_tokens, temperature, deltas, cancel)
+            self.stream_builtin(parts, max_tokens, temperature, interactive, deltas, cancel)
                 .await
         } else {
             self.stream_http(parts, max_tokens, temperature, deltas, cancel)
@@ -560,7 +564,7 @@ mod tests {
         let streamer = streamer(LLMProvider::CustomOpenAI, Some(address));
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let outcome = streamer
-            .stream(&parts(), 300, 0.3, tx, &CancellationToken::new())
+            .stream(&parts(), 300, 0.3, true, tx, &CancellationToken::new())
             .await
             .unwrap();
         assert_eq!(outcome.text, "Hello there [01:02].");
@@ -587,7 +591,7 @@ mod tests {
         let streamer = streamer(LLMProvider::Ollama, Some(address));
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let outcome = streamer
-            .stream(&parts(), 300, 0.3, tx, &CancellationToken::new())
+            .stream(&parts(), 300, 0.3, true, tx, &CancellationToken::new())
             .await
             .unwrap();
         assert_eq!(outcome.text, "Ask about the budget.");
@@ -609,7 +613,7 @@ mod tests {
         let streamer = streamer(LLMProvider::CustomOpenAI, Some(address));
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let error = streamer
-            .stream(&parts(), 300, 0.3, tx, &CancellationToken::new())
+            .stream(&parts(), 300, 0.3, true, tx, &CancellationToken::new())
             .await
             .unwrap_err();
         assert_eq!(error.kind, StreamErrorKind::Auth);

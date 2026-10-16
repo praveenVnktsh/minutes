@@ -356,6 +356,48 @@ struct CacheParams {
 /// Prefix states kept in host memory (each is roughly 70 MB per 1k tokens
 /// on Qwen 3.5 4B): the anchor and the stable prefix, plus one spare.
 const MAX_CHECKPOINTS: usize = 3;
+/// On machines with 8 GB of RAM or less: one checkpoint and a smaller
+/// cached context, so Copilot's resident memory stays small next to the model
+/// and live transcription.
+const LOW_MEMORY_CHECKPOINTS: usize = 1;
+const LOW_MEMORY_CACHE_CONTEXT: u32 = 4096;
+const LOW_MEMORY_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+
+/// Total physical memory, when the platform reports it.
+fn total_memory_bytes() -> Option<u64> {
+    #[cfg(target_os = "macos")]
+    {
+        let output = std::process::Command::new("sysctl")
+            .args(["-n", "hw.memsize"])
+            .output()
+            .ok()?;
+        return String::from_utf8(output.stdout).ok()?.trim().parse().ok();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+        let kb: u64 = meminfo
+            .lines()
+            .find(|line| line.starts_with("MemTotal:"))?
+            .split_whitespace()
+            .nth(1)?
+            .parse()
+            .ok()?;
+        return Some(kb * 1024);
+    }
+    #[allow(unreachable_code)]
+    None
+}
+
+/// Checkpoint count and cached-context cap for this machine.
+fn cache_limits(total_memory: Option<u64>) -> (usize, Option<u32>) {
+    match total_memory {
+        Some(bytes) if bytes <= LOW_MEMORY_BYTES => {
+            (LOW_MEMORY_CHECKPOINTS, Some(LOW_MEMORY_CACHE_CONTEXT))
+        }
+        _ => (MAX_CHECKPOINTS, None),
+    }
+}
 
 /// What generation reports while it runs.
 trait GenerationSink {
@@ -379,8 +421,11 @@ struct ModelState {
     // must go first.
     /// Persistent context for `cache_prompt` requests, with its n_ctx and threads.
     cache_ctx: Option<((u32, i32), LlamaContext<'static>)>,
-    /// Saved prefix states, most recently used first (at most `MAX_CHECKPOINTS`).
+    /// Saved prefix states, most recently used first (at most `max_checkpoints`).
     checkpoints: Vec<Checkpoint>,
+    max_checkpoints: usize,
+    /// Smaller cached context on low-memory machines.
+    cache_context_cap: Option<u32>,
     /// Boxed so its address stays put while `cache_ctx` borrows it.
     model: Option<Box<LlamaModel>>,
     model_path: Option<PathBuf>,
@@ -402,9 +447,15 @@ fn thread_count() -> i32 {
 impl ModelState {
     fn new() -> Result<Self> {
         let backend = LlamaBackend::init().context("Failed to init LlamaBackend")?;
+        let (max_checkpoints, cache_context_cap) = cache_limits(total_memory_bytes());
+        if cache_context_cap.is_some() {
+            eprintln!("💡 8 GB machine: one prefix checkpoint, smaller cached context");
+        }
         Ok(Self {
             cache_ctx: None,
             checkpoints: Vec::new(),
+            max_checkpoints,
+            cache_context_cap,
             model: None,
             model_path: None,
             context_size: 2048,
@@ -561,7 +612,10 @@ impl ModelState {
         sink: &mut dyn GenerationSink,
     ) -> std::result::Result<GenerationOutput, GenerateError> {
         let start_time = Instant::now();
-        let n_ctx = cache.context_size.clamp(512, self.context_size.max(512));
+        let mut n_ctx = cache.context_size.clamp(512, self.context_size.max(512));
+        if let Some(cap) = self.cache_context_cap {
+            n_ctx = n_ctx.min(cap);
+        }
         let tokens = self.tokenize(&params.prompt)?;
         check_context_budget(tokens.len(), params.max_tokens, n_ctx)?;
         // The stable prefix and, when given, an earlier anchor inside it.
@@ -634,7 +688,7 @@ impl ModelState {
             if let Some(checkpoint) = save_checkpoint(&ctx, &tokens[..end]) {
                 self.checkpoints.retain(|c| c.tokens != checkpoint.tokens);
                 self.checkpoints.insert(0, checkpoint);
-                self.checkpoints.truncate(MAX_CHECKPOINTS);
+                self.checkpoints.truncate(self.max_checkpoints);
             }
         }
         if sink.is_cancelled() {
@@ -1118,6 +1172,7 @@ fn main() -> Result<()> {
                     cancel: &cancel,
                 };
                 let result = state.generate(params, &mut sink);
+                cancel.finished(id);
                 send_response(&Response::from_generation(result, id))?;
             }
             Ok(Request::Tokenize {

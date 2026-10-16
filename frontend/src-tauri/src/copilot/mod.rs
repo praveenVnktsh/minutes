@@ -347,6 +347,14 @@ fn finish<R: Runtime>(app: &AppHandle<R>, mut session: ActiveSession) {
     });
 }
 
+/// The user pressed stop: refuse new requests and cancel running ones now,
+/// before the last audio is decoded. Saving happens in `finish_session`.
+pub fn deactivate_session(session_id: &str) {
+    if let Some(core) = current_core().filter(|core| core.session_id() == session_id) {
+        core.deactivate();
+    }
+}
+
 /// The meeting ended: no more Copilot requests; in-flight ones are stopped
 /// (inside the helper, never by killing it) and moments are saved. Returns at
 /// once. The finished session stays readable for the panel until the next one.
