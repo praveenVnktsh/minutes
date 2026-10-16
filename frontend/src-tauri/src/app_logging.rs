@@ -67,13 +67,22 @@ pub fn init() {
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).build();
     *LOG_FILE_HANDLE.lock().unwrap_or_else(|p| p.into_inner()) =
         dir.as_deref().and_then(|dir| LogFile::open(dir).ok());
+    let max_level = max_level_for(stderr.filter());
     if log::set_boxed_logger(Box::new(AppLogger { stderr })).is_ok() {
-        log::set_max_level(log::LevelFilter::Info);
+        log::set_max_level(max_level);
     }
     match dir {
         Some(dir) => log::info!("Writing logs to {}", dir.display()),
         None => log::warn!("No log directory could be resolved; logging to stderr only"),
     }
+}
+
+/// The global level the `log` macros filter at: what RUST_LOG asks of
+/// stderr, and never below info, which the file always keeps. A fixed Info
+/// silenced RUST_LOG=debug (and perf_debug!) everywhere, because the macros
+/// drop records above the global level before any logger sees them.
+fn max_level_for(stderr_filter: log::LevelFilter) -> log::LevelFilter {
+    stderr_filter.max(log::LevelFilter::Info)
 }
 
 /// Point logs and panic reports at `dir` (Tauri's resolved `app_log_dir()`)
@@ -236,6 +245,22 @@ fn install_panic_hook() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rust_log_debug_raises_the_global_level() {
+        assert_eq!(
+            max_level_for(log::LevelFilter::Debug),
+            log::LevelFilter::Debug
+        );
+        assert_eq!(
+            max_level_for(log::LevelFilter::Trace),
+            log::LevelFilter::Trace
+        );
+        assert_eq!(
+            max_level_for(log::LevelFilter::Warn),
+            log::LevelFilter::Info
+        );
+    }
 
     #[test]
     fn identifier_comes_from_the_tauri_config() {
