@@ -736,42 +736,108 @@ fn overlap(start_a: f64, end_a: f64, start_b: f64, end_b: f64) -> f64 {
     (end_a.min(end_b) - start_a.max(start_b)).max(0.0)
 }
 
-/// Reuse existing speaker IDs when a rerun overlaps previously labeled transcript
-/// segments, then allocate deterministic IDs to any newly discovered clusters.
-fn stabilize_turn_labels(turns: &mut [SpeakerTurn], transcripts: &[Transcript]) {
-    let mut scores: HashMap<(String, String), f64> = HashMap::new();
-    for turn in turns.iter() {
-        for transcript in transcripts {
-            let Some(previous) = transcript
+/// A stretch of audio that an earlier diarization run gave a speaker ID.
+#[derive(Debug, Clone, PartialEq)]
+struct LabeledSpan {
+    start: f64,
+    end: f64,
+    label: String,
+}
+
+/// A new cluster inherits an earlier ID only when they share at least this
+/// fraction of the smaller one's speech. Below it the overlap is incidental
+/// (a few seconds of crosstalk), and inheriting would hand that person's
+/// rename to someone else.
+const MIN_IDENTITY_OVERLAP: f64 = 0.3;
+
+/// What the earlier assignment said, in recording time: the last run's turns
+/// when there is one (they survive a final pass or retranscription, which
+/// replaces the transcript rows and their speaker column), otherwise the
+/// transcript rows that still carry `speaker_NN` labels.
+fn previous_spans(
+    previous_turns: Option<&[SpeakerTurn]>,
+    transcripts: &[Transcript],
+) -> Vec<LabeledSpan> {
+    if let Some(turns) = previous_turns.filter(|turns| !turns.is_empty()) {
+        return turns
+            .iter()
+            .filter(|turn| turn.speaker.starts_with("speaker_") && turn.end > turn.start)
+            .map(|turn| LabeledSpan {
+                start: turn.start,
+                end: turn.end,
+                label: turn.speaker.clone(),
+            })
+            .collect();
+    }
+    transcripts
+        .iter()
+        .filter_map(|transcript| {
+            let label = transcript
                 .speaker
                 .as_deref()
-                .filter(|value| value.starts_with("speaker_"))
-            else {
-                continue;
-            };
-            let (Some(start), Some(end)) = (transcript.audio_start_time, transcript.audio_end_time)
-            else {
-                continue;
-            };
-            let amount = overlap(turn.start, turn.end, start, end);
+                .filter(|value| value.starts_with("speaker_"))?;
+            let (start, end) = (transcript.audio_start_time?, transcript.audio_end_time?);
+            (end > start).then(|| LabeledSpan {
+                start,
+                end,
+                label: label.to_string(),
+            })
+        })
+        .collect()
+}
+
+/// Map a rerun's raw clusters onto the IDs of the previous assignment by
+/// maximum time overlap (one-to-one, largest overlaps first), so renames,
+/// merges and overrides keyed by those IDs stay with the same person. Clusters
+/// with no convincing match get fresh IDs that avoid every `reserved` one
+/// (earlier IDs and IDs the user corrected), so a new person never inherits
+/// an old person's name.
+fn stabilize_turn_labels(
+    turns: &mut [SpeakerTurn],
+    previous: &[LabeledSpan],
+    reserved: &HashSet<String>,
+) {
+    let mut scores: HashMap<(String, String), f64> = HashMap::new();
+    let mut new_totals: HashMap<String, f64> = HashMap::new();
+    let mut old_totals: HashMap<String, f64> = HashMap::new();
+    for span in previous {
+        *old_totals.entry(span.label.clone()).or_default() += span.end - span.start;
+    }
+    for turn in turns.iter() {
+        *new_totals.entry(turn.speaker.clone()).or_default() += (turn.end - turn.start).max(0.0);
+        for span in previous {
+            let amount = overlap(turn.start, turn.end, span.start, span.end);
             if amount > 0.0 {
                 *scores
-                    .entry((turn.speaker.clone(), previous.to_string()))
+                    .entry((turn.speaker.clone(), span.label.clone()))
                     .or_default() += amount;
             }
         }
     }
 
-    let mut candidates: Vec<_> = scores.into_iter().collect();
-    candidates.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let mut candidates: Vec<_> = scores
+        .into_iter()
+        .filter(|((raw, previous), amount)| {
+            let smaller = new_totals
+                .get(raw)
+                .copied()
+                .unwrap_or(0.0)
+                .min(old_totals.get(previous).copied().unwrap_or(0.0));
+            smaller > 0.0 && *amount >= MIN_IDENTITY_OVERLAP * smaller
+        })
+        .collect();
+    // Largest overlap first; ties broken by name so reruns are deterministic.
+    candidates.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     let mut mapping = HashMap::new();
-    let mut used_labels = HashSet::new();
+    let mut taken = HashSet::new();
     for ((raw, previous), _) in candidates {
-        if !mapping.contains_key(&raw) && used_labels.insert(previous.clone()) {
+        if !mapping.contains_key(&raw) && taken.insert(previous.clone()) {
             mapping.insert(raw, previous);
         }
     }
 
+    let mut used_labels: HashSet<String> = reserved.clone();
+    used_labels.extend(previous.iter().map(|span| span.label.clone()));
     let mut raw_labels: Vec<String> = turns.iter().map(|turn| turn.speaker.clone()).collect();
     raw_labels.sort();
     raw_labels.dedup();
@@ -794,6 +860,43 @@ fn stabilize_turn_labels(turns: &mut [SpeakerTurn], transcripts: &[Transcript]) 
             turn.speaker.clone_from(label);
         }
     }
+}
+
+/// The latest saved run's turns for a meeting, if one parses.
+async fn latest_run_turns(pool: &sqlx::SqlitePool, meeting_id: &str) -> Option<Vec<SpeakerTurn>> {
+    let json: Option<String> = sqlx::query_scalar(
+        "SELECT result_json FROM diarization_runs WHERE meeting_id = ? ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(meeting_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| log::warn!("Diarization: could not read the previous run: {error}"))
+    .ok()
+    .flatten();
+    serde_json::from_str::<DiarizationResult>(&json?)
+        .map_err(|error| log::warn!("Diarization: the previous run is unreadable: {error}"))
+        .ok()
+        .map(|result| result.turns)
+}
+
+/// IDs the user has named, merged or pinned segments to: a new cluster must
+/// never be handed one of these.
+async fn corrected_speaker_ids(pool: &sqlx::SqlitePool, meeting_id: &str) -> HashSet<String> {
+    let rows: Vec<String> = sqlx::query_scalar(
+        "SELECT speaker_id FROM speaker_identities WHERE meeting_id = ? \
+         UNION SELECT merged_into FROM speaker_identities WHERE meeting_id = ? AND merged_into IS NOT NULL \
+         UNION SELECT speaker_id FROM speaker_segment_overrides WHERE meeting_id = ?",
+    )
+    .bind(meeting_id)
+    .bind(meeting_id)
+    .bind(meeting_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_else(|error| {
+        log::warn!("Diarization: could not read speaker corrections: {error}");
+        Vec::new()
+    });
+    rows.into_iter().collect()
 }
 
 fn speaker_for_transcript(transcript: &Transcript, turns: &[SpeakerTurn]) -> Option<String> {
@@ -1132,7 +1235,10 @@ async fn diarize_and_persist<R: Runtime>(
         70,
         "Grouping speaker turns...",
     );
-    stabilize_turn_labels(&mut turns, &transcripts);
+    let previous_turns = latest_run_turns(pool, meeting_id).await;
+    let previous = previous_spans(previous_turns.as_deref(), &transcripts);
+    let reserved = corrected_speaker_ids(pool, meeting_id).await;
+    stabilize_turn_labels(&mut turns, &previous, &reserved);
     let user_label = detect_user_speaker_label(&transcripts, &turns);
     if let Some(label) = &user_label {
         log::info!(
@@ -1516,9 +1622,76 @@ mod tests {
                 confidence: 1.0,
             },
         ];
-        stabilize_turn_labels(&mut turns, &transcripts);
+        stabilize_turn_labels(
+            &mut turns,
+            &previous_spans(None, &transcripts),
+            &HashSet::new(),
+        );
         assert_eq!(turns[0].speaker, "speaker_03");
         assert_eq!(turns[1].speaker, "speaker_01");
+    }
+
+    fn turn(start: f64, end: f64, speaker: &str) -> SpeakerTurn {
+        SpeakerTurn {
+            start,
+            end,
+            speaker: speaker.into(),
+            confidence: 1.0,
+        }
+    }
+
+    #[test]
+    fn rerun_after_a_final_pass_keeps_ids_from_the_previous_run() {
+        // Regression: the final pass replaces the transcript rows, so their
+        // speaker column is empty and the rerun used to number clusters from
+        // scratch. Raw cluster order flipped here, which moved "Avery"
+        // (speaker_01) onto the other person.
+        let previous_run = vec![
+            turn(0.0, 10.0, "speaker_00"),
+            turn(10.0, 20.0, "speaker_01"),
+            turn(20.0, 30.0, "speaker_00"),
+        ];
+        let replaced_rows = vec![
+            transcript("new-a", 0.5, 9.5, None),
+            transcript("new-b", 10.5, 19.5, None),
+        ];
+        let mut turns = vec![
+            turn(0.0, 10.2, "raw_01"),
+            turn(10.2, 20.0, "raw_00"),
+            turn(20.0, 30.0, "raw_01"),
+        ];
+        let previous = previous_spans(Some(&previous_run), &replaced_rows);
+        stabilize_turn_labels(&mut turns, &previous, &HashSet::new());
+        assert_eq!(turns[0].speaker, "speaker_00");
+        assert_eq!(turns[1].speaker, "speaker_01");
+        assert_eq!(turns[2].speaker, "speaker_00");
+    }
+
+    #[test]
+    fn a_new_speaker_never_inherits_a_corrected_or_earlier_id() {
+        // A resumed meeting: speaker_01 ("Avery") spoke 10-20 s. The rerun
+        // finds a new person from 20 s on whose first turn grazes Avery's
+        // last second; a second of overlap must not hand them Avery's name.
+        let previous_run = vec![
+            turn(0.0, 10.0, "speaker_00"),
+            turn(10.0, 20.0, "speaker_01"),
+        ];
+        let mut turns = vec![
+            turn(0.0, 10.0, "raw_00"),
+            turn(11.0, 20.0, "raw_02"),
+            turn(19.0, 60.0, "raw_01"),
+        ];
+        let reserved = HashSet::from(["speaker_02".to_string()]);
+        stabilize_turn_labels(
+            &mut turns,
+            &previous_spans(Some(&previous_run), &[]),
+            &reserved,
+        );
+        assert_eq!(turns[0].speaker, "speaker_00");
+        assert_eq!(turns[1].speaker, "speaker_01");
+        // speaker_02 carries a user correction (e.g. a merge target), so the
+        // new person gets the next free ID.
+        assert_eq!(turns[2].speaker, "speaker_03");
     }
 
     #[test]
@@ -1670,7 +1843,7 @@ mod tests {
     fn nemotron_turns_feed_label_stabilisation() {
         let mut turns =
             segments_to_turns(vec![segment(0.0, 2.0, 1, 0.9), segment(2.0, 4.0, 0, 0.9)]);
-        stabilize_turn_labels(&mut turns, &[]);
+        stabilize_turn_labels(&mut turns, &[], &HashSet::new());
         assert_eq!(turns[0].speaker, "speaker_01");
         assert_eq!(turns[1].speaker, "speaker_00");
     }
@@ -1894,7 +2067,7 @@ mod tests {
             .expect("fixture should diarize");
 
         let mut turns = segments_to_turns(cap_speakers(segments.clone(), 2));
-        stabilize_turn_labels(&mut turns, &[]);
+        stabilize_turn_labels(&mut turns, &[], &HashSet::new());
         let speakers = turns
             .iter()
             .map(|turn| turn.speaker.as_str())

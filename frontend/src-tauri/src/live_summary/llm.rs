@@ -39,6 +39,9 @@ pub(crate) fn generation_options() -> GenerationOptions {
         seed: Some(SUMMARY_SEED),
         timeout: Some(REQUEST_TIMEOUT),
         on_abandon: OnAbandon::Yield,
+        // Reasoning models get low effort and room to think on top of the
+        // cap, or they would spend the 150 tokens thinking.
+        brief: true,
         ..Default::default()
     }
 }
@@ -130,6 +133,8 @@ pub struct SummaryModelGenerator {
     config: LlmConfig,
     app_data_dir: Option<PathBuf>,
     client: reqwest::Client,
+    /// Ollama's num_ctx, the same as every other app call to the model.
+    num_ctx: Option<u32>,
 }
 
 impl SummaryModelGenerator {
@@ -146,7 +151,14 @@ impl SummaryModelGenerator {
         let config = load_llm_config(pool, &settings.provider, &settings.model, Some(&settings))
             .await
             .map_err(|e| anyhow!(e))?;
+        let num_ctx = crate::summary::service::ollama_num_ctx(
+            &config.provider,
+            &config.model_name,
+            config.ollama_endpoint.as_deref(),
+        )
+        .await;
         Ok(Self {
+            num_ctx,
             provider_id: settings.provider,
             config,
             app_data_dir,
@@ -171,7 +183,8 @@ impl Generator for SummaryModelGenerator {
         user_prompt: &str,
         cancel: &CancellationToken,
     ) -> Result<Generated, GenerateError> {
-        let options = generation_options();
+        let mut options = generation_options();
+        options.num_ctx = self.num_ctx;
         generate_summary(
             &self.client,
             &self.config.provider,

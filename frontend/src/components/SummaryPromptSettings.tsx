@@ -36,6 +36,25 @@ const COPY: Record<
   },
 };
 
+/** Remembers that the user has seen the notes/no-notes split notice. */
+export const PROMPT_SPLIT_NOTICE_KEY = 'summaryPromptSplitNoticeDismissed';
+
+function noticeDismissed(): boolean {
+  try {
+    return typeof localStorage !== 'undefined' && localStorage.getItem(PROMPT_SPLIT_NOTICE_KEY) === 'true';
+  } catch {
+    return false;
+  }
+}
+
+function dismissNotice() {
+  try {
+    localStorage.setItem(PROMPT_SPLIT_NOTICE_KEY, 'true');
+  } catch {
+    // Without storage the notice just shows again next time.
+  }
+}
+
 type LoadState =
   | { status: 'loading' }
   | { status: 'error'; message: string }
@@ -51,6 +70,10 @@ export function SummaryPromptSettings({ kind = 'notes' }: { kind?: SummaryPrompt
   const [state, setState] = useState<LoadState>({ status: 'loading' });
   const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState<'saving' | 'resetting' | null>(null);
+  // Before the split, a custom notes prompt applied to every meeting. For a
+  // user who had one, say once that meetings without notes now use this
+  // prompt, and offer to carry their text over.
+  const [customNotesPrompt, setCustomNotesPrompt] = useState<string | null>(null);
 
   const applySettings = useCallback((settings: SummaryPromptSettingsData) => {
     setState({ status: 'ready', saved: settings });
@@ -69,6 +92,27 @@ export function SummaryPromptSettings({ kind = 'notes' }: { kind?: SummaryPrompt
   useEffect(() => {
     void load();
   }, [load]);
+
+  const savedIsCustom = state.status === 'ready' ? state.saved.isCustom : null;
+  useEffect(() => {
+    if (kind !== 'transcriptOnly' || savedIsCustom !== false || noticeDismissed()) return;
+    let cancelled = false;
+    invoke<SummaryPromptSettingsData>('api_get_summary_prompt', { kind: 'notes' })
+      .then((notes) => {
+        if (!cancelled && notes.isCustom) setCustomNotesPrompt(notes.prompt);
+      })
+      .catch(() => {
+        // The notice is only a hint; without it the card still works.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [kind, savedIsCustom]);
+
+  const closeNotice = () => {
+    dismissNotice();
+    setCustomNotesPrompt(null);
+  };
 
   const save = async () => {
     setBusy('saving');
@@ -130,6 +174,33 @@ export function SummaryPromptSettings({ kind = 'notes' }: { kind?: SummaryPrompt
           <Button variant="outline" size="sm" onClick={() => void load()}>
             Retry
           </Button>
+        </div>
+      )}
+
+      {saved && customNotesPrompt !== null && !saved.isCustom && (
+        <div
+          data-testid="prompt-split-notice"
+          className={`mb-4 rounded-md p-3 text-sm ${panel.info}`}
+        >
+          <p>
+            Your custom Notes prompt now applies only to meetings where you typed notes. Meetings
+            without notes use this No-notes prompt, which is still the default.
+          </p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => {
+                setDraft(customNotesPrompt);
+                closeNotice();
+              }}
+            >
+              Start from my Notes prompt
+            </Button>
+            <Button size="sm" variant="ghost" onClick={closeNotice}>
+              Keep the default
+            </Button>
+          </div>
         </div>
       )}
 

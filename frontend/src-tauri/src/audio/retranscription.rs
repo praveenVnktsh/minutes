@@ -446,21 +446,46 @@ async fn run_retranscription<R: Runtime>(
             continue;
         }
 
-        // Transcribe this segment
-        let (text, conf) = if use_parakeet {
-            let engine = parakeet_engine.as_ref().unwrap();
-            let text = engine
-                .transcribe_audio(segment.samples.clone())
-                .await
-                .map_err(|e| anyhow!("Parakeet transcription failed on segment {}: {}", i, e))?;
-            (text, 0.9f32)
-        } else {
-            let engine = whisper_engine.as_ref().unwrap();
-            let (text, conf, _) = engine
-                .transcribe_audio_with_confidence(segment.samples.clone(), language.clone())
-                .await
-                .map_err(|e| anyhow!("Whisper transcription failed on segment {}: {}", i, e))?;
-            (text, conf)
+        // Transcribe this segment. A recording that started meanwhile may
+        // have loaded its own model into the shared engine between the check
+        // above and this call; then the text came from the wrong model, so
+        // wait for the recording, reload ours and transcribe it again.
+        let (text, conf) = loop {
+            let (text, conf) = if use_parakeet {
+                let engine = parakeet_engine.as_ref().unwrap();
+                let text = engine
+                    .transcribe_audio(segment.samples.clone())
+                    .await
+                    .map_err(|e| {
+                        anyhow!("Parakeet transcription failed on segment {}: {}", i, e)
+                    })?;
+                (text, 0.9f32)
+            } else {
+                let engine = whisper_engine.as_ref().unwrap();
+                let (text, conf, _) = engine
+                    .transcribe_audio_with_confidence(segment.samples.clone(), language.clone())
+                    .await
+                    .map_err(|e| anyhow!("Whisper transcription failed on segment {}: {}", i, e))?;
+                (text, conf)
+            };
+            let current_model = if use_parakeet {
+                parakeet_engine.as_ref().unwrap().get_current_model().await
+            } else {
+                whisper_engine.as_ref().unwrap().get_current_model().await
+            };
+            if !model_was_swapped(resolved_model_name.as_deref(), current_model.as_deref()) {
+                break (text, conf);
+            }
+            warn!(
+                "Segment {} of {meeting_id} ran while the engine held {:?} instead of {:?}; transcribing it again",
+                i, current_model, resolved_model_name
+            );
+            wait_for_live_engine(&app, &meeting_id, provider.as_deref(), progress).await?;
+            if use_parakeet {
+                parakeet_engine = Some(get_or_init_parakeet(&app, model.as_deref()).await?);
+            } else {
+                whisper_engine = Some(get_or_init_whisper(&app, model.as_deref()).await?);
+            }
         };
 
         // Skip empty transcripts
@@ -654,6 +679,12 @@ async fn run_retranscription<R: Runtime>(
         language,
         warning,
     })
+}
+
+/// Whether the shared engine no longer holds the model this pass loaded. An
+/// unknown model on either side is not treated as a swap.
+fn model_was_swapped(expected: Option<&str>, current: Option<&str>) -> bool {
+    matches!((expected, current), (Some(expected), Some(current)) if expected != current)
 }
 
 /// While a live recording transcribes with the same engine family (only when
@@ -1073,6 +1104,20 @@ pub async fn is_retranscription_in_progress_command() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_model_swapped_under_the_pass_is_detected() {
+        assert!(model_was_swapped(
+            Some("large-v3-turbo-q5_0"),
+            Some("base.en")
+        ));
+        assert!(!model_was_swapped(
+            Some("large-v3-turbo-q5_0"),
+            Some("large-v3-turbo-q5_0")
+        ));
+        assert!(!model_was_swapped(None, Some("base.en")));
+        assert!(!model_was_swapped(Some("base.en"), None));
+    }
 
     #[test]
     fn test_create_transcript_segments_empty() {
