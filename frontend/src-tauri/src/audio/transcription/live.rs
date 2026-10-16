@@ -32,6 +32,34 @@ struct SessionPlan {
 
 static SESSION_PLAN: Mutex<Option<SessionPlan>> = Mutex::new(None);
 
+/// Provider of the chunked engine a live recording is transcribing with right
+/// now, if any. Whisper and Parakeet engines are process-wide, so a final pass
+/// on the same engine family must not run alongside it (it would swap the
+/// loaded model under the recording).
+static CHUNKED_LIVE_PROVIDER: Mutex<Option<String>> = Mutex::new(None);
+
+pub fn chunked_live_provider() -> Option<String> {
+    CHUNKED_LIVE_PROVIDER
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+fn is_parakeet(provider: &str) -> bool {
+    provider == settings::PROVIDER_PARAKEET
+}
+
+/// Whether a pass on `pass_provider` would share an engine with the live
+/// recording's chunked engine. The streaming (Nemotron) recognizer is separate
+/// and never conflicts.
+pub fn live_conflicts(live_provider: Option<&str>, pass_provider: Option<&str>) -> bool {
+    match (live_provider, pass_provider) {
+        (Some(live), Some(pass)) => is_parakeet(live) == is_parakeet(pass),
+        (Some(live), None) => !is_parakeet(live), // a pass without a provider uses Whisper
+        _ => false,
+    }
+}
+
 /// Tell the user about a degraded live path without failing anything. The
 /// frontend shows non-actionable "active" transcription errors as a warning.
 fn notify<R: Runtime>(app: &AppHandle<R>, message: &str) {
@@ -241,10 +269,17 @@ pub async fn start_worker<R: Runtime>(
             live_streaming::start_streaming_transcription_task(app.clone(), receiver, engine),
             model,
         )),
-        Some(Loaded::Chunked(engine)) => Ok((
-            super::worker::start_transcription_task_with_engine(app.clone(), receiver, engine),
-            model,
-        )),
+        Some(Loaded::Chunked(engine)) => {
+            if let LivePlan::Chunked(choice) = &plan {
+                *CHUNKED_LIVE_PROVIDER
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = Some(choice.engine.provider.clone());
+            }
+            Ok((
+                super::worker::start_transcription_task_with_engine(app.clone(), receiver, engine),
+                model,
+            ))
+        }
         None => {
             LIVE_TRANSCRIPTION_ENABLED.store(false, Ordering::SeqCst);
             Err(receiver)
@@ -257,19 +292,35 @@ pub async fn start_worker<R: Runtime>(
 }
 
 /// Free the live engine after a recording, so the final pass has the memory.
-/// Chunked engines are left to the stop path's existing unload.
-pub fn release_after_recording() {
+/// Returns the provider of the chunked engine the recording used, if any, for
+/// the stop path to unload; a streaming recording loaded none.
+pub fn release_after_recording() -> Option<String> {
     live_streaming::engine::unload();
     LIVE_STREAMING_MODE.store(false, Ordering::SeqCst);
+    CHUNKED_LIVE_PROVIDER
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
 }
 
-/// The provider whose chunked engine this recording used, if any.
-pub fn session_chunked_provider() -> Option<String> {
-    SESSION_PLAN
-        .lock()
-        .ok()
-        .and_then(|guard| match guard.as_ref().map(|s| &s.plan) {
-            Some(LivePlan::Chunked(choice)) => Some(choice.engine.provider.clone()),
-            _ => None,
-        })
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_streaming_or_idle_recording_never_conflicts_with_a_pass() {
+        assert!(!live_conflicts(None, Some("localWhisper")));
+        assert!(!live_conflicts(None, Some("parakeet")));
+        assert!(!live_conflicts(None, None));
+    }
+
+    #[test]
+    fn only_the_same_engine_family_conflicts() {
+        assert!(live_conflicts(Some("localWhisper"), Some("localWhisper")));
+        assert!(live_conflicts(Some("parakeet"), Some("parakeet")));
+        assert!(live_conflicts(Some("localWhisper"), None));
+        assert!(!live_conflicts(Some("parakeet"), Some("localWhisper")));
+        assert!(!live_conflicts(Some("localWhisper"), Some("parakeet")));
+        assert!(!live_conflicts(Some("parakeet"), None));
+    }
 }

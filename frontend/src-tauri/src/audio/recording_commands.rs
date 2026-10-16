@@ -1530,8 +1530,8 @@ async fn stop_recording_session<R: Runtime>(
     };
 
     // The worker has drained: free the streaming model before the final pass
-    // needs the memory.
-    transcription::live::release_after_recording();
+    // needs the memory, and note which chunked engine (if any) live text used.
+    let live_chunked_provider = transcription::live::release_after_recording();
 
     // The worker has drained, so no more final transcript events can arrive.
     {
@@ -1572,28 +1572,19 @@ async fn stop_recording_session<R: Runtime>(
 
     info!("🧠 All transcript chunks processed. Now safely unloading transcription model...");
 
-    // Determine which provider was used and unload the appropriate model (with timeout)
-    let config = match tokio::time::timeout(
-        tokio::time::Duration::from_secs(30), // 30 seconds max for DB operation
-        crate::api::api::api_get_transcript_config(app.clone(), app.clone().state(), None),
-    )
-    .await
+    // Unload only the chunked engine this recording itself used: a streaming
+    // recording loaded none, and Whisper/Parakeet may be busy with a final pass
+    // for another meeting. A running pass unloads its own engine when it
+    // finishes (unload_engine_after_batch).
+    let config = if super::transcription_queue::get_queue()
+        .has_active_task()
+        .await
     {
-        Ok(Ok(Some(config))) => Some(config.provider),
-        Ok(Ok(None)) => None,
-        Ok(Err(e)) => {
-            warn!("⚠️ Failed to get transcript config: {:?}", e);
-            None
-        }
-        Err(_) => {
-            warn!("⏱️ Transcript config timeout (30s), continuing shutdown");
-            None
-        }
+        info!("Keeping transcription engines loaded: a transcription task is running");
+        None
+    } else {
+        live_chunked_provider
     };
-
-    // Unload the chunked engine this recording actually used (a fallback may
-    // differ from the configured final model).
-    let config = transcription::live::session_chunked_provider().or(config);
     match config.as_deref() {
         Some("parakeet") => {
             info!("🦜 Unloading Parakeet model...");
@@ -1623,8 +1614,8 @@ async fn stop_recording_session<R: Runtime>(
                 warn!("⚠️ No Parakeet engine found to unload model");
             }
         }
-        _ => {
-            // Default to Whisper
+        None => info!("No chunked live engine to unload"),
+        Some(_) => {
             info!("🎤 Unloading Whisper model...");
             let engine_clone = {
                 let engine_guard = crate::whisper_engine::commands::WHISPER_ENGINE

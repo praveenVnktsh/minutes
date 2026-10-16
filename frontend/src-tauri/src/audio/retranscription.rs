@@ -342,13 +342,17 @@ async fn run_retranscription<R: Runtime>(
         "Loading transcription engine...",
     );
 
+    // A recording whose live text uses the same engine family would have its
+    // model swapped by this pass, so wait for it rather than block recording.
+    wait_for_live_engine(&app, &meeting_id, provider.as_deref(), 25).await?;
+
     // Initialize the appropriate engine once (not per-segment)
-    let whisper_engine = if !use_parakeet {
+    let mut whisper_engine = if !use_parakeet {
         Some(get_or_init_whisper(&app, model.as_deref()).await?)
     } else {
         None
     };
-    let parakeet_engine = if use_parakeet {
+    let mut parakeet_engine = if use_parakeet {
         Some(get_or_init_parakeet(&app, model.as_deref()).await?)
     } else {
         None
@@ -408,6 +412,16 @@ async fn run_retranscription<R: Runtime>(
 
         // Calculate progress (25% to 80% range for transcription)
         let progress = 25 + ((i as f32 / processable_count as f32) * 55.0) as u32;
+
+        // A recording started meanwhile may share this engine: wait for it,
+        // then make sure this pass's model is the one loaded again.
+        if wait_for_live_engine(&app, &meeting_id, provider.as_deref(), progress).await? {
+            if use_parakeet {
+                parakeet_engine = Some(get_or_init_parakeet(&app, model.as_deref()).await?);
+            } else {
+                whisper_engine = Some(get_or_init_whisper(&app, model.as_deref()).await?);
+            }
+        }
         let segment_duration_sec = (segment.end_timestamp_ms - segment.start_timestamp_ms) / 1000.0;
         emit_progress(
             &app,
@@ -636,6 +650,38 @@ async fn run_retranscription<R: Runtime>(
         language,
         warning,
     })
+}
+
+/// While a live recording transcribes with the same engine family (only when
+/// its live model is a chunked Whisper/Parakeet engine; the streaming model is
+/// separate), pause here instead of swapping the model under the recording.
+/// Returns whether it waited, so the caller can reload its model.
+async fn wait_for_live_engine<R: Runtime>(
+    app: &AppHandle<R>,
+    meeting_id: &str,
+    provider: Option<&str>,
+    progress: u32,
+) -> Result<bool> {
+    use super::transcription::live::{chunked_live_provider, live_conflicts};
+    let mut waited = false;
+    while live_conflicts(chunked_live_provider().as_deref(), provider) {
+        if RETRANSCRIPTION_CANCELLED.load(Ordering::SeqCst) {
+            return Err(anyhow!("Retranscription cancelled"));
+        }
+        if !waited {
+            info!("Retranscription of {meeting_id} paused while a recording uses the same engine");
+            emit_progress(
+                app,
+                meeting_id,
+                "waiting",
+                progress,
+                "Paused while a recording uses the same transcription engine; continues when it stops.",
+            );
+            waited = true;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    Ok(waited)
 }
 
 /// Public entry point for the transcription queue to run retranscription
