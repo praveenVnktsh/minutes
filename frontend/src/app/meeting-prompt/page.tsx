@@ -15,7 +15,7 @@ import { applyTheme, listenForThemeChanges, readTheme, syncNativeTheme } from '@
 const useBrowserLayoutEffect = typeof window === 'undefined' ? useEffect : useLayoutEffect
 
 /** How long "Won't ask again" stays up with its Undo before the prompt closes. */
-export const IGNORE_UNDO_MS = 5000
+const IGNORE_UNDO_MS = 5000
 const SNOOZE_MINUTES = 60
 
 type PromptView = 'prompt' | 'more' | 'ignored'
