@@ -54,6 +54,7 @@ export function MeetingWorkspace({
   transcript,
   assistant,
   showAssistant,
+  assistantLabel = 'Chat',
   peopleCount,
   toolbarActions,
   onTitleChange,
@@ -78,6 +79,8 @@ export function MeetingWorkspace({
   transcript: ReactNode;
   assistant: ReactNode;
   showAssistant: boolean;
+  /** The dock pill's label: "Copilot" while recording, "Chat" otherwise. */
+  assistantLabel?: string;
   peopleCount: number;
   toolbarActions?: ReactNode;
   onTitleChange?: (title: string) => void | Promise<void>;
@@ -366,11 +369,11 @@ export function MeetingWorkspace({
             type="button"
             onClick={toggleChat}
             disabled={!showAssistant}
-            title="Toggle chat"
+            title={`Toggle ${assistantLabel.toLowerCase()}`}
             aria-pressed={chatOpen && showAssistant}
             className={`flex h-8 items-center gap-1.5 rounded-full px-3 text-xs transition-colors ${chatOpen && showAssistant ? 'bg-surface-2 text-ink' : 'text-ink-subtle hover:bg-surface-2 hover:text-ink'} disabled:opacity-40`}
           >
-            <MessageCircle className="h-3.5 w-3.5" /> Chat
+            <MessageCircle className="h-3.5 w-3.5" /> {assistantLabel}
           </button>
         </div>
       </div>

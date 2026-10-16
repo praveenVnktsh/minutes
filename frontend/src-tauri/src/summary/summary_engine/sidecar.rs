@@ -35,8 +35,20 @@ pub struct SidecarManager {
 
     /// Held for one whole request/response round trip. llama-helper answers
     /// one line per request, in order, so two callers interleaving their
-    /// write/read halves would read each other's replies.
-    exchange_lock: Arc<Mutex<()>>,
+    /// write/read halves would read each other's replies. Waiters are served
+    /// by priority (see [`Priority`]).
+    exchange: Arc<ExchangeQueue>,
+
+    /// Whether the running helper understands request ids and `cancel`. Set
+    /// once a reply echoes an id; reset on every spawn.
+    cancel_supported: Arc<AtomicBool>,
+
+    /// Held while checking and (re)spawning the helper, so two callers can
+    /// never interleave child/stdin/stdout handles or start duplicate loops.
+    spawn_lock: Arc<Mutex<()>>,
+
+    /// Bumped on every spawn; health and idle loops of an older helper exit.
+    generation: Arc<AtomicUsize>,
 
     /// Last activity timestamp
     last_activity: Arc<RwLock<Instant>>,
@@ -100,7 +112,10 @@ impl SidecarManager {
             child_process: Arc::new(Mutex::new(None)),
             stdin_writer: Arc::new(Mutex::new(None)),
             stdout_reader: Arc::new(Mutex::new(None)),
-            exchange_lock: Arc::new(Mutex::new(())),
+            exchange: Arc::new(ExchangeQueue::default()),
+            cancel_supported: Arc::new(AtomicBool::new(false)),
+            spawn_lock: Arc::new(Mutex::new(())),
+            generation: Arc::new(AtomicUsize::new(0)),
             last_activity: Arc::new(RwLock::new(Instant::now())),
             is_healthy: Arc::new(AtomicBool::new(false)),
             should_shutdown: Arc::new(AtomicBool::new(false)),
@@ -117,7 +132,10 @@ impl SidecarManager {
             child_process: Arc::new(Mutex::new(None)),
             stdin_writer: Arc::new(Mutex::new(None)),
             stdout_reader: Arc::new(Mutex::new(None)),
-            exchange_lock: Arc::new(Mutex::new(())),
+            exchange: Arc::new(ExchangeQueue::default()),
+            cancel_supported: Arc::new(AtomicBool::new(false)),
+            spawn_lock: Arc::new(Mutex::new(())),
+            generation: Arc::new(AtomicUsize::new(0)),
             last_activity: Arc::new(RwLock::new(Instant::now())),
             is_healthy: Arc::new(AtomicBool::new(false)),
             should_shutdown: Arc::new(AtomicBool::new(false)),
@@ -343,18 +361,18 @@ impl SidecarManager {
     }
 
     /// Ensure sidecar is running, spawn if needed
+    ///
+    /// A running, healthy helper is never restarted for a different model:
+    /// every request names its model and the helper switches models itself,
+    /// inside the serialized exchange, so a caller asking for another model
+    /// can never kill someone else's request in flight.
     pub async fn ensure_running(&self, model_path: PathBuf) -> Result<()> {
-        // Check if already running with correct model
-        {
-            let current_model = self.current_model_path.read().await;
-            if current_model.as_ref() == Some(&model_path) && self.is_healthy() {
-                log::debug!("Sidecar already running with correct model");
-                self.update_activity().await;
-                return Ok(());
-            }
+        let _spawning = self.spawn_lock.lock().await;
+        if self.is_healthy() {
+            log::debug!("Sidecar already running");
+            self.update_activity().await;
+            return Ok(());
         }
-
-        // Need to spawn or restart
         self.spawn(model_path).await
     }
 
@@ -429,6 +447,8 @@ impl SidecarManager {
             *current_model = Some(model_path);
         }
 
+        self.cancel_supported.store(false, Ordering::SeqCst);
+        self.generation.fetch_add(1, Ordering::SeqCst);
         self.is_healthy.store(true, Ordering::SeqCst);
         self.should_shutdown.store(false, Ordering::SeqCst);
         self.update_activity().await;
@@ -442,17 +462,18 @@ impl SidecarManager {
         Ok(())
     }
 
-    /// Send a request to the sidecar and wait for its response.
+    /// Send a request to the sidecar and wait for its response, at `Normal`
+    /// priority (`Background` for [`OnAbandon::Yield`]) and without an id.
     ///
     /// Requests are serialized: the whole write/read round trip runs under
-    /// `exchange_lock`, and time spent waiting for that lock does not count
-    /// toward `timeout`. Cancelling while still waiting for the lock never
-    /// touches the sidecar.
+    /// the exchange queue, and time spent waiting for it does not count
+    /// toward `timeout`. Cancelling while still waiting never touches the
+    /// sidecar.
     ///
     /// Once the request is written, `on_abandon` decides what a timeout or
     /// cancellation does: [`OnAbandon::StopSidecar`] kills the helper so the
-    /// generation stops at once; [`OnAbandon::LetFinish`] returns to the caller
-    /// immediately and leaves the reply to be read and discarded in the
+    /// generation stops at once; the other policies return to the caller
+    /// immediately and leave the reply to be read and discarded in the
     /// background (up to `ABANDONED_DRAIN_LIMIT`), so other callers sharing
     /// the sidecar are unaffected.
     pub async fn send_request(
@@ -462,17 +483,59 @@ impl SidecarManager {
         cancellation_token: Option<&CancellationToken>,
         on_abandon: OnAbandon,
     ) -> Result<String> {
+        self.send(SidecarRequest {
+            json: request_json,
+            id: None,
+            priority: on_abandon.priority(),
+            timeout,
+            timeout_includes_queue: false,
+            cancellation_token,
+            on_abandon,
+            tokens: None,
+        })
+        .await
+    }
+
+    /// Send one request. See [`SidecarRequest`] for the knobs.
+    pub async fn send(&self, request: SidecarRequest<'_>) -> Result<String> {
+        let SidecarRequest {
+            json: request_json,
+            id,
+            priority,
+            timeout,
+            timeout_includes_queue,
+            cancellation_token,
+            on_abandon,
+            tokens,
+        } = request;
         let guard = RequestGuard::new(self.active_request_count.clone());
+        let queued_at = Instant::now();
+        let acquire = self.acquire_exchange(priority, id);
         let exchange = {
-            let lock = self.exchange_lock.clone().lock_owned();
-            match cancellation_token {
-                Some(token) => tokio::select! {
-                    biased;
-                    _ = token.cancelled() => return Err(anyhow!(SidecarError::Cancelled)),
-                    exchange = lock => exchange,
-                },
-                None => lock.await,
+            let queue_limit = async {
+                if timeout_includes_queue {
+                    tokio::time::sleep(timeout).await
+                } else {
+                    std::future::pending().await
+                }
+            };
+            let cancelled = async {
+                match cancellation_token {
+                    Some(token) => token.cancelled().await,
+                    None => std::future::pending().await,
+                }
+            };
+            tokio::select! {
+                biased;
+                _ = cancelled => return Err(anyhow!(SidecarError::Cancelled)),
+                _ = queue_limit => return Err(anyhow!(SidecarError::Busy(timeout))),
+                exchange = acquire => exchange,
             }
+        };
+        let timeout = if timeout_includes_queue {
+            timeout.saturating_sub(queued_at.elapsed())
+        } else {
+            timeout
         };
 
         let pipes = self.pipes();
@@ -481,20 +544,24 @@ impl SidecarManager {
         let round_trip = tokio::spawn(async move {
             let _exchange = exchange;
             let _guard = guard;
-            let result =
-                match tokio::time::timeout(drain_limit, pipes.round_trip(&request_json)).await {
-                    Ok(result) => result,
-                    Err(_) => {
-                        // The reply never came: the line protocol is out of
-                        // step, so the helper has to go.
-                        log::error!(
-                            "llama-helper gave no reply within {:?}, stopping it",
-                            drain_limit
-                        );
-                        pipes.kill().await;
-                        Err(anyhow!(SidecarError::TimedOut(drain_limit)))
-                    }
-                };
+            let result = match tokio::time::timeout(
+                drain_limit,
+                pipes.round_trip(&request_json, tokens.as_ref()),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => {
+                    // The reply never came: the line protocol is out of
+                    // step, so the helper has to go.
+                    log::error!(
+                        "llama-helper gave no reply within {:?}, stopping it",
+                        drain_limit
+                    );
+                    pipes.kill().await;
+                    Err(anyhow!(SidecarError::TimedOut(drain_limit)))
+                }
+            };
             if result.is_ok() {
                 *pipes.last_activity.write().await = Instant::now();
             }
@@ -525,11 +592,44 @@ impl SidecarManager {
                 // The kill ends the read with EOF, which releases the lock.
                 let _ = tokio::time::timeout(Duration::from_secs(5), round_trip).await;
             }
-            OnAbandon::LetFinish => {
-                log::info!("{abandoned}; leaving the reply to finish in the background");
+            OnAbandon::LetFinish | OnAbandon::Yield => {
+                // Ask the helper to stop early; its one final reply is still
+                // read (and dropped) by the round trip, so nothing desyncs.
+                match id {
+                    Some(id) if self.cancel_supported.load(Ordering::SeqCst) => {
+                        log::info!("{abandoned}; cancelling request {id} in the helper");
+                        self.pipes().send_cancel(id).await;
+                    }
+                    _ => log::info!("{abandoned}; leaving the reply to finish in the background"),
+                }
             }
         }
         Err(anyhow!(abandoned))
+    }
+
+    /// Waits for the exchange at `priority`. An interactive waiter asks an
+    /// in-flight background request to stop (once), when the helper supports it.
+    async fn acquire_exchange(&self, priority: Priority, id: Option<u64>) -> ExchangeGuard {
+        let mut waiting = WaitingGuard::new(self.exchange.clone(), priority);
+        loop {
+            let released = self.exchange.released.notified();
+            tokio::pin!(released);
+            released.as_mut().enable();
+            let can_preempt = self.cancel_supported.load(Ordering::SeqCst);
+            match self
+                .exchange
+                .try_acquire(priority, id, can_preempt, &mut waiting)
+            {
+                Attempt::Acquired(guard) => return guard,
+                Attempt::Wait { preempt } => {
+                    if let Some(victim) = preempt {
+                        log::info!("Pre-empting background llama-helper request {victim}");
+                        self.pipes().send_cancel(victim).await;
+                    }
+                }
+            }
+            released.await;
+        }
     }
 
     fn pipes(&self) -> Pipes {
@@ -540,6 +640,7 @@ impl SidecarManager {
             is_healthy: self.is_healthy.clone(),
             current_model_path: self.current_model_path.clone(),
             last_activity: self.last_activity.clone(),
+            cancel_supported: self.cancel_supported.clone(),
         }
     }
 
@@ -557,7 +658,7 @@ impl SidecarManager {
         // for internal health checks, as that would prevent graceful shutdown.
         // A busy sidecar is alive by definition, so skip the ping rather than
         // queue behind (or interleave with) a real request.
-        let Ok(_exchange) = self.exchange_lock.try_lock() else {
+        let Some(_exchange) = self.exchange.try_acquire_idle() else {
             return Ok(());
         };
 
@@ -693,11 +794,15 @@ impl SidecarManager {
 
     /// Start health check loop (runs in background)
     fn start_health_check_loop(&self) {
+        let generation = self.generation.load(Ordering::SeqCst);
         let manager = Self {
             child_process: self.child_process.clone(),
             stdin_writer: self.stdin_writer.clone(),
             stdout_reader: self.stdout_reader.clone(),
-            exchange_lock: self.exchange_lock.clone(),
+            exchange: self.exchange.clone(),
+            cancel_supported: self.cancel_supported.clone(),
+            spawn_lock: self.spawn_lock.clone(),
+            generation: self.generation.clone(),
             last_activity: self.last_activity.clone(),
             is_healthy: self.is_healthy.clone(),
             should_shutdown: self.should_shutdown.clone(),
@@ -714,7 +819,9 @@ impl SidecarManager {
             loop {
                 interval.tick().await;
 
-                if manager.should_shutdown.load(Ordering::SeqCst) {
+                if manager.should_shutdown.load(Ordering::SeqCst)
+                    || manager.generation.load(Ordering::SeqCst) != generation
+                {
                     log::debug!("Health check loop: shutdown flag set, exiting");
                     break;
                 }
@@ -742,11 +849,15 @@ impl SidecarManager {
 
     /// Start idle check loop (runs in background)
     fn start_idle_check_loop(&self) {
+        let generation = self.generation.load(Ordering::SeqCst);
         let manager = Self {
             child_process: self.child_process.clone(),
             stdin_writer: self.stdin_writer.clone(),
             stdout_reader: self.stdout_reader.clone(),
-            exchange_lock: self.exchange_lock.clone(),
+            exchange: self.exchange.clone(),
+            cancel_supported: self.cancel_supported.clone(),
+            spawn_lock: self.spawn_lock.clone(),
+            generation: self.generation.clone(),
             last_activity: self.last_activity.clone(),
             is_healthy: self.is_healthy.clone(),
             should_shutdown: self.should_shutdown.clone(),
@@ -763,7 +874,9 @@ impl SidecarManager {
             loop {
                 interval.tick().await;
 
-                if manager.should_shutdown.load(Ordering::SeqCst) {
+                if manager.should_shutdown.load(Ordering::SeqCst)
+                    || manager.generation.load(Ordering::SeqCst) != generation
+                {
                     log::debug!("Idle check loop: shutdown flag set, exiting");
                     break;
                 }
@@ -804,11 +917,68 @@ pub enum OnAbandon {
     /// Kill the helper so the generation stops immediately (a user cancel).
     #[default]
     StopSidecar,
-    /// Leave the helper running; its reply is read and dropped in the
-    /// background. For background callers (the live timeline) that share the
-    /// sidecar with the summary and must never interrupt it.
+    /// Leave the helper running; the request is cancelled inside the helper
+    /// when it supports that, and its reply is read and dropped in the
+    /// background. For callers that share the sidecar and must never
+    /// interrupt others (Copilot).
     LetFinish,
+    /// Like `LetFinish`, and the request runs at `Background` priority, so
+    /// Copilot may pre-empt it. For the live timeline.
+    Yield,
 }
+
+impl OnAbandon {
+    /// The queue priority a plain `send_request` with this policy gets.
+    pub fn priority(self) -> Priority {
+        match self {
+            OnAbandon::Yield => Priority::Background,
+            OnAbandon::StopSidecar | OnAbandon::LetFinish => Priority::Normal,
+        }
+    }
+}
+
+/// Who goes first when several callers wait for the sidecar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Priority {
+    /// The live timeline: waits behind everyone, and an in-flight request
+    /// can be pre-empted by an `Interactive` one.
+    Background,
+    /// Summaries, titles, chat, token counts: never pre-empted.
+    Normal,
+    /// Copilot: served first.
+    Interactive,
+}
+
+impl Priority {
+    fn index(self) -> usize {
+        match self {
+            Priority::Background => 0,
+            Priority::Normal => 1,
+            Priority::Interactive => 2,
+        }
+    }
+}
+
+/// One request to the sidecar.
+pub struct SidecarRequest<'a> {
+    pub json: String,
+    /// The request's `id` field, needed to cancel it in the helper.
+    pub id: Option<u64>,
+    pub priority: Priority,
+    pub timeout: Duration,
+    /// Count time waiting for the sidecar toward `timeout` (Copilot: the user
+    /// is waiting either way). A queue timeout never touches the sidecar.
+    pub timeout_includes_queue: bool,
+    pub cancellation_token: Option<&'a CancellationToken>,
+    pub on_abandon: OnAbandon,
+    /// Receives the text of each streamed `token` line.
+    pub tokens: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+}
+
+/// An interactive request pre-empts background (timeline) work at most this
+/// often; in between it waits for the timeline request to finish, so the
+/// live summary always gets an entry in.
+pub const PREEMPT_MIN_GAP: Duration = Duration::from_secs(120);
 
 /// Longest an abandoned request may keep the sidecar busy before the helper is
 /// stopped to get the protocol back in step.
@@ -820,6 +990,161 @@ pub enum SidecarError {
     Cancelled,
     #[error("Request timed out after {0:?}")]
     TimedOut(Duration),
+    /// Waited `timeout` for the sidecar without getting it.
+    #[error("The built-in model was busy for {0:?}")]
+    Busy(Duration),
+    /// An interactive request (Copilot) stopped this background one.
+    #[error("Generation preempted by an interactive request")]
+    Preempted,
+}
+
+// ============================================================================
+// Exchange queue
+// ============================================================================
+
+#[derive(Debug, Clone, Copy)]
+struct Holder {
+    priority: Priority,
+    id: Option<u64>,
+    preempt_sent: bool,
+}
+
+#[derive(Debug, Default)]
+struct QueueState {
+    /// When an interactive request last pre-empted a background one.
+    last_preempt: Option<Instant>,
+    busy: bool,
+    /// Waiters per priority (indexed by `Priority::index`).
+    waiting: [usize; 3],
+    holder: Option<Holder>,
+}
+
+/// A lock over the sidecar's request/response exchange that serves waiters by
+/// priority. Within one priority, order is whoever wakes first.
+#[derive(Debug, Default)]
+pub(crate) struct ExchangeQueue {
+    state: std::sync::Mutex<QueueState>,
+    released: tokio::sync::Notify,
+}
+
+/// Holds the exchange; dropping it lets the next waiter in.
+pub(crate) struct ExchangeGuard {
+    queue: Arc<ExchangeQueue>,
+}
+
+impl Drop for ExchangeGuard {
+    fn drop(&mut self) {
+        let mut state = self.queue.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.busy = false;
+        state.holder = None;
+        drop(state);
+        self.queue.released.notify_waiters();
+    }
+}
+
+/// Counts a caller as waiting until it gets the exchange or gives up.
+struct WaitingGuard {
+    queue: Arc<ExchangeQueue>,
+    priority: Priority,
+    registered: bool,
+}
+
+impl WaitingGuard {
+    fn new(queue: Arc<ExchangeQueue>, priority: Priority) -> Self {
+        queue
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .waiting[priority.index()] += 1;
+        Self {
+            queue,
+            priority,
+            registered: true,
+        }
+    }
+}
+
+impl Drop for WaitingGuard {
+    fn drop(&mut self) {
+        if self.registered {
+            let mut state = self.queue.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.waiting[self.priority.index()] -= 1;
+            drop(state);
+            // A lower-priority waiter may now be first in line.
+            self.queue.released.notify_waiters();
+        }
+    }
+}
+
+enum Attempt {
+    Acquired(ExchangeGuard),
+    /// Keep waiting; first ask this background request to stop.
+    Wait {
+        preempt: Option<u64>,
+    },
+}
+
+impl ExchangeQueue {
+    fn try_acquire(
+        self: &Arc<Self>,
+        priority: Priority,
+        id: Option<u64>,
+        can_preempt: bool,
+        waiting: &mut WaitingGuard,
+    ) -> Attempt {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let outranked = state.waiting[priority.index() + 1..]
+            .iter()
+            .any(|count| *count > 0);
+        if !state.busy && !outranked {
+            state.busy = true;
+            state.holder = Some(Holder {
+                priority,
+                id,
+                preempt_sent: false,
+            });
+            if waiting.registered {
+                state.waiting[priority.index()] -= 1;
+                waiting.registered = false;
+            }
+            return Attempt::Acquired(ExchangeGuard {
+                queue: self.clone(),
+            });
+        }
+        let recently = state
+            .last_preempt
+            .is_some_and(|at| at.elapsed() < PREEMPT_MIN_GAP);
+        let preempt = match state.holder.as_mut() {
+            Some(holder)
+                if priority == Priority::Interactive
+                    && can_preempt
+                    && !recently
+                    && holder.priority == Priority::Background
+                    && !holder.preempt_sent =>
+            {
+                holder.preempt_sent = holder.id.is_some();
+                holder.id
+            }
+            _ => None,
+        };
+        if preempt.is_some() {
+            state.last_preempt = Some(Instant::now());
+        }
+        Attempt::Wait { preempt }
+    }
+
+    /// The exchange if nobody holds or wants it (health pings).
+    pub(crate) fn try_acquire_idle(self: &Arc<Self>) -> Option<ExchangeGuard> {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.busy || state.waiting.iter().any(|count| *count > 0) {
+            return None;
+        }
+        state.busy = true;
+        state.holder = None;
+        Some(ExchangeGuard {
+            queue: self.clone(),
+        })
+    }
 }
 
 /// The handles one request needs, owned, so its round trip can outlive the
@@ -831,26 +1156,73 @@ struct Pipes {
     is_healthy: Arc<AtomicBool>,
     current_model_path: Arc<RwLock<Option<PathBuf>>>,
     last_activity: Arc<RwLock<Instant>>,
+    cancel_supported: Arc<AtomicBool>,
+}
+
+#[derive(serde::Deserialize)]
+struct TokenLine {
+    #[serde(default)]
+    text: String,
+}
+
+/// Whether a reply line is a streamed token rather than a request's final reply.
+fn is_token_line(line: &str) -> bool {
+    line.starts_with(r#"{"type":"token""#)
 }
 
 impl Pipes {
-    async fn round_trip(&self, request_json: &str) -> Result<String> {
-        {
-            let mut stdin_lock = self.stdin_writer.lock().await;
-            let stdin = stdin_lock
-                .as_mut()
-                .ok_or_else(|| anyhow!("Sidecar not running"))?;
-            stdin
-                .write_all(request_json.as_bytes())
-                .await
-                .context("Failed to write request to stdin")?;
-            stdin
-                .write_all(b"\n")
-                .await
-                .context("Failed to write newline")?;
-            stdin.flush().await.context("Failed to flush stdin")?;
+    async fn write_line(&self, line: &str) -> Result<()> {
+        let mut stdin_lock = self.stdin_writer.lock().await;
+        let stdin = stdin_lock
+            .as_mut()
+            .ok_or_else(|| anyhow!("Sidecar not running"))?;
+        stdin
+            .write_all(line.as_bytes())
+            .await
+            .context("Failed to write request to stdin")?;
+        stdin
+            .write_all(b"\n")
+            .await
+            .context("Failed to write newline")?;
+        stdin.flush().await.context("Failed to flush stdin")?;
+        Ok(())
+    }
+
+    /// Writes the request and reads until its final reply, forwarding any
+    /// streamed token lines on the way.
+    async fn round_trip(
+        &self,
+        request_json: &str,
+        tokens: Option<&tokio::sync::mpsc::UnboundedSender<String>>,
+    ) -> Result<String> {
+        self.write_line(request_json).await?;
+        loop {
+            let line = self.read_line().await?;
+            if is_token_line(&line) {
+                if let (Some(tokens), Ok(token)) =
+                    (tokens, serde_json::from_str::<TokenLine>(&line))
+                {
+                    let _ = tokens.send(token.text);
+                }
+                continue;
+            }
+            if serde_json::from_str::<serde_json::Value>(&line)
+                .ok()
+                .is_some_and(|reply| reply.get("id").is_some_and(|id| !id.is_null()))
+            {
+                self.cancel_supported.store(true, Ordering::SeqCst);
+            }
+            return Ok(line);
         }
-        self.read_line().await
+    }
+
+    /// Asks the helper to stop request `id`. It still writes that request's
+    /// one final reply, which its own round trip reads. Never answered.
+    async fn send_cancel(&self, id: u64) {
+        let line = serde_json::json!({"type": "cancel", "id": id}).to_string();
+        if let Err(error) = self.write_line(&line).await {
+            log::warn!("Could not cancel llama-helper request {id}: {error:#}");
+        }
     }
 
     async fn read_line(&self) -> Result<String> {
@@ -930,7 +1302,7 @@ mod tests {
         match error.downcast_ref::<SidecarError>() {
             Some(SidecarError::Cancelled) => cancelled,
             Some(SidecarError::TimedOut(_)) => !cancelled,
-            None => false,
+            Some(SidecarError::Busy(_) | SidecarError::Preempted) | None => false,
         }
     }
 
@@ -1071,6 +1443,428 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(reply, request("fast-after"));
+        manager.shutdown().await.unwrap();
+    }
+
+    // ------------------------------------------------------------------
+    // Priority, pre-emption and streaming, against a helper that speaks the
+    // id/cancel/stream protocol.
+    // ------------------------------------------------------------------
+
+    /// Answers `generate` like llama-helper: streams one token per word when
+    /// asked, takes ~1.5 s for prompts containing "slow" unless cancelled,
+    /// and always writes exactly one final reply carrying the request id.
+    fn protocol_helper(dir: &std::path::Path) -> PathBuf {
+        let path = dir.join("protocol-llama-helper");
+        std::fs::write(
+            &path,
+            r#"#!/usr/bin/env python3
+import json, sys, threading, time, queue
+cancelled = set()
+requests = queue.Queue()
+def reader():
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        msg = json.loads(line)
+        if msg.get("type") == "cancel":
+            cancelled.add(msg["id"])
+            continue
+        requests.put(msg)
+    requests.put(None)
+threading.Thread(target=reader, daemon=True).start()
+def send(obj):
+    sys.stdout.write(json.dumps(obj, separators=(",", ":")) + "\n")
+    sys.stdout.flush()
+while True:
+    msg = requests.get()
+    if msg is None:
+        break
+    rid = msg.get("id")
+    prompt = msg.get("prompt", "")
+    finish = "stop"
+    if "slow" in prompt:
+        for _ in range(150):
+            if rid in cancelled:
+                finish = "cancelled"
+                break
+            time.sleep(0.01)
+    if msg.get("stream") and finish == "stop":
+        for word in prompt.split(" "):
+            send({"type": "token", "id": rid, "text": word + " "})
+    send({"type": "response", "text": prompt, "error": None, "finish_reason": finish, "id": rid})
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    async fn running_protocol_helper() -> (tempfile::TempDir, Arc<SidecarManager>) {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = protocol_helper(dir.path());
+        let manager = Arc::new(SidecarManager::new_with_binary(binary));
+        manager
+            .ensure_running(dir.path().join("model.gguf"))
+            .await
+            .unwrap();
+        // The first reply that echoes an id unlocks cancellation.
+        let warmup = manager
+            .send(spec(
+                generate_line(0, "warmup", false),
+                Some(0),
+                Priority::Normal,
+            ))
+            .await
+            .unwrap();
+        assert!(warmup.contains("warmup"));
+        assert!(manager.cancel_supported.load(Ordering::SeqCst));
+        (dir, manager)
+    }
+
+    fn generate_line(id: u64, prompt: &str, stream: bool) -> String {
+        serde_json::json!({"type": "generate", "prompt": prompt, "id": id, "stream": stream})
+            .to_string()
+    }
+
+    fn spec(json: String, id: Option<u64>, priority: Priority) -> SidecarRequest<'static> {
+        SidecarRequest {
+            json,
+            id,
+            priority,
+            timeout: Duration::from_secs(10),
+            timeout_includes_queue: false,
+            cancellation_token: None,
+            on_abandon: if priority == Priority::Background {
+                OnAbandon::Yield
+            } else {
+                OnAbandon::LetFinish
+            },
+            tokens: None,
+        }
+    }
+
+    fn reply_field(reply: &str, field: &str) -> serde_json::Value {
+        serde_json::from_str::<serde_json::Value>(reply).unwrap()[field].clone()
+    }
+
+    #[tokio::test]
+    async fn an_interactive_request_preempts_an_in_flight_background_one() {
+        let (_dir, manager) = running_protocol_helper().await;
+        let background = {
+            let manager = manager.clone();
+            tokio::spawn(async move {
+                manager
+                    .send(spec(
+                        generate_line(1, "slow timeline", false),
+                        Some(1),
+                        Priority::Background,
+                    ))
+                    .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let started = Instant::now();
+        let interactive = manager
+            .send(spec(
+                generate_line(2, "copilot", false),
+                Some(2),
+                Priority::Interactive,
+            ))
+            .await
+            .unwrap();
+        assert!(
+            started.elapsed() < Duration::from_millis(900),
+            "copilot waited {:?} behind the timeline",
+            started.elapsed()
+        );
+        assert_eq!(reply_field(&interactive, "id"), 2);
+        assert_eq!(reply_field(&interactive, "text"), "copilot");
+        // The timeline reads its own (cancelled) reply, never copilot's.
+        let background = background.await.unwrap().unwrap();
+        assert_eq!(reply_field(&background, "id"), 1);
+        assert_eq!(reply_field(&background, "finish_reason"), "cancelled");
+        assert!(
+            manager.is_healthy(),
+            "pre-emption must not stop the sidecar"
+        );
+        manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_interactive_request_never_preempts_a_summary() {
+        let (_dir, manager) = running_protocol_helper().await;
+        let summary = {
+            let manager = manager.clone();
+            tokio::spawn(async move {
+                manager
+                    .send(spec(
+                        generate_line(1, "slow summary", false),
+                        Some(1),
+                        Priority::Normal,
+                    ))
+                    .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let interactive = manager
+            .send(spec(
+                generate_line(2, "copilot", false),
+                Some(2),
+                Priority::Interactive,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(reply_field(&interactive, "id"), 2);
+        let summary = summary.await.unwrap().unwrap();
+        assert_eq!(reply_field(&summary, "finish_reason"), "stop");
+        assert_eq!(reply_field(&summary, "text"), "slow summary");
+        manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_interactive_request_jumps_queued_background_work() {
+        let (_dir, manager) = running_protocol_helper().await;
+        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let run = |id: u64, prompt: &'static str, priority: Priority| {
+            let manager = manager.clone();
+            let order = order.clone();
+            tokio::spawn(async move {
+                let reply = manager
+                    .send(spec(generate_line(id, prompt, false), Some(id), priority))
+                    .await
+                    .unwrap();
+                order.lock().unwrap().push(id);
+                reply
+            })
+        };
+        let summary = run(1, "slow summary", Priority::Normal);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let timeline = run(2, "timeline", Priority::Background);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let copilot = run(3, "copilot", Priority::Interactive);
+        for task in [summary, timeline, copilot] {
+            task.await.unwrap();
+        }
+        assert_eq!(*order.lock().unwrap(), vec![1, 3, 2]);
+        manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn streamed_tokens_are_forwarded_and_the_final_reply_returned() {
+        let (_dir, manager) = running_protocol_helper().await;
+        let (tokens, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let mut request = spec(
+            generate_line(5, "hello there friend", true),
+            Some(5),
+            Priority::Interactive,
+        );
+        request.tokens = Some(tokens);
+        let reply = manager.send(request).await.unwrap();
+        assert_eq!(reply_field(&reply, "type"), "response");
+        let mut streamed = String::new();
+        while let Ok(token) = received.try_recv() {
+            streamed.push_str(&token);
+        }
+        assert_eq!(streamed, "hello there friend ");
+        // The next request is not confused by the token lines.
+        let next = manager
+            .send(spec(
+                generate_line(6, "next", false),
+                Some(6),
+                Priority::Normal,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(reply_field(&next, "id"), 6);
+        manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_abandoned_copilot_request_is_cancelled_in_the_helper_not_killed() {
+        let (_dir, manager) = running_protocol_helper().await;
+        let mut request = spec(
+            generate_line(7, "slow copilot", false),
+            Some(7),
+            Priority::Interactive,
+        );
+        request.timeout = Duration::from_millis(100);
+        let error = manager.send(request).await.unwrap_err();
+        assert!(is_error(&error, false), "{error:#}");
+        assert!(manager.is_healthy());
+        let started = Instant::now();
+        let next = manager
+            .send(spec(
+                generate_line(8, "after", false),
+                Some(8),
+                Priority::Normal,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(reply_field(&next, "id"), 8);
+        assert!(
+            started.elapsed() < Duration::from_millis(900),
+            "the cancel should end the abandoned generation early"
+        );
+        manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_queue_timeout_never_touches_the_sidecar() {
+        let (_dir, manager) = running_protocol_helper().await;
+        let summary = {
+            let manager = manager.clone();
+            tokio::spawn(async move {
+                manager
+                    .send(spec(
+                        generate_line(1, "slow summary", false),
+                        Some(1),
+                        Priority::Normal,
+                    ))
+                    .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let mut request = spec(
+            generate_line(2, "copilot", false),
+            Some(2),
+            Priority::Interactive,
+        );
+        request.timeout = Duration::from_millis(200);
+        request.timeout_includes_queue = true;
+        let error = manager.send(request).await.unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<SidecarError>(),
+            Some(SidecarError::Busy(_))
+        ));
+        let summary = summary.await.unwrap().unwrap();
+        assert_eq!(reply_field(&summary, "finish_reason"), "stop");
+        assert!(manager.is_healthy());
+        manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn another_model_never_restarts_a_healthy_helper_under_a_request() {
+        // Regression: ensure_running respawned on a model change, so a
+        // timeline tick on another model killed an in-flight Copilot stream.
+        let (dir, manager) = running_protocol_helper().await;
+        let copilot = {
+            let manager = manager.clone();
+            tokio::spawn(async move {
+                manager
+                    .send(spec(
+                        generate_line(1, "slow copilot", false),
+                        Some(1),
+                        Priority::Interactive,
+                    ))
+                    .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        manager
+            .ensure_running(dir.path().join("other-model.gguf"))
+            .await
+            .unwrap();
+        let reply = copilot.await.unwrap().unwrap();
+        assert_eq!(reply_field(&reply, "finish_reason"), "stop");
+        assert_eq!(reply_field(&reply, "text"), "slow copilot");
+        assert!(manager.is_healthy());
+        manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn concurrent_starts_spawn_one_helper() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = protocol_helper(dir.path());
+        let manager = Arc::new(SidecarManager::new_with_binary(binary));
+        let mut starts = Vec::new();
+        for _ in 0..6 {
+            let manager = manager.clone();
+            let model = dir.path().join("model.gguf");
+            starts.push(tokio::spawn(
+                async move { manager.ensure_running(model).await },
+            ));
+        }
+        for start in starts {
+            start.await.unwrap().unwrap();
+        }
+        assert_eq!(manager.generation.load(Ordering::SeqCst), 1, "spawned once");
+        let reply = manager
+            .send(spec(
+                generate_line(3, "hello", false),
+                Some(3),
+                Priority::Normal,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(reply_field(&reply, "id"), 3);
+        manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_timeline_is_preempted_at_most_once_per_gap() {
+        let (_dir, manager) = running_protocol_helper().await;
+        for (round, (timeline_id, copilot_id)) in [(1, 2), (3, 4)].into_iter().enumerate() {
+            let background = {
+                let manager = manager.clone();
+                tokio::spawn(async move {
+                    manager
+                        .send(spec(
+                            generate_line(timeline_id, "slow timeline", false),
+                            Some(timeline_id),
+                            Priority::Background,
+                        ))
+                        .await
+                })
+            };
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            manager
+                .send(spec(
+                    generate_line(copilot_id, "copilot", false),
+                    Some(copilot_id),
+                    Priority::Interactive,
+                ))
+                .await
+                .unwrap();
+            let background = background.await.unwrap().unwrap();
+            let expected = if round == 0 { "cancelled" } else { "stop" };
+            assert_eq!(
+                reply_field(&background, "finish_reason"),
+                expected,
+                "round {round}: the second timeline request in the gap must finish"
+            );
+        }
+        manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn proactive_copilot_work_never_preempts_the_timeline() {
+        let (_dir, manager) = running_protocol_helper().await;
+        let background = {
+            let manager = manager.clone();
+            tokio::spawn(async move {
+                manager
+                    .send(spec(
+                        generate_line(1, "slow timeline", false),
+                        Some(1),
+                        Priority::Background,
+                    ))
+                    .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        // Suggestion confirms and drafts run at Normal priority.
+        manager
+            .send(spec(
+                generate_line(2, "confirm", false),
+                Some(2),
+                Priority::Normal,
+            ))
+            .await
+            .unwrap();
+        let background = background.await.unwrap().unwrap();
+        assert_eq!(reply_field(&background, "finish_reason"), "stop");
         manager.shutdown().await.unwrap();
     }
 }

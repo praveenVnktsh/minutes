@@ -29,6 +29,61 @@ pub const PARTIAL_EVENT: &str = "transcript-partial";
 /// bounds what a stop has to decode before it can save.
 pub const MAX_BACKLOG_SECONDS: f64 = 20.0;
 
+/// The live worker's latest backlog, in milliseconds of queued audio. Other
+/// features (Copilot's proactive suggestions) read it to back off when live
+/// transcription is falling behind real time.
+static LAST_BACKLOG_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Seconds of audio live transcription has queued: the streaming worker's
+/// backlog at its last decode, or the chunked (Whisper/Parakeet) worker's
+/// queue depth, whichever is larger. 0 when neither runs.
+pub fn current_backlog_seconds() -> f64 {
+    let streaming = LAST_BACKLOG_MS.load(std::sync::atomic::Ordering::Relaxed);
+    streaming.max(chunked_backlog_ms()) as f64 / 1000.0
+}
+
+/// Audio (ms) queued in the chunked live worker, per source (microphone,
+/// system). The sources run side by side, so the backlog is the larger one.
+static CHUNKED_QUEUED_MS: [std::sync::atomic::AtomicU64; 2] = [
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+];
+
+fn chunked_backlog_ms() -> u64 {
+    CHUNKED_QUEUED_MS
+        .iter()
+        .map(|queued| queued.load(std::sync::atomic::Ordering::Relaxed))
+        .max()
+        .unwrap_or(0)
+}
+
+/// Counts one chunk as queued in the chunked live worker until dropped (when
+/// the worker is done with it, whatever the outcome).
+pub struct ChunkedBacklog {
+    source: usize,
+    ms: u64,
+}
+
+impl ChunkedBacklog {
+    pub fn queued(system: bool, samples: usize, sample_rate: u32) -> Self {
+        let ms = (samples as u64 * 1000) / u64::from(sample_rate.max(1));
+        let source = usize::from(system);
+        CHUNKED_QUEUED_MS[source].fetch_add(ms, std::sync::atomic::Ordering::Relaxed);
+        Self { source, ms }
+    }
+}
+
+impl Drop for ChunkedBacklog {
+    fn drop(&mut self) {
+        let queued = &CHUNKED_QUEUED_MS[self.source];
+        let _ = queued.fetch_update(
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+            |current| Some(current.saturating_sub(self.ms)),
+        );
+    }
+}
+
 /// Cancel flag of the running streaming worker, if any.
 static CURRENT_CANCEL: Mutex<Option<Arc<AtomicBool>>> = Mutex::new(None);
 
@@ -228,6 +283,10 @@ mod imp {
                 }
 
                 let backlog = backlog_seconds(&batch);
+                super::LAST_BACKLOG_MS.store(
+                    (backlog.max(0.0) * 1000.0) as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
                 if backlog > MAX_BACKLOG_SECONDS {
                     // Windows carry their recording position, so the next one
                     // realigns each source's timeline.
@@ -294,6 +353,7 @@ mod imp {
             drop(transcriber);
             drop(engine);
             clear_cancel(&cancel);
+            super::LAST_BACKLOG_MS.store(0, std::sync::atomic::Ordering::Relaxed);
             info!("✅ Streaming live transcription finished");
         })
     }
@@ -349,6 +409,18 @@ mod tests {
             chunk_id: 0,
             device_type: device,
         }
+    }
+
+    #[test]
+    fn the_chunked_queue_counts_toward_the_backlog_until_each_chunk_is_done() {
+        let before = current_backlog_seconds();
+        let system = ChunkedBacklog::queued(true, 48_000 * 6, 48_000);
+        let mic = ChunkedBacklog::queued(false, 48_000 * 2, 48_000);
+        assert!(current_backlog_seconds() >= before.max(6.0) - 1e-9);
+        drop(system);
+        assert!(current_backlog_seconds() < 6.0);
+        drop(mic);
+        assert!(chunked_backlog_ms() == 0 || current_backlog_seconds() < 2.0);
     }
 
     #[test]

@@ -52,6 +52,18 @@ fn recording_live() -> bool {
     IS_RECORDING.load(Ordering::SeqCst) && !IS_RECORDING_STOPPING.load(Ordering::SeqCst)
 }
 
+/// Whether a recording is capturing right now. Background model work (the
+/// built-in LLM) uses fewer CPU threads meanwhile, so live transcription keeps up.
+pub fn is_recording_live() -> bool {
+    recording_live()
+}
+
+/// Whether a recording is capturing or still stopping (its last audio is
+/// being decoded). Built-in LLM work stays light until it is fully done.
+pub fn is_recording_or_stopping() -> bool {
+    IS_RECORDING.load(Ordering::SeqCst)
+}
+
 fn stopped_capture_needing_cleanup() -> Option<String> {
     if !IS_RECORDING.load(Ordering::SeqCst) || IS_RECORDING_STOPPING.load(Ordering::SeqCst) {
         return None;
@@ -237,7 +249,9 @@ fn finalize_recording_start<R: Runtime>(app: &AppHandle<R>, session_id: String) 
         &session_id,
         crate::meeting_activity::ActivityStatus::Recording,
     );
-    // Infallible and non-blocking: the live summary never affects recording.
+    // Infallible and non-blocking: the live summary and Copilot never affect
+    // recording.
+    crate::copilot::start_session(app, session_id.clone());
     crate::live_summary::start_session(app, session_id);
 }
 
@@ -1406,6 +1420,13 @@ async fn stop_recording_session<R: Runtime>(
     );
 
     let _stopping_guard = StoppingGuard::try_new()?;
+    // Copilot stops first: no new questions or suggestion cards while the
+    // last audio is decoded and saved. Its moments are written later.
+    if let Some(recording) = crate::meeting_activity::recording_identity() {
+        if session_matches(expected_session_id.as_deref(), &recording.session_id) {
+            crate::copilot::deactivate_session(&recording.session_id);
+        }
+    }
     let _engine_lifecycle_guard = super::common::acquire_engine_lifecycle_lock().await;
 
     // Check if recording is active
@@ -1583,6 +1604,9 @@ async fn stop_recording_session<R: Runtime>(
     // The live summary has every final segment now: let it write its last
     // entry in the background (bounded), without delaying the save.
     crate::live_summary::finish_session(&session_id);
+    // No Copilot requests after the meeting ends; its moments are saved in
+    // the background.
+    crate::copilot::finish_session(&app, &session_id);
 
     let manager_for_cleanup = RECORDING_MANAGER.lock().unwrap().take();
     if let Some((stopping_session_id, segments)) =
