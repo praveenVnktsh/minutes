@@ -51,6 +51,7 @@ pub mod debug_mode;
 pub mod download_eta;
 pub mod groq;
 pub mod live_notes;
+pub mod live_summary;
 pub mod meeting_activity;
 pub mod meeting_assistant;
 pub mod meeting_detection;
@@ -933,6 +934,10 @@ pub fn run() {
             live_notes::attach_live_notes,
             live_notes::get_meeting_live_notes,
             live_notes::save_meeting_live_notes,
+            live_summary::get_live_timeline,
+            live_summary::list_meeting_timeline_entries,
+            live_summary::get_live_summary_settings,
+            live_summary::set_live_summary_settings,
             meeting_assistant::get_meeting_chat,
             meeting_assistant::chat_with_meeting,
             // Reload sync commands (retrieve transcript history and meeting name)

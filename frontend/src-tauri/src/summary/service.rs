@@ -217,21 +217,21 @@ fn extract_cached_english_markdown(
 }
 
 /// Everything an LLM call needs beyond the prompts, resolved from saved settings.
-struct LlmConfig {
-    provider: LLMProvider,
-    model_name: String,
-    api_key: String,
-    ollama_endpoint: Option<String>,
-    custom_openai_endpoint: Option<String>,
-    max_tokens: Option<u32>,
-    temperature: Option<f32>,
-    top_p: Option<f32>,
+pub(crate) struct LlmConfig {
+    pub(crate) provider: LLMProvider,
+    pub(crate) model_name: String,
+    pub(crate) api_key: String,
+    pub(crate) ollama_endpoint: Option<String>,
+    pub(crate) custom_openai_endpoint: Option<String>,
+    pub(crate) max_tokens: Option<u32>,
+    pub(crate) temperature: Option<f32>,
+    pub(crate) top_p: Option<f32>,
 }
 
 /// Resolves the API key, Ollama endpoint and CustomOpenAI settings for a provider/model pair.
 /// `settings` is the already-loaded settings row, when the caller has one, so Ollama's
 /// endpoint lookup does not read it again.
-async fn load_llm_config(
+pub(crate) async fn load_llm_config(
     pool: &SqlitePool,
     model_provider: &str,
     model_name: &str,
