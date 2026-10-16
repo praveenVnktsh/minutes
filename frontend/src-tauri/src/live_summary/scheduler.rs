@@ -94,6 +94,10 @@ pub struct WindowScheduler {
     last_request_at: Duration,
     in_flight: bool,
     cadence: Duration,
+    /// No window is due before this (a back-off after failures).
+    not_before: Duration,
+    /// Older segments already dropped from `pending` to bound it.
+    trimmed_segments: usize,
 }
 
 impl WindowScheduler {
@@ -109,6 +113,8 @@ impl WindowScheduler {
             last_request_at: now,
             in_flight: false,
             cadence,
+            not_before: Duration::ZERO,
+            trimmed_segments: 0,
         }
     }
 
@@ -117,6 +123,36 @@ impl WindowScheduler {
             return;
         }
         self.pending.push(segment);
+        // Bound memory through a long back-off: a window only ever carries
+        // the newest MAX_WINDOW_WORDS, so text much older than that is dead.
+        if self.pending_words() > MAX_WINDOW_WORDS * 2 {
+            self.trim_pending();
+        }
+    }
+
+    /// Put a failed window's text back, ahead of what arrived since, so the
+    /// next window retries it. The next window still carries at most
+    /// `MAX_WINDOW_WORDS`, keeping the newest text.
+    pub fn requeue(&mut self, window: Window) {
+        let mut segments = window.segments;
+        segments.append(&mut self.pending);
+        self.pending = segments;
+        self.trim_pending();
+    }
+
+    /// No window before `now + delay`.
+    pub fn back_off(&mut self, now: Duration, delay: Duration) {
+        self.not_before = now + delay;
+    }
+
+    fn trim_pending(&mut self) {
+        self.pending.sort_by_key(|segment| segment.start_ms);
+        let mut words = self.pending_words();
+        while words > MAX_WINDOW_WORDS && self.pending.len() > 1 {
+            words -= self.pending[0].words();
+            self.pending.remove(0);
+            self.trimmed_segments += 1;
+        }
     }
 
     pub fn pending_words(&self) -> usize {
@@ -134,7 +170,7 @@ impl WindowScheduler {
         if self.in_flight || paused {
             return None;
         }
-        if now.saturating_sub(self.last_request_at) < self.cadence {
+        if now.saturating_sub(self.last_request_at) < self.cadence || now < self.not_before {
             return None;
         }
         self.drop_stale_short_text(now);
@@ -180,7 +216,7 @@ impl WindowScheduler {
 
         // Coalesce a long backlog into one window of the newest text.
         let mut words: usize = segments.iter().map(Segment::words).sum();
-        let mut dropped_segments = 0;
+        let mut dropped_segments = std::mem::take(&mut self.trimmed_segments);
         while words > MAX_WINDOW_WORDS && segments.len() > 1 {
             words -= segments[0].words();
             segments.remove(0);
@@ -216,6 +252,44 @@ impl WindowScheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_window_is_retried_with_the_new_text_up_to_the_cap() {
+        let mut scheduler = WindowScheduler::new(secs(0));
+        scheduler.push(segment(0, 400, 0));
+        let failed = scheduler.poll(secs(60), false).unwrap();
+        scheduler.complete();
+        scheduler.push(segment(70, 500, 70));
+        scheduler.requeue(failed);
+        scheduler.push(segment(100, 500, 100));
+        let retry = scheduler.poll(secs(120), false).unwrap();
+        // 1,400 words pending: the oldest (the failed window's) goes first.
+        assert_eq!(retry.words(), 1000);
+        assert_eq!(retry.dropped_segments, 1);
+        assert_eq!(retry.start_ms, 70_000);
+    }
+
+    #[test]
+    fn back_off_delays_the_next_window() {
+        let mut scheduler = WindowScheduler::new(secs(0));
+        scheduler.push(segment(0, 100, 0));
+        scheduler.back_off(secs(0), secs(240));
+        assert!(scheduler.poll(secs(60), false).is_none());
+        assert!(scheduler.poll(secs(239), false).is_none());
+        assert!(scheduler.poll(secs(240), false).is_some());
+    }
+
+    #[test]
+    fn pending_text_stays_bounded_while_nothing_is_sent() {
+        let mut scheduler = WindowScheduler::new(secs(0));
+        for i in 0..100 {
+            scheduler.push(segment(i * 10, 100, i as u64 * 10));
+        }
+        assert!(scheduler.pending_words() <= MAX_WINDOW_WORDS * 2);
+        let window = scheduler.poll(secs(2000), false).unwrap();
+        assert_eq!(window.words(), MAX_WINDOW_WORDS);
+        assert_eq!(window.dropped_segments, 88);
+    }
 
     fn secs(s: u64) -> Duration {
         Duration::from_secs(s)

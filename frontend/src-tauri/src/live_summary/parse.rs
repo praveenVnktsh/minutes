@@ -88,7 +88,7 @@ pub fn parse_entries(
     previous_texts: &[String],
 ) -> Result<Vec<ParsedEntry>, ParseError> {
     let cleaned = strip_fences(&strip_think(raw));
-    let items = match first_json_value(&cleaned) {
+    let items = match reply_json_value(&cleaned) {
         Some(value) => entry_items(value).ok_or(ParseError::UnexpectedShape)?,
         None => {
             let salvaged = salvage_objects(&cleaned);
@@ -154,18 +154,39 @@ fn strip_fences(text: &str) -> String {
         .join("\n")
 }
 
-/// The first complete JSON object or array in `text`, ignoring anything after it.
-fn first_json_value(text: &str) -> Option<Value> {
+/// The JSON the reply answers with: the first complete object carrying an
+/// `entries` key, else the first complete JSON object or array at all. Models
+/// sometimes echo a fragment of the prompt (a time like `[01:05]`, an example
+/// object) before the real answer, so the first value alone is not enough.
+fn reply_json_value(text: &str) -> Option<Value> {
+    let values = json_values(text);
+    let entries_at = values.iter().position(|value| {
+        value
+            .as_object()
+            .is_some_and(|map| map.contains_key("entries"))
+    });
+    match entries_at {
+        Some(index) => values.into_iter().nth(index),
+        None => values.into_iter().next(),
+    }
+}
+
+/// Every complete top-level JSON object or array in `text`, in order.
+fn json_values(text: &str) -> Vec<Value> {
+    let mut values = Vec::new();
     let mut offset = 0;
     while let Some(index) = text[offset..].find(['{', '[']) {
         let start = offset + index;
         let mut stream = serde_json::Deserializer::from_str(&text[start..]).into_iter::<Value>();
-        if let Some(Ok(value)) = stream.next() {
-            return Some(value);
+        match stream.next() {
+            Some(Ok(value)) => {
+                values.push(value);
+                offset = start + stream.byte_offset().max(1);
+            }
+            _ => offset = start + 1,
         }
-        offset = start + 1;
     }
-    None
+    values
 }
 
 /// The entry list in a parsed reply: `{"entries": [...]}`, any other single
@@ -384,6 +405,17 @@ mod tests {
                 speaker: Some("Others".into()),
             }]
         );
+    }
+
+    #[test]
+    fn the_object_with_entries_wins_over_earlier_json() {
+        let raw = r#"Looking at [01:05] and {"note":"draft"} first. {"entries":[{"kind":"decision","text":"Ship on Friday"}]}"#;
+        let entries = parse(raw).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].text, "Ship on Friday");
+        // Without an entries object, the first value still counts.
+        let bare = parse(r#"[{"kind":"point","text":"Budget is fine"}]"#).unwrap();
+        assert_eq!(bare.len(), 1);
     }
 
     #[test]

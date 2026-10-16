@@ -149,11 +149,68 @@ impl<R: Runtime> WorkerHost for AppHost<R> {
         Ok(())
     }
 
+    async fn meeting_exists(&self, meeting_id: &str) -> Result<bool> {
+        let row: Option<(i64,)> = sqlx::query_as("SELECT 1 FROM meetings WHERE id = ?")
+            .bind(meeting_id)
+            .fetch_optional(&self.pool()?)
+            .await?;
+        Ok(row.is_some())
+    }
+
     fn publish(&self, snapshot: &TimelineSnapshot) {
-        *LATEST.lock().unwrap_or_else(|e| e.into_inner()) = Some(snapshot.clone());
-        if let Err(error) = self.app.emit(TIMELINE_UPDATE_EVENT, snapshot) {
+        let Some(snapshot) =
+            publishable(&self.session_id, active_session_id().as_deref(), snapshot)
+        else {
+            return;
+        };
+        let mut latest = LATEST.lock().unwrap_or_else(|e| e.into_inner());
+        if latest_accepts(latest.as_ref(), &snapshot) {
+            *latest = Some(snapshot.clone());
+        }
+        drop(latest);
+        if let Err(error) = self.app.emit(TIMELINE_UPDATE_EVENT, &snapshot) {
             warn!("Live summary: could not emit an update: {error}");
         }
+    }
+}
+
+fn active_session_id() -> Option<String> {
+    SESSION
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .map(|session| session.session_id.clone())
+}
+
+/// What a session's worker may publish while `active` is the live session.
+/// A worker still finishing after a newer recording started (it has up to
+/// `STOP_GRACE` plus its last writes) only reports itself as stopped, so its
+/// late updates can refresh the old meeting's chapters but never take over
+/// the new session's live panel.
+fn publishable(
+    session_id: &str,
+    active: Option<&str>,
+    snapshot: &TimelineSnapshot,
+) -> Option<TimelineSnapshot> {
+    debug_assert_eq!(snapshot.session_id, session_id);
+    match active {
+        Some(active) if active != session_id => Some(TimelineSnapshot {
+            status: worker::TimelineStatus::Stopped,
+            error: None,
+            ..snapshot.clone()
+        }),
+        _ => Some(snapshot.clone()),
+    }
+}
+
+/// Whether `LATEST` (what the panel rehydrates from) takes `next`: the same
+/// session's updates, or a live session replacing a stopped one; never an
+/// older session's stopped snapshot over a newer one.
+fn latest_accepts(current: Option<&TimelineSnapshot>, next: &TimelineSnapshot) -> bool {
+    match current {
+        None => true,
+        Some(current) if current.session_id == next.session_id => true,
+        Some(_) => next.status != worker::TimelineStatus::Stopped,
     }
 }
 
@@ -273,6 +330,43 @@ pub async fn set_live_summary_settings<R: Runtime>(
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    fn snapshot(session: &str, status: worker::TimelineStatus) -> TimelineSnapshot {
+        TimelineSnapshot {
+            session_id: session.into(),
+            meeting_id: Some(format!("meeting-{session}")),
+            status,
+            error: None,
+            entries: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_finishing_old_session_cannot_take_over_the_new_one() {
+        use worker::TimelineStatus::*;
+        // The old worker publishes "listening" after a new recording started.
+        let late = publishable("old", Some("new"), &snapshot("old", Listening)).unwrap();
+        assert_eq!(late.status, Stopped);
+        assert_eq!(late.meeting_id.as_deref(), Some("meeting-old"));
+        // ...and LATEST keeps the new session.
+        let current = snapshot("new", Listening);
+        assert!(!latest_accepts(Some(&current), &late));
+        // Its own updates pass through untouched.
+        let own = publishable("new", Some("new"), &current).unwrap();
+        assert_eq!(own.status, Listening);
+        // A new live session replaces a stopped one.
+        assert!(latest_accepts(
+            Some(&snapshot("old", Stopped)),
+            &snapshot("new", Listening)
+        ));
+        // With no session active, a worker's own final update is kept.
+        assert_eq!(
+            publishable("old", None, &snapshot("old", Stopped))
+                .unwrap()
+                .status,
+            Stopped
+        );
+    }
 
     #[test]
     fn the_setting_defaults_to_on() {

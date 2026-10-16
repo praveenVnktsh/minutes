@@ -14,7 +14,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use super::llm::{GenerateError, Generated, Generator};
+use super::llm::{FailureKind, GenerateError, Generated, Generator};
 use super::parse::{parse_entries, ParsedEntry};
 use super::prompt::{self, PreviousEntry};
 use super::scheduler::{Segment, Window, WindowScheduler, CADENCE};
@@ -26,9 +26,13 @@ pub const TICK: Duration = Duration::from_secs(2);
 pub const STOP_GRACE: Duration = Duration::from_secs(15);
 /// Earlier entries the parser checks new ones against for repeats.
 const DEDUPE_HISTORY: usize = 10;
-/// Failed writes of the same entries before they are dropped (the meeting was
-/// most likely deleted; its entries must not come back).
-const MAX_PERSIST_ATTEMPTS: u32 = 3;
+/// Longest back-off after repeated failures, and the wait after a provider
+/// refuses the request (bad key, quota, rate limit).
+pub const MAX_BACKOFF: Duration = Duration::from_secs(600);
+/// After the recording stops, how long unsaved entries keep being retried
+/// (a busy database, or the meeting row not written yet).
+pub const FINAL_PERSIST_WINDOW: Duration = Duration::from_secs(60);
+const FINAL_PERSIST_RETRY: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -99,6 +103,9 @@ pub trait WorkerHost: Send + Sync {
     fn enabled(&self) -> bool;
     async fn generator(&self) -> Result<Arc<dyn Generator>>;
     async fn persist(&self, rows: &[TimelineEntryRow]) -> Result<()>;
+    /// Whether the meeting row still exists, to tell a deleted meeting (drop
+    /// its entries: they must not come back) from a transient write failure.
+    async fn meeting_exists(&self, meeting_id: &str) -> Result<bool>;
     fn publish(&self, snapshot: &TimelineSnapshot);
 }
 
@@ -107,6 +114,9 @@ pub struct WorkerConfig {
     pub cadence: Duration,
     pub tick: Duration,
     pub stop_grace: Duration,
+    pub max_backoff: Duration,
+    pub final_persist_window: Duration,
+    pub final_persist_retry: Duration,
 }
 
 impl Default for WorkerConfig {
@@ -115,9 +125,22 @@ impl Default for WorkerConfig {
             cadence: CADENCE,
             tick: TICK,
             stop_grace: STOP_GRACE,
+            max_backoff: MAX_BACKOFF,
+            final_persist_window: FINAL_PERSIST_WINDOW,
+            final_persist_retry: FINAL_PERSIST_RETRY,
         }
     }
 }
+
+/// The wait before the next window after `failures` failures in a row: the
+/// cadence after the first, then doubling, up to `max`.
+pub fn backoff_delay(cadence: Duration, failures: u32, max: Duration) -> Duration {
+    let doublings = failures.saturating_sub(1).min(16);
+    cadence.saturating_mul(1u32 << doublings).min(max)
+}
+
+/// The notice for a provider that refused the request.
+pub const REFUSED_NOTICE: &str = "The summary provider refused the request (check its API key, quota or rate limit). Live summary will try again in a few minutes.";
 
 type RequestOutcome = (Window, String, String, Result<Generated, GenerateError>);
 
@@ -128,11 +151,13 @@ struct InFlight {
 
 struct Worker {
     host: Arc<dyn WorkerHost>,
+    config: WorkerConfig,
     started: Instant,
     scheduler: WindowScheduler,
     snapshot: TimelineSnapshot,
     unsaved: Vec<TimelineEntry>,
-    persist_failures: u32,
+    /// Requests that failed in a row, for the back-off.
+    failures: u32,
     in_flight: Option<InFlight>,
 }
 
@@ -156,33 +181,62 @@ impl Worker {
         }
     }
 
-    async fn persist_unsaved(&mut self) {
+    /// Store unsaved entries once the meeting exists. Returns whether
+    /// nothing is left unsaved. A failed write keeps the entries for the next
+    /// try unless the meeting is gone (deleted mid-recording).
+    async fn persist_unsaved(&mut self) -> bool {
         self.refresh_meeting_id();
         let Some(meeting_id) = self.snapshot.meeting_id.clone() else {
-            return;
+            return self.unsaved.is_empty();
         };
         if self.unsaved.is_empty() {
-            return;
+            return true;
         }
         let rows: Vec<_> = self.unsaved.iter().map(|e| e.row(&meeting_id)).collect();
         match self.host.persist(&rows).await {
             Ok(()) => {
                 self.unsaved.clear();
-                self.persist_failures = 0;
+                true
             }
             Err(error) => {
-                self.persist_failures += 1;
-                warn!(
-                    "Live summary: could not store {} entries for {meeting_id} (attempt {}): {error:#}",
-                    rows.len(),
-                    self.persist_failures
-                );
-                if self.persist_failures >= MAX_PERSIST_ATTEMPTS {
-                    warn!("Live summary: dropping unsaved entries for {meeting_id}");
+                if matches!(self.host.meeting_exists(&meeting_id).await, Ok(false)) {
+                    warn!(
+                        "Live summary: meeting {meeting_id} is gone, dropping {} unsaved entries",
+                        rows.len()
+                    );
                     self.unsaved.clear();
-                    self.persist_failures = 0;
+                    return true;
                 }
+                warn!(
+                    "Live summary: could not store {} entries for {meeting_id}, will retry: {error:#}",
+                    rows.len()
+                );
+                false
             }
+        }
+    }
+
+    /// Back off after a failed request; the window's text goes back into the
+    /// queue when the failure was the request's, not the reply's.
+    fn record_failure(&mut self, window: Option<Window>, kind: FailureKind) {
+        self.failures += 1;
+        let delay = match kind {
+            FailureKind::Unavailable => self.config.max_backoff,
+            FailureKind::Transient => {
+                backoff_delay(self.config.cadence, self.failures, self.config.max_backoff)
+            }
+        };
+        let now = self.now();
+        self.scheduler.back_off(now, delay);
+        if let Some(window) = window {
+            self.scheduler.requeue(window);
+        }
+        if self.failures > 1 {
+            info!(
+                "Live summary: {} failures in a row, next window in {}s",
+                self.failures,
+                delay.as_secs()
+            );
         }
     }
 
@@ -192,7 +246,8 @@ impl Worker {
             Err(error) => {
                 self.scheduler.complete();
                 info!("Live summary unavailable: {error:#}");
-                self.set_status(TimelineStatus::Unavailable, Some(format!("{error:#}")));
+                // The panel's own notice covers a missing model.
+                self.set_status(TimelineStatus::Unavailable, None);
                 return;
             }
         };
@@ -242,6 +297,7 @@ impl Worker {
             Ok(outcome) => outcome,
             Err(error) => {
                 warn!("Live summary request task failed: {error}");
+                self.record_failure(None, FailureKind::Transient);
                 self.set_status(
                     TimelineStatus::Failed,
                     Some("The live summary request failed".into()),
@@ -249,22 +305,31 @@ impl Worker {
                 return;
             }
         };
-        let raw = match result {
-            Ok(generated) if generated.truncated => {
-                warn!("Live summary: skipping a window, the reply hit the output cap");
-                self.set_status(
-                    TimelineStatus::Failed,
-                    Some("The summary model's reply was cut off".into()),
-                );
-                return;
-            }
-            Ok(generated) => generated.text,
-            Err(error) => {
-                warn!("Live summary request failed: {error}");
-                self.set_status(TimelineStatus::Failed, Some(short_error(&error.message)));
-                return;
-            }
-        };
+        let raw =
+            match result {
+                Ok(generated) if generated.truncated => {
+                    // Same text, same seed: a retry would be cut off again.
+                    warn!("Live summary: skipping a window, the reply hit the output cap");
+                    self.record_failure(None, FailureKind::Transient);
+                    self.set_status(
+                        TimelineStatus::Failed,
+                        Some("The summary model's reply was cut off".into()),
+                    );
+                    return;
+                }
+                Ok(generated) => generated.text,
+                Err(error) => {
+                    warn!("Live summary request failed: {error}");
+                    self.record_failure(Some(window), error.kind);
+                    match error.kind {
+                        FailureKind::Unavailable => self
+                            .set_status(TimelineStatus::Unavailable, Some(REFUSED_NOTICE.into())),
+                        FailureKind::Transient => self
+                            .set_status(TimelineStatus::Failed, Some(short_error(&error.message))),
+                    }
+                    return;
+                }
+            };
         let history: Vec<String> = self
             .snapshot
             .entries
@@ -297,6 +362,7 @@ impl Worker {
                     })
                     .collect();
                 perf_debug!("Live summary: {} new entries", new.len());
+                self.failures = 0;
                 self.snapshot.entries.extend(new.iter().cloned());
                 self.snapshot.entries.sort_by_key(|e| e.start_ms);
                 self.unsaved.extend(new);
@@ -313,6 +379,7 @@ impl Worker {
                     "Live summary: skipping a window, {error} ({} chars)",
                     raw.len()
                 );
+                self.record_failure(None, FailureKind::Transient);
                 perf_debug!(
                     "Live summary unreadable reply: {:?}",
                     raw.chars().take(160).collect::<String>()
@@ -326,7 +393,7 @@ impl Worker {
     }
 
     async fn tick(&mut self) {
-        self.persist_unsaved().await;
+        let _ = self.persist_unsaved().await;
         if !self.host.enabled() {
             self.scheduler.clear();
             self.set_status(TimelineStatus::Disabled, None);
@@ -341,7 +408,13 @@ impl Worker {
         }
     }
 
-    /// Wait for the request in flight, up to `deadline`, then cancel it.
+    /// Wait for the request in flight, up to `deadline`, then give up on it.
+    ///
+    /// Giving up cancels only this worker's interest: a built-in request was
+    /// sent with `OnAbandon::LetFinish`, so the shared sidecar finishes it in
+    /// the background and drops the reply, and the summary (or anything else
+    /// using the sidecar) is never interrupted. The task is detached, never
+    /// aborted: aborting could cut a sidecar shutdown or exchange in half.
     async fn settle_in_flight(&mut self, deadline: Instant) {
         let Some(InFlight { mut handle, cancel }) = self.in_flight.take() else {
             return;
@@ -350,16 +423,9 @@ impl Worker {
         match tokio::time::timeout(remaining, &mut handle).await {
             Ok(outcome) => self.finish_request(outcome).await,
             Err(_) => {
-                info!("Live summary: cancelling the last request at stop");
+                info!("Live summary: abandoning the last request at stop");
                 cancel.cancel();
-                // Give cancellation a moment to unwind (the built-in sidecar
-                // stops generating), then drop the task regardless.
-                if tokio::time::timeout(Duration::from_secs(1), &mut handle)
-                    .await
-                    .is_err()
-                {
-                    handle.abort();
-                }
+                drop(handle);
                 self.scheduler.complete();
             }
         }
@@ -371,17 +437,25 @@ impl Worker {
             self.scheduler.push(segment);
         }
         self.settle_in_flight(deadline).await;
-        if self.host.enabled() && Instant::now() < deadline {
+        // A provider that just refused us is not asked again for the tail.
+        let refused = self.snapshot.status == TimelineStatus::Unavailable;
+        if self.host.enabled() && !refused && Instant::now() < deadline {
             let now = self.now();
             if let Some(window) = self.scheduler.flush(now) {
                 self.start_request(window).await;
                 self.settle_in_flight(deadline).await;
             }
         }
-        self.persist_unsaved().await;
+        // The recording no longer waits on us: keep trying to store the last
+        // entries for a while (a locked database, a meeting row still being
+        // written), then give up.
+        let persist_deadline = Instant::now() + self.config.final_persist_window;
+        while !self.persist_unsaved().await && Instant::now() < persist_deadline {
+            tokio::time::sleep(self.config.final_persist_retry).await;
+        }
         if !self.unsaved.is_empty() {
             warn!(
-                "Live summary: {} entries were never stored (no meeting was bound)",
+                "Live summary: {} entries were never stored",
                 self.unsaved.len()
             );
         }
@@ -419,10 +493,11 @@ pub async fn run(
             entries: Vec::new(),
         },
         host,
+        config,
         started: Instant::now(),
         scheduler: WindowScheduler::with_cadence(Duration::ZERO, config.cadence),
         unsaved: Vec::new(),
-        persist_failures: 0,
+        failures: 0,
         in_flight: None,
     };
     worker.host.publish(&worker.snapshot);
@@ -476,6 +551,7 @@ mod tests {
         gone: AtomicBool,
         meeting_id: Mutex<Option<String>>,
         fail_persist: AtomicBool,
+        meeting_gone: AtomicBool,
         persisted: Mutex<Vec<TimelineEntryRow>>,
         published: Mutex<Vec<TimelineSnapshot>>,
         generator: Mutex<Option<Arc<dyn Generator>>>,
@@ -509,6 +585,9 @@ mod tests {
             self.persisted.lock().unwrap().extend(rows.iter().cloned());
             Ok(())
         }
+        async fn meeting_exists(&self, _: &str) -> Result<bool> {
+            Ok(!self.meeting_gone.load(Ordering::SeqCst))
+        }
         fn publish(&self, snapshot: &TimelineSnapshot) {
             self.published.lock().unwrap().push(snapshot.clone());
         }
@@ -522,7 +601,9 @@ mod tests {
         active: AtomicUsize,
         max_active: AtomicUsize,
         fail_first: usize,
+        fail_kind: FailureKind,
         hang: bool,
+        prompts: Mutex<Vec<String>>,
     }
 
     impl FakeGenerator {
@@ -533,7 +614,9 @@ mod tests {
                 active: AtomicUsize::new(0),
                 max_active: AtomicUsize::new(0),
                 fail_first: 0,
+                fail_kind: FailureKind::Transient,
                 hang: false,
+                prompts: Mutex::new(Vec::new()),
             }
         }
     }
@@ -553,6 +636,7 @@ mod tests {
             cancel: &CancellationToken,
         ) -> std::result::Result<Generated, GenerateError> {
             let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            self.prompts.lock().unwrap().push(user.to_string());
             let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
             self.max_active.fetch_max(active, Ordering::SeqCst);
             let result = if self.hang {
@@ -561,7 +645,10 @@ mod tests {
             } else {
                 tokio::time::sleep(self.delay).await;
                 if call < self.fail_first {
-                    Err(GenerateError::transient("model offline"))
+                    Err(GenerateError {
+                        kind: self.fail_kind,
+                        message: "model offline".into(),
+                    })
                 } else {
                     // Distinct text per call, so the dedupe keeps every entry.
                     let topic = [
@@ -586,6 +673,9 @@ mod tests {
             cadence: Duration::from_millis(40),
             tick: Duration::from_millis(10),
             stop_grace: Duration::from_millis(300),
+            max_backoff: Duration::from_millis(40),
+            final_persist_window: Duration::from_millis(100),
+            final_persist_retry: Duration::from_millis(10),
         }
     }
 
@@ -715,7 +805,9 @@ mod tests {
             .position(|s| *s == TimelineStatus::Failed)
             .unwrap();
         assert!(statuses[failed_at..].contains(&TimelineStatus::Listening));
-        assert_eq!(snapshot.entries.len(), 1);
+        // The failed window's text is retried (alone or merged with the next
+        // speech, depending on timing), so the timeline is not empty.
+        assert!(!snapshot.entries.is_empty());
     }
 
     #[tokio::test]
@@ -735,12 +827,99 @@ mod tests {
         assert_eq!(host.persisted.lock().unwrap()[0].meeting_id, "meeting-late");
 
         host.fail_persist.store(true, Ordering::SeqCst);
+        host.meeting_gone.store(true, Ordering::SeqCst);
         tx.send(speech(60)).unwrap();
         tokio::time::sleep(Duration::from_millis(150)).await;
         finish.cancel();
         let snapshot = task.await.unwrap();
         assert_eq!(snapshot.entries.len(), 2, "the live view keeps both");
         assert_eq!(host.persisted.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_busy_database_does_not_lose_entries() {
+        let generator = Arc::new(FakeGenerator::new(Duration::ZERO));
+        let host = host_with(generator.clone());
+        host.fail_persist.store(true, Ordering::SeqCst);
+        let (tx, rx) = unbounded_channel();
+        let finish = CancellationToken::new();
+        let task = tokio::spawn(run(host.clone(), "s".into(), rx, finish.clone(), config()));
+        tx.send(speech(0)).unwrap();
+        // Far more than the old three attempts (6 s at the real tick).
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(host.persisted.lock().unwrap().is_empty());
+        host.fail_persist.store(false, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        finish.cancel();
+        let snapshot = task.await.unwrap();
+        assert_eq!(snapshot.entries.len(), 1);
+        assert_eq!(host.persisted.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_failed_request_puts_its_text_back_for_the_next_window() {
+        let mut generator = FakeGenerator::new(Duration::ZERO);
+        generator.fail_first = 1;
+        let generator = Arc::new(generator);
+        let host = host_with(generator.clone());
+        let (tx, rx) = unbounded_channel();
+        let finish = CancellationToken::new();
+        let task = tokio::spawn(run(host.clone(), "s".into(), rx, finish.clone(), config()));
+        let mut first = speech(0);
+        first.text = format!("{} budget review", first.text);
+        tx.send(first).unwrap();
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        tx.send(speech(60)).unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        finish.cancel();
+        task.await.unwrap();
+        let prompts = generator.prompts.lock().unwrap();
+        assert!(prompts.len() >= 2);
+        assert!(
+            prompts[1].contains("budget review"),
+            "the retry carries the failed window's text"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refusing_provider_is_unavailable_and_backed_off() {
+        let mut generator = FakeGenerator::new(Duration::ZERO);
+        generator.fail_first = usize::MAX;
+        generator.fail_kind = FailureKind::Unavailable;
+        let generator = Arc::new(generator);
+        let host = host_with(generator.clone());
+        let (tx, rx) = unbounded_channel();
+        let finish = CancellationToken::new();
+        let mut config = config();
+        config.max_backoff = Duration::from_secs(60);
+        let task = tokio::spawn(run(host.clone(), "s".into(), rx, finish.clone(), config));
+        for i in 0..10 {
+            tx.send(speech(i * 60)).unwrap();
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+        finish.cancel();
+        task.await.unwrap();
+        assert_eq!(
+            generator.calls.load(Ordering::SeqCst),
+            1,
+            "no retry every cadence after a refusal"
+        );
+        let published = host.published.lock().unwrap();
+        assert!(published
+            .iter()
+            .any(|s| s.status == TimelineStatus::Unavailable
+                && s.error.as_deref() == Some(REFUSED_NOTICE)));
+    }
+
+    #[test]
+    fn backoff_doubles_up_to_the_cap() {
+        let cadence = Duration::from_secs(60);
+        let max = Duration::from_secs(600);
+        assert_eq!(backoff_delay(cadence, 1, max), Duration::from_secs(60));
+        assert_eq!(backoff_delay(cadence, 2, max), Duration::from_secs(120));
+        assert_eq!(backoff_delay(cadence, 3, max), Duration::from_secs(240));
+        assert_eq!(backoff_delay(cadence, 5, max), max);
+        assert_eq!(backoff_delay(cadence, 400, max), max);
     }
 
     #[tokio::test]
