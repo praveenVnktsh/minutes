@@ -85,6 +85,8 @@ struct Helper {
     stdout: BufReader<std::process::ChildStdout>,
     model: String,
     next_id: u64,
+    /// Generation threads to ask for; `None` is the helper's default.
+    threads: Option<i32>,
 }
 
 #[derive(Debug, Default)]
@@ -113,6 +115,7 @@ impl Helper {
             stdout,
             model: model.to_string(),
             next_id: 1,
+            threads: Some(RECORDING_LLM_THREADS),
         }
     }
 
@@ -139,8 +142,10 @@ impl Helper {
             "seed": 42,
             "id": id,
             "stream": true,
-            "n_threads": RECORDING_LLM_THREADS,
         });
+        if let Some(threads) = self.threads {
+            request["n_threads"] = threads.into();
+        }
         if let Some((prefix, anchor)) = prefix {
             request["cache_prompt"] = true.into();
             request["cache_prefix_chars"] = prefix.into();
@@ -353,11 +358,13 @@ fn live_transcription_rtf_with_copilot_running() {
         })
         .collect();
 
-    for (label, pause_ms) in [
-        ("live + Copilot back to back (worst case)", 0u64),
-        ("live + Copilot, one request every 8 s", 8_000u64),
+    for (label, pause_ms, threads) in [
+        ("live + Copilot back to back, default threads", 0u64, None),
+        ("live + Copilot back to back, 2 generation threads", 0u64, Some(RECORDING_LLM_THREADS)),
+        ("live + Copilot, a request every 8 s, 2 threads", 8_000u64, Some(RECORDING_LLM_THREADS)),
     ] {
         let mut helper = Helper::start(&binary, &model);
+        helper.threads = threads;
         helper.generate(&prompts[0].0, Some(prompts[0].1), 2); // load + warm the prefix
         let stop = Arc::new(AtomicBool::new(false));
         let count = Arc::new(AtomicUsize::new(0));

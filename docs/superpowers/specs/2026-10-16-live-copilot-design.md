@@ -79,8 +79,9 @@ Built by `context::build`:
 6. **Notes**: the user's live notes, capped.
 7. **Task**: the quick action or the question.
 
-The window starts at `floor((latest − 180 s) / 60 s) · 60 s`, so it is 3–4 minutes and its
-start only moves once a minute. The stable cut is `floor(latest / 30 s) · 30 s`.
+The window starts at `floor((latest − 180 s) / 120 s) · 120 s`, so it is 3–5 minutes and its
+start only moves every two minutes. The stable cut is `floor(latest / 30 s) · 30 s`. The end of
+the live summary block is the prefix's **anchor**: it survives the window moving.
 
 Caps (estimated at 4 characters per token): timeline 1200, transcript 1600, notes 400,
 question 200. The whole prompt therefore stays under ~3.6k tokens at minute 5 and minute 60.
@@ -95,8 +96,10 @@ On each finalized **Others** (`system`) line, when Suggestions is on:
    "what do you think", "thoughts?"). Rejects fillers and tag questions ("right?",
    "you know?", "okay?", "yeah?", "make sense?" on their own or as the tail of a statement),
    lines under 3 words, and rhetorical "you know" phrases.
-2. Skipped with a recorded reason if a card is already active or the last card was under
-   **20 s** ago.
+2. Skipped with a recorded reason if a card is already active (a card stops counting after
+   2 minutes), the last card was under **20 s** ago, a confirm ran under 8 s ago, a confirm
+   is still running, the provider refused us in the last 2 minutes, the recording is paused,
+   or **live transcription is more than 2 s behind** (the streaming worker's queued audio).
 3. **Confirm** with the model: the same context plus "Is the last line a question or request
    that You should answer? Reply yes or no." `max_tokens = 5`, temperature 0.
 4. On yes: create the card, then stream a draft reply (`max_tokens = 300`).
@@ -124,15 +127,18 @@ Never triggered by `mic` lines. One active card at a time.
 ### Prompt-prefix reuse in llama-helper
 
 Generate requests may carry `cache_prompt: true`, `cache_prefix_chars: N` (byte length of the
-stable part of the formatted prompt) and `cache_context_size`.
+stable part of the formatted prompt), `cache_anchor_chars` (the earlier anchor) and
+`cache_context_size`.
 
-- The helper keeps one persistent context for cached requests and a **checkpoint**: the
-  token list of the stable prefix and a host-memory copy of sequence 0's state
-  (`llama_state_seq_get_data_ext`). A checkpoint works for both attention-only models and
-  hybrid/recurrent ones (Qwen 3.5), where partial KV removal is not possible.
-- On a cached request: clear the KV cache; if the checkpoint's tokens are a prefix of the new
-  prompt, restore it and start from there; evaluate up to the new stable boundary and save a
-  new checkpoint there; then evaluate the rest. `reused_tokens` reports the restored length.
+- The helper keeps one persistent context for cached requests and up to three
+  **checkpoints**: token lists of stable prefixes and host-memory copies of sequence 0's
+  state (`llama_state_seq_get_data_ext`, ~70 MB per 1k tokens on Qwen 3.5 4B). Checkpoints
+  work for attention-only and hybrid/recurrent models (Qwen 3.5) alike; partial KV removal
+  does not work on the latter.
+- On a cached request: clear the KV cache; restore the longest checkpoint that still starts
+  the prompt; evaluate up to the anchor and the stable boundary, saving a checkpoint at each
+  one past the restored point; then evaluate the rest. `reused_tokens` reports the restored
+  length.
 - Non-cached requests (summary, title, timeline) keep the previous code path exactly: a fresh
   context per request. The checkpoint survives them because it lives in host memory.
 
@@ -161,6 +167,20 @@ status stays `listening`, and the next attempt is 10 s later. Summary and title 
 
 Copilot's own Stop and timeout also use the cancel message, so they never kill the shared
 sidecar.
+
+### Live transcription contention
+
+Measured on the user's Mac: Nemotron alone runs at ~0.6× real time; back-to-back local
+Qwen 3.5 4B generations push it past 1.0×. Copilot therefore:
+
+- asks llama-helper for **2 generation threads while a recording is live**
+  (`n_threads`; prompt evaluation keeps all threads, because on Qwen 3.5 part of it runs
+  on the CPU and two threads made a cold prompt ~8× slower);
+- keeps proactive work tiny and rate limited (5-token confirm, ≥ 8 s apart, one at a time,
+  one card per 20 s) and **sheds it when the live worker reports more than 2 s of backlog**;
+- relies on prefix reuse, so a typical request evaluates ~50–300 new prompt tokens;
+- and the live timeline (background priority) waits **4 s after any built-in generation**
+  while recording, so the model never runs back to back with Copilot.
 
 ### Failure handling
 
@@ -205,6 +225,10 @@ alarms; `[MM:SS]` links correct after the final transcript replaces the live one
 discussed" honesty; failure isolation; history saved; nothing after End meeting.
 
 ## Risks
+
+- **Back-to-back local load.** A user who fires requests continuously still slows live
+  transcription; the guards above only cover proactive and background work. See the PR for
+  measured real-time factors.
 
 - **Memory.** The cached copilot context (8k tokens) and one checkpoint stay resident while
   the helper is alive (it exits after 5 idle minutes).
