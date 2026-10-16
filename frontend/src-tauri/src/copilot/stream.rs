@@ -17,19 +17,20 @@ use super::stream_parse::{
     claude_event, ollama_line, openai_event, LineBuffer, SseDecoder, StreamItem,
 };
 use crate::summary::llm_client::{
-    build_ollama_chat_body, build_openai_compat_chat_body, rejected_sampling_fields,
-    GenerationOptions, LLMProvider,
+    build_claude_body, build_ollama_chat_body, build_openai_compat_chat_body,
+    compatibility_retry_body, GenerationOptions, LLMProvider,
 };
 use crate::summary::service::LlmConfig;
-use crate::summary::summary_engine::client::{
-    generate_with_builtin_stream, BuiltinStreamOptions,
-};
+use crate::summary::summary_engine::client::{generate_with_builtin_stream, BuiltinStreamOptions};
 use crate::summary::summary_engine::sidecar::SidecarError;
 
 /// The helper's cached Copilot context. Prompts are capped well below it.
 pub const BUILTIN_CACHE_CONTEXT: u32 = 8192;
-/// Context Copilot asks Ollama for: its prompts plus a reply fit easily.
-const OLLAMA_NUM_CTX: u32 = 8192;
+/// Ollama context when the model's own size is unknown. Normally the
+/// streamer carries the app-wide per-model num_ctx, so Ollama never reloads.
+const OLLAMA_FALLBACK_NUM_CTX: u32 = 8192;
+/// Compatibility retries per request (each drops what the last rejection named).
+const MAX_COMPATIBILITY_RETRIES: usize = 2;
 /// Upper bound for one request; first-token and stall timeouts are enforced
 /// by the caller and are much shorter.
 pub const HARD_TIMEOUT: Duration = Duration::from_secs(90);
@@ -104,9 +105,11 @@ pub trait Streamer: Send + Sync {
 /// The configured provider and model.
 pub struct ProviderStreamer {
     pub provider_id: String,
-    pub config: LlmConfig,
+    pub(crate) config: LlmConfig,
     pub app_data_dir: Option<PathBuf>,
     pub client: reqwest::Client,
+    /// Ollama's num_ctx: the same value every other app call uses for the model.
+    pub num_ctx: Option<u32>,
 }
 
 /// Classifies an HTTP failure for the user and for back-off.
@@ -138,32 +141,6 @@ fn in_stream_error(message: String) -> StreamError {
     }
 }
 
-/// The body for a retry without fields the provider rejected (OpenAI
-/// reasoning models refuse `temperature` and want `max_completion_tokens`).
-pub fn retry_body(body: &Value, status: u16, error_body: &str) -> Option<Value> {
-    if !matches!(status, 400 | 422) {
-        return None;
-    }
-    let mut retry = body.clone();
-    let object = retry.as_object_mut()?;
-    let mut changed = false;
-    if let Ok(code) = reqwest::StatusCode::from_u16(status) {
-        for field in rejected_sampling_fields(code, error_body) {
-            changed |= object.remove(field).is_some();
-        }
-    }
-    if error_body.contains("max_completion_tokens") {
-        if let Some(value) = object.remove("max_tokens") {
-            object.insert("max_completion_tokens".into(), value);
-            changed = true;
-        }
-    }
-    if error_body.contains("stream_options") {
-        changed |= object.remove("stream_options").is_some();
-    }
-    changed.then_some(retry)
-}
-
 #[derive(Clone, Copy)]
 enum Format {
     OpenAi,
@@ -184,7 +161,9 @@ impl ProviderStreamer {
             max_tokens: Some(max_tokens),
             output_cap: Some(max_tokens),
             sampling_temperature: Some(temperature),
-            num_ctx: Some(OLLAMA_NUM_CTX),
+            num_ctx: Some(self.num_ctx.unwrap_or(OLLAMA_FALLBACK_NUM_CTX)),
+            // Short answers: reasoning models get low effort and room to think.
+            brief: true,
             ..Default::default()
         };
         let mut headers = header::HeaderMap::new();
@@ -214,10 +193,8 @@ impl ProviderStreamer {
         Ok(match config.provider {
             LLMProvider::OpenAI => {
                 bearer(&mut headers)?;
-                let (url, headers, mut body, format) = openai(
-                    "https://api.openai.com/v1/chat/completions".into(),
-                    headers,
-                );
+                let (url, headers, mut body, format) =
+                    openai("https://api.openai.com/v1/chat/completions".into(), headers);
                 body["stream_options"] = serde_json::json!({"include_usage": true});
                 (url, headers, body, format)
             }
@@ -266,14 +243,9 @@ impl ProviderStreamer {
                         .map_err(|_| StreamError::other("Invalid API key format"))?,
                 );
                 headers.insert("anthropic-version", CLAUDE_VERSION.parse().unwrap());
-                // Current Claude models reject `temperature`, as in the summary client.
-                let body = serde_json::json!({
-                    "model": config.model_name,
-                    "max_tokens": max_tokens,
-                    "system": parts.system,
-                    "messages": [{"role": "user", "content": user}],
-                    "stream": true,
-                });
+                let mut body =
+                    build_claude_body(&config.model_name, &parts.system, &user, &options);
+                body["stream"] = Value::Bool(true);
                 (
                     "https://api.anthropic.com/v1/messages".into(),
                     headers,
@@ -281,7 +253,9 @@ impl ProviderStreamer {
                     Format::Claude,
                 )
             }
-            LLMProvider::BuiltInAI => unreachable!("the built-in model streams through the sidecar"),
+            LLMProvider::BuiltInAI => {
+                unreachable!("the built-in model streams through the sidecar")
+            }
         })
     }
 
@@ -322,20 +296,28 @@ impl ProviderStreamer {
     ) -> Result<StreamOutcome, StreamError> {
         let (url, headers, body, format) = self.request(parts, max_tokens, temperature)?;
         let mut response = self.send(&url, &headers, &body, cancel).await?;
-        if !response.status().is_success() {
-            let status = response.status().as_u16();
+        let mut body = body;
+        let mut retries = 0;
+        while !response.status().is_success() {
+            let status = response.status();
             let error_body = response.text().await.unwrap_or_default();
-            match retry_body(&body, status, &error_body) {
-                Some(retry) => {
-                    response = self.send(&url, &headers, &retry, cancel).await?;
-                    if !response.status().is_success() {
-                        let status = response.status().as_u16();
-                        let error_body = response.text().await.unwrap_or_default();
-                        return Err(http_error(status, &error_body));
-                    }
-                }
-                None => return Err(http_error(status, &error_body)),
-            }
+            let retry = (retries < MAX_COMPATIBILITY_RETRIES)
+                .then(|| {
+                    compatibility_retry_body(
+                        &self.config.provider,
+                        &body,
+                        status,
+                        &error_body,
+                        true,
+                    )
+                })
+                .flatten();
+            let Some(retry) = retry else {
+                return Err(http_error(status.as_u16(), &error_body));
+            };
+            retries += 1;
+            response = self.send(&url, &headers, &retry, cancel).await?;
+            body = retry;
         }
 
         let mut outcome = StreamOutcome::default();
@@ -343,22 +325,23 @@ impl ProviderStreamer {
         let mut lines = LineBuffer::default();
         let mut bytes = response.bytes_stream();
         let mut done = false;
-        let mut apply = |items: Vec<StreamItem>, outcome: &mut StreamOutcome| -> Result<bool, StreamError> {
-            for item in items {
-                match item {
-                    StreamItem::Delta(text) => {
-                        outcome.text.push_str(&text);
-                        let _ = deltas.send(text);
+        let apply =
+            |items: Vec<StreamItem>, outcome: &mut StreamOutcome| -> Result<bool, StreamError> {
+                for item in items {
+                    match item {
+                        StreamItem::Delta(text) => {
+                            outcome.text.push_str(&text);
+                            let _ = deltas.send(text);
+                        }
+                        StreamItem::Finish { truncated } => outcome.truncated = truncated,
+                        StreamItem::PromptTokens(n) => outcome.prompt_tokens = Some(n),
+                        StreamItem::CompletionTokens(n) => outcome.completion_tokens = Some(n),
+                        StreamItem::Error(message) => return Err(in_stream_error(message)),
+                        StreamItem::Done => return Ok(true),
                     }
-                    StreamItem::Finish { truncated } => outcome.truncated = truncated,
-                    StreamItem::PromptTokens(n) => outcome.prompt_tokens = Some(n),
-                    StreamItem::CompletionTokens(n) => outcome.completion_tokens = Some(n),
-                    StreamItem::Error(message) => return Err(in_stream_error(message)),
-                    StreamItem::Done => return Ok(true),
                 }
-            }
-            Ok(false)
-        };
+                Ok(false)
+            };
         while !done {
             let chunk = tokio::select! {
                 biased;
@@ -366,7 +349,8 @@ impl ProviderStreamer {
                 chunk = bytes.next() => chunk,
             };
             let Some(chunk) = chunk else { break };
-            let chunk = chunk.map_err(|e| StreamError::other(format!("The stream broke off: {e}")))?;
+            let chunk =
+                chunk.map_err(|e| StreamError::other(format!("The stream broke off: {e}")))?;
             let items: Vec<StreamItem> = match format {
                 Format::OpenAi => sse.push(&chunk).iter().flat_map(openai_event).collect(),
                 Format::Claude => sse.push(&chunk).iter().flat_map(claude_event).collect(),
@@ -512,12 +496,17 @@ mod tests {
             config: config(provider, endpoint),
             app_data_dir: None,
             client: reqwest::Client::new(),
+            num_ctx: Some(4096),
         }
     }
 
     /// Serves one HTTP response (in two writes, to exercise chunking) and
     /// hands back the request body it got.
-    async fn serve_once(status: &'static str, content_type: &'static str, body: String) -> (String, tokio::task::JoinHandle<String>) {
+    async fn serve_once(
+        status: &'static str,
+        content_type: &'static str,
+        body: String,
+    ) -> (String, tokio::task::JoinHandle<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = format!("http://{}", listener.local_addr().unwrap());
         let handle = tokio::spawn(async move {
@@ -533,7 +522,8 @@ mod tests {
                         .lines()
                         .find_map(|l| {
                             let (k, v) = l.split_once(':')?;
-                            k.eq_ignore_ascii_case("content-length").then(|| v.trim().parse().unwrap())
+                            k.eq_ignore_ascii_case("content-length")
+                                .then(|| v.trim().parse().unwrap())
                         })
                         .unwrap_or(0);
                     if request.len() >= end + 4 + length {
@@ -608,8 +598,12 @@ mod tests {
 
     #[tokio::test]
     async fn auth_and_rate_limit_failures_are_typed() {
-        let (address, _server) =
-            serve_once("401 Unauthorized", "application/json", r#"{"error":"bad key"}"#.into()).await;
+        let (address, _server) = serve_once(
+            "401 Unauthorized",
+            "application/json",
+            r#"{"error":"bad key"}"#.into(),
+        )
+        .await;
         let streamer = streamer(LLMProvider::CustomOpenAI, Some(address));
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let error = streamer
@@ -622,24 +616,42 @@ mod tests {
     }
 
     #[test]
-    fn rejected_fields_are_dropped_or_renamed_for_one_retry() {
-        let body = serde_json::json!({"model": "o4", "max_tokens": 300, "temperature": 0.3, "stream": true});
-        let retry = retry_body(
-            &body,
-            400,
+    fn streaming_bodies_use_the_shared_builders_and_retry_rules() {
+        let (_, headers, claude, _) = streamer(LLMProvider::Claude, None)
+            .request(&parts(), 300, 0.3)
+            .unwrap();
+        assert_eq!(claude["stream"], true);
+        assert!(claude.get("temperature").is_none());
+        assert_eq!(
+            claude["output_config"]["effort"], "low",
+            "brief: low effort"
+        );
+        assert!(headers.get("anthropic-version").is_some());
+
+        let (_, _, ollama, _) = streamer(LLMProvider::Ollama, None)
+            .request(&parts(), 300, 0.3)
+            .unwrap();
+        assert_eq!(ollama["options"]["num_ctx"], 4096, "the app-wide num_ctx");
+
+        let (_, _, gpt5, _) = streamer(LLMProvider::OpenAI, None)
+            .request(&parts(), 300, 0.3)
+            .unwrap();
+        let mut gpt5 = gpt5;
+        gpt5["model"] = "gpt-5-mini".into();
+        let (_, _, plain, _) = streamer(LLMProvider::OpenRouter, None)
+            .request(&parts(), 300, 0.3)
+            .unwrap();
+        let retry = compatibility_retry_body(
+            &LLMProvider::OpenRouter,
+            &plain,
+            reqwest::StatusCode::BAD_REQUEST,
             r#"{"error":{"message":"Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.","param":"max_tokens"}}"#,
+            true,
         )
         .unwrap();
-        assert_eq!(retry["max_completion_tokens"], 300);
         assert!(retry.get("max_tokens").is_none());
-        let retry = retry_body(
-            &body,
-            400,
-            r#"{"error":{"message":"Unsupported value: 'temperature'","param":"temperature"}}"#,
-        )
-        .unwrap();
-        assert!(retry.get("temperature").is_none());
-        assert!(retry_body(&body, 500, "temperature").is_none());
+        assert!(retry.get("max_completion_tokens").is_some());
+        assert_eq!(retry["stream"], true, "the retry still streams");
     }
 
     #[test]

@@ -133,10 +133,7 @@ fn strip_phrases(text: &str, phrases: &[&str]) -> String {
 fn last_sentence(text: &str) -> &str {
     let trimmed = text.trim_end_matches(|c: char| c.is_whitespace() || c == '"');
     let body = trimmed.trim_end_matches(['?', '.', '!']);
-    let start = body
-        .rfind(['.', '!', '?'])
-        .map(|at| at + 1)
-        .unwrap_or(0);
+    let start = body.rfind(['.', '!', '?']).map(|at| at + 1).unwrap_or(0);
     trimmed[start..].trim()
 }
 
@@ -266,7 +263,10 @@ mod tests {
             "We agreed to move the launch to Q3, okay?",
         ] {
             let decision = rule_check(line);
-            assert!(!decision.passed(), "{line:?} should be rejected, got {decision:?}");
+            assert!(
+                !decision.passed(),
+                "{line:?} should be rejected, got {decision:?}"
+            );
         }
     }
 

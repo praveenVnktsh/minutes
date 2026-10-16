@@ -70,12 +70,20 @@ impl QuickAction {
 pub enum Task {
     Action(QuickAction),
     /// "Shorter": the previous answer to shorten.
-    Shorten { previous: String },
+    Shorten {
+        previous: String,
+    },
     Question(String),
     /// Is the line at `at_ms` a question for You? One word.
-    Confirm { at_ms: i64, line: String },
+    Confirm {
+        at_ms: i64,
+        line: String,
+    },
     /// Draft a reply to the line at `at_ms`.
-    Suggest { at_ms: i64, line: String },
+    Suggest {
+        at_ms: i64,
+        line: String,
+    },
 }
 
 /// Longest question or quoted line put into a task.

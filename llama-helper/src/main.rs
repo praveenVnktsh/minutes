@@ -62,6 +62,9 @@ enum Request {
         cache_prefix_chars: Option<usize>,
         /// Context window for the persistent cached context (defaults to `context_size`).
         cache_context_size: Option<u32>,
+        /// CPU threads for this request. The app lowers it while a recording
+        /// runs, so live transcription (on the CPU) keeps up.
+        n_threads: Option<i32>,
     },
     /// Counts the tokens `text` produces with the loaded model's tokenizer,
     /// using exactly the tokenization `generate` applies to a prompt.
@@ -336,6 +339,7 @@ struct GenerateParams {
     id: Option<u64>,
     /// Set for `cache_prompt` requests.
     cache: Option<CacheParams>,
+    threads: i32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -364,8 +368,8 @@ struct Checkpoint {
 struct ModelState {
     // Field order is drop order: the cached context borrows the model, so it
     // must go first.
-    /// Persistent context for `cache_prompt` requests, and its n_ctx.
-    cache_ctx: Option<(u32, LlamaContext<'static>)>,
+    /// Persistent context for `cache_prompt` requests, with its n_ctx and threads.
+    cache_ctx: Option<((u32, i32), LlamaContext<'static>)>,
     checkpoint: Option<Checkpoint>,
     /// Boxed so its address stays put while `cache_ctx` borrows it.
     model: Option<Box<LlamaModel>>,
@@ -494,7 +498,7 @@ impl ModelState {
         check_context_budget(tokens_list.len(), params.max_tokens, self.context_size)?;
 
         let model = self.model.as_deref().context("Model not loaded")?;
-        let threads = thread_count();
+        let threads = params.threads;
         let ctx_params = LlamaContextParams::default()
             .with_n_ctx(Some(
                 NonZeroU32::new(self.context_size).context("Invalid ctx size")?,
@@ -558,10 +562,10 @@ impl ModelState {
         };
         let model = self.model_static()?;
 
+        let threads = params.threads;
         let mut ctx = match self.cache_ctx.take() {
-            Some((size, ctx)) if size == n_ctx => ctx,
+            Some((key, ctx)) if key == (n_ctx, threads) => ctx,
             _ => {
-                let threads = thread_count();
                 let ctx_params = LlamaContextParams::default()
                     .with_n_ctx(Some(NonZeroU32::new(n_ctx).context("Invalid ctx size")?))
                     .with_n_batch(n_ctx)
@@ -610,7 +614,7 @@ impl ModelState {
             self.checkpoint = save_checkpoint(&ctx, &tokens[..plan.stable_end]);
         }
         if sink.is_cancelled() {
-            self.cache_ctx = Some((n_ctx, ctx));
+            self.cache_ctx = Some(((n_ctx, threads), ctx));
             return Ok(cancelled_output(tokens.len(), reused));
         }
         decode_range(&mut ctx, &mut batch, &tokens, position, tokens.len(), true)?;
@@ -632,7 +636,7 @@ impl ModelState {
             sink,
             start_time,
         );
-        self.cache_ctx = Some((n_ctx, ctx));
+        self.cache_ctx = Some(((n_ctx, threads), ctx));
         let output = output?;
         self.update_activity();
         Ok(finish_output(
@@ -1036,6 +1040,7 @@ fn main() -> Result<()> {
                 cache_prompt,
                 cache_prefix_chars,
                 cache_context_size,
+                n_threads,
             }) => {
                 let max_tokens = max_tokens.unwrap_or(512);
                 let context_size = context_size.unwrap_or(2048);
@@ -1077,6 +1082,9 @@ fn main() -> Result<()> {
                     seed,
                     id,
                     cache,
+                    threads: n_threads
+                        .filter(|n| *n > 0)
+                        .map_or_else(thread_count, |n| n.min(thread_count())),
                 };
                 let mut sink = StdoutSink {
                     id: params.id,

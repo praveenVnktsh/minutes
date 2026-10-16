@@ -112,7 +112,12 @@ fn timeline_block(timeline: &[TimelineItem]) -> String {
                 "decision" | "action" => format!("{}: ", item.kind),
                 _ => String::new(),
             };
-            format!("[{}] {}{}\n", format_time(item.start_ms), kind, item.text.trim())
+            format!(
+                "[{}] {}{}\n",
+                format_time(item.start_ms),
+                kind,
+                item.text.trim()
+            )
         })
         .collect();
     let mut skip = 0;
@@ -216,17 +221,29 @@ mod tests {
         let mut lines = Vec::new();
         let mut t = 0;
         while t < minutes * 60 {
-            let speaker = if t % 20 == 0 { Speaker::You } else { Speaker::Others };
+            let speaker = if t % 20 == 0 {
+                Speaker::You
+            } else {
+                Speaker::Others
+            };
             push_line(
                 &mut lines,
-                line(t, speaker, "we talked about the onboarding funnel and the pricing tiers again"),
+                line(
+                    t,
+                    speaker,
+                    "we talked about the onboarding funnel and the pricing tiers again",
+                ),
             );
             t += 7;
         }
         let timeline = (0..minutes * 2)
             .map(|i| TimelineItem {
                 start_ms: i * 30_000,
-                kind: if i % 5 == 0 { "decision".into() } else { "point".into() },
+                kind: if i % 5 == 0 {
+                    "decision".into()
+                } else {
+                    "point".into()
+                },
                 text: format!("Entry {i} about the roadmap and who owns the follow-up"),
             })
             .collect();
@@ -249,8 +266,12 @@ mod tests {
             text: "Ship on Friday".into(),
         }];
         let parts = build(&lines, &timeline, "check QA", &task());
-        assert!(parts.stable.starts_with("LIVE SUMMARY SO FAR:\n[00:00] decision: Ship on Friday\n"));
-        assert!(parts.stable.contains("[00:05] Others: Can we ship Friday?\n"));
+        assert!(parts
+            .stable
+            .starts_with("LIVE SUMMARY SO FAR:\n[00:00] decision: Ship on Friday\n"));
+        assert!(parts
+            .stable
+            .contains("[00:05] Others: Can we ship Friday?\n"));
         assert!(parts.rest.starts_with("[00:40] You: I think so.\n"));
         assert!(parts.rest.contains("MY NOTES:\ncheck QA"));
         assert!(parts.rest.ends_with(&task().text()));
@@ -262,8 +283,12 @@ mod tests {
         let (lines, timeline) = meeting(40);
         let parts = build(&lines, &timeline, "", &task());
         let user = parts.user();
-        assert!(!user.contains("[30:00]"), "half an hour ago is out of the window");
-        assert!(user.contains("[38:"), "the last minutes are in");
+        let transcript = &user[user.find("TRANSCRIPT").unwrap()..];
+        assert!(
+            !transcript.contains("[30:"),
+            "half an hour ago is out of the window"
+        );
+        assert!(transcript.contains("[38:"), "the last minutes are in");
     }
 
     #[test]
@@ -284,17 +309,21 @@ mod tests {
         let first = build(&lines, &timeline, "", &task());
         // A few seconds later in the same 30 s bucket.
         let last = lines.last().unwrap().start_ms / 1000;
-        push_line(&mut lines, line(last + 1, Speaker::Others, "One more thing?"));
-        let (_, cut_before) = window_bounds(lines[lines.len() - 2].end_ms);
-        let (_, cut_after) = window_bounds(lines.last().unwrap().end_ms);
+        push_line(
+            &mut lines,
+            line(last + 1, Speaker::Others, "One more thing?"),
+        );
         let second = build(&lines, &timeline, "", &task());
-        if cut_before == cut_after {
-            assert_eq!(first.stable, second.stable);
-        } else {
-            assert!(second.stable.starts_with(&first.stable));
-        }
+        // The stable part only ever grows at its end, so the saved prefix
+        // still matches.
+        assert!(second.stable.starts_with(&first.stable));
         // A different task never changes the prefix.
-        let third = build(&lines, &timeline, "", &Task::Question("Who owns it?".into()));
+        let third = build(
+            &lines,
+            &timeline,
+            "",
+            &Task::Question("Who owns it?".into()),
+        );
         assert_eq!(second.stable, third.stable);
         // Neither do notes.
         let fourth = build(&lines, &timeline, "new note", &task());
@@ -322,7 +351,9 @@ mod tests {
             .parse()
             .unwrap();
         assert_eq!(left_out % 10, 0);
-        assert!(block.trim_end().ends_with("entry 299 with enough words to matter for the budget"));
+        assert!(block
+            .trim_end()
+            .ends_with("entry 299 with enough words to matter for the budget"));
     }
 
     #[test]

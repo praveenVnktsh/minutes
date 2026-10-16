@@ -47,7 +47,9 @@ impl LineBuffer {
         if self.pending.is_empty() {
             return None;
         }
-        let line = String::from_utf8_lossy(&self.pending).trim_end().to_string();
+        let line = String::from_utf8_lossy(&self.pending)
+            .trim_end()
+            .to_string();
         self.pending.clear();
         (!line.is_empty()).then_some(line)
     }
@@ -289,7 +291,11 @@ mod tests {
             for event in decoder.finish() {
                 items.extend(openai_event(&event));
             }
-            assert_eq!(deltas(&items), "Say we ship Friday – café [12:04].", "chunk {size}");
+            assert_eq!(
+                deltas(&items),
+                "Say we ship Friday – café [12:04].",
+                "chunk {size}"
+            );
             assert!(items.contains(&StreamItem::Finish { truncated: false }));
             assert!(items.contains(&StreamItem::PromptTokens(1500)));
             assert_eq!(items.last(), Some(&StreamItem::Done));

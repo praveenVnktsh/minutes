@@ -53,6 +53,7 @@ pub mod download_eta;
 pub mod groq;
 pub mod live_notes;
 pub mod live_summary;
+pub mod copilot;
 pub mod meeting_activity;
 pub mod meeting_assistant;
 pub mod meeting_detection;
@@ -1000,6 +1001,15 @@ pub fn run() {
             live_summary::list_meeting_timeline_entries,
             live_summary::get_live_summary_settings,
             live_summary::set_live_summary_settings,
+            copilot::copilot_get_state,
+            copilot::copilot_ask,
+            copilot::copilot_stop,
+            copilot::copilot_retry,
+            copilot::copilot_shorter,
+            copilot::copilot_dismiss_card,
+            copilot::copilot_set_notes,
+            copilot::get_copilot_settings,
+            copilot::set_copilot_settings,
             meeting_assistant::get_meeting_chat,
             meeting_assistant::chat_with_meeting,
             // Reload sync commands (retrieve transcript history and meeting name)

@@ -262,3 +262,13 @@ fn generate_request_deserializes_qwen_penalties() {
     assert_eq!(sampling.penalty_last_n, 256);
     assert!(sampling.uses_penalties());
 }
+
+#[test]
+fn thread_count_can_be_lowered_per_request() {
+    let request: Request =
+        serde_json::from_str(r#"{"type":"generate","prompt":"p","n_threads":2}"#).unwrap();
+    let Request::Generate { n_threads, .. } = request else {
+        panic!("expected generate request");
+    };
+    assert_eq!(n_threads, Some(2));
+}

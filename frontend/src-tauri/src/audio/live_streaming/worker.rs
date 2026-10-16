@@ -29,6 +29,17 @@ pub const PARTIAL_EVENT: &str = "transcript-partial";
 /// bounds what a stop has to decode before it can save.
 pub const MAX_BACKLOG_SECONDS: f64 = 20.0;
 
+/// The live worker's latest backlog, in milliseconds of queued audio. Other
+/// features (Copilot's proactive suggestions) read it to back off when live
+/// transcription is falling behind real time.
+static LAST_BACKLOG_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Seconds of audio the live worker had queued at its last decode; 0 when no
+/// streaming worker runs.
+pub fn current_backlog_seconds() -> f64 {
+    LAST_BACKLOG_MS.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1000.0
+}
+
 /// Cancel flag of the running streaming worker, if any.
 static CURRENT_CANCEL: Mutex<Option<Arc<AtomicBool>>> = Mutex::new(None);
 
@@ -228,6 +239,10 @@ mod imp {
                 }
 
                 let backlog = backlog_seconds(&batch);
+                super::LAST_BACKLOG_MS.store(
+                    (backlog.max(0.0) * 1000.0) as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
                 if backlog > MAX_BACKLOG_SECONDS {
                     // Windows carry their recording position, so the next one
                     // realigns each source's timeline.
@@ -294,6 +309,7 @@ mod imp {
             drop(transcriber);
             drop(engine);
             clear_cancel(&cancel);
+            super::LAST_BACKLOG_MS.store(0, std::sync::atomic::Ordering::Relaxed);
             info!("✅ Streaming live transcription finished");
         })
     }

@@ -49,6 +49,9 @@ enum Request {
         cache_prefix_chars: Option<usize>,
         #[serde(skip_serializing_if = "Option::is_none")]
         cache_context_size: Option<u32>,
+        /// Fewer CPU threads while a recording runs (see [`generation_threads`]).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        n_threads: Option<i32>,
     },
     Tokenize {
         text: String,
@@ -388,6 +391,7 @@ pub async fn generate_with_builtin(
         cache_prompt: None,
         cache_prefix_chars: None,
         cache_context_size: None,
+        n_threads: generation_threads(),
     };
 
     let request_json = serde_json::to_string(&request)?;
@@ -395,6 +399,26 @@ pub async fn generate_with_builtin(
         .timeout
         .unwrap_or(Duration::from_secs(models::GENERATION_TIMEOUT_SECS));
 
+    if options.on_abandon == OnAbandon::Yield {
+        let last_end = *LAST_GENERATION_END
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let delay = background_pacing_delay(
+            last_end,
+            std::time::Instant::now(),
+            crate::audio::recording_commands::is_recording_live(),
+        );
+        if !delay.is_zero() {
+            perf_debug!("Pacing a background generation by {:?}", delay);
+            match cancellation_token {
+                Some(token) => tokio::select! {
+                    _ = token.cancelled() => return Err(anyhow!(SidecarError::Cancelled)),
+                    _ = tokio::time::sleep(delay) => {}
+                },
+                None => tokio::time::sleep(delay).await,
+            }
+        }
+    }
     log::info!("Sending generation request to sidecar (max_tokens: {max_tokens})");
     let response_json = manager
         .send(SidecarRequest {
@@ -407,7 +431,9 @@ pub async fn generate_with_builtin(
             on_abandon: options.on_abandon,
             tokens: None,
         })
-        .await?;
+        .await;
+    note_generation_end();
+    let response_json = response_json?;
 
     if cancellation_token.is_some_and(CancellationToken::is_cancelled) {
         return Err(anyhow!("Generation cancelled"));
@@ -420,6 +446,45 @@ pub async fn generate_with_builtin(
         completion.truncated
     );
     Ok(completion)
+}
+
+/// CPU threads llama-helper may use while a recording is live. Live
+/// transcription (Nemotron) decodes on the CPU and measurably falls behind
+/// real time when the helper takes its default (cores / 2 + 2) threads; the
+/// model's weights run on the GPU either way.
+pub const RECORDING_LLM_THREADS: i32 = 2;
+
+/// Thread override for a generate request: fewer while recording.
+pub fn generation_threads() -> Option<i32> {
+    crate::audio::recording_commands::is_recording_live().then_some(RECORDING_LLM_THREADS)
+}
+
+/// Minimum pause between the end of one built-in generation and the start of
+/// a background (live timeline) one while recording, so the model never runs
+/// back to back with Copilot and live transcription gets the machine.
+pub const BACKGROUND_PACING: Duration = Duration::from_secs(4);
+
+static LAST_GENERATION_END: std::sync::Mutex<Option<std::time::Instant>> =
+    std::sync::Mutex::new(None);
+
+fn note_generation_end() {
+    *LAST_GENERATION_END
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now());
+}
+
+/// How long a background request should wait before it starts.
+pub fn background_pacing_delay(
+    last_end: Option<std::time::Instant>,
+    now: std::time::Instant,
+    recording: bool,
+) -> Duration {
+    match last_end {
+        Some(end) if recording => {
+            BACKGROUND_PACING.saturating_sub(now.saturating_duration_since(end))
+        }
+        _ => Duration::ZERO,
+    }
 }
 
 /// Ids for generate requests, so the sidecar can cancel one in the helper.
@@ -566,6 +631,7 @@ pub async fn generate_with_builtin_stream(
         cache_prompt: Some(true),
         cache_prefix_chars: Some(prefix_chars),
         cache_context_size: Some(options.cache_context_size.min(model_def.context_size)),
+        n_threads: generation_threads(),
     };
     let response_json = manager
         .send(SidecarRequest {
@@ -578,8 +644,9 @@ pub async fn generate_with_builtin_stream(
             on_abandon: OnAbandon::LetFinish,
             tokens: Some(tokens),
         })
-        .await?;
-    parse_stream_response(&response_json)
+        .await;
+    note_generation_end();
+    parse_stream_response(&response_json?)
 }
 
 /// Shutdown the global sidecar (graceful cleanup)
@@ -660,6 +727,7 @@ mod tests {
             cache_prompt: None,
             cache_prefix_chars: None,
             cache_context_size: None,
+            n_threads: None,
         };
 
         let json = serde_json::to_string(&request).unwrap();
@@ -761,6 +829,26 @@ mod tests {
     }
 
     #[test]
+    fn background_work_pauses_after_a_generation_only_while_recording() {
+        let now = std::time::Instant::now();
+        let just_now = now - Duration::from_secs(1);
+        assert_eq!(
+            background_pacing_delay(Some(just_now), now, true),
+            BACKGROUND_PACING - Duration::from_secs(1)
+        );
+        assert_eq!(
+            background_pacing_delay(Some(just_now), now, false),
+            Duration::ZERO
+        );
+        assert_eq!(background_pacing_delay(None, now, true), Duration::ZERO);
+        let long_ago = now - Duration::from_secs(60);
+        assert_eq!(
+            background_pacing_delay(Some(long_ago), now, true),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
     fn a_preempted_background_reply_is_a_typed_error_not_partial_text() {
         let error = parse_generate_response(
             r#"{"type":"response","text":"half","error":null,"finish_reason":"cancelled","id":3}"#,
@@ -793,6 +881,7 @@ mod tests {
             cache_prompt: None,
             cache_prefix_chars: None,
             cache_context_size: None,
+            n_threads: None,
         })
         .unwrap();
         assert!(json.contains("\"id\":4"));
