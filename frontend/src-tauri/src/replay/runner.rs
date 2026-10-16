@@ -7,9 +7,14 @@
 //! `store.json`; models are linked, file by file, so a model the replay would
 //! delete or download only affects the sandbox.
 //!
-//! The audio is decoded with ffmpeg and fed in real time (or `speed`× faster)
-//! as the pipeline would: 600 ms windows per source, the recording as the
-//! system ("Others") source and silence as the microphone. Everything the UI
+//! The audio is decoded with ffmpeg and fed as the pipeline would (600 ms
+//! windows per source, the recording as the system ("Others") source and
+//! silence as the microphone), as fast as live transcription decodes it.
+//! Recording-time rules run on `crate::clock`, which the replay simulates:
+//! meeting time jumps ahead with the audio while no model work is in flight,
+//! and runs at the wall clock's rate while it is, so a request taking 1.2 s
+//! still lets 1.2 s of audio arrive meanwhile. `realtime` feeds at real speed
+//! instead, for occasional fidelity runs. Everything the UI
 //! would hear is written to `events.jsonl` with debug measurements alongside;
 //! see [`super::events`].
 
@@ -53,7 +58,8 @@ pub struct Options {
     /// `use_notes` looks next to the audio.
     pub notes: Option<PathBuf>,
     pub use_notes: bool,
-    pub speed: f64,
+    /// Feed at real speed instead of as fast as decoding allows.
+    pub realtime: bool,
     pub verbose: bool,
     pub summary_runs: u32,
     pub skip_final: bool,
@@ -100,7 +106,7 @@ impl Recorder {
         let record = Record {
             seq: log.seq,
             t_ms: self.t_ms(),
-            audio_ms: self.audio_ms.load(Ordering::Relaxed),
+            audio_ms: meeting_ms(),
             kind,
             name: name.to_string(),
             payload,
@@ -140,6 +146,11 @@ impl Recorder {
             .records
             .clone()
     }
+}
+
+/// Meeting time: the simulated clock the recording-time features run on.
+fn meeting_ms() -> u64 {
+    crate::clock::simulation::elapsed().as_millis() as u64
 }
 
 // ---------------------------------------------------------------------------
@@ -289,9 +300,9 @@ async fn copy_settings(real_db: &Path, pool: &sqlx::SqlitePool) -> Result<()> {
             .await
             .with_context(|| format!("reading {table}"))?;
         let marks = vec!["?"; columns.len()].join(", ");
+        let sql = format!("INSERT OR REPLACE INTO {table} ({list}) VALUES ({marks})");
         for row in rows {
-            let mut insert =
-                sqlx::query(&format!("INSERT OR REPLACE INTO {table} ({list}) VALUES ({marks})"));
+            let mut insert = sqlx::query(&sql);
             for index in 0..columns.len() {
                 insert = insert.bind(row.try_get::<Option<String>, _>(index).ok().flatten());
             }
@@ -380,7 +391,11 @@ impl Feeder {
     fn window(&mut self, samples: &[f32], position: u64) {
         match &mut self.feed {
             Feed::Streaming => {
-                self.send(vec![0.0; samples.len()], RecordingDeviceType::Microphone, position);
+                self.send(
+                    vec![0.0; samples.len()],
+                    RecordingDeviceType::Microphone,
+                    position,
+                );
                 self.send(samples.to_vec(), RecordingDeviceType::System, position);
             }
             Feed::Chunked(vad) => {
@@ -422,15 +437,55 @@ impl Feeder {
     }
 }
 
-/// Decodes and feeds the recording, paced to `speed`× real time. Returns the
-/// feeder (for the stop flush) and the samples fed.
+/// Waits until the live worker has decoded up to `fed_s` minus a little
+/// look-ahead, so unpaced feeding never builds a backlog the worker would
+/// drop. Gives up after a while (a stuck worker must not hang the replay).
+fn wait_for_decode(fed_s: f64, streaming: bool) {
+    const LOOKAHEAD_S: f64 = 1.2;
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(30) {
+        let caught_up = if streaming {
+            crate::audio::live_streaming::worker::decode_totals().1 >= fed_s - LOOKAHEAD_S
+        } else {
+            crate::audio::live_streaming::worker::current_backlog_seconds() < 2.0
+        };
+        if caught_up {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+/// Moves meeting time to `end_ms` of audio: at once while no model work is in
+/// flight, at the wall clock's rate while it is (or always, in real time).
+fn pace_to(end: Duration, realtime: bool) {
+    use crate::clock::simulation;
+    loop {
+        if realtime || crate::clock::is_busy() {
+            if !simulation::is_following() {
+                simulation::follow_wall(true);
+            }
+            if simulation::elapsed() >= end {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        } else {
+            simulation::advance_to(end);
+            return;
+        }
+    }
+}
+
+/// Decodes and feeds the recording. Returns the feeder (for the stop flush)
+/// and the samples fed.
 fn feed_audio(
     audio: PathBuf,
     mut feeder: Feeder,
-    speed: f64,
+    realtime: bool,
     limit_ms: Option<u64>,
     recorder: Arc<Recorder>,
 ) -> Result<(Feeder, u64)> {
+    let streaming = matches!(feeder.feed, Feed::Streaming);
     let mut child = Command::new(ffmpeg()?)
         .args(["-hide_banner", "-nostdin", "-v", "error", "-i"])
         .arg(&audio)
@@ -439,8 +494,10 @@ fn feed_audio(
         .stderr(Stdio::null())
         .spawn()
         .context("starting ffmpeg")?;
-    let mut stdout = child.stdout.take().ok_or_else(|| anyhow!("no ffmpeg stdout"))?;
-    let started = Instant::now();
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("no ffmpeg stdout"))?;
     let mut bytes = vec![0u8; WINDOW_SAMPLES * 4];
     let mut position: u64 = 0;
     loop {
@@ -465,12 +522,15 @@ fn feed_audio(
             .collect();
         // A window is sent once it has been "captured".
         let end = position + count as u64;
-        let due = Duration::from_secs_f64(end as f64 / SAMPLE_RATE as f64 / speed);
-        if let Some(wait) = due.checked_sub(started.elapsed()) {
-            std::thread::sleep(wait);
-        }
+        pace_to(
+            Duration::from_secs_f64(end as f64 / SAMPLE_RATE as f64),
+            realtime,
+        );
         feeder.window(&samples, position);
         position = end;
+        if !realtime {
+            wait_for_decode(position as f64 / SAMPLE_RATE as f64, streaming);
+        }
         recorder
             .audio_ms
             .store(position * 1000 / SAMPLE_RATE as u64, Ordering::Relaxed);
@@ -497,7 +557,11 @@ struct Shared {
     last_others_ms: AtomicI64,
 }
 
-fn register_listeners(app: &AppHandle<MockRuntime>, recorder: &Arc<Recorder>, shared: &Arc<Shared>) {
+fn register_listeners(
+    app: &AppHandle<MockRuntime>,
+    recorder: &Arc<Recorder>,
+    shared: &Arc<Shared>,
+) {
     for &name in UI_EVENTS {
         let recorder = recorder.clone();
         let shared = shared.clone();
@@ -583,11 +647,11 @@ fn spawn_health(recorder: Arc<Recorder>, done: Arc<AtomicBool>) -> tokio::task::
         let mut recent: std::collections::VecDeque<(f64, f64)> = Default::default();
         let mut tick = 0u64;
         while !done.load(Ordering::Relaxed) {
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            tokio::time::sleep(Duration::from_millis(250)).await;
             tick += 1;
             let (busy, audio) = crate::audio::live_streaming::worker::decode_totals();
             recent.push_back((busy, audio));
-            if recent.len() > 11 {
+            if recent.len() > 41 {
                 recent.pop_front();
             }
             let (busy0, audio0) = recent.front().copied().unwrap_or((0.0, 0.0));
@@ -604,9 +668,11 @@ fn spawn_health(recorder: Arc<Recorder>, done: Arc<AtomicBool>) -> tokio::task::
                     "rtf_total": if audio > 0.0 { Some(busy / audio) } else { None },
                     "busy_s": busy,
                     "decoded_audio_s": audio,
+                    "fed_audio_s": recorder.audio_ms.load(Ordering::Relaxed) as f64 / 1000.0,
+                    "llm_busy": crate::clock::is_busy(),
                 }),
             );
-            if tick % 5 == 0 {
+            if tick % 20 == 0 {
                 system.refresh_processes(ProcessesToUpdate::All, true);
                 let app = me
                     .and_then(|pid| system.process(pid))
@@ -632,92 +698,6 @@ fn spawn_health(recorder: Arc<Recorder>, done: Arc<AtomicBool>) -> tokio::task::
     })
 }
 
-const DETECTOR_COUNTERS: &[(&str, &str)] = &[
-    ("ruleReject", "rule_reject"),
-    ("rulePass", "rule_pass"),
-    ("skipped", "skipped"),
-    ("confirmYes", "confirm_yes"),
-    ("confirmNo", "confirm_no"),
-    ("confirmUnknown", "confirm_unknown"),
-    ("falseAlarms", "false_alarms"),
-];
-
-/// Polls Copilot's state: each detector counter step becomes a decision, and
-/// each finished request a `copilot-request` record.
-fn spawn_copilot_watch(
-    recorder: Arc<Recorder>,
-    shared: Arc<Shared>,
-    done: Arc<AtomicBool>,
-    tags: Arc<Mutex<HashMap<String, Option<String>>>>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut counters: HashMap<&str, u64> = HashMap::new();
-        let mut finished: std::collections::HashSet<String> = Default::default();
-        let mut confirming_line: i64 = 0;
-        loop {
-            let stopping = done.load(Ordering::Relaxed);
-            if let Some(snapshot) = crate::copilot::copilot_get_state().await {
-                let value = serde_json::to_value(&snapshot).unwrap_or(Value::Null);
-                let detector = &value["debug"]["detector"];
-                let last = detector["last"].as_str().unwrap_or_default().to_string();
-                for (key, label) in DETECTOR_COUNTERS {
-                    let now = detector[*key].as_u64().unwrap_or(0);
-                    let before = counters.insert(key, now).unwrap_or(0);
-                    for _ in before..now {
-                        let line_ms = if label.starts_with("confirm") {
-                            confirming_line
-                        } else {
-                            shared.last_others_ms.load(Ordering::Relaxed)
-                        };
-                        if last.contains("confirming") && *label == "rule_pass" {
-                            confirming_line = line_ms;
-                        }
-                        recorder.debug(
-                            debug::DETECTOR,
-                            json!({ "counter": label, "decision": last, "line_ms": line_ms }),
-                        );
-                    }
-                }
-                for message in value["messages"].as_array().into_iter().flatten() {
-                    let id = message["id"].as_str().unwrap_or_default().to_string();
-                    let status = message["status"].as_str().unwrap_or_default();
-                    if matches!(status, "pending" | "streaming") || finished.contains(&id) {
-                        continue;
-                    }
-                    finished.insert(id.clone());
-                    let stats = &message["stats"];
-                    let tag = tags
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .get(&id)
-                        .cloned()
-                        .flatten();
-                    recorder.debug(
-                        debug::COPILOT_REQUEST,
-                        json!({
-                            "id": id,
-                            "kind": message["kind"],
-                            "tag": tag,
-                            "audio_ms": message["audioMs"],
-                            "status": status,
-                            "error": message["error"],
-                            "first_token_ms": stats["firstTokenMs"],
-                            "total_ms": stats["totalMs"],
-                            "tokens_per_second": stats["tokensPerSecond"],
-                            "prompt_tokens": stats["promptTokens"],
-                            "reused_tokens": stats["reusedTokens"],
-                        }),
-                    );
-                }
-            }
-            if stopping {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    })
-}
-
 /// Runs the scripted Copilot steps and feeds the user's notes as the
 /// recording reaches them.
 fn spawn_script(
@@ -732,7 +712,7 @@ fn spawn_script(
         let mut steps = steps.into_iter().peekable();
         let mut notes_fed = 0usize;
         while !done.load(Ordering::Relaxed) {
-            let audio_ms = recorder.audio_ms.load(Ordering::Relaxed);
+            let audio_ms = meeting_ms();
             let due = notes
                 .iter()
                 .take_while(|(at, _, _)| *at * 1000.0 <= audio_ms as f64)
@@ -755,15 +735,12 @@ fn spawn_script(
                 recorder.debug(debug::SCRIPT, json!({ "kind": "notes", "count": due }));
             }
             while let Some(step) = steps.next_if(|s| s.at_ms <= audio_ms) {
-                let topic = script::pick_topic(
-                    &shared.timeline.lock().unwrap_or_else(|e| e.into_inner()),
-                );
+                let topic =
+                    script::pick_topic(&shared.timeline.lock().unwrap_or_else(|e| e.into_inner()));
                 let text = script::fill_topic(&step.step.text, &topic);
                 let result = match step.step.kind {
                     StepKind::Ask => crate::copilot::copilot_ask(None, Some(text.clone())).await,
-                    StepKind::Action => {
-                        crate::copilot::copilot_ask(Some(text.clone()), None).await
-                    }
+                    StepKind::Action => crate::copilot::copilot_ask(Some(text.clone()), None).await,
                 };
                 let (id, error) = match result {
                     Ok(id) => (Some(id), None),
@@ -862,7 +839,11 @@ fn summary_text(lines: &[Value]) -> String {
                 let total = start.floor() as u64;
                 parts.push(format!("[{:02}:{:02}]", total / 60, total % 60));
             }
-            if let Some(speaker) = l["speaker"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+            if let Some(speaker) = l["speaker"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
                 parts.push(format!("[{}]", speaker_label(speaker)));
             }
             parts.push(text.to_string());
@@ -913,9 +894,6 @@ pub fn run(options: Options) -> Result<PathBuf> {
     if !options.audio.is_file() {
         bail!("No recording at {}", options.audio.display());
     }
-    if !(options.speed.is_finite() && options.speed > 0.0) {
-        bail!("--speed must be positive");
-    }
     let real = real_data_dir()?;
     let run_id = format!(
         "{}-{}",
@@ -932,6 +910,13 @@ pub fn run(options: Options) -> Result<PathBuf> {
 
     let recorder = Arc::new(Recorder::new(&out_dir.join("events.jsonl"))?);
     let _ = LOG_RECORDER.set(recorder.clone());
+    // Meeting time for every recording-time rule, and their decisions traced
+    // into the event log.
+    crate::clock::simulation::install();
+    {
+        let recorder = recorder.clone();
+        super::trace::install(Arc::new(move |name, payload| recorder.debug(name, payload)));
+    }
     let logger = ReplayLogger {
         file: Mutex::new(BufWriter::new(File::create(out_dir.join("app.log"))?)),
     };
@@ -953,9 +938,15 @@ pub fn run(options: Options) -> Result<PathBuf> {
         .and_then(|e| e.to_str())
         .unwrap_or("mp4");
     #[cfg(unix)]
-    std::os::unix::fs::symlink(&options.audio, meeting_folder.join(format!("audio.{extension}")))?;
+    std::os::unix::fs::symlink(
+        &options.audio,
+        meeting_folder.join(format!("audio.{extension}")),
+    )?;
     #[cfg(not(unix))]
-    std::fs::copy(&options.audio, meeting_folder.join(format!("audio.{extension}")))?;
+    std::fs::copy(
+        &options.audio,
+        meeting_folder.join(format!("audio.{extension}")),
+    )?;
 
     // The app, on the mock runtime, with the sandbox as its data folder.
     let mut context = tauri::test::mock_context(tauri::test::noop_assets());
@@ -992,6 +983,7 @@ pub fn run(options: Options) -> Result<PathBuf> {
             json!({ "error": format!("{error:#}") }),
         );
     }
+    super::trace::uninstall();
     recorder.flush();
     log::logger().flush();
 
@@ -1039,10 +1031,7 @@ async fn replay(
     // What the app's setup does for transcription.
     crate::whisper_engine::commands::set_models_directory(&app);
     crate::parakeet_engine::commands::set_models_directory(&app);
-    if let Some(vocabulary) = store
-        .get("transcriptionVocabulary")
-        .and_then(Value::as_str)
-    {
+    if let Some(vocabulary) = store.get("transcriptionVocabulary").and_then(Value::as_str) {
         crate::whisper_engine::whisper_engine::set_transcription_vocabulary(vocabulary.to_string());
     }
     crate::audio::transcription_queue::init_queue_worker(&app);
@@ -1101,11 +1090,8 @@ async fn replay(
     let mut limitations = vec![
         "The recording is one mixed track (microphone and system together). It is fed as the system (Others) source with a silent microphone, so every line is attributed to Others and the detector sees the user's own questions too.".to_string(),
     ];
-    if options.speed != 1.0 {
-        limitations.push(format!(
-            "Fed at {}× real time: contention, cooldown and real-time factor numbers are distorted.",
-            options.speed
-        ));
+    if !options.realtime {
+        limitations.push("Fed as fast as live transcription decodes, on a simulated meeting clock that runs at real speed only while model work is in flight. Model latencies are real; live transcription's real-time contention is approximated (RTF is decode time over audio time), not measured.".to_string());
     }
     if !dropped.is_empty() {
         limitations.push(format!(
@@ -1124,7 +1110,8 @@ async fn replay(
             "audio_name": options.audio.file_name().map(|n| n.to_string_lossy().to_string()),
             "duration_s": duration_s,
             "fed_s": fed_s,
-            "speed": options.speed,
+            "speed": if options.realtime { 1.0 } else { 0.0 },
+            "realtime": options.realtime,
             "live_engine": live_engine,
             "summary_model": model,
             "script": scheduled.iter().map(|s| json!({
@@ -1145,15 +1132,16 @@ async fn replay(
     crate::copilot::start_session(&app, session_id.clone());
     crate::live_summary::start_session(&app, session_id.clone());
     // The frontend creates the meeting right after start and binds it.
-    let meeting_id = crate::database::repositories::transcript::TranscriptsRepository::save_transcript(
-        &pool,
-        "Replay",
-        &[],
-        Some(meeting_folder.to_string_lossy().to_string()),
-        None,
-        false,
-    )
-    .await?;
+    let meeting_id =
+        crate::database::repositories::transcript::TranscriptsRepository::save_transcript(
+            &pool,
+            "Replay",
+            &[],
+            Some(meeting_folder.to_string_lossy().to_string()),
+            None,
+            false,
+        )
+        .await?;
     crate::meeting_activity::bind_active_recording_meeting(
         app.clone(),
         session_id.clone(),
@@ -1165,8 +1153,6 @@ async fn replay(
     let done = Arc::new(AtomicBool::new(false));
     let tags: Arc<Mutex<HashMap<String, Option<String>>>> = Default::default();
     let health = spawn_health(recorder.clone(), done.clone());
-    let watch_done = Arc::new(AtomicBool::new(false));
-    let watch = spawn_copilot_watch(recorder.clone(), shared.clone(), watch_done.clone(), tags.clone());
     let script_task = spawn_script(
         recorder.clone(),
         shared.clone(),
@@ -1190,16 +1176,19 @@ async fn replay(
         feed,
         chunk_id: 0,
     };
-    let (audio, speed, limit) = (
+    let (audio, realtime, limit) = (
         options.audio.clone(),
-        options.speed,
+        options.realtime,
         options.limit_seconds.map(|s| (s * 1000.0) as u64),
     );
     let feed_recorder = recorder.clone();
     let (feeder, position) = tokio::task::spawn_blocking(move || {
-        feed_audio(audio, feeder, speed, limit, feed_recorder)
+        feed_audio(audio, feeder, realtime, limit, feed_recorder)
     })
     .await??;
+    // After the audio, meeting time runs with the wall clock (stop graces,
+    // the final pass and the summaries are measured as they really run).
+    crate::clock::simulation::follow_wall(true);
     recorder.phase("audio-end", json!({}));
 
     // Stop, in `stop_recording`'s order.
@@ -1239,7 +1228,11 @@ async fn replay(
     recorder.phase("stopped", json!({}));
 
     // Save the live transcript as the frontend does.
-    let finals = shared.finals.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let finals = shared
+        .finals
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
     let segments: Vec<crate::api::TranscriptSegment> = finals
         .iter()
         .enumerate()
@@ -1277,8 +1270,6 @@ async fn replay(
     .await;
     // Copilot's finish (persisting moments) and the last state.
     tokio::time::sleep(Duration::from_secs(3)).await;
-    watch_done.store(true, Ordering::Relaxed);
-    let _ = watch.await;
 
     // The final pass (and diarization inside it).
     let mut lines = transcript_lines(&pool, &meeting_id).await?;
@@ -1318,10 +1309,11 @@ async fn replay(
     recorder.debug(debug::FINAL_TRANSCRIPT, json!({ "lines": lines }));
 
     // The summary, `summary_runs` times on the same input.
-    let config = crate::database::repositories::setting::SettingsRepository::get_model_config(&pool)
-        .await
-        .ok()
-        .flatten();
+    let config =
+        crate::database::repositories::setting::SettingsRepository::get_model_config(&pool)
+            .await
+            .ok()
+            .flatten();
     match config {
         None => log::warn!("Replay: no summary model configured; skipping the summary"),
         Some(config) => {
@@ -1391,14 +1383,18 @@ async fn summarize(
     let started = Instant::now();
     loop {
         tokio::time::sleep(Duration::from_secs(2)).await;
-        let row = sqlx::query("SELECT status, result, error FROM summary_processes WHERE meeting_id = ?")
-            .bind(meeting_id)
-            .fetch_optional(pool)
-            .await?;
+        let row =
+            sqlx::query("SELECT status, result, error FROM summary_processes WHERE meeting_id = ?")
+                .bind(meeting_id)
+                .fetch_optional(pool)
+                .await?;
         if let Some(row) = row {
             let status: String = row.try_get(0).unwrap_or_default();
             let status = status.to_lowercase();
-            if !matches!(status.as_str(), "pending" | "processing" | "started" | "running") {
+            if !matches!(
+                status.as_str(),
+                "pending" | "processing" | "started" | "running"
+            ) {
                 let result: Option<String> = row.try_get(1).ok().flatten();
                 let markdown = result
                     .as_deref()

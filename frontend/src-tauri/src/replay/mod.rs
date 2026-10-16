@@ -23,6 +23,7 @@
 pub mod events;
 pub mod report;
 pub mod script;
+pub mod trace;
 
 #[cfg(feature = "dev-replay")]
 pub mod runner;

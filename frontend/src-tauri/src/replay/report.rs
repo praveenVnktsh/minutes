@@ -147,7 +147,12 @@ fn live_lines(records: &[Record]) -> Vec<LiveLine> {
     records
         .iter()
         .filter(|r| r.is_event("transcript-update"))
-        .filter(|r| !r.payload.get("is_partial").and_then(Value::as_bool).unwrap_or(false))
+        .filter(|r| {
+            !r.payload
+                .get("is_partial")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
         .filter_map(|r| {
             let text = text(&r.payload, "text")?.trim().to_string();
             (!text.is_empty()).then(|| LiveLine {
@@ -158,6 +163,14 @@ fn live_lines(records: &[Record]) -> Vec<LiveLine> {
             })
         })
         .collect()
+}
+
+/// A sidecar record's kind: `phase` from the queue trace, `what` from the log.
+fn sidecar_what(payload: &Value) -> String {
+    text(payload, "phase")
+        .or_else(|| text(payload, "what"))
+        .unwrap_or_default()
+        .to_string()
 }
 
 fn text_or(value: &Value, key: &str) -> String {
@@ -201,12 +214,15 @@ fn phase_t(records: &[Record], phase: &str) -> Option<u64> {
 struct Messages {
     last: Vec<Value>,
     first_seen: HashMap<String, u64>,
+    /// Meeting time (audio_ms) each message first appeared at.
+    first_seen_audio: HashMap<String, u64>,
     deltas: HashMap<String, Vec<u64>>,
 }
 
 fn messages(records: &[Record]) -> Messages {
     let mut by_id: Vec<(String, Value)> = Vec::new();
     let mut first_seen = HashMap::new();
+    let mut first_seen_audio = HashMap::new();
     let mut deltas: HashMap<String, Vec<u64>> = HashMap::new();
     for record in records {
         if record.is_event("copilot-state") {
@@ -218,6 +234,9 @@ fn messages(records: &[Record]) -> Messages {
                     continue;
                 };
                 first_seen.entry(id.to_string()).or_insert(record.t_ms);
+                first_seen_audio
+                    .entry(id.to_string())
+                    .or_insert(record.audio_ms);
                 match by_id.iter_mut().find(|(known, _)| known == id) {
                     Some((_, slot)) => *slot = message.clone(),
                     None => by_id.push((id.to_string(), message.clone())),
@@ -232,6 +251,7 @@ fn messages(records: &[Record]) -> Messages {
     Messages {
         last: by_id.into_iter().map(|(_, m)| m).collect(),
         first_seen,
+        first_seen_audio,
         deltas,
     }
 }
@@ -271,10 +291,33 @@ fn honest(reply: &str) -> bool {
     .any(|phrase| reply.contains(phrase))
 }
 
-/// Rolling real-time factor of live transcription over `RTF_WINDOW_MS`, from
-/// the cumulative `busy_s` / `decoded_audio_s` of `live` records.
+/// Real-time factor of live transcription (decode time over audio time) for
+/// each `RTF_WINDOW_MS` of decoded audio, from the cumulative `busy_s` /
+/// `decoded_audio_s` of `live` records. Works for real-time and unpaced runs.
 fn rtf_windows(records: &[Record]) -> Vec<(u64, f64)> {
-    let samples: Vec<(u64, f64, f64)> = records
+    let samples = live_samples(records);
+    let window = RTF_WINDOW_MS as f64 / 1000.0;
+    let mut out = Vec::new();
+    let mut start = 0;
+    for (index, &(t, busy, audio, _)) in samples.iter().enumerate() {
+        while samples[start].2 + window < audio {
+            start += 1;
+        }
+        if start == index {
+            continue;
+        }
+        let (_, busy0, audio0, _) = samples[start];
+        let audio_delta = audio - audio0;
+        if audio_delta >= window / 2.0 {
+            out.push((t, (busy - busy0) / audio_delta));
+        }
+    }
+    out
+}
+
+/// `(t_ms, busy_s, decoded_audio_s, llm_busy)` of every `live` record.
+fn live_samples(records: &[Record]) -> Vec<(u64, f64, f64, bool)> {
+    records
         .iter()
         .filter(|r| r.is_debug(debug::LIVE))
         .filter_map(|r| {
@@ -282,25 +325,27 @@ fn rtf_windows(records: &[Record]) -> Vec<(u64, f64)> {
                 r.t_ms,
                 num(&r.payload, "busy_s")?,
                 num(&r.payload, "decoded_audio_s")?,
+                r.payload
+                    .get("llm_busy")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
             ))
         })
-        .collect();
-    let mut out = Vec::new();
-    let mut start = 0;
-    for (index, &(t, busy, audio)) in samples.iter().enumerate() {
-        while samples[start].0 + RTF_WINDOW_MS < t {
-            start += 1;
-        }
-        if start == index {
-            continue;
-        }
-        let (_, busy0, audio0) = samples[start];
-        let audio_delta = audio - audio0;
-        if audio_delta >= 10.0 {
-            out.push((t, (busy - busy0) / audio_delta));
+        .collect()
+}
+
+/// RTF over the intervals where model work was in flight, and how much audio
+/// those intervals decoded.
+fn rtf_while_llm(records: &[Record]) -> Option<(f64, f64)> {
+    let samples = live_samples(records);
+    let (mut busy, mut audio) = (0.0, 0.0);
+    for pair in samples.windows(2) {
+        if pair[1].3 {
+            busy += pair[1].1 - pair[0].1;
+            audio += pair[1].2 - pair[0].2;
         }
     }
-    out
+    (audio >= 5.0).then(|| (busy / audio, audio))
 }
 
 fn median(values: &mut [u64]) -> Option<u64> {
@@ -384,7 +429,11 @@ pub fn score(records: &[Record]) -> Report {
         if let Some(first) = first_line_t {
             for r in records.iter().filter(|r| r.t_ms < first) {
                 if r.is_debug(debug::SIDECAR) {
-                    idle.push(format!("{} sidecar {}", at(r.t_ms), text_or(&r.payload, "what")));
+                    idle.push(format!(
+                        "{} sidecar {}",
+                        at(r.t_ms),
+                        sidecar_what(&r.payload)
+                    ));
                 }
                 if r.is_event("live-timeline-update")
                     && text(&r.payload, "status") == Some("generating")
@@ -422,7 +471,10 @@ pub fn score(records: &[Record]) -> Report {
                     "{} {}{}: first words {} ms, {} total, {:.1} tok/s",
                     at(r.audio_ms.max(0) as u64),
                     r.kind,
-                    r.tag.as_ref().map(|t| format!(" [{t}]")).unwrap_or_default(),
+                    r.tag
+                        .as_ref()
+                        .map(|t| format!(" [{t}]"))
+                        .unwrap_or_default(),
                     r.first_token_ms
                         .map(|v| v.to_string())
                         .unwrap_or_else(|| "–".into()),
@@ -445,7 +497,9 @@ pub fn score(records: &[Record]) -> Report {
             },
             value: format!(
                 "median {} ms, max {} ms{}",
-                median(&mut values).map(|v| v.to_string()).unwrap_or_else(|| "–".into()),
+                median(&mut values)
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "–".into()),
                 max.map(|v| v.to_string()).unwrap_or_else(|| "–".into()),
                 if missing > 0 {
                     format!(", {missing} without an answer")
@@ -460,10 +514,8 @@ pub fn score(records: &[Record]) -> Report {
 
     // 3. Streaming.
     {
-        let answered: Vec<&CopilotRequest> = requests
-            .iter()
-            .filter(|r| r.status == "done")
-            .collect();
+        let answered: Vec<&CopilotRequest> =
+            requests.iter().filter(|r| r.status == "done").collect();
         let streamed = answered.iter().filter(|r| r.deltas >= 2).count();
         criteria.push(Criterion {
             id: "streaming",
@@ -477,7 +529,14 @@ pub fn score(records: &[Record]) -> Report {
             detail: answered
                 .iter()
                 .filter(|r| r.deltas < 2)
-                .map(|r| format!("{} {}: {} chunks", at(r.audio_ms.max(0) as u64), r.kind, r.deltas))
+                .map(|r| {
+                    format!(
+                        "{} {}: {} chunks",
+                        at(r.audio_ms.max(0) as u64),
+                        r.kind,
+                        r.deltas
+                    )
+                })
                 .collect(),
             private_detail: vec![],
         });
@@ -529,9 +588,11 @@ pub fn score(records: &[Record]) -> Report {
             let Some(seen) = msgs.first_seen.get(&card.id).copied() else {
                 continue;
             };
-            created.push(seen);
+            // The cooldown is a meeting-time rule.
+            created.push(msgs.first_seen_audio.get(&card.id).copied().unwrap_or(seen));
             let line = lines.iter().find(|l| {
-                l.source == "system" && ((l.start_s * 1000.0).round() as i64 - card.audio_ms).abs() <= 50
+                l.source == "system"
+                    && ((l.start_s * 1000.0).round() as i64 - card.audio_ms).abs() <= 50
             });
             match line {
                 Some(line) => {
@@ -557,13 +618,16 @@ pub fn score(records: &[Record]) -> Report {
                 Status::NotApplicable
             } else {
                 Status::from_bool(
-                    latencies.len() == cards.len() && max.is_some_and(|m| m <= CARD_LATENCY_LIMIT_MS),
+                    latencies.len() == cards.len()
+                        && max.is_some_and(|m| m <= CARD_LATENCY_LIMIT_MS),
                 )
             },
             value: format!(
                 "{} cards, median {} ms, max {} ms",
                 cards.len(),
-                median(&mut latencies.clone()).map(|v| v.to_string()).unwrap_or_else(|| "–".into()),
+                median(&mut latencies.clone())
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "–".into()),
                 max.map(|v| v.to_string()).unwrap_or_else(|| "–".into())
             ),
             detail,
@@ -582,7 +646,9 @@ pub fn score(records: &[Record]) -> Report {
             },
             value: format!(
                 "min gap {}",
-                min_gap.map(|g| format!("{:.1} s", g as f64 / 1000.0)).unwrap_or_else(|| "–".into())
+                min_gap
+                    .map(|g| format!("{:.1} s", g as f64 / 1000.0))
+                    .unwrap_or_else(|| "–".into())
             ),
             detail: vec![],
             private_detail: vec![],
@@ -600,7 +666,10 @@ pub fn score(records: &[Record]) -> Report {
         let mut fired = Vec::new();
         let mut fired_text = Vec::new();
         for d in &decisions {
-            let counter = text_or(&d.payload, "counter");
+            let counter = text(&d.payload, "step")
+                .or_else(|| text(&d.payload, "counter"))
+                .unwrap_or_default()
+                .to_string();
             *counters.entry(counter.clone()).or_default() += 1;
             let decision = text_or(&d.payload, "decision");
             if counter == "skipped" {
@@ -616,7 +685,11 @@ pub fn score(records: &[Record]) -> Report {
             }
             if counter == "confirm_yes" {
                 let line_ms = uint(&d.payload, "line_ms").unwrap_or(0);
-                fired.push(format!("fired on the line at {} (wall {})", at(line_ms), at(d.t_ms)));
+                fired.push(format!(
+                    "fired on the line at {} (wall {})",
+                    at(line_ms),
+                    at(d.t_ms)
+                ));
                 if let Some(line) = lines
                     .iter()
                     .find(|l| ((l.start_s * 1000.0).round() as u64).abs_diff(line_ms) <= 50)
@@ -645,7 +718,10 @@ pub fn score(records: &[Record]) -> Report {
             ));
         }
         detail.extend(fired);
-        stats.insert("detector".into(), serde_json::to_value(&counters).unwrap_or_default());
+        stats.insert(
+            "detector".into(),
+            serde_json::to_value(&counters).unwrap_or_default(),
+        );
         criteria.push(Criterion {
             id: "detector",
             label: "Detector fires (review for false alarms)",
@@ -763,6 +839,7 @@ pub fn score(records: &[Record]) -> Report {
             .rev()
             .find(|r| r.is_debug(debug::LIVE))
             .and_then(|r| num(&r.payload, "rtf_total"));
+        let overlap = rtf_while_llm(records);
         let over: Vec<String> = windows
             .iter()
             .filter(|(_, rtf)| *rtf >= RTF_LIMIT)
@@ -771,16 +848,25 @@ pub fn score(records: &[Record]) -> Report {
             .collect();
         criteria.push(Criterion {
             id: "live_rtf",
-            label: "Live transcription RTF < 0.9 (60 s windows)",
+            label: "Live transcription RTF < 0.9 (60 s of audio windows)",
             status: match worst {
                 None => Status::NotApplicable,
-                Some((_, rtf)) => Status::from_bool(rtf < RTF_LIMIT),
+                Some((_, rtf)) => {
+                    Status::from_bool(rtf < RTF_LIMIT && overlap.is_none_or(|(o, _)| o < RTF_LIMIT))
+                }
             },
             value: format!(
-                "max {} (at {}), overall {}, max backlog {}",
-                worst.map(|w| format!("{:.2}", w.1)).unwrap_or_else(|| "–".into()),
+                "max {} (at {}), overall {}, while the model ran {}, max backlog {}",
+                worst
+                    .map(|w| format!("{:.2}", w.1))
+                    .unwrap_or_else(|| "–".into()),
                 worst.map(|w| at(w.0)).unwrap_or_else(|| "–".into()),
-                total.map(|v| format!("{v:.2}")).unwrap_or_else(|| "–".into()),
+                total
+                    .map(|v| format!("{v:.2}"))
+                    .unwrap_or_else(|| "–".into()),
+                overlap
+                    .map(|(o, a)| format!("{o:.2} over {a:.0} s of audio"))
+                    .unwrap_or_else(|| "–".into()),
                 backlog
                     .map(|b| format!("{:.1} s at {}", b.1, at(b.0)))
                     .unwrap_or_else(|| "–".into())
@@ -800,7 +886,8 @@ pub fn score(records: &[Record]) -> Report {
                     after.push(format!("{} copilot chunk", at(r.t_ms)));
                 }
                 if r.is_debug(debug::DETECTOR)
-                    && text(&r.payload, "decision").is_some_and(|d| d.contains("confirming"))
+                    && (text(&r.payload, "step") == Some("confirming")
+                        || text(&r.payload, "decision").is_some_and(|d| d.contains("confirming")))
                 {
                     after.push(format!("{} detector confirm", at(r.t_ms)));
                 }
@@ -860,12 +947,8 @@ pub fn score(records: &[Record]) -> Report {
         if done.len() >= 2 && !identical {
             let a: Vec<&str> = done[0].0.lines().collect();
             let b: Vec<&str> = done[1].0.lines().collect();
-            let differing = a
-                .iter()
-                .zip(b.iter())
-                .filter(|(x, y)| x != y)
-                .count()
-                + a.len().abs_diff(b.len());
+            let differing =
+                a.iter().zip(b.iter()).filter(|(x, y)| x != y).count() + a.len().abs_diff(b.len());
             detail.push(format!("{differing} lines differ"));
         }
         criteria.push(Criterion {
@@ -876,7 +959,11 @@ pub fn score(records: &[Record]) -> Report {
             } else {
                 Status::from_bool(identical)
             },
-            value: format!("{} of {} runs completed, identical: {identical}", done.len(), runs.len()),
+            value: format!(
+                "{} of {} runs completed, identical: {identical}",
+                done.len(),
+                runs.len()
+            ),
             detail,
             private_detail: vec![],
         });
@@ -896,7 +983,12 @@ pub fn score(records: &[Record]) -> Report {
         .iter()
         .rev()
         .find(|r| r.is_event("live-timeline-update"))
-        .and_then(|r| r.payload.get("entries").and_then(Value::as_array).map(Vec::len));
+        .and_then(|r| {
+            r.payload
+                .get("entries")
+                .and_then(Value::as_array)
+                .map(Vec::len)
+        });
     stats.insert("timeline_entries".into(), timeline.unwrap_or(0).into());
     let sidecar: Vec<&Record> = records
         .iter()
@@ -904,7 +996,7 @@ pub fn score(records: &[Record]) -> Report {
         .collect();
     let mut sidecar_counts: BTreeMap<String, u64> = BTreeMap::new();
     for r in &sidecar {
-        *sidecar_counts.entry(text_or(&r.payload, "what")).or_default() += 1;
+        *sidecar_counts.entry(sidecar_what(&r.payload)).or_default() += 1;
     }
     stats.insert(
         "sidecar".into(),
@@ -918,17 +1010,17 @@ pub fn score(records: &[Record]) -> Report {
             .fold(0.0f64, f64::max)
     };
     stats.insert("peak_app_rss_mb".into(), peak("app_rss_mb").round().into());
-    stats.insert("peak_helper_rss_mb".into(), peak("helper_rss_mb").round().into());
+    stats.insert(
+        "peak_helper_rss_mb".into(),
+        peak("helper_rss_mb").round().into(),
+    );
     if let (Some(start), Some(done)) = (
         phase_t(records, "final-pass-start"),
         phase_t(records, "final-pass-done"),
     ) {
         stats.insert("final_pass_s".into(), ((done - start) / 1000).into());
     }
-    let errors: HashSet<String> = requests
-        .iter()
-        .filter_map(|r| r.error.clone())
-        .collect();
+    let errors: HashSet<String> = requests.iter().filter_map(|r| r.error.clone()).collect();
     stats.insert("copilot_errors".into(), errors.len().into());
 
     Report {
@@ -1032,7 +1124,14 @@ mod tests {
         )
     }
 
-    fn message(id: &str, kind: &str, audio_ms: i64, reply: &str, status: &str, stats: Value) -> Value {
+    fn message(
+        id: &str,
+        kind: &str,
+        audio_ms: i64,
+        reply: &str,
+        status: &str,
+        stats: Value,
+    ) -> Value {
         json!({"id": id, "kind": kind, "audioMs": audio_ms, "reply": reply,
                "status": status, "stats": stats})
     }
@@ -1042,37 +1141,127 @@ mod tests {
                                "promptTokens": 1200, "reusedTokens": 0});
         let ask2_stats = json!({"firstTokenMs": 700, "totalMs": 3000, "tokensPerSecond": 22.0,
                                 "promptTokens": 1300, "reusedTokens": 1100});
-        let m1 = message("a1", "ask", 60_000, "It has not come up in the meeting so far.", "done", ask_stats);
-        let m2 = message("a2", "action", 120_000, "They decided the tenth [00:10].", "done", ask2_stats);
-        let card = message("c1", "suggestion", 100_000, "Say yes [01:40].", "done", json!({}));
+        let m1 = message(
+            "a1",
+            "ask",
+            60_000,
+            "It has not come up in the meeting so far.",
+            "done",
+            ask_stats,
+        );
+        let m2 = message(
+            "a2",
+            "action",
+            120_000,
+            "They decided the tenth [00:10].",
+            "done",
+            ask2_stats,
+        );
+        let card = message(
+            "c1",
+            "suggestion",
+            100_000,
+            "Say yes [01:40].",
+            "done",
+            json!({}),
+        );
         vec![
-            rec(0, RecordType::Meta, "run-start", json!({"audio_name": "x", "duration_s": 300.0, "speed": 1.0})),
+            rec(
+                0,
+                RecordType::Meta,
+                "run-start",
+                json!({"audio_name": "x", "duration_s": 300.0, "speed": 1.0}),
+            ),
             dbg(0, "phase", json!({"phase": "live-start"})),
             line(9_000, "mic", 8.0, "Hello everyone"),
             line(12_000, "system", 10.0, "We pick the tenth."),
-            dbg(30_000, "live", json!({"backlog_s": 0.2, "busy_s": 5.0, "decoded_audio_s": 30.0, "rtf_total": 0.17})),
-            dbg(60_000, "script", json!({"message_id": "a1", "tag": "honesty"})),
+            dbg(
+                30_000,
+                "live",
+                json!({"backlog_s": 0.2, "busy_s": 5.0, "decoded_audio_s": 30.0, "rtf_total": 0.17}),
+            ),
+            dbg(
+                60_000,
+                "script",
+                json!({"message_id": "a1", "tag": "honesty"}),
+            ),
             ev(60_100, "copilot-state", json!({"messages": [m1.clone()]})),
             ev(60_900, "copilot-delta", json!({"id": "a1", "delta": "It"})),
-            ev(61_000, "copilot-delta", json!({"id": "a1", "delta": " has"})),
-            dbg(90_000, "live", json!({"backlog_s": 0.4, "busy_s": 20.0, "decoded_audio_s": 90.0, "rtf_total": 0.22})),
+            ev(
+                61_000,
+                "copilot-delta",
+                json!({"id": "a1", "delta": " has"}),
+            ),
+            dbg(
+                90_000,
+                "live",
+                json!({"backlog_s": 0.4, "busy_s": 20.0, "decoded_audio_s": 90.0, "rtf_total": 0.22}),
+            ),
             line(101_000, "system", 100.0, "Can you send the deck?"),
-            dbg(101_010, "detector", json!({"counter": "rule_pass", "decision": "rule: yes (question mark), confirming", "line_ms": 100_000})),
-            dbg(102_000, "detector", json!({"counter": "confirm_yes", "decision": "model: yes", "line_ms": 100_000})),
-            ev(102_500, "copilot-state", json!({"messages": [m1.clone(), card.clone()]})),
-            ev(103_000, "copilot-delta", json!({"id": "c1", "delta": "Say"})),
-            ev(103_100, "copilot-delta", json!({"id": "c1", "delta": " yes"})),
+            dbg(
+                101_010,
+                "detector",
+                json!({"counter": "rule_pass", "decision": "rule: yes (question mark), confirming", "line_ms": 100_000}),
+            ),
+            dbg(
+                102_000,
+                "detector",
+                json!({"counter": "confirm_yes", "decision": "model: yes", "line_ms": 100_000}),
+            ),
+            ev(
+                102_500,
+                "copilot-state",
+                json!({"messages": [m1.clone(), card.clone()]}),
+            ),
+            ev(
+                103_000,
+                "copilot-delta",
+                json!({"id": "c1", "delta": "Say"}),
+            ),
+            ev(
+                103_100,
+                "copilot-delta",
+                json!({"id": "c1", "delta": " yes"}),
+            ),
             dbg(120_000, "script", json!({"message_id": "a2", "tag": null})),
-            ev(120_000, "copilot-state", json!({"messages": [m1.clone(), card.clone(), m2.clone()]})),
-            ev(120_700, "copilot-delta", json!({"id": "a2", "delta": "They"})),
-            ev(120_800, "copilot-delta", json!({"id": "a2", "delta": " decided"})),
-            dbg(150_000, "live", json!({"backlog_s": 0.1, "busy_s": 30.0, "decoded_audio_s": 150.0, "rtf_total": 0.2})),
+            ev(
+                120_000,
+                "copilot-state",
+                json!({"messages": [m1.clone(), card.clone(), m2.clone()]}),
+            ),
+            ev(
+                120_700,
+                "copilot-delta",
+                json!({"id": "a2", "delta": "They"}),
+            ),
+            ev(
+                120_800,
+                "copilot-delta",
+                json!({"id": "a2", "delta": " decided"}),
+            ),
+            dbg(
+                150_000,
+                "live",
+                json!({"backlog_s": 0.1, "busy_s": 30.0, "decoded_audio_s": 150.0, "rtf_total": 0.2}),
+            ),
             dbg(300_000, "phase", json!({"phase": "stop"})),
-            dbg(400_000, "final-transcript", json!({"lines": [
+            dbg(
+                400_000,
+                "final-transcript",
+                json!({"lines": [
                 {"start": 8.0, "end": 11.0, "speaker": "You", "text": "Hello"},
-                {"start": 99.0, "end": 103.0, "speaker": "Speaker 1", "text": "Can you"}]})),
-            dbg(500_000, "summary", json!({"run": 1, "status": "completed", "markdown": "# A", "ms": 1000})),
-            dbg(600_000, "summary", json!({"run": 2, "status": "completed", "markdown": "# A", "ms": 1100})),
+                {"start": 99.0, "end": 103.0, "speaker": "Speaker 1", "text": "Can you"}]}),
+            ),
+            dbg(
+                500_000,
+                "summary",
+                json!({"run": 1, "status": "completed", "markdown": "# A", "ms": 1000}),
+            ),
+            dbg(
+                600_000,
+                "summary",
+                json!({"run": 2, "status": "completed", "markdown": "# A", "ms": 1100}),
+            ),
         ]
     }
 
@@ -1095,13 +1284,26 @@ mod tests {
             "after_end",
             "summary_determinism",
         ] {
-            assert_eq!(status(&report, id), Status::Pass, "{id}: {:?}", report.criteria);
+            assert_eq!(
+                status(&report, id),
+                Status::Pass,
+                "{id}: {:?}",
+                report.criteria
+            );
         }
         assert_eq!(status(&report, "card_cooldown"), Status::NotApplicable);
-        let first = report.criteria.iter().find(|c| c.id == "first_words").unwrap();
+        let first = report
+            .criteria
+            .iter()
+            .find(|c| c.id == "first_words")
+            .unwrap();
         // Measured from the ask to the first streamed chunk.
         assert!(first.value.contains("max 900 ms"), "{}", first.value);
-        let card = report.criteria.iter().find(|c| c.id == "card_latency").unwrap();
+        let card = report
+            .criteria
+            .iter()
+            .find(|c| c.id == "card_latency")
+            .unwrap();
         assert!(card.value.contains("max 1500 ms"), "{}", card.value);
     }
 
@@ -1111,7 +1313,11 @@ mod tests {
         // A model request while idle, a slow first word, a bad citation, a
         // dishonest answer, a different summary and work after the stop.
         records.insert(2, dbg(1_000, "sidecar", json!({"what": "spawn"})));
-        records.push(ev(305_000, "copilot-delta", json!({"id": "a2", "delta": "late"})));
+        records.push(ev(
+            305_000,
+            "copilot-delta",
+            json!({"id": "a2", "delta": "late"}),
+        ));
         let slow = message(
             "a3",
             "ask",
@@ -1120,12 +1326,32 @@ mod tests {
             "done",
             json!({"firstTokenMs": 5000, "promptTokens": 10, "reusedTokens": 0}),
         );
-        records.push(dbg(200_000, "script", json!({"message_id": "a3", "tag": "honesty"})));
+        records.push(dbg(
+            200_000,
+            "script",
+            json!({"message_id": "a3", "tag": "honesty"}),
+        ));
         records.push(ev(200_100, "copilot-state", json!({"messages": [slow]})));
-        records.push(ev(205_000, "copilot-delta", json!({"id": "a3", "delta": "They"})));
-        records.push(dbg(700_000, "summary", json!({"run": 3, "status": "completed", "markdown": "# B", "ms": 1})));
+        records.push(ev(
+            205_000,
+            "copilot-delta",
+            json!({"id": "a3", "delta": "They"}),
+        ));
+        records.push(dbg(
+            700_000,
+            "summary",
+            json!({"run": 3, "status": "completed", "markdown": "# B", "ms": 1}),
+        ));
         let report = score(&records);
-        for id in ["idle", "first_words", "reuse", "citations", "honesty", "after_end", "summary_determinism"] {
+        for id in [
+            "idle",
+            "first_words",
+            "reuse",
+            "citations",
+            "honesty",
+            "after_end",
+            "summary_determinism",
+        ] {
             assert_eq!(status(&report, id), Status::Fail, "{id}");
         }
     }
@@ -1134,7 +1360,11 @@ mod tests {
     fn rtf_over_the_limit_fails() {
         let records = vec![
             dbg(0, "live", json!({"busy_s": 0.0, "decoded_audio_s": 0.0})),
-            dbg(30_000, "live", json!({"busy_s": 28.0, "decoded_audio_s": 30.0})),
+            dbg(
+                30_000,
+                "live",
+                json!({"busy_s": 28.0, "decoded_audio_s": 30.0}),
+            ),
         ];
         let report = score(&records);
         assert_eq!(status(&report, "live_rtf"), Status::Fail);

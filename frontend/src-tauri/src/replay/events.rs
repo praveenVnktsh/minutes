@@ -207,8 +207,10 @@ mod tests {
 
     #[test]
     fn a_bad_line_names_its_line_number() {
-        let error = parse_jsonl("{\"seq\":0,\"t_ms\":0,\"audio_ms\":0,\"type\":\"meta\",\"name\":\"x\"}\nnot json")
-            .unwrap_err();
+        let error = parse_jsonl(
+            "{\"seq\":0,\"t_ms\":0,\"audio_ms\":0,\"type\":\"meta\",\"name\":\"x\"}\nnot json",
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("line 2"), "{error}");
     }
 

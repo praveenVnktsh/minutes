@@ -28,6 +28,8 @@ pnpm lint
 # Runs each test file in its own process; see scripts/test-each.mjs for why.
 step "frontend tests"
 pnpm test
+step "replay viewer tests"
+node --test ../site/replay/parser.test.js
 # Also produces frontend/out, which the Rust app embeds at compile time
 # (tauri.conf.json's frontendDist), so it must come before the Rust build.
 step "build frontend"

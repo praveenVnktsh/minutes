@@ -408,7 +408,7 @@ pub async fn generate_with_builtin(
             .unwrap_or_else(|e| e.into_inner());
         let delay = background_pacing_delay(
             last_end,
-            std::time::Instant::now(),
+            crate::clock::now().into_std(),
             crate::audio::recording_commands::is_recording_or_stopping(),
         );
         if !delay.is_zero() {
@@ -416,9 +416,9 @@ pub async fn generate_with_builtin(
             match cancellation_token {
                 Some(token) => tokio::select! {
                     _ = token.cancelled() => return Err(anyhow!(SidecarError::Cancelled)),
-                    _ = tokio::time::sleep(delay) => {}
+                    _ = crate::clock::sleep(delay) => {}
                 },
-                None => tokio::time::sleep(delay).await,
+                None => crate::clock::sleep(delay).await,
             }
         }
     }
@@ -473,7 +473,7 @@ static LAST_GENERATION_END: std::sync::Mutex<Option<std::time::Instant>> =
 fn note_generation_end() {
     *LAST_GENERATION_END
         .lock()
-        .unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now());
+        .unwrap_or_else(|e| e.into_inner()) = Some(crate::clock::now().into_std());
 }
 
 /// How long a background request should wait before it starts.
