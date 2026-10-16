@@ -1,9 +1,15 @@
-use crate::summary::llm_client::{generate_summary, LLMProvider};
-use crate::summary::templates::Template;
+use crate::summary::budget::{
+    chars_per_token, estimate_tokens, group_within_budget, is_context_overflow_error,
+    shrink_chunk_tokens, ContextBudget, MIN_CHUNK_TOKENS,
+};
+use crate::summary::llm_client::{generate_summary, GenerationOptions, LLMProvider, LlmCompletion};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use reqwest::Client;
+use std::collections::VecDeque;
+use std::future::Future;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
@@ -67,11 +73,8 @@ pub fn require_visible_markdown(stage: &str, cleaned: &CleanedLlmMarkdown) -> Re
 
 const MAX_CHUNK_ATTEMPTS: usize = 2;
 
-fn should_retry_chunk_failure(
-    attempt: usize,
-    cancellation_token: Option<&CancellationToken>,
-) -> bool {
-    attempt < MAX_CHUNK_ATTEMPTS && !cancellation_token.is_some_and(CancellationToken::is_cancelled)
+fn should_retry_chunk_failure(attempt: usize, cancelled: bool) -> bool {
+    attempt < MAX_CHUNK_ATTEMPTS && !cancelled
 }
 
 const ENGLISH_BASE_SUMMARY_INSTRUCTION: &str =
@@ -105,9 +108,13 @@ fn resolve_final_language_action(
 ) -> FinalLanguageAction {
     match summary_language.and_then(language_name_from_code) {
         Some(name) if name != "English" => FinalLanguageAction::Translate(name),
+        // `detected_transcript_language` is only set when detection was
+        // confident. Unknown or low-confidence detection must not trigger a
+        // second full rewrite of the notes, so only a confidently detected
+        // non-English transcript is normalised.
         _ => match detected_transcript_language.and_then(language_name_from_code) {
-            Some("English") => FinalLanguageAction::ReturnEnglish,
-            _ => FinalLanguageAction::NormalizeEnglish,
+            Some(name) if name != "English" => FinalLanguageAction::NormalizeEnglish,
+            _ => FinalLanguageAction::ReturnEnglish,
         },
     }
 }
@@ -126,7 +133,7 @@ fn english_normalization_system_prompt() -> &'static str {
 fn english_markdown_after_normalization_result(
     original_markdown: &str,
     normalization_result: Result<CleanedLlmMarkdown, String>,
-    cancellation_token: Option<&CancellationToken>,
+    cancelled: bool,
 ) -> Result<(CleanedLlmMarkdown, bool), String> {
     match normalization_result {
         Ok(cleaned) if !cleaned.markdown.is_empty() => Ok((cleaned, false)),
@@ -140,7 +147,7 @@ fn english_markdown_after_normalization_result(
                 true,
             ))
         }
-        Err(error) if cancellation_token.is_some_and(CancellationToken::is_cancelled) => Err(error),
+        Err(error) if cancelled => Err(error),
         Err(e) => {
             error!(
                 "English normalization pass failed; returning pass-1 markdown without hard fail: {}",
@@ -217,9 +224,19 @@ fn translation_system_prompt(target_language: &str) -> String {
     )
 }
 
+/// Explains the speaker labels `formatSummaryTranscript` (frontend) writes on
+/// every transcript line.
+const SPEAKER_GUIDE: &str = "Transcript lines look like `[mm:ss] [Speaker] text`. `[You]` is the person who recorded this meeting (the user). `[Others]` is everyone heard through the computer's audio: remote participants, possibly several different people, so never treat all `[Others]` lines as one person. Use a person's name only when the transcript states it.";
+
+fn chunk_system_prompt() -> String {
+    format!("You are an expert meeting summarizer.\n\n{SPEAKER_GUIDE}")
+}
+
+const COMBINE_SYSTEM_PROMPT: &str = "You are an expert at synthesizing meeting summaries.";
+
 fn build_chunk_summary_user_prompt(chunk: &str) -> String {
     format!(
-        "{ENGLISH_BASE_SUMMARY_INSTRUCTION}\n\nProvide a concise but comprehensive summary of the following transcript chunk. Capture all key points, decisions, action items, and mentioned individuals. Do not include reasoning, self-correction, or meta-commentary — output only the summary content.\n\n<transcript_chunk>\n{chunk}\n</transcript_chunk>"
+        "{ENGLISH_BASE_SUMMARY_INSTRUCTION}\n\nProvide a concise but comprehensive summary of the following transcript chunk. Capture all key points, decisions, action items with their owners and due dates, open questions, and mentioned individuals. Do not include reasoning, self-correction, or meta-commentary — output only the summary content.\n\n<transcript_chunk>\n{chunk}\n</transcript_chunk>"
     )
 }
 
@@ -228,11 +245,15 @@ fn build_combine_summary_user_prompt(combined_text: &str) -> String {
         "{ENGLISH_BASE_SUMMARY_INSTRUCTION}\n\nThe following are consecutive summaries of a meeting. Combine them into a single, coherent, and detailed narrative summary that retains all important details, organized logically. Do not include reasoning, self-correction, or meta-commentary — output only the summary content.\n\n<summaries>\n{combined_text}\n</summaries>"
     )
 }
+
+/// Final-pass prompt when the user typed notes: enrich their notes.
 pub fn default_notes_system_prompt() -> String {
     format!(
         r#"You are Minutes, an expert meeting note-taker in the style of Granola.
 
 The user typed their own notes during the meeting. Your job is to ENRICH those notes using the transcript — NOT to write a fresh summary of the transcript.
+
+{SPEAKER_GUIDE}
 
 **METHOD:**
 1. The notes in `<my_notes>` are the outline. Turn each distinct note into one bullet, in the user's original order, and preserve the user's own wording and punctuation — including question marks and uncertainty (e.g. `datadog?`, `clippy mode?`).
@@ -241,19 +262,74 @@ The user typed their own notes during the meeting. Your job is to ENRICH those n
 4. Do NOT re-order, merge, or rewrite the user's notes into new themes.
 5. Start with a single Markdown H1 title (max 6 words) naming the main topic this specific meeting actually discussed, drawn from `<transcript>` and `<my_notes>`. Never use a generic or placeholder title.
 6. After the enriched notes, add a `## Also discussed` section with at most 4 short bullets for important transcript items the notes do not cover. Omit the section entirely if there is nothing important.
-7. If `<my_notes>` is empty, write concise bullet notes from the transcript alone.
-8. {ENGLISH_BASE_SUMMARY_INSTRUCTION}
-9. Output ONLY the Markdown notes — no reasoning, thinking, self-correction, or meta-commentary."#
+7. {ENGLISH_BASE_SUMMARY_INSTRUCTION}
+8. Output ONLY the Markdown notes — no reasoning, thinking, self-correction, or meta-commentary."#
     )
 }
 
-/// Resolves the system prompt used for the final notes call: a user-provided
-/// override when present and non-blank, otherwise the built-in default.
-fn resolve_notes_system_prompt(override_prompt: Option<&str>) -> String {
+/// The example's title. Small models copy example titles verbatim, so
+/// `is_prompt_echo_title` refuses it as a meeting name.
+const TRANSCRIPT_ONLY_EXAMPLE_TITLE: &str = "Office Move Logistics";
+
+/// Final-pass prompt when the user typed no notes (the common case): fixed
+/// sections so every meeting's notes have the same shape.
+pub fn default_transcript_only_system_prompt() -> String {
+    format!(
+        r#"You are Minutes, an expert meeting note-taker. Write meeting notes from the transcript in `<transcript>`.
+
+{SPEAKER_GUIDE}
+
+**FORMAT** — use these sections in this order, and leave out any section that would be empty:
+1. `# Title` — one H1 of at most 6 words naming what this specific meeting discussed. Never generic.
+2. `## Summary` — 2-3 sentences on the purpose and outcome of the meeting.
+3. `## Decisions` — one bullet per decision that was actually made.
+4. `## Action items` — one bullet per task: `- **Owner** — task (due: date)`. Write the due date only if one was stated, and use **Unassigned** when nobody took the task.
+5. `## Open questions` — one bullet per question left unresolved.
+
+**RULES:**
+- Use only what the transcript says. Never invent names, dates, numbers or decisions.
+- Keep bullets short and concrete.
+- {ENGLISH_BASE_SUMMARY_INSTRUCTION}
+- Output ONLY the Markdown notes — no reasoning, thinking, self-correction, or meta-commentary.
+
+**EXAMPLE** (shows the format only; never copy its content or title):
+# {TRANSCRIPT_ONLY_EXAMPLE_TITLE}
+
+## Summary
+The team agreed to move to the new office on 3 June. Movers are booked, but desk assignments are still undecided.
+
+## Decisions
+- Move day is 3 June.
+
+## Action items
+- **You** — send the floor plan to everyone (due: Friday)
+- **Unassigned** — book the internet installation
+
+## Open questions
+- Who gets the desks by the window?"#
+    )
+}
+
+/// The final-pass system prompt: the user's saved override when there is one,
+/// otherwise the enrich-my-notes prompt when they typed notes, or the
+/// fixed-section prompt when they did not.
+pub(crate) fn resolve_summary_system_prompt(override_prompt: Option<&str>, notes: &str) -> String {
     match override_prompt.map(str::trim) {
         Some(trimmed) if !trimmed.is_empty() => trimmed.to_string(),
+        _ if notes.trim().is_empty() => default_transcript_only_system_prompt(),
         _ => default_notes_system_prompt(),
     }
+}
+
+fn build_final_user_prompt(notes: &str, content: &str) -> String {
+    let mut prompt = String::new();
+    if !notes.trim().is_empty() {
+        prompt.push_str("<my_notes>\n");
+        prompt.push_str(notes);
+        prompt.push_str("\n</my_notes>\n\n");
+    }
+    prompt.push_str(&format!("<transcript>\n{content}\n</transcript>\n"));
+    prompt
 }
 
 /// The example title the old default notes prompt carried. Small local models
@@ -348,15 +424,23 @@ fn sanitize_title_line(line: &str) -> Option<String> {
     (!title.is_empty()).then(|| title.to_string())
 }
 
-/// True when `title` is the old prompt's example title rather than something
-/// the meeting discussed, i.e. `source_text` never mentions a roadmap.
+/// True when `title` is a prompt's example title rather than something the
+/// meeting discussed, i.e. `source_text` never mentions the example's topic.
 pub fn is_prompt_echo_title(title: &str, source_text: &str) -> bool {
-    title
-        .trim_matches(|c: char| !c.is_alphanumeric())
-        .split_whitespace()
-        .map(str::to_lowercase)
-        .eq(PROMPT_ECHO_TITLE.split_whitespace().map(str::to_lowercase))
-        && !source_text.to_lowercase().contains("roadmap")
+    let source_text = source_text.to_lowercase();
+    [
+        (PROMPT_ECHO_TITLE, "roadmap"),
+        (TRANSCRIPT_ONLY_EXAMPLE_TITLE, "office"),
+    ]
+    .into_iter()
+    .any(|(example, topic)| {
+        title
+            .trim_matches(|c: char| !c.is_alphanumeric())
+            .split_whitespace()
+            .map(str::to_lowercase)
+            .eq(example.split_whitespace().map(str::to_lowercase))
+            && !source_text.contains(topic)
+    })
 }
 
 /// Rough token count estimation using character count
@@ -380,23 +464,34 @@ pub fn chunk_text(text: &str, chunk_size_tokens: usize, overlap_tokens: usize) -
         "Chunking text with token-based chunk_size: {} and overlap: {}",
         chunk_size_tokens, overlap_tokens
     );
-
-    if text.is_empty() || chunk_size_tokens == 0 {
+    if chunk_size_tokens == 0 {
         return vec![];
     }
-
-    // Convert token-based sizes to character-based sizes
-    // Using ~2.85 chars per token (inverse of 0.35 tokens per char from rough_token_count)
+    // ~2.85 chars per token (inverse of 0.35 tokens per char from rough_token_count)
     let chars_per_token = 1.0 / 0.35;
-    let chunk_size_chars = (chunk_size_tokens as f64 * chars_per_token).ceil() as usize;
-    let overlap_chars = (overlap_tokens as f64 * chars_per_token).ceil() as usize;
+    chunk_text_by_chars(
+        text,
+        (chunk_size_tokens as f64 * chars_per_token).ceil() as usize,
+        (overlap_tokens as f64 * chars_per_token).ceil() as usize,
+    )
+}
+
+/// Chunks text into overlapping segments of at most `chunk_size_chars`
+/// characters, preferring sentence, then line, then word boundaries.
+pub(crate) fn chunk_text_by_chars(
+    text: &str,
+    chunk_size_chars: usize,
+    overlap_chars: usize,
+) -> Vec<String> {
+    if text.is_empty() || chunk_size_chars == 0 {
+        return vec![];
+    }
 
     // Collect characters for indexing (needed for proper Unicode support)
     let chars: Vec<char> = text.chars().collect();
     let total_chars = chars.len();
 
     if total_chars <= chunk_size_chars {
-        info!("Text is shorter than chunk size, returning as a single chunk.");
         return vec![text.to_string()];
     }
 
@@ -411,15 +506,25 @@ pub fn chunk_text(text: &str, chunk_size_tokens: usize, overlap_tokens: usize) -
         let start_byte: usize = chars[..start_char].iter().map(|c| c.len_utf8()).sum();
         let mut end_byte: usize = chars[..end_char].iter().map(|c| c.len_utf8()).sum();
 
-        // Try to break at sentence or word boundary for cleaner chunks
+        // Try to break at a transcript line, sentence or word boundary
         if end_char < total_chars {
             let slice = &text[start_byte..end_byte];
-            let sentence_boundary = slice.rfind(". ").map(|index| index + 2);
-            let word_boundary = slice.rfind(' ').map(|index| index + 1);
-            let boundary = sentence_boundary
-                .filter(|end| slice[..*end].chars().count() > overlap_chars)
+            let longer_than_overlap = |end: &usize| slice[..*end].chars().count() > overlap_chars;
+            let boundary = slice
+                .rfind('\n')
+                .map(|index| index + 1)
+                .filter(longer_than_overlap)
                 .or_else(|| {
-                    word_boundary.filter(|end| slice[..*end].chars().count() > overlap_chars)
+                    slice
+                        .rfind(". ")
+                        .map(|index| index + 2)
+                        .filter(longer_than_overlap)
+                })
+                .or_else(|| {
+                    slice
+                        .rfind(' ')
+                        .map(|index| index + 1)
+                        .filter(longer_than_overlap)
                 });
 
             if let Some(boundary) = boundary {
@@ -467,252 +572,538 @@ pub(crate) struct GeneratedMeetingSummary {
     pub normalization_fallback: bool,
 }
 
+const CANCELLED_ERROR: &str = "Summary generation was cancelled";
+
+/// Tokens a chat template adds around system and user text, for estimates.
+const CHAT_TEMPLATE_TOKENS: usize = 32;
+/// Overlap between consecutive transcript chunks.
+const CHUNK_OVERLAP_TOKENS: usize = 100;
+const SUMMARY_SEPARATOR: &str = "\n---\n";
+const SUMMARY_SEPARATOR_TOKENS: usize = 4;
+/// Use slightly less than the measured characters-per-token when sizing chunks,
+/// since token density varies across a transcript.
+const CHUNK_SIZE_SAFETY: f64 = 0.95;
+
+/// What the summary pipeline needs from a model: generation and token counting.
+/// `ProviderBackend` is the real implementation; tests use a scripted fake.
+pub(crate) trait SummaryBackend: Sync {
+    fn generate(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+        options: &GenerationOptions,
+    ) -> impl Future<Output = Result<LlmCompletion, String>> + Send;
+
+    /// Tokens in `text` alone.
+    fn count_tokens(&self, text: &str) -> impl Future<Output = Result<usize, String>> + Send;
+
+    /// Tokens in the full prompt the model will see, chat template included.
+    fn count_prompt_tokens(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+    ) -> impl Future<Output = Result<usize, String>> + Send;
+
+    fn provider(&self) -> &LLMProvider;
+
+    fn is_cancelled(&self) -> bool;
+}
+
+/// Calls the configured provider through `generate_summary`. Built-in AI counts
+/// tokens with the model's own tokenizer; other providers use a conservative
+/// estimate.
+pub(crate) struct ProviderBackend<'a> {
+    pub client: &'a Client,
+    pub provider: &'a LLMProvider,
+    pub model_name: &'a str,
+    pub api_key: &'a str,
+    pub ollama_endpoint: Option<&'a str>,
+    pub custom_openai_endpoint: Option<&'a str>,
+    pub app_data_dir: Option<&'a PathBuf>,
+    pub cancellation_token: Option<&'a CancellationToken>,
+}
+
+impl ProviderBackend<'_> {
+    fn builtin_dir(&self) -> Result<&PathBuf, String> {
+        self.app_data_dir
+            .ok_or_else(|| "app_data_dir is required for BuiltInAI provider".to_string())
+    }
+}
+
+impl SummaryBackend for ProviderBackend<'_> {
+    async fn generate(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+        options: &GenerationOptions,
+    ) -> Result<LlmCompletion, String> {
+        generate_summary(
+            self.client,
+            self.provider,
+            self.model_name,
+            self.api_key,
+            system_prompt,
+            user_prompt,
+            self.ollama_endpoint,
+            self.custom_openai_endpoint,
+            options,
+            self.app_data_dir,
+            self.cancellation_token,
+        )
+        .await
+    }
+
+    async fn count_tokens(&self, text: &str) -> Result<usize, String> {
+        if *self.provider != LLMProvider::BuiltInAI {
+            return Ok(estimate_tokens(text));
+        }
+        crate::summary::summary_engine::count_builtin_tokens(
+            self.builtin_dir()?,
+            self.model_name,
+            text,
+            self.cancellation_token,
+        )
+        .await
+        .map_err(|error| format!("Could not count transcript tokens: {error}"))
+    }
+
+    async fn count_prompt_tokens(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+    ) -> Result<usize, String> {
+        if *self.provider != LLMProvider::BuiltInAI {
+            return Ok(
+                estimate_tokens(system_prompt) + estimate_tokens(user_prompt) + CHAT_TEMPLATE_TOKENS,
+            );
+        }
+        let formatted = crate::summary::summary_engine::format_builtin_prompt(
+            self.model_name,
+            system_prompt,
+            user_prompt,
+        )
+        .map_err(|error| error.to_string())?;
+        self.count_tokens(&formatted).await
+    }
+
+    fn provider(&self) -> &LLMProvider {
+        self.provider
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancellation_token
+            .is_some_and(CancellationToken::is_cancelled)
+    }
+}
+
+/// The user-facing error for an output that hit the model's limit. Such output
+/// is incomplete and must never be saved as a finished summary.
+pub(crate) fn truncation_error(stage: &str, provider: &LLMProvider) -> String {
+    let hint = match provider {
+        LLMProvider::CustomOpenAI => {
+            "Raise Max tokens in the custom endpoint settings, then try again."
+        }
+        LLMProvider::BuiltInAI | LLMProvider::Ollama => {
+            "Try again with a shorter transcript, or pick a model with a larger context window."
+        }
+        _ => "Try again, or pick a different model.",
+    };
+    format!(
+        "{stage} was cut off because the model reached its output limit, so the incomplete summary was not saved. {hint}"
+    )
+}
+
+fn chars_for_tokens(tokens: usize, chars_per_token: f64) -> usize {
+    ((tokens as f64 * chars_per_token * CHUNK_SIZE_SAFETY).floor() as usize).max(1)
+}
+
+/// Runs the summary passes against one backend, with one output budget and,
+/// for local models, one context budget.
+struct SummaryPipeline<'a, B: SummaryBackend> {
+    backend: &'a B,
+    options: GenerationOptions,
+    budget: Option<ContextBudget>,
+    reasoning_stripped: AtomicBool,
+}
+
+impl<'a, B: SummaryBackend> SummaryPipeline<'a, B> {
+    fn new(backend: &'a B, options: &GenerationOptions, budget: Option<ContextBudget>) -> Self {
+        let mut options = options.clone();
+        if let Some(budget) = budget {
+            options
+                .max_tokens
+                .get_or_insert(u32::try_from(budget.max_output).unwrap_or(u32::MAX));
+            if *backend.provider() == LLMProvider::Ollama {
+                options.num_ctx = Some(u32::try_from(budget.n_ctx).unwrap_or(u32::MAX));
+            }
+        }
+        Self {
+            backend,
+            options,
+            budget,
+            reasoning_stripped: AtomicBool::new(false),
+        }
+    }
+
+    fn reasoning_stripped(&self) -> bool {
+        self.reasoning_stripped.load(Ordering::Relaxed)
+    }
+
+    /// One model call that must produce a complete answer. A truncated reply
+    /// is retried once with a larger output budget when the context has room;
+    /// otherwise it fails rather than passing incomplete text along.
+    async fn complete(
+        &self,
+        stage: &str,
+        system_prompt: &str,
+        user_prompt: &str,
+        require_visible: bool,
+    ) -> Result<CleanedLlmMarkdown, String> {
+        if self.backend.is_cancelled() {
+            return Err(CANCELLED_ERROR.to_string());
+        }
+        let mut options = self.options.clone();
+        for attempt in 1..=2 {
+            let completion = self
+                .backend
+                .generate(system_prompt, user_prompt, &options)
+                .await?;
+            if completion.reasoning_stripped {
+                self.reasoning_stripped.store(true, Ordering::Relaxed);
+            }
+            if !completion.truncated {
+                let mut cleaned = clean_llm_markdown_detailed(&completion.content);
+                cleaned.reasoning_stripped |= completion.reasoning_stripped;
+                if cleaned.reasoning_stripped {
+                    self.reasoning_stripped.store(true, Ordering::Relaxed);
+                }
+                if require_visible {
+                    require_visible_markdown(stage, &cleaned)?;
+                }
+                return Ok(cleaned);
+            }
+            if attempt == 1 {
+                if let Some(grown) = self
+                    .grown_output(&options, &completion, system_prompt, user_prompt)
+                    .await?
+                {
+                    warn!(
+                        "{} hit the output limit ({:?} tokens); retrying with {} tokens",
+                        stage, options.max_tokens, grown
+                    );
+                    options.max_tokens = Some(grown);
+                    continue;
+                }
+            }
+            break;
+        }
+        error!("{} was truncated at the output limit", stage);
+        Err(truncation_error(stage, self.backend.provider()))
+    }
+
+    async fn grown_output(
+        &self,
+        options: &GenerationOptions,
+        completion: &LlmCompletion,
+        system_prompt: &str,
+        user_prompt: &str,
+    ) -> Result<Option<u32>, String> {
+        let Some(budget) = self.budget else {
+            return Ok(None);
+        };
+        let current = options
+            .max_tokens
+            .map_or(budget.max_output, |tokens| tokens as usize);
+        let prompt_tokens = match completion.prompt_tokens {
+            Some(tokens) => tokens as usize,
+            None => {
+                self.backend
+                    .count_prompt_tokens(system_prompt, user_prompt)
+                    .await?
+            }
+        };
+        Ok(budget
+            .grown_output(current, prompt_tokens)
+            .map(|tokens| u32::try_from(tokens).unwrap_or(u32::MAX)))
+    }
+
+    /// Pass 1: the English notes, map-reducing the transcript first when it
+    /// does not fit the final prompt's budget.
+    async fn english_notes(
+        &self,
+        text: &str,
+        notes: &str,
+        final_system_prompt: &str,
+    ) -> Result<(String, i64), String> {
+        let (content, chunk_count) = match self.budget {
+            None => (text.to_string(), 1),
+            Some(budget) => {
+                let overhead = self
+                    .backend
+                    .count_prompt_tokens(final_system_prompt, &build_final_user_prompt(notes, ""))
+                    .await?;
+                let input_budget = budget.input_budget(overhead);
+                if input_budget < MIN_CHUNK_TOKENS {
+                    return Err("Your meeting notes are too long for this model's context window. Shorten the notes, or pick a model with a larger context window.".to_string());
+                }
+                let transcript_tokens = self.backend.count_tokens(text).await?;
+                info!(
+                    "Context budget: n_ctx={}, max_output={}, prompt overhead={}, transcript={} tokens, input budget={}",
+                    budget.n_ctx, budget.max_output, overhead, transcript_tokens, input_budget
+                );
+                if transcript_tokens <= input_budget {
+                    (text.to_string(), 1)
+                } else {
+                    let chunk_overhead = self
+                        .backend
+                        .count_prompt_tokens(
+                            &chunk_system_prompt(),
+                            &build_chunk_summary_user_prompt(""),
+                        )
+                        .await?;
+                    let chunk_budget = budget.input_budget(chunk_overhead).max(MIN_CHUNK_TOKENS);
+                    let ratio = chars_per_token(text, transcript_tokens);
+                    let summaries = self
+                        .summarize_transcript_chunks(text, chunk_budget, ratio)
+                        .await?;
+                    let count = summaries.len() as i64;
+                    (self.combine_summaries(summaries, budget).await?, count)
+                }
+            }
+        };
+
+        info!("Generating enhanced notes");
+        let cleaned = self
+            .complete(
+                "Final summary",
+                final_system_prompt,
+                &build_final_user_prompt(notes, &content),
+                true,
+            )
+            .await?;
+        Ok((cleaned.markdown, chunk_count))
+    }
+
+    /// Summarises each transcript chunk. A chunk that overflows the context is
+    /// split smaller and retried instead of being resent unchanged.
+    async fn summarize_transcript_chunks(
+        &self,
+        text: &str,
+        chunk_budget: usize,
+        chars_per_token: f64,
+    ) -> Result<Vec<String>, String> {
+        let system_prompt = chunk_system_prompt();
+        let overlap = chars_for_tokens(CHUNK_OVERLAP_TOKENS, chars_per_token);
+        let mut queue: VecDeque<(String, usize)> = chunk_text_by_chars(
+            text,
+            chars_for_tokens(chunk_budget, chars_per_token),
+            overlap,
+        )
+        .into_iter()
+        .map(|chunk| (chunk, chunk_budget))
+        .collect();
+        info!("Summarising transcript in {} chunks", queue.len());
+
+        let mut summaries = Vec::with_capacity(queue.len());
+        while let Some((chunk, chunk_tokens)) = queue.pop_front() {
+            let section = summaries.len() + 1;
+            let total = summaries.len() + queue.len() + 1;
+            let prompt = build_chunk_summary_user_prompt(&chunk);
+            for attempt in 1..=MAX_CHUNK_ATTEMPTS {
+                match self
+                    .complete("Summary chunk", &system_prompt, &prompt, true)
+                    .await
+                {
+                    Ok(cleaned) => {
+                        summaries.push(cleaned.markdown);
+                        break;
+                    }
+                    Err(_) if self.backend.is_cancelled() => {
+                        return Err(CANCELLED_ERROR.to_string());
+                    }
+                    Err(error) if is_context_overflow_error(&error) => {
+                        let Some(smaller) = shrink_chunk_tokens(chunk_tokens) else {
+                            return Err(format!(
+                                "Transcript section {section} of {total} does not fit the model's context window even after splitting it: {error}"
+                            ));
+                        };
+                        warn!(
+                            "Transcript section {}/{} overflowed the context at ~{} tokens; splitting to ~{} tokens",
+                            section, total, chunk_tokens, smaller
+                        );
+                        let pieces = chunk_text_by_chars(
+                            &chunk,
+                            chars_for_tokens(smaller, chars_per_token),
+                            overlap.min(chars_for_tokens(smaller / 4, chars_per_token)),
+                        );
+                        for piece in pieces.into_iter().rev() {
+                            queue.push_front((piece, smaller));
+                        }
+                        break;
+                    }
+                    Err(error) if should_retry_chunk_failure(attempt, self.backend.is_cancelled()) => {
+                        warn!(
+                            "Failed processing chunk {}/{} on attempt {}/{}: {}; retrying",
+                            section, total, attempt, MAX_CHUNK_ATTEMPTS, error
+                        );
+                    }
+                    Err(error) => {
+                        error!(
+                            "Failed processing chunk {}/{} on attempt {}/{}: {}",
+                            section, total, attempt, MAX_CHUNK_ATTEMPTS, error
+                        );
+                        return Err(format!(
+                            "Summary generation could not complete because transcript section {} of {} failed after {} attempts: {}. Please retry.",
+                            section, total, MAX_CHUNK_ATTEMPTS, error
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(summaries)
+    }
+
+    /// Combines chunk summaries in groups that fit the context, repeating until
+    /// one summary remains.
+    async fn combine_summaries(
+        &self,
+        mut summaries: Vec<String>,
+        budget: ContextBudget,
+    ) -> Result<String, String> {
+        if summaries.is_empty() {
+            return Err(
+                "Multi-level summarization failed: No chunks were processed successfully."
+                    .to_string(),
+            );
+        }
+        let overhead = self
+            .backend
+            .count_prompt_tokens(COMBINE_SYSTEM_PROMPT, &build_combine_summary_user_prompt(""))
+            .await?;
+        let combine_budget = budget.input_budget(overhead);
+        while summaries.len() > 1 {
+            let mut tokens = Vec::with_capacity(summaries.len());
+            for summary in &summaries {
+                tokens.push(self.backend.count_tokens(summary).await?);
+            }
+            let mut groups =
+                group_within_budget(&tokens, combine_budget, SUMMARY_SEPARATOR_TOKENS);
+            if groups.len() == summaries.len() {
+                // No two summaries fit together. Pair them anyway so every
+                // round makes progress; an overflow then surfaces as an error.
+                groups = (0..summaries.len())
+                    .step_by(2)
+                    .map(|start| start..(start + 2).min(summaries.len()))
+                    .collect();
+            }
+            let mut next = Vec::with_capacity(groups.len());
+            for group in groups {
+                if group.len() == 1 {
+                    next.push(summaries[group.start].clone());
+                    continue;
+                }
+                let joined = summaries[group].join(SUMMARY_SEPARATOR);
+                let cleaned = self
+                    .complete(
+                        "Combined summary",
+                        COMBINE_SYSTEM_PROMPT,
+                        &build_combine_summary_user_prompt(&joined),
+                        true,
+                    )
+                    .await?;
+                next.push(cleaned.markdown);
+            }
+            summaries = next;
+        }
+        Ok(summaries.remove(0))
+    }
+
+    async fn translate_markdown(
+        &self,
+        english_markdown: &str,
+        target_language: &str,
+    ) -> Result<CleanedLlmMarkdown, String> {
+        let system_prompt = translation_system_prompt(target_language);
+        let user_prompt = format!(
+            "Translate the following Markdown document into {target_language}. Return ONLY the translated Markdown, nothing else.\n\n<document>\n{english_markdown}\n</document>"
+        );
+        self.complete("Translation", &system_prompt, &user_prompt, true)
+            .await
+    }
+
+    async fn normalize_markdown_to_english(
+        &self,
+        markdown: &str,
+    ) -> Result<CleanedLlmMarkdown, String> {
+        let user_prompt = format!(
+            "Convert the following Markdown document into English. Return ONLY the English Markdown, nothing else.\n\n<document>\n{markdown}\n</document>"
+        );
+        self.complete(
+            "English normalization pass",
+            english_normalization_system_prompt(),
+            &user_prompt,
+            false,
+        )
+        .await
+        .map_err(|error| format!("English normalization pass failed: {error}"))
+    }
+}
+
+/// Generates the meeting notes.
+///
+/// `context_budget` is the context window local models run with (built-in AI,
+/// Ollama); `None` means a hosted model with room for the whole transcript.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn generate_meeting_summary(
-    client: &Client,
-    provider: &LLMProvider,
+pub(crate) async fn generate_meeting_summary<B: SummaryBackend>(
+    backend: &B,
     model_name: &str,
-    api_key: &str,
     text: &str,
     custom_prompt: &str,
-    template_id: &str,
-    template: &Template,
-    notes_system_prompt: Option<&str>,
-    token_threshold: usize,
-    ollama_endpoint: Option<&str>,
-    custom_openai_endpoint: Option<&str>,
-    max_tokens: Option<u32>,
-    temperature: Option<f32>,
-    top_p: Option<f32>,
-    app_data_dir: Option<&PathBuf>,
-    cancellation_token: Option<&CancellationToken>,
+    final_system_prompt: &str,
+    context_budget: Option<ContextBudget>,
+    options: &GenerationOptions,
     summary_language: Option<&str>,
     detected_transcript_language: Option<&str>,
     cached_english: Option<&str>,
 ) -> Result<GeneratedMeetingSummary, String> {
-    if cancellation_token.is_some_and(CancellationToken::is_cancelled) {
-        return Err("Summary generation was cancelled".to_string());
+    if backend.is_cancelled() {
+        return Err(CANCELLED_ERROR.to_string());
     }
     info!(
         "Starting summary generation with provider: {:?}, model: {}",
-        provider, model_name
+        backend.provider(),
+        model_name
     );
+    let pipeline = SummaryPipeline::new(backend, options, context_budget);
 
-    let total_tokens = rough_token_count(text);
-    let (mut english_markdown, successful_chunk_count, mut reasoning_stripped) = if let Some(
-        cached,
-    ) =
-        resolve_cached_english(cached_english, summary_language)
-    {
-        info!(
-            "✓ Using cached English summary ({} chars), skipping pass 1",
-            cached.len()
-        );
-        (cached.to_string(), 1_i64, false)
-    } else {
-        let mut content_to_summarize = text.to_string();
-        let successful_chunk_count;
-        let mut stage_reasoning_stripped = false;
-
-        if (provider == &LLMProvider::Ollama || provider == &LLMProvider::BuiltInAI)
-            && total_tokens >= token_threshold
-        {
-            let chunks = chunk_text(text, token_threshold - 300, 100);
-            let num_chunks = chunks.len();
-            let mut chunk_summaries = Vec::with_capacity(num_chunks);
-            for (index, chunk) in chunks.iter().enumerate() {
-                if cancellation_token.is_some_and(CancellationToken::is_cancelled) {
-                    return Err("Summary generation was cancelled".to_string());
-                }
-                let prompt = build_chunk_summary_user_prompt(chunk);
-                for attempt in 1..=MAX_CHUNK_ATTEMPTS {
-                    let result = match generate_summary(
-                        client,
-                        provider,
-                        model_name,
-                        api_key,
-                        "You are an expert meeting summarizer.",
-                        &prompt,
-                        ollama_endpoint,
-                        custom_openai_endpoint,
-                        max_tokens,
-                        temperature,
-                        top_p,
-                        app_data_dir,
-                        cancellation_token,
-                    )
-                    .await
-                    {
-                        Ok(completion) => {
-                            let cleaned = clean_llm_markdown_detailed(&completion.content);
-                            stage_reasoning_stripped |=
-                                completion.reasoning_stripped || cleaned.reasoning_stripped;
-                            require_visible_markdown("Summary chunk", &cleaned).map(|()| cleaned)
-                        }
-                        Err(error) => Err(error),
-                    };
-
-                    match result {
-                        Ok(cleaned) => {
-                            chunk_summaries.push(cleaned.markdown);
-                            break;
-                        }
-                        Err(_)
-                            if cancellation_token.is_some_and(CancellationToken::is_cancelled) =>
-                        {
-                            return Err("Summary generation was cancelled".to_string());
-                        }
-                        Err(error) if should_retry_chunk_failure(attempt, cancellation_token) => {
-                            warn!(
-                                "Failed processing chunk {}/{} on attempt {}/{}: {}; retrying",
-                                index + 1,
-                                num_chunks,
-                                attempt,
-                                MAX_CHUNK_ATTEMPTS,
-                                error
-                            );
-                        }
-                        Err(error) => {
-                            error!(
-                                "Failed processing chunk {}/{} on attempt {}/{}: {}",
-                                index + 1,
-                                num_chunks,
-                                attempt,
-                                MAX_CHUNK_ATTEMPTS,
-                                error
-                            );
-                            return Err(format!(
-                                    "Summary generation could not complete because transcript section {} of {} failed after {} attempts: {}. Please retry.",
-                                    index + 1,
-                                    num_chunks,
-                                    MAX_CHUNK_ATTEMPTS,
-                                    error
-                                ));
-                        }
-                    }
-                }
-            }
-            if chunk_summaries.is_empty() {
-                return Err(
-                    "Multi-level summarization failed: No chunks were processed successfully."
-                        .to_string(),
-                );
-            }
-            successful_chunk_count = chunk_summaries.len() as i64;
-            content_to_summarize = if chunk_summaries.len() == 1 {
-                chunk_summaries.remove(0)
-            } else {
-                let prompt = build_combine_summary_user_prompt(&chunk_summaries.join("\n---\n"));
-                let completion = generate_summary(
-                    client,
-                    provider,
-                    model_name,
-                    api_key,
-                    "You are an expert at synthesizing meeting summaries.",
-                    &prompt,
-                    ollama_endpoint,
-                    custom_openai_endpoint,
-                    max_tokens,
-                    temperature,
-                    top_p,
-                    app_data_dir,
-                    cancellation_token,
-                )
-                .await?;
-                let cleaned = clean_llm_markdown_detailed(&completion.content);
-                stage_reasoning_stripped |=
-                    completion.reasoning_stripped || cleaned.reasoning_stripped;
-                require_visible_markdown("Combined summary", &cleaned)?;
-                cleaned.markdown
-            };
+    let (mut english_markdown, successful_chunk_count) =
+        if let Some(cached) = resolve_cached_english(cached_english, summary_language) {
+            info!(
+                "✓ Using cached English summary ({} chars), skipping pass 1",
+                cached.len()
+            );
+            (cached.to_string(), 1_i64)
         } else {
-            successful_chunk_count = 1;
-        }
-
-        // Notes are free-form bullet points that enrich the user's own notes;
-        // templates are intentionally not used.
-        let _ = (template_id, template);
-        info!("Generating enhanced bullet notes");
-        let final_system_prompt = resolve_notes_system_prompt(notes_system_prompt);
-        let mut final_user_prompt = String::new();
-        if !custom_prompt.is_empty() {
-            final_user_prompt.push_str("<my_notes>\n");
-            final_user_prompt.push_str(custom_prompt);
-            final_user_prompt.push_str("\n</my_notes>\n\n");
-        }
-        final_user_prompt.push_str(&format!(
-            "<transcript>\n{content_to_summarize}\n</transcript>\n"
-        ));
-        let completion = generate_summary(
-            client,
-            provider,
-            model_name,
-            api_key,
-            &final_system_prompt,
-            &final_user_prompt,
-            ollama_endpoint,
-            custom_openai_endpoint,
-            max_tokens,
-            temperature,
-            top_p,
-            app_data_dir,
-            cancellation_token,
-        )
-        .await?;
-        let cleaned = clean_llm_markdown_detailed(&completion.content);
-        stage_reasoning_stripped |= completion.reasoning_stripped || cleaned.reasoning_stripped;
-        require_visible_markdown("Final summary", &cleaned)?;
-        (
-            cleaned.markdown,
-            successful_chunk_count,
-            stage_reasoning_stripped,
-        )
-    };
+            pipeline
+                .english_notes(text, custom_prompt, final_system_prompt)
+                .await?
+        };
 
     let (final_markdown, normalization_fallback) =
         match resolve_final_language_action(summary_language, detected_transcript_language) {
             FinalLanguageAction::Translate(language) => {
-                let translated = translate_markdown(
-                    client,
-                    provider,
-                    model_name,
-                    api_key,
-                    &english_markdown,
-                    language,
-                    ollama_endpoint,
-                    custom_openai_endpoint,
-                    max_tokens,
-                    temperature,
-                    top_p,
-                    app_data_dir,
-                    cancellation_token,
-                )
-                .await
-                .map_err(|error| format!("Translation to {language} failed: {error}"))?;
-                reasoning_stripped |= translated.reasoning_stripped;
+                let translated = pipeline
+                    .translate_markdown(&english_markdown, language)
+                    .await
+                    .map_err(|error| format!("Translation to {language} failed: {error}"))?;
                 (translated.markdown, false)
             }
             FinalLanguageAction::NormalizeEnglish => {
                 let (normalized, fallback) = english_markdown_after_normalization_result(
                     &english_markdown,
-                    normalize_markdown_to_english(
-                        client,
-                        provider,
-                        model_name,
-                        api_key,
-                        &english_markdown,
-                        ollama_endpoint,
-                        custom_openai_endpoint,
-                        max_tokens,
-                        temperature,
-                        top_p,
-                        app_data_dir,
-                        cancellation_token,
-                    )
-                    .await,
-                    cancellation_token,
+                    pipeline.normalize_markdown_to_english(&english_markdown).await,
+                    backend.is_cancelled(),
                 )?;
-                reasoning_stripped |= normalized.reasoning_stripped;
                 english_markdown = normalized.markdown.clone();
                 (normalized.markdown, fallback)
             }
@@ -723,129 +1114,9 @@ pub(crate) async fn generate_meeting_summary(
         final_markdown,
         english_markdown,
         successful_chunk_count,
-        reasoning_stripped,
+        reasoning_stripped: pipeline.reasoning_stripped(),
         normalization_fallback,
     })
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn run_markdown_transform(
-    client: &Client,
-    provider: &LLMProvider,
-    model_name: &str,
-    api_key: &str,
-    system_prompt: &str,
-    user_prompt: &str,
-    failure_label: &str,
-    ollama_endpoint: Option<&str>,
-    custom_openai_endpoint: Option<&str>,
-    max_tokens: Option<u32>,
-    temperature: Option<f32>,
-    top_p: Option<f32>,
-    app_data_dir: Option<&PathBuf>,
-    cancellation_token: Option<&CancellationToken>,
-) -> Result<CleanedLlmMarkdown, String> {
-    if cancellation_token.is_some_and(CancellationToken::is_cancelled) {
-        return Err("Summary generation was cancelled".to_string());
-    }
-    let completion = generate_summary(
-        client,
-        provider,
-        model_name,
-        api_key,
-        system_prompt,
-        user_prompt,
-        ollama_endpoint,
-        custom_openai_endpoint,
-        max_tokens,
-        temperature,
-        top_p,
-        app_data_dir,
-        cancellation_token,
-    )
-    .await
-    .map_err(|error| format!("{failure_label} failed: {error}"))?;
-    let mut cleaned = clean_llm_markdown_detailed(&completion.content);
-    cleaned.reasoning_stripped |= completion.reasoning_stripped;
-    Ok(cleaned)
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn translate_markdown(
-    client: &Client,
-    provider: &LLMProvider,
-    model_name: &str,
-    api_key: &str,
-    english_markdown: &str,
-    target_language: &str,
-    ollama_endpoint: Option<&str>,
-    custom_openai_endpoint: Option<&str>,
-    max_tokens: Option<u32>,
-    temperature: Option<f32>,
-    top_p: Option<f32>,
-    app_data_dir: Option<&PathBuf>,
-    cancellation_token: Option<&CancellationToken>,
-) -> Result<CleanedLlmMarkdown, String> {
-    let system_prompt = translation_system_prompt(target_language);
-    let user_prompt = format!(
-        "Translate the following Markdown document into {target_language}. Return ONLY the translated Markdown, nothing else.\n\n<document>\n{english_markdown}\n</document>"
-    );
-    let cleaned = run_markdown_transform(
-        client,
-        provider,
-        model_name,
-        api_key,
-        &system_prompt,
-        &user_prompt,
-        "Translation pass",
-        ollama_endpoint,
-        custom_openai_endpoint,
-        max_tokens,
-        temperature,
-        top_p,
-        app_data_dir,
-        cancellation_token,
-    )
-    .await?;
-    require_visible_markdown("Translation", &cleaned)?;
-    Ok(cleaned)
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn normalize_markdown_to_english(
-    client: &Client,
-    provider: &LLMProvider,
-    model_name: &str,
-    api_key: &str,
-    markdown: &str,
-    ollama_endpoint: Option<&str>,
-    custom_openai_endpoint: Option<&str>,
-    max_tokens: Option<u32>,
-    temperature: Option<f32>,
-    top_p: Option<f32>,
-    app_data_dir: Option<&PathBuf>,
-    cancellation_token: Option<&CancellationToken>,
-) -> Result<CleanedLlmMarkdown, String> {
-    let user_prompt = format!(
-        "Convert the following Markdown document into English. Return ONLY the English Markdown, nothing else.\n\n<document>\n{markdown}\n</document>"
-    );
-    run_markdown_transform(
-        client,
-        provider,
-        model_name,
-        api_key,
-        english_normalization_system_prompt(),
-        &user_prompt,
-        "English normalization pass",
-        ollama_endpoint,
-        custom_openai_endpoint,
-        max_tokens,
-        temperature,
-        top_p,
-        app_data_dir,
-        cancellation_token,
-    )
-    .await
 }
 
 #[cfg(test)]
@@ -945,10 +1216,28 @@ mod tests {
     }
 
     #[test]
-    fn english_target_with_unknown_transcript_normalizes_to_english() {
+    fn unknown_transcript_language_skips_normalization() {
+        for summary_language in [Some("en"), None] {
+            assert_eq!(
+                resolve_final_language_action(summary_language, None),
+                FinalLanguageAction::ReturnEnglish
+            );
+            assert_eq!(
+                resolve_final_language_action(summary_language, Some("zz-unknown")),
+                FinalLanguageAction::ReturnEnglish
+            );
+        }
+    }
+
+    #[test]
+    fn confidently_detected_non_english_transcript_normalizes() {
         assert_eq!(
-            resolve_final_language_action(Some("en"), None),
+            resolve_final_language_action(None, Some("de")),
             FinalLanguageAction::NormalizeEnglish
+        );
+        assert_eq!(
+            resolve_final_language_action(None, Some("en-GB")),
+            FinalLanguageAction::ReturnEnglish
         );
     }
 
@@ -969,7 +1258,7 @@ mod tests {
                     markdown: String::new(),
                     reasoning_stripped: true,
                 }),
-                None,
+                false,
             )
             .unwrap(),
             (
@@ -980,51 +1269,113 @@ mod tests {
                 true,
             )
         );
-        let cancellation_token = CancellationToken::new();
-        cancellation_token.cancel();
         assert!(english_markdown_after_normalization_result(
             "# Original",
             Err("Summary generation was cancelled".to_string()),
-            Some(&cancellation_token),
+            true,
         )
         .is_err());
     }
 
     #[test]
-    fn resolve_notes_system_prompt_uses_override_when_present() {
-        assert_eq!(
-            resolve_notes_system_prompt(Some("Custom prompt text")),
-            "Custom prompt text"
-        );
+    fn summary_prompt_uses_override_when_present() {
+        for notes in ["", "my notes"] {
+            assert_eq!(
+                resolve_summary_system_prompt(Some("Custom prompt text"), notes),
+                "Custom prompt text"
+            );
+        }
     }
 
     #[test]
-    fn resolve_notes_system_prompt_falls_back_when_blank() {
+    fn summary_prompt_trims_override() {
         assert_eq!(
-            resolve_notes_system_prompt(Some("   \n\t")),
-            default_notes_system_prompt()
-        );
-    }
-
-    #[test]
-    fn resolve_notes_system_prompt_falls_back_when_none() {
-        assert_eq!(
-            resolve_notes_system_prompt(None),
-            default_notes_system_prompt()
-        );
-    }
-
-    #[test]
-    fn resolve_notes_system_prompt_trims_override() {
-        assert_eq!(
-            resolve_notes_system_prompt(Some("  Custom prompt  \n")),
+            resolve_summary_system_prompt(Some("  Custom prompt  \n"), "notes"),
             "Custom prompt"
         );
     }
 
     #[test]
+    fn summary_prompt_without_override_depends_on_notes() {
+        for override_prompt in [None, Some("   \n\t")] {
+            assert_eq!(
+                resolve_summary_system_prompt(override_prompt, "launch date?"),
+                default_notes_system_prompt()
+            );
+            assert_eq!(
+                resolve_summary_system_prompt(override_prompt, "  \n "),
+                default_transcript_only_system_prompt()
+            );
+        }
+    }
+
+    #[test]
+    fn every_summary_prompt_explains_speaker_labels() {
+        for prompt in [
+            default_notes_system_prompt(),
+            default_transcript_only_system_prompt(),
+            chunk_system_prompt(),
+        ] {
+            assert!(prompt.contains("`[You]` is the person who recorded"), "{prompt}");
+            assert!(prompt.contains("`[Others]`"), "{prompt}");
+            assert!(prompt.contains("several different people"), "{prompt}");
+        }
+    }
+
+    #[test]
+    fn transcript_only_prompt_has_fixed_sections_and_example() {
+        let prompt = default_transcript_only_system_prompt();
+        let positions: Vec<usize> = [
+            "`# Title`",
+            "`## Summary`",
+            "`## Decisions`",
+            "`## Action items`",
+            "`## Open questions`",
+        ]
+        .iter()
+        .map(|section| prompt.find(section).unwrap_or_else(|| panic!("{section}")))
+        .collect();
+        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(prompt.contains("at most 6 words"));
+        assert!(prompt.contains("2-3 sentences"));
+        assert!(prompt.contains("due date only if one was stated"));
+        assert!(prompt.contains("leave out any section that would be empty"));
+        assert!(prompt.contains("**EXAMPLE**"));
+        assert!(prompt.contains(ENGLISH_BASE_SUMMARY_INSTRUCTION));
+        assert!(prompt.contains("no reasoning"));
+        assert!(!prompt.contains(PROMPT_ECHO_TITLE));
+    }
+
+    #[test]
+    fn final_user_prompt_wraps_notes_only_when_present() {
+        assert_eq!(
+            build_final_user_prompt("", "[00:01] [You] hi"),
+            "<transcript>\n[00:01] [You] hi\n</transcript>\n"
+        );
+        assert_eq!(
+            build_final_user_prompt(" \n", "x"),
+            "<transcript>\nx\n</transcript>\n"
+        );
+        assert_eq!(
+            build_final_user_prompt("ship?", "x"),
+            "<my_notes>\nship?\n</my_notes>\n\n<transcript>\nx\n</transcript>\n"
+        );
+    }
+
+    #[test]
+    fn truncation_error_is_clear_and_provider_specific() {
+        let custom = truncation_error("Final summary", &LLMProvider::CustomOpenAI);
+        assert!(custom.starts_with("Final summary was cut off"));
+        assert!(custom.contains("not saved"));
+        assert!(custom.contains("Max tokens"));
+        assert!(truncation_error("Final summary", &LLMProvider::BuiltInAI)
+            .contains("larger context window"));
+    }
+
+    #[test]
     fn prompts_carry_no_echoable_example_title() {
         assert!(!default_notes_system_prompt().contains(PROMPT_ECHO_TITLE));
+        assert!(!default_notes_system_prompt().contains(TRANSCRIPT_ONLY_EXAMPLE_TITLE));
         assert!(!default_notes_system_prompt().contains("e.g. `#"));
         assert!(!title_system_prompt().contains(PROMPT_ECHO_TITLE));
         assert!(!title_system_prompt().contains("e.g."));
@@ -1153,15 +1504,287 @@ mod tests {
         ));
         assert!(!is_prompt_echo_title("Hiring Pipeline Review", transcript));
         assert!(!is_prompt_echo_title("Roadmap Sync Followup", transcript));
+
+        assert!(is_prompt_echo_title("Office Move Logistics", transcript));
+        assert!(!is_prompt_echo_title(
+            "Office Move Logistics",
+            "Others: the office move is on Monday."
+        ));
     }
 
     #[test]
     fn chunk_retries_once_unless_cancelled() {
-        assert!(should_retry_chunk_failure(1, None));
-        assert!(!should_retry_chunk_failure(2, None));
-        let cancellation_token = CancellationToken::new();
-        cancellation_token.cancel();
-        assert!(!should_retry_chunk_failure(1, Some(&cancellation_token)));
+        assert!(should_retry_chunk_failure(1, false));
+        assert!(!should_retry_chunk_failure(2, false));
+        assert!(!should_retry_chunk_failure(1, true));
+    }
+
+    #[test]
+    fn chunk_by_chars_prefers_transcript_line_boundaries() {
+        let text = "[00:01] [You] first line here\n[00:05] [Others] second line here\n";
+        let chunks = chunk_text_by_chars(text, 40, 0);
+        assert_eq!(chunks[0], "[00:01] [You] first line here\n");
+        assert_eq!(chunks.concat(), text);
+    }
+
+    // Pipeline tests against a scripted backend -----------------------------
+
+    type Responder =
+        dyn Fn(usize, &str, &str, &GenerationOptions) -> Result<LlmCompletion, String> + Send + Sync;
+
+    /// Counts one token per character so budgets are easy to reason about.
+    struct FakeBackend {
+        provider: LLMProvider,
+        respond: Box<Responder>,
+        calls: std::sync::Mutex<Vec<(String, String, GenerationOptions)>>,
+    }
+
+    impl FakeBackend {
+        fn new(
+            provider: LLMProvider,
+            respond: impl Fn(usize, &str, &str, &GenerationOptions) -> Result<LlmCompletion, String>
+                + Send
+                + Sync
+                + 'static,
+        ) -> Self {
+            Self {
+                provider,
+                respond: Box::new(respond),
+                calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn calls(&self) -> Vec<(String, String, GenerationOptions)> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl SummaryBackend for FakeBackend {
+        async fn generate(
+            &self,
+            system_prompt: &str,
+            user_prompt: &str,
+            options: &GenerationOptions,
+        ) -> Result<LlmCompletion, String> {
+            let index = {
+                let mut calls = self.calls.lock().unwrap();
+                calls.push((
+                    system_prompt.to_string(),
+                    user_prompt.to_string(),
+                    options.clone(),
+                ));
+                calls.len() - 1
+            };
+            (self.respond)(index, system_prompt, user_prompt, options)
+        }
+
+        async fn count_tokens(&self, text: &str) -> Result<usize, String> {
+            Ok(text.chars().count())
+        }
+
+        async fn count_prompt_tokens(
+            &self,
+            system_prompt: &str,
+            user_prompt: &str,
+        ) -> Result<usize, String> {
+            Ok(system_prompt.chars().count() + user_prompt.chars().count())
+        }
+
+        fn provider(&self) -> &LLMProvider {
+            &self.provider
+        }
+
+        fn is_cancelled(&self) -> bool {
+            false
+        }
+    }
+
+    fn reply(content: &str) -> Result<LlmCompletion, String> {
+        Ok(LlmCompletion {
+            content: content.to_string(),
+            reasoning_stripped: false,
+            truncated: false,
+            prompt_tokens: None,
+        })
+    }
+
+    fn truncated(content: &str) -> Result<LlmCompletion, String> {
+        Ok(LlmCompletion {
+            content: content.to_string(),
+            reasoning_stripped: false,
+            truncated: true,
+            prompt_tokens: None,
+        })
+    }
+
+    async fn run(
+        backend: &FakeBackend,
+        text: &str,
+        budget: Option<ContextBudget>,
+        detected_language: Option<&str>,
+    ) -> Result<GeneratedMeetingSummary, String> {
+        generate_meeting_summary(
+            backend,
+            "model",
+            text,
+            "",
+            &default_transcript_only_system_prompt(),
+            budget,
+            &GenerationOptions::default(),
+            None,
+            detected_language,
+            None,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn transcript_that_fits_is_summarised_in_one_budgeted_call() {
+        let backend = FakeBackend::new(LLMProvider::BuiltInAI, |_, _, _, _| reply("# Notes"));
+        let generated = run(
+            &backend,
+            "[00:01] [You] hello",
+            Some(ContextBudget::new(32_768)),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(generated.final_markdown, "# Notes");
+        let calls = backend.calls();
+        assert_eq!(calls.len(), 1, "unknown language must not add a normalization pass");
+        assert!(calls[0].1.contains("<transcript>\n[00:01] [You] hello\n</transcript>"));
+        assert_eq!(calls[0].2.max_tokens, Some(4_096));
+        assert_eq!(calls[0].2.num_ctx, None);
+    }
+
+    #[tokio::test]
+    async fn ollama_calls_carry_num_ctx_matching_the_budget() {
+        let backend = FakeBackend::new(LLMProvider::Ollama, |_, _, _, _| reply("# Notes"));
+        run(
+            &backend,
+            "short",
+            Some(ContextBudget::for_ollama(131_072)),
+            None,
+        )
+        .await
+        .unwrap();
+        let options = &backend.calls()[0].2;
+        assert_eq!(options.num_ctx, Some(16_384));
+        assert_eq!(options.max_tokens, Some(4_096));
+    }
+
+    #[tokio::test]
+    async fn truncated_reply_is_retried_with_a_larger_output_budget() {
+        let backend = FakeBackend::new(LLMProvider::BuiltInAI, |index, _, _, _| {
+            if index == 0 {
+                truncated("# Notes\n- half")
+            } else {
+                reply("# Notes\n- complete")
+            }
+        });
+        let generated = run(&backend, "short", Some(ContextBudget::new(32_768)), None)
+            .await
+            .unwrap();
+        assert_eq!(generated.final_markdown, "# Notes\n- complete");
+        let calls = backend.calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[1].2.max_tokens, Some(8_192));
+        assert_eq!(calls[0].1, calls[1].1);
+    }
+
+    #[tokio::test]
+    async fn repeated_truncation_fails_instead_of_saving_partial_notes() {
+        let backend =
+            FakeBackend::new(LLMProvider::BuiltInAI, |_, _, _, _| truncated("# Notes\n- half"));
+        let error = run(&backend, "short", Some(ContextBudget::new(32_768)), None)
+            .await
+            .unwrap_err();
+        assert!(error.contains("cut off"), "{error}");
+        assert_eq!(backend.calls().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn hosted_truncation_fails_without_a_blind_retry() {
+        let backend = FakeBackend::new(LLMProvider::Claude, |_, _, _, _| truncated("# Notes"));
+        let error = run(&backend, "short", None, None).await.unwrap_err();
+        assert!(error.contains("cut off"), "{error}");
+        assert_eq!(backend.calls().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn long_transcripts_are_chunked_within_the_context_budget() {
+        let budget = ContextBudget::new(4_096);
+        let backend = FakeBackend::new(LLMProvider::BuiltInAI, |_, system, _, _| {
+            if system == COMBINE_SYSTEM_PROMPT {
+                reply("combined summary")
+            } else {
+                reply("chunk summary")
+            }
+        });
+        let line = "[00:01] [Others] we discussed the quarterly plan in detail today.\n";
+        let text = line.repeat(120); // ~8k tokens at one token per char
+        let generated = run(&backend, &text, Some(budget), None).await.unwrap();
+        assert!(generated.successful_chunk_count > 2);
+
+        let window = budget.n_ctx - budget.max_output;
+        for (system, user, _) in backend.calls() {
+            let prompt_tokens = system.chars().count() + user.chars().count();
+            assert!(prompt_tokens <= window, "{prompt_tokens} > {window}");
+        }
+        let calls = backend.calls();
+        let final_call = calls.last().unwrap();
+        assert!(final_call.0.contains("`## Summary`"));
+        assert!(final_call.1.contains("combined summary"));
+    }
+
+    #[tokio::test]
+    async fn context_overflow_resplits_the_chunk_instead_of_resending_it() {
+        let budget = ContextBudget::new(4_096);
+        // The "model" can only take chunk prompts below 1,800 characters.
+        let backend = FakeBackend::new(LLMProvider::BuiltInAI, |_, system, user, _| {
+            if system == chunk_system_prompt() && user.chars().count() > 1_800 {
+                Err("Generation failed: context overflow: prompt has 3000 tokens".to_string())
+            } else {
+                reply("summary")
+            }
+        });
+        // Unique lines, so identical prompts can only come from a resend.
+        let text: String = (0..200)
+            .map(|i| format!("[{:02}:{:02}] [You] item {i}: plan the launch.\n", i / 60, i % 60))
+            .collect();
+        run(&backend, &text, Some(budget), None).await.unwrap();
+
+        let chunk_prompts: Vec<String> = backend
+            .calls()
+            .into_iter()
+            .filter(|(system, _, _)| *system == chunk_system_prompt())
+            .map(|(_, user, _)| user)
+            .collect();
+        let overflowed: Vec<&String> = chunk_prompts
+            .iter()
+            .filter(|user| user.chars().count() > 1_800)
+            .collect();
+        assert!(!overflowed.is_empty(), "test should exercise an overflow");
+        for user in overflowed {
+            assert_eq!(
+                chunk_prompts.iter().filter(|other| *other == user).count(),
+                1,
+                "an overflowing chunk was resent unchanged"
+            );
+        }
+        assert!(chunk_prompts.iter().any(|user| user.chars().count() <= 1_800));
+    }
+
+    #[tokio::test]
+    async fn confidently_non_english_transcript_gets_one_normalization_pass() {
+        let backend = FakeBackend::new(LLMProvider::BuiltInAI, |index, _, _, _| {
+            reply(if index == 0 { "# Notizen" } else { "# Notes" })
+        });
+        let generated = run(&backend, "kurz", Some(ContextBudget::new(32_768)), Some("de"))
+            .await
+            .unwrap();
+        assert_eq!(generated.final_markdown, "# Notes");
+        assert_eq!(backend.calls().len(), 2);
     }
 
     // resolve_cached_english matrix -------------------------------------------

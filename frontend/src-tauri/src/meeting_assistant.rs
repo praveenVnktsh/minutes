@@ -1,6 +1,6 @@
 use crate::database::repositories::setting::SettingsRepository;
 use crate::state::AppState;
-use crate::summary::llm_client::{generate_summary, LLMProvider};
+use crate::summary::llm_client::{generate_summary, GenerationOptions, LLMProvider};
 use crate::summary::processor::clean_llm_markdown_detailed;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -215,12 +215,15 @@ pub async fn chat_with_meeting<R: Runtime>(
         &context.to_string(),
         config.ollama_endpoint.as_deref(),
         custom.as_ref().map(|value| value.endpoint.as_str()),
-        custom
-            .as_ref()
-            .and_then(|value| value.max_tokens)
-            .map(|value| value as u32),
-        custom.as_ref().and_then(|value| value.temperature),
-        custom.as_ref().and_then(|value| value.top_p),
+        &GenerationOptions {
+            max_tokens: custom
+                .as_ref()
+                .and_then(|value| value.max_tokens)
+                .map(|value| value as u32),
+            temperature: custom.as_ref().and_then(|value| value.temperature),
+            top_p: custom.as_ref().and_then(|value| value.top_p),
+            num_ctx: None,
+        },
         app_data_dir.as_ref(),
         None,
     )
