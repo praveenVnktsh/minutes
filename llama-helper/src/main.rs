@@ -3,20 +3,35 @@ use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::pin::pin;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc;
 use std::sync::Arc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use llama_cpp_2::context::params::LlamaContextParams;
+use llama_cpp_2::context::session::LlamaStateSeqFlags;
+use llama_cpp_2::context::LlamaContext;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaModel};
+use llama_cpp_2::token::LlamaToken;
 use serde::{Deserialize, Serialize};
+
+mod gpu;
+mod prefix;
+
+use prefix::{plan_prefix, safe_emit_end, CancelFlag};
 
 // ============================================================================
 // Protocol Messages (JSON over stdin/stdout)
 // ============================================================================
+//
+// One request per line in, and exactly one final reply line out per request,
+// in order. A streaming `generate` also writes `token` lines before its final
+// `response`. `cancel` is the only request that never gets a reply: it is
+// handled by the stdin reader thread while a generation runs, and a cancel for
+// an id that is not running is ignored.
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -37,6 +52,16 @@ enum Request {
         stop_tokens: Option<Vec<String>>,
         /// Sampling seed. Defaults to `DEFAULT_SEED` so identical requests give identical output.
         seed: Option<u32>,
+        /// Request id, echoed on every line this request produces. Needed to cancel it.
+        id: Option<u64>,
+        /// Write `token` lines while generating.
+        stream: Option<bool>,
+        /// Reuse the saved state of the prompt's stable prefix (see `prefix.rs`).
+        cache_prompt: Option<bool>,
+        /// Byte length of the prompt's stable prefix.
+        cache_prefix_chars: Option<usize>,
+        /// Context window for the persistent cached context (defaults to `context_size`).
+        cache_context_size: Option<u32>,
     },
     /// Counts the tokens `text` produces with the loaded model's tokenizer,
     /// using exactly the tokenization `generate` applies to a prompt.
@@ -44,6 +69,10 @@ enum Request {
         text: String,
         context_size: Option<u32>,
         model_path: Option<String>,
+    },
+    /// Stop generation `id` early. Never answered.
+    Cancel {
+        id: u64,
     },
     Ping,
     Shutdown,
@@ -57,7 +86,8 @@ enum Response {
     Response {
         text: String,
         error: Option<String>,
-        /// "stop" when the model ended its turn, "length" when it hit max_tokens.
+        /// "stop" when the model ended its turn, "length" when it hit
+        /// max_tokens, "cancelled" when a cancel request stopped it.
         #[serde(skip_serializing_if = "Option::is_none")]
         finish_reason: Option<&'static str>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -67,6 +97,21 @@ enum Response {
         /// Machine-readable error class, e.g. "context_overflow".
         #[serde(skip_serializing_if = "Option::is_none")]
         error_kind: Option<&'static str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<u64>,
+        /// Prompt tokens restored from the prefix checkpoint instead of evaluated.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reused_tokens: Option<u32>,
+        /// Time from receiving the request to the first generated token.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        first_token_ms: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tokens_per_second: Option<f64>,
+    },
+    Token {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<u64>,
+        text: String,
     },
     TokenCount {
         count: u32,
@@ -79,7 +124,7 @@ enum Response {
 }
 
 impl Response {
-    fn failure(message: String, error_kind: Option<&'static str>) -> Self {
+    fn failure(message: String, error_kind: Option<&'static str>, id: Option<u64>) -> Self {
         Response::Response {
             text: String::new(),
             error: Some(message),
@@ -87,10 +132,17 @@ impl Response {
             prompt_tokens: None,
             completion_tokens: None,
             error_kind,
+            id,
+            reused_tokens: None,
+            first_token_ms: None,
+            tokens_per_second: None,
         }
     }
 
-    fn from_generation(result: std::result::Result<GenerationOutput, GenerateError>) -> Self {
+    fn from_generation(
+        result: std::result::Result<GenerationOutput, GenerateError>,
+        id: Option<u64>,
+    ) -> Self {
         match result {
             Ok(output) => Response::Response {
                 text: output.text,
@@ -99,11 +151,15 @@ impl Response {
                 prompt_tokens: Some(output.prompt_tokens),
                 completion_tokens: Some(output.completion_tokens),
                 error_kind: None,
+                id,
+                reused_tokens: output.reused_tokens,
+                first_token_ms: output.first_token_ms,
+                tokens_per_second: Some(output.tokens_per_second),
             },
             Err(error) => {
                 let kind = matches!(error, GenerateError::ContextOverflow { .. })
                     .then_some(ERROR_KIND_CONTEXT_OVERFLOW);
-                Response::failure(format!("Generation failed: {error}"), kind)
+                Response::failure(format!("Generation failed: {error}"), kind, id)
             }
         }
     }
@@ -118,6 +174,7 @@ const ERROR_KIND_CONTEXT_OVERFLOW: &str = "context_overflow";
 enum FinishReason {
     Stop,
     Length,
+    Cancelled,
 }
 
 impl FinishReason {
@@ -125,16 +182,21 @@ impl FinishReason {
         match self {
             FinishReason::Stop => "stop",
             FinishReason::Length => "length",
+            FinishReason::Cancelled => "cancelled",
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 struct GenerationOutput {
     text: String,
     finish_reason: FinishReason,
     prompt_tokens: u32,
     completion_tokens: u32,
+    /// Only reported for cached requests.
+    reused_tokens: Option<u32>,
+    first_token_ms: Option<u64>,
+    tokens_per_second: f64,
 }
 
 #[derive(Debug)]
@@ -264,178 +326,76 @@ impl SamplingConfig {
     }
 }
 
-// ============================================================================
-// VRAM Detection and GPU Layer Calculation
-// ============================================================================
-
-/// Detect available VRAM in GB
-fn detect_vram_gb() -> f32 {
-    #[cfg(feature = "metal")]
-    {
-        // macOS Metal: Query recommended max working set size
-        if let Some(vram) = detect_metal_vram() {
-            eprintln!("Metal VRAM detected: {:.2} GB", vram);
-            return vram;
-        }
-    }
-
-    #[cfg(feature = "cuda")]
-    {
-        // NVIDIA CUDA: Query device memory
-        if let Some(vram) = detect_cuda_vram() {
-            eprintln!("CUDA VRAM detected: {:.2} GB", vram);
-            return vram;
-        }
-    }
-
-    // TODO: Vulkan VRAM detection
-
-    eprintln!("VRAM detection not available, using conservative estimate");
-    4.0 // Conservative fallback
+/// One generation's parameters.
+struct GenerateParams {
+    prompt: String,
+    max_tokens: i32,
+    sampling: SamplingConfig,
+    stop_tokens: Vec<String>,
+    seed: u32,
+    id: Option<u64>,
+    /// Set for `cache_prompt` requests.
+    cache: Option<CacheParams>,
 }
 
-#[cfg(feature = "metal")]
-fn detect_metal_vram() -> Option<f32> {
-    if let Ok(output) = std::process::Command::new("sysctl")
-        .arg("hw.memsize")
-        .output()
-    {
-        if let Ok(stdout) = String::from_utf8(output.stdout) {
-            if let Some(bytes_str) = stdout.split(':').nth(1) {
-                if let Ok(bytes) = bytes_str.trim().parse::<u64>() {
-                    let gb = bytes as f32 / (1024.0 * 1024.0 * 1024.0);
-                    // Assume GPU can use ~60% of system memory on Apple Silicon
-                    return Some(gb * 0.6);
-                }
-            }
-        }
-    }
-    None
-}
-
-#[cfg(feature = "cuda")]
-fn detect_cuda_vram() -> Option<f32> {
-    // Use nvidia-smi to query VRAM
-    if let Ok(output) = std::process::Command::new("nvidia-smi")
-        .args(&["--query-gpu=memory.free", "--format=csv,noheader,nounits"])
-        .output()
-    {
-        if let Ok(stdout) = String::from_utf8(output.stdout) {
-            if let Ok(mb) = stdout.trim().parse::<f32>() {
-                return Some(mb / 1024.0); // Convert MB to GB
-            }
-        }
-    }
-    None
-}
-
-/// Calculate safe GPU layer count based on VRAM, model file size, and context size
-fn calculate_gpu_layers(
-    model_path: &PathBuf,
-    model_layers: u32,
-    vram_gb: f32,
+#[derive(Debug, Clone, Copy)]
+struct CacheParams {
+    prefix_chars: usize,
     context_size: u32,
-) -> u32 {
-    let file_size_gb = std::fs::metadata(model_path)
-        .map(|m| m.len() as f32 / 1024.0 / 1024.0 / 1024.0)
-        .unwrap_or(0.0);
-
-    if file_size_gb == 0.0 {
-        eprintln!("⚠️ Could not determine model file size, using conservative default");
-        return 0;
-    }
-
-    // Heuristic: Estimate KV cache size
-    // 7B models (approx > 2.5GB) usually have 4096 hidden dim -> ~256MB per 1k context
-    // 1B models (approx < 2.5GB) usually have 2048 hidden dim -> ~128MB per 1k context
-    let kv_per_1k_gb = if file_size_gb > 2.5 { 0.25 } else { 0.12 };
-    let total_kv_gb = (context_size as f32 / 1000.0) * kv_per_1k_gb;
-
-    // Safety buffer (500MB) for OS/Display
-    let safe_vram = vram_gb - 0.5;
-
-    // For debugging
-    eprintln!("📊 VRAM Analysis:");
-    eprintln!("   • Available: {:.2} GB", vram_gb);
-    eprintln!("   • Safe Limit: {:.2} GB", safe_vram);
-    eprintln!("   • Model Weights: {:.2} GB", file_size_gb);
-    eprintln!(
-        "   • KV Cache ({} ctx): {:.2} GB",
-        context_size, total_kv_gb
-    );
-
-    if safe_vram <= 0.0 {
-        eprintln!("⚠️ No safe VRAM available, using CPU only");
-        return 0;
-    }
-
-    // Calculate cost per layer
-    let weight_per_layer = file_size_gb / model_layers as f32;
-    let kv_per_layer = total_kv_gb / model_layers as f32;
-    let total_per_layer = weight_per_layer + kv_per_layer;
-
-    // Calculate how many layers fit
-    let safe_layers = (safe_vram / total_per_layer).floor() as u32;
-    let layers = safe_layers.min(model_layers);
-
-    eprintln!(
-        "   • Cost per layer: {:.2} MB (Weights) + {:.2} MB (KV) = {:.2} MB",
-        weight_per_layer * 1024.0,
-        kv_per_layer * 1024.0,
-        total_per_layer * 1024.0
-    );
-
-    if layers < model_layers {
-        eprintln!(
-            "⚠️ Memory constrained. Offloading {}/{} layers ({:.1}%)",
-            layers,
-            model_layers,
-            (layers as f32 / model_layers as f32) * 100.0
-        );
-    } else {
-        eprintln!("✅ Full offload possible ({} layers)", layers);
-    }
-
-    layers
 }
 
-/// Get default GPU layer count with smart detection
-fn get_default_gpu_layers(model_path: &PathBuf, context_size: u32) -> u32 {
-    let vram = detect_vram_gb();
-    // TODO: Use actual model metadata instead of heuristics
-    // Heuristic: Estimate total layers based on file size
-    // 7B models (Q4) are ~4.1GB and have ~32-35 layers
-    // 1B models (Q4) are ~1.1GB and have ~20-28 layers
-    let file_size_gb = std::fs::metadata(model_path)
-        .map(|m| m.len() as f32 / 1024.0 / 1024.0 / 1024.0)
-        .unwrap_or(0.0);
-
-    let estimated_layers = if file_size_gb > 2.5 { 33 } else { 28 };
-
-    calculate_gpu_layers(model_path, estimated_layers, vram, context_size)
+/// What generation reports while it runs.
+trait GenerationSink {
+    fn is_cancelled(&self) -> bool;
+    fn on_text(&mut self, text: &str);
 }
 
 // ============================================================================
 // Model State Management
 // ============================================================================
 
+/// The saved state of a prompt's stable prefix, in host memory, so it outlives
+/// the context it came from.
+struct Checkpoint {
+    tokens: Vec<LlamaToken>,
+    state: Vec<u8>,
+}
+
 struct ModelState {
-    backend: LlamaBackend,
-    model: Option<LlamaModel>,
+    // Field order is drop order: the cached context borrows the model, so it
+    // must go first.
+    /// Persistent context for `cache_prompt` requests, and its n_ctx.
+    cache_ctx: Option<(u32, LlamaContext<'static>)>,
+    checkpoint: Option<Checkpoint>,
+    /// Boxed so its address stays put while `cache_ctx` borrows it.
+    model: Option<Box<LlamaModel>>,
     model_path: Option<PathBuf>,
     context_size: u32,
     last_activity: Arc<AtomicU64>,
+    backend: LlamaBackend,
+}
+
+fn thread_count() -> i32 {
+    // Conservative default: max(1, (Cores / 2) + 2), so the UI thread is never starved.
+    std::thread::available_parallelism()
+        .map(|n| {
+            let cores = n.get() as i32;
+            ((cores / 2) + 2).max(1)
+        })
+        .unwrap_or(2)
 }
 
 impl ModelState {
     fn new() -> Result<Self> {
         let backend = LlamaBackend::init().context("Failed to init LlamaBackend")?;
         Ok(Self {
-            backend,
+            cache_ctx: None,
+            checkpoint: None,
             model: None,
             model_path: None,
             context_size: 2048,
             last_activity: Arc::new(AtomicU64::new(Self::current_timestamp())),
+            backend,
         })
     }
 
@@ -452,7 +412,7 @@ impl ModelState {
     }
 
     fn seconds_since_activity(&self) -> u64 {
-        Self::current_timestamp() - self.last_activity.load(Ordering::SeqCst)
+        Self::current_timestamp().saturating_sub(self.last_activity.load(Ordering::SeqCst))
     }
 
     fn load_model_if_needed(&mut self, model_path: PathBuf, context_size: u32) -> Result<()> {
@@ -466,9 +426,14 @@ impl ModelState {
         }
 
         eprintln!("📥 Loading model: {}", model_path.display());
+        // Anything tied to the old model goes before it does.
+        self.cache_ctx = None;
+        self.checkpoint = None;
+        self.model = None;
+        self.model_path = None;
 
         // Detect GPU layers
-        let gpu_layers = get_default_gpu_layers(&model_path, context_size);
+        let gpu_layers = gpu::get_default_gpu_layers(&model_path, context_size);
 
         // Configure model parameters with GPU offload
         let model_params = LlamaModelParams::default().with_n_gpu_layers(gpu_layers);
@@ -477,7 +442,7 @@ impl ModelState {
         let model = LlamaModel::load_from_file(&self.backend, model_path.clone(), &model_params)
             .with_context(|| format!("unable to load model at {:?}", model_path))?;
 
-        self.model = Some(model);
+        self.model = Some(Box::new(model));
         self.model_path = Some(model_path);
         self.context_size = context_size;
         self.update_activity();
@@ -489,37 +454,47 @@ impl ModelState {
     /// Tokenizes `text` exactly as `generate` tokenizes a prompt. `AddBos::Always`
     /// maps to llama.cpp's `add_special`, which only prepends BOS when the GGUF's
     /// `add_bos_token` says so (Gemma: yes, Qwen: no), so templates never double it.
-    fn tokenize(&self, text: &str) -> Result<Vec<llama_cpp_2::token::LlamaToken>> {
-        let model = self.model.as_ref().context("Model not loaded")?;
+    fn tokenize(&self, text: &str) -> Result<Vec<LlamaToken>> {
+        let model = self.model.as_deref().context("Model not loaded")?;
         model
             .str_to_token(text, AddBos::Always)
             .with_context(|| "failed to tokenize prompt")
     }
 
+    /// The loaded model with the lifetime the cached context needs.
+    ///
+    /// SAFETY: the model is boxed (its address never moves) and is only
+    /// dropped in `load_model_if_needed` or with `ModelState`, both of which
+    /// drop `cache_ctx` first.
+    fn model_static(&self) -> Result<&'static LlamaModel> {
+        let model = self.model.as_deref().context("Model not loaded")?;
+        Ok(unsafe { &*(model as *const LlamaModel) })
+    }
+
     fn generate(
         &mut self,
-        prompt: String,
-        max_tokens: i32,
-        sampling: SamplingConfig,
-        stop_tokens: Vec<String>,
-        seed: u32,
+        params: GenerateParams,
+        sink: &mut dyn GenerationSink,
+    ) -> std::result::Result<GenerationOutput, GenerateError> {
+        match params.cache {
+            Some(cache) => self.generate_cached(params, cache, sink),
+            None => self.generate_fresh(params, sink),
+        }
+    }
+
+    /// The original path: a fresh context per request.
+    fn generate_fresh(
+        &mut self,
+        params: GenerateParams,
+        sink: &mut dyn GenerationSink,
     ) -> std::result::Result<GenerationOutput, GenerateError> {
         let start_time = Instant::now();
-        let tokens_list = self.tokenize(&prompt)?;
+        let tokens_list = self.tokenize(&params.prompt)?;
         eprintln!("📝 Tokenized prompt: {} tokens", tokens_list.len());
-        check_context_budget(tokens_list.len(), max_tokens, self.context_size)?;
+        check_context_budget(tokens_list.len(), params.max_tokens, self.context_size)?;
 
-        let model = self.model.as_ref().context("Model not loaded")?;
-
-        // Calculate thread count (conservative default: max(1, (Cores / 2) + 2))
-        // This ensures the UI thread is never starved
-        let threads: i32 = std::thread::available_parallelism()
-            .map(|n| {
-                let cores = n.get() as i32;
-                ((cores / 2) + 2).max(1)
-            })
-            .unwrap_or(2);
-
+        let model = self.model.as_deref().context("Model not loaded")?;
+        let threads = thread_count();
         let ctx_params = LlamaContextParams::default()
             .with_n_ctx(Some(
                 NonZeroU32::new(self.context_size).context("Invalid ctx size")?,
@@ -533,45 +508,291 @@ impl ModelState {
             .context("unable to create the llama_context")?;
 
         // Use context size for batch capacity to handle long prompts
-        let batch_size = self.context_size as usize;
-        let mut batch = LlamaBatch::new(batch_size, 1);
-
+        let mut batch = LlamaBatch::new(self.context_size as usize, 1);
         let last_index: i32 = (tokens_list.len() - 1) as i32;
-        for (i, token) in (0_i32..).zip(tokens_list) {
-            let is_last = i == last_index;
+        for (i, token) in (0_i32..).zip(tokens_list.iter().copied()) {
             batch
-                .add(token, i, &[0], is_last)
+                .add(token, i, &[0], i == last_index)
                 .context("Failed to add token to batch")?;
         }
-
         ctx.decode(&mut batch).context("llama_decode() failed")?;
         let prompt_time = start_time.elapsed();
 
         let n_prompt_tokens = batch.n_tokens();
-        let mut n_cur = n_prompt_tokens;
-        let mut decoder = encoding_rs::UTF_8.new_decoder();
-        let mut output = String::new();
+        let output = run_sampling(
+            &mut ctx,
+            model,
+            &mut batch,
+            n_prompt_tokens,
+            &params,
+            sink,
+            start_time,
+        )?;
+        self.update_activity();
+        Ok(finish_output(
+            output,
+            n_prompt_tokens as u32,
+            None,
+            start_time,
+            prompt_time,
+        ))
+    }
 
-        eprintln!("🔄 Starting generation (max_tokens: {})", max_tokens);
+    /// A `cache_prompt` request: restore the stable prefix's checkpoint when it
+    /// still matches, evaluate only what is new, and save the new prefix.
+    fn generate_cached(
+        &mut self,
+        params: GenerateParams,
+        cache: CacheParams,
+        sink: &mut dyn GenerationSink,
+    ) -> std::result::Result<GenerationOutput, GenerateError> {
+        let start_time = Instant::now();
+        let n_ctx = cache.context_size.clamp(512, self.context_size.max(512));
+        let tokens = self.tokenize(&params.prompt)?;
+        check_context_budget(tokens.len(), params.max_tokens, n_ctx)?;
+        let prefix_end = floor_char_boundary(&params.prompt, cache.prefix_chars);
+        let prefix_tokens = if prefix_end == 0 {
+            Vec::new()
+        } else {
+            self.tokenize(&params.prompt[..prefix_end])?
+        };
+        let model = self.model_static()?;
 
-        use llama_cpp_2::sampling::LlamaSampler;
-
-        eprintln!("🎲 Sampling seed: {}", seed);
-        let sampler = if sampling.temperature <= 0.0 {
-            if sampling.uses_penalties() {
-                LlamaSampler::chain_simple([
-                    LlamaSampler::penalties(
-                        sampling.penalty_last_n,
-                        sampling.repeat_penalty,
-                        sampling.frequency_penalty,
-                        sampling.presence_penalty,
-                    ),
-                    LlamaSampler::greedy(),
-                ])
-            } else {
-                LlamaSampler::chain_simple([LlamaSampler::greedy()])
+        let mut ctx = match self.cache_ctx.take() {
+            Some((size, ctx)) if size == n_ctx => ctx,
+            _ => {
+                let threads = thread_count();
+                let ctx_params = LlamaContextParams::default()
+                    .with_n_ctx(Some(NonZeroU32::new(n_ctx).context("Invalid ctx size")?))
+                    .with_n_batch(n_ctx)
+                    .with_n_threads(threads)
+                    .with_n_threads_batch(threads);
+                model
+                    .new_context(&self.backend, ctx_params)
+                    .context("unable to create the cached llama_context")?
             }
-        } else if sampling.uses_penalties() {
+        };
+        ctx.clear_kv_cache();
+
+        let mut plan = plan_prefix(
+            &tokens,
+            &prefix_tokens,
+            self.checkpoint.as_ref().map(|c| c.tokens.as_slice()),
+        );
+        if plan.restore {
+            let checkpoint = self.checkpoint.as_ref().expect("planned from a checkpoint");
+            // SAFETY: the bytes came from `state_seq_get_data_ext` on a context
+            // of this same model.
+            let restored = unsafe {
+                ctx.state_seq_set_data_ext(&checkpoint.state, 0, LlamaStateSeqFlags::empty())
+            };
+            if !restored {
+                eprintln!("⚠️ Prefix checkpoint could not be restored; evaluating in full");
+                ctx.clear_kv_cache();
+                self.checkpoint = None;
+                plan = plan_prefix(&tokens, &prefix_tokens, None);
+            }
+        }
+        let reused = plan.start;
+
+        let mut batch = LlamaBatch::new(n_ctx as usize, 1);
+        let mut position = plan.start;
+        if plan.saves_checkpoint() {
+            decode_range(
+                &mut ctx,
+                &mut batch,
+                &tokens,
+                position,
+                plan.stable_end,
+                false,
+            )?;
+            position = plan.stable_end;
+            self.checkpoint = save_checkpoint(&ctx, &tokens[..plan.stable_end]);
+        }
+        if sink.is_cancelled() {
+            self.cache_ctx = Some((n_ctx, ctx));
+            return Ok(cancelled_output(tokens.len(), reused));
+        }
+        decode_range(&mut ctx, &mut batch, &tokens, position, tokens.len(), true)?;
+        let prompt_time = start_time.elapsed();
+        eprintln!(
+            "📝 Cached prompt: {} tokens, {} reused, {} evaluated in {:.2}s",
+            tokens.len(),
+            reused,
+            tokens.len() - reused,
+            prompt_time.as_secs_f64()
+        );
+
+        let output = run_sampling(
+            &mut ctx,
+            model,
+            &mut batch,
+            tokens.len() as i32,
+            &params,
+            sink,
+            start_time,
+        );
+        self.cache_ctx = Some((n_ctx, ctx));
+        let output = output?;
+        self.update_activity();
+        Ok(finish_output(
+            output,
+            tokens.len() as u32,
+            Some(reused as u32),
+            start_time,
+            prompt_time,
+        ))
+    }
+}
+
+fn floor_char_boundary(text: &str, index: usize) -> usize {
+    let mut index = index.min(text.len());
+    while index > 0 && !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
+/// Evaluates `tokens[from..to]` at their own positions; only the last one gets
+/// logits, and only when `logits_at_end`.
+fn decode_range(
+    ctx: &mut LlamaContext<'_>,
+    batch: &mut LlamaBatch,
+    tokens: &[LlamaToken],
+    from: usize,
+    to: usize,
+    logits_at_end: bool,
+) -> Result<()> {
+    if from >= to {
+        return Ok(());
+    }
+    batch.clear();
+    for (position, token) in tokens.iter().enumerate().take(to).skip(from) {
+        batch
+            .add(
+                *token,
+                position as i32,
+                &[0],
+                logits_at_end && position + 1 == to,
+            )
+            .context("Failed to add token to batch")?;
+    }
+    ctx.decode(batch).context("llama_decode() failed")?;
+    Ok(())
+}
+
+fn save_checkpoint(ctx: &LlamaContext<'_>, tokens: &[LlamaToken]) -> Option<Checkpoint> {
+    let flags = LlamaStateSeqFlags::empty();
+    let size = ctx.state_seq_get_size_ext(0, flags);
+    if size == 0 {
+        return None;
+    }
+    let mut state = vec![0_u8; size];
+    // SAFETY: `state` holds `size` bytes, the size llama.cpp asked for.
+    let written = unsafe { ctx.state_seq_get_data_ext(state.as_mut_ptr(), 0, flags) };
+    if written == 0 || written > size {
+        eprintln!("⚠️ Could not save the prefix checkpoint");
+        return None;
+    }
+    state.truncate(written);
+    eprintln!(
+        "💾 Prefix checkpoint: {} tokens, {:.1} MB",
+        tokens.len(),
+        written as f64 / (1024.0 * 1024.0)
+    );
+    Some(Checkpoint {
+        tokens: tokens.to_vec(),
+        state,
+    })
+}
+
+fn cancelled_output(prompt_tokens: usize, reused: usize) -> GenerationOutput {
+    GenerationOutput {
+        text: String::new(),
+        finish_reason: FinishReason::Cancelled,
+        prompt_tokens: prompt_tokens as u32,
+        completion_tokens: 0,
+        reused_tokens: Some(reused as u32),
+        first_token_ms: None,
+        tokens_per_second: 0.0,
+    }
+}
+
+struct SampledOutput {
+    text: String,
+    finish_reason: FinishReason,
+    completion_tokens: u32,
+    first_token_at: Option<Duration>,
+}
+
+fn finish_output(
+    output: SampledOutput,
+    prompt_tokens: u32,
+    reused_tokens: Option<u32>,
+    start_time: Instant,
+    prompt_time: Duration,
+) -> GenerationOutput {
+    let total_time = start_time.elapsed();
+    let gen_time = total_time.saturating_sub(prompt_time);
+    let tokens_per_second = if gen_time.as_secs_f64() > 0.0 {
+        f64::from(output.completion_tokens) / gen_time.as_secs_f64()
+    } else {
+        0.0
+    };
+
+    eprintln!("📊 Generation Statistics:");
+    eprintln!("   • Prompt tokens: {}", prompt_tokens);
+    if let Some(reused) = reused_tokens {
+        eprintln!("   • Reused prompt tokens: {}", reused);
+    }
+    eprintln!("   • Output tokens: {}", output.completion_tokens);
+    eprintln!("   • Prompt processing: {:.2}s", prompt_time.as_secs_f64());
+    eprintln!("   • Generation time: {:.2}s", gen_time.as_secs_f64());
+    eprintln!("   • Total time: {:.2}s", total_time.as_secs_f64());
+    eprintln!("   • Speed: {:.2} tokens/sec", tokens_per_second);
+
+    GenerationOutput {
+        text: output.text,
+        finish_reason: output.finish_reason,
+        prompt_tokens,
+        completion_tokens: output.completion_tokens,
+        reused_tokens,
+        first_token_ms: output
+            .first_token_at
+            .map(|at| u64::try_from(at.as_millis()).unwrap_or(u64::MAX)),
+        tokens_per_second,
+    }
+}
+
+/// Samples up to `max_tokens` after the prompt. The batch's last token must
+/// hold logits.
+fn run_sampling(
+    ctx: &mut LlamaContext<'_>,
+    model: &LlamaModel,
+    batch: &mut LlamaBatch,
+    n_prompt_tokens: i32,
+    params: &GenerateParams,
+    sink: &mut dyn GenerationSink,
+    start_time: Instant,
+) -> Result<SampledOutput> {
+    use llama_cpp_2::sampling::LlamaSampler;
+
+    let sampling = params.sampling;
+    let max_tokens = params.max_tokens;
+    let seed = params.seed;
+    let mut n_cur = n_prompt_tokens;
+    let mut decoder = encoding_rs::UTF_8.new_decoder();
+    let mut output = String::new();
+    let mut emitted = 0_usize;
+    let mut first_token_at = None;
+
+    eprintln!(
+        "🔄 Starting generation (max_tokens: {}, seed: {})",
+        max_tokens, seed
+    );
+
+    let sampler = if sampling.temperature <= 0.0 {
+        if sampling.uses_penalties() {
             LlamaSampler::chain_simple([
                 LlamaSampler::penalties(
                     sampling.penalty_last_n,
@@ -579,113 +800,122 @@ impl ModelState {
                     sampling.frequency_penalty,
                     sampling.presence_penalty,
                 ),
-                LlamaSampler::top_k(sampling.top_k),
-                LlamaSampler::top_p(sampling.top_p, 1),
-                LlamaSampler::temp(sampling.temperature),
-                LlamaSampler::dist(seed),
+                LlamaSampler::greedy(),
             ])
         } else {
-            LlamaSampler::chain_simple([
-                LlamaSampler::top_k(sampling.top_k),
-                LlamaSampler::top_p(sampling.top_p, 1),
-                LlamaSampler::temp(sampling.temperature),
-                LlamaSampler::dist(seed),
-            ])
-        };
-        let mut sampler = pin!(sampler);
-        let mut finish_reason = FinishReason::Stop;
+            LlamaSampler::chain_simple([LlamaSampler::greedy()])
+        }
+    } else if sampling.uses_penalties() {
+        LlamaSampler::chain_simple([
+            LlamaSampler::penalties(
+                sampling.penalty_last_n,
+                sampling.repeat_penalty,
+                sampling.frequency_penalty,
+                sampling.presence_penalty,
+            ),
+            LlamaSampler::top_k(sampling.top_k),
+            LlamaSampler::top_p(sampling.top_p, 1),
+            LlamaSampler::temp(sampling.temperature),
+            LlamaSampler::dist(seed),
+        ])
+    } else {
+        LlamaSampler::chain_simple([
+            LlamaSampler::top_k(sampling.top_k),
+            LlamaSampler::top_p(sampling.top_p, 1),
+            LlamaSampler::temp(sampling.temperature),
+            LlamaSampler::dist(seed),
+        ])
+    };
+    let mut sampler = pin!(sampler);
+    let mut finish_reason = FinishReason::Stop;
 
-        loop {
-            // Check if we've generated enough tokens
-            if (n_cur - n_prompt_tokens) >= max_tokens {
-                eprintln!("⚠️ Reached max_tokens limit; output is truncated");
-                finish_reason = FinishReason::Length;
-                break;
-            }
-
-            let token = sampler.as_mut().sample(&ctx, batch.n_tokens() - 1);
-            sampler.as_mut().accept(token);
-
-            if model.is_eog_token(token) {
-                eprintln!(
-                    "✓ End-of-generation token reached (generated {} chars)",
-                    output.len()
-                );
-                break;
-            }
-
-            let output_bytes = match model.token_to_piece_bytes(token, 32, true, None) {
-                Err(llama_cpp_2::TokenToStringError::InsufficientBufferSpace(size)) => {
-                    let required_size: usize = size
-                        .checked_neg()
-                        .context("Invalid token piece buffer size")?
-                        .try_into()
-                        .context("Invalid token piece buffer size")?;
-                    model.token_to_piece_bytes(token, required_size, true, None)
-                }
-                result => result,
-            }
-            .context("Failed to convert token to bytes")?;
-
-            let mut token_text = String::with_capacity(32);
-            let _ = decoder.decode_to_string(&output_bytes, &mut token_text, false);
-            output.push_str(&token_text);
-
-            // Check for model-specific stop tokens
-            let mut should_stop = false;
-            for stop_token in &stop_tokens {
-                if output.contains(stop_token) {
-                    eprintln!(
-                        "✓ Stop token '{}' detected (generated {} chars)",
-                        stop_token,
-                        output.len()
-                    );
-                    // Remove the stop token from output
-                    output = output.replace(stop_token, "").trim_end().to_string();
-                    should_stop = true;
-                    break;
-                }
-            }
-            if should_stop {
-                break;
-            }
-
-            batch.clear();
-            batch
-                .add(token, n_cur, &[0], true)
-                .context("Failed to add generated token to batch")?;
-            n_cur += 1;
-            ctx.decode(&mut batch).context("failed to eval")?;
+    loop {
+        if sink.is_cancelled() {
+            eprintln!("✋ Generation cancelled");
+            finish_reason = FinishReason::Cancelled;
+            break;
+        }
+        // Check if we've generated enough tokens
+        if (n_cur - n_prompt_tokens) >= max_tokens {
+            eprintln!("⚠️ Reached max_tokens limit; output is truncated");
+            finish_reason = FinishReason::Length;
+            break;
         }
 
-        // Generation statistics
-        let total_time = start_time.elapsed();
-        let gen_time = total_time.saturating_sub(prompt_time);
-        let output_tokens = (n_cur - n_prompt_tokens) as u64;
-        let prompt_tokens = n_prompt_tokens as u64;
+        let token = sampler.as_mut().sample(ctx, batch.n_tokens() - 1);
+        sampler.as_mut().accept(token);
+        if first_token_at.is_none() {
+            first_token_at = Some(start_time.elapsed());
+        }
 
-        let tokens_per_sec = if gen_time.as_secs_f64() > 0.0 {
-            output_tokens as f64 / gen_time.as_secs_f64()
-        } else {
-            0.0
-        };
+        if model.is_eog_token(token) {
+            eprintln!(
+                "✓ End-of-generation token reached (generated {} chars)",
+                output.len()
+            );
+            break;
+        }
 
-        eprintln!("📊 Generation Statistics:");
-        eprintln!("   • Prompt tokens: {}", prompt_tokens);
-        eprintln!("   • Output tokens: {}", output_tokens);
-        eprintln!("   • Prompt processing: {:.2}s", prompt_time.as_secs_f64());
-        eprintln!("   • Generation time: {:.2}s", gen_time.as_secs_f64());
-        eprintln!("   • Total time: {:.2}s", total_time.as_secs_f64());
-        eprintln!("   • Speed: {:.2} tokens/sec", tokens_per_sec);
+        let output_bytes = match model.token_to_piece_bytes(token, 32, true, None) {
+            Err(llama_cpp_2::TokenToStringError::InsufficientBufferSpace(size)) => {
+                let required_size: usize = size
+                    .checked_neg()
+                    .context("Invalid token piece buffer size")?
+                    .try_into()
+                    .context("Invalid token piece buffer size")?;
+                model.token_to_piece_bytes(token, required_size, true, None)
+            }
+            result => result,
+        }
+        .context("Failed to convert token to bytes")?;
 
-        self.update_activity();
-        Ok(GenerationOutput {
-            text: output,
-            finish_reason,
-            prompt_tokens: u32::try_from(prompt_tokens).unwrap_or(u32::MAX),
-            completion_tokens: u32::try_from(output_tokens).unwrap_or(u32::MAX),
-        })
+        let mut token_text = String::with_capacity(32);
+        let _ = decoder.decode_to_string(&output_bytes, &mut token_text, false);
+        output.push_str(&token_text);
+
+        // Check for model-specific stop tokens
+        let mut should_stop = false;
+        for stop_token in &params.stop_tokens {
+            if output.contains(stop_token) {
+                eprintln!(
+                    "✓ Stop token '{}' detected (generated {} chars)",
+                    stop_token,
+                    output.len()
+                );
+                // Remove the stop token from output
+                output = output.replace(stop_token, "").trim_end().to_string();
+                should_stop = true;
+                break;
+            }
+        }
+        if should_stop {
+            break;
+        }
+
+        let safe_end = safe_emit_end(&output, &params.stop_tokens);
+        if safe_end > emitted {
+            sink.on_text(&output[emitted..safe_end]);
+            emitted = safe_end;
+        }
+
+        batch.clear();
+        batch
+            .add(token, n_cur, &[0], true)
+            .context("Failed to add generated token to batch")?;
+        n_cur += 1;
+        ctx.decode(batch).context("failed to eval")?;
     }
+
+    if output.len() > emitted && output.is_char_boundary(emitted) {
+        sink.on_text(&output[emitted..]);
+    }
+
+    Ok(SampledOutput {
+        text: output,
+        finish_reason,
+        completion_tokens: u32::try_from(n_cur - n_prompt_tokens).unwrap_or(0),
+        first_token_at,
+    })
 }
 
 // ============================================================================
@@ -694,9 +924,67 @@ impl ModelState {
 
 fn send_response(response: &Response) -> Result<()> {
     let json = serde_json::to_string(response)?;
-    println!("{}", json);
-    io::stdout().flush()?;
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    writeln!(out, "{}", json)?;
+    out.flush()?;
     Ok(())
+}
+
+/// Streams token lines for one request and watches its cancel flag.
+struct StdoutSink<'a> {
+    id: Option<u64>,
+    stream: bool,
+    cancel: &'a CancelFlag,
+}
+
+impl GenerationSink for StdoutSink<'_> {
+    fn is_cancelled(&self) -> bool {
+        self.cancel.is_cancelled(self.id)
+    }
+
+    fn on_text(&mut self, text: &str) {
+        if self.stream && !text.is_empty() {
+            let _ = send_response(&Response::Token {
+                id: self.id,
+                text: text.to_string(),
+            });
+        }
+    }
+}
+
+/// Reads stdin on its own thread so a `cancel` can arrive mid-generation.
+/// Every other line is passed to the main loop in order.
+fn spawn_stdin_reader(
+    cancel: Arc<CancelFlag>,
+) -> mpsc::Receiver<std::result::Result<Request, String>> {
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let stdin = io::stdin();
+        for line in stdin.lock().lines() {
+            let Ok(line) = line else {
+                eprintln!("❌ Error reading stdin");
+                break;
+            };
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let message = match serde_json::from_str::<Request>(line) {
+                Ok(Request::Cancel { id }) => {
+                    cancel.cancel(id);
+                    continue;
+                }
+                Ok(request) => Ok(request),
+                Err(e) => Err(e.to_string()),
+            };
+            if sender.send(message).is_err() {
+                break;
+            }
+        }
+        // Dropping the sender tells the main loop stdin reached EOF.
+    });
+    receiver
 }
 
 fn main() -> Result<()> {
@@ -712,10 +1000,8 @@ fn main() -> Result<()> {
     );
 
     let mut state = ModelState::new()?;
-
-    let stdin = io::stdin();
-    let mut stdin_lock = stdin.lock();
-    let mut buffer = String::new();
+    let cancel = Arc::new(CancelFlag::default());
+    let requests = spawn_stdin_reader(cancel.clone());
 
     loop {
         // Check idle timeout
@@ -725,117 +1011,125 @@ fn main() -> Result<()> {
             break;
         }
 
-        // Read line from stdin
-        buffer.clear();
-        match stdin_lock.read_line(&mut buffer) {
-            Ok(0) => {
-                // EOF reached
-                eprintln!("📪 EOF received, shutting down");
-                break;
-            }
-            Ok(_) => {
-                let line = buffer.trim();
-                if line.is_empty() {
-                    continue;
+        let Ok(message) = requests.recv() else {
+            eprintln!("📪 EOF received, shutting down");
+            break;
+        };
+
+        match message {
+            Ok(Request::Generate {
+                prompt,
+                max_tokens,
+                context_size,
+                model_path,
+                temperature,
+                top_k,
+                top_p,
+                presence_penalty,
+                frequency_penalty,
+                repeat_penalty,
+                penalty_last_n,
+                stop_tokens,
+                seed,
+                id,
+                stream,
+                cache_prompt,
+                cache_prefix_chars,
+                cache_context_size,
+            }) => {
+                let max_tokens = max_tokens.unwrap_or(512);
+                let context_size = context_size.unwrap_or(2048);
+                let seed = seed.unwrap_or(DEFAULT_SEED);
+
+                let sampling = SamplingConfig::from_request(
+                    temperature,
+                    top_k,
+                    top_p,
+                    presence_penalty,
+                    frequency_penalty,
+                    repeat_penalty,
+                    penalty_last_n,
+                );
+                let stop_tokens = stop_tokens.unwrap_or_default();
+
+                // Load model if path provided
+                if let Some(path_str) = model_path {
+                    let path = PathBuf::from(path_str);
+                    if let Err(e) = state.load_model_if_needed(path, context_size) {
+                        send_response(&Response::failure(
+                            format!("Failed to load model: {}", e),
+                            None,
+                            id,
+                        ))?;
+                        continue;
+                    }
                 }
 
-                // Parse request
-                match serde_json::from_str::<Request>(line) {
-                    Ok(Request::Generate {
-                        prompt,
-                        max_tokens,
-                        context_size,
-                        model_path,
-                        temperature,
-                        top_k,
-                        top_p,
-                        presence_penalty,
-                        frequency_penalty,
-                        repeat_penalty,
-                        penalty_last_n,
-                        stop_tokens,
-                        seed,
-                    }) => {
-                        let max_tokens = max_tokens.unwrap_or(512);
-                        let context_size = context_size.unwrap_or(2048);
-                        let seed = seed.unwrap_or(DEFAULT_SEED);
-
-                        let sampling = SamplingConfig::from_request(
-                            temperature,
-                            top_k,
-                            top_p,
-                            presence_penalty,
-                            frequency_penalty,
-                            repeat_penalty,
-                            penalty_last_n,
-                        );
-                        let stop_tokens = stop_tokens.unwrap_or_else(Vec::new);
-
-                        // Load model if path provided
-                        if let Some(path_str) = model_path {
-                            let path = PathBuf::from(path_str);
-                            if let Err(e) = state.load_model_if_needed(path, context_size) {
-                                send_response(&Response::failure(
-                                    format!("Failed to load model: {}", e),
-                                    None,
-                                ))?;
-                                continue;
-                            }
-                        }
-
-                        // Generate response with sampling parameters
-                        let result =
-                            state.generate(prompt, max_tokens, sampling, stop_tokens, seed);
-                        send_response(&Response::from_generation(result))?;
-                    }
-                    Ok(Request::Tokenize {
-                        text,
-                        context_size,
-                        model_path,
-                    }) => {
-                        if let Some(path_str) = model_path {
-                            let context_size = context_size.unwrap_or(state.context_size);
-                            if let Err(e) =
-                                state.load_model_if_needed(PathBuf::from(path_str), context_size)
-                            {
-                                send_response(&Response::Error {
-                                    message: format!("Failed to load model: {}", e),
-                                })?;
-                                continue;
-                            }
-                        }
-                        match state.tokenize(&text) {
-                            Ok(tokens) => {
-                                state.update_activity();
-                                send_response(&Response::TokenCount {
-                                    count: u32::try_from(tokens.len()).unwrap_or(u32::MAX),
-                                })?;
-                            }
-                            Err(e) => send_response(&Response::Error {
-                                message: format!("Tokenization failed: {:#}", e),
-                            })?,
-                        }
-                    }
-                    Ok(Request::Ping) => {
-                        state.update_activity();
-                        send_response(&Response::Pong)?;
-                    }
-                    Ok(Request::Shutdown) => {
-                        eprintln!("🛑 Shutdown requested");
-                        send_response(&Response::Goodbye)?;
-                        break;
-                    }
-                    Err(e) => {
-                        eprintln!("❌ Failed to parse request: {}", e);
+                let cache = cache_prompt.unwrap_or(false).then(|| CacheParams {
+                    prefix_chars: cache_prefix_chars.unwrap_or(0),
+                    context_size: cache_context_size.unwrap_or(context_size),
+                });
+                let params = GenerateParams {
+                    prompt,
+                    max_tokens,
+                    sampling,
+                    stop_tokens,
+                    seed,
+                    id,
+                    cache,
+                };
+                let mut sink = StdoutSink {
+                    id: params.id,
+                    stream: stream.unwrap_or(false),
+                    cancel: &cancel,
+                };
+                let result = state.generate(params, &mut sink);
+                send_response(&Response::from_generation(result, id))?;
+            }
+            Ok(Request::Tokenize {
+                text,
+                context_size,
+                model_path,
+            }) => {
+                if let Some(path_str) = model_path {
+                    let context_size = context_size.unwrap_or(state.context_size);
+                    if let Err(e) =
+                        state.load_model_if_needed(PathBuf::from(path_str), context_size)
+                    {
                         send_response(&Response::Error {
-                            message: format!("Invalid request: {}", e),
+                            message: format!("Failed to load model: {}", e),
+                        })?;
+                        continue;
+                    }
+                }
+                match state.tokenize(&text) {
+                    Ok(tokens) => {
+                        state.update_activity();
+                        send_response(&Response::TokenCount {
+                            count: u32::try_from(tokens.len()).unwrap_or(u32::MAX),
                         })?;
                     }
+                    Err(e) => send_response(&Response::Error {
+                        message: format!("Tokenization failed: {:#}", e),
+                    })?,
                 }
             }
-            Err(e) => {
-                eprintln!("❌ Error reading stdin: {}", e);
+            // Handled by the reader thread; never reaches here.
+            Ok(Request::Cancel { .. }) => {}
+            Ok(Request::Ping) => {
+                state.update_activity();
+                send_response(&Response::Pong)?;
+            }
+            Ok(Request::Shutdown) => {
+                eprintln!("🛑 Shutdown requested");
+                send_response(&Response::Goodbye)?;
                 break;
+            }
+            Err(e) => {
+                eprintln!("❌ Failed to parse request: {}", e);
+                send_response(&Response::Error {
+                    message: format!("Invalid request: {}", e),
+                })?;
             }
         }
     }
@@ -845,167 +1139,4 @@ fn main() -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn context_budget_accepts_prompt_that_fits_with_output() {
-        assert!(check_context_budget(1000, 3000, 4096).is_ok());
-        assert!(check_context_budget(1096, 3000, 4096).is_ok());
-    }
-
-    #[test]
-    fn context_budget_rejects_prompt_plus_output_over_window() {
-        let error = check_context_budget(1097, 3000, 4096).unwrap_err();
-        assert!(matches!(
-            error,
-            GenerateError::ContextOverflow {
-                prompt_tokens: 1097,
-                max_tokens: 3000,
-                context_size: 4096
-            }
-        ));
-        assert!(error.to_string().contains("context overflow"));
-    }
-
-    #[test]
-    fn context_budget_rejects_empty_prompt_as_other_error() {
-        assert!(matches!(
-            check_context_budget(0, 10, 4096),
-            Err(GenerateError::Other(_))
-        ));
-    }
-
-    #[test]
-    fn overflow_response_carries_machine_readable_kind() {
-        let response = Response::from_generation(Err(GenerateError::ContextOverflow {
-            prompt_tokens: 5000,
-            max_tokens: 4096,
-            context_size: 8192,
-        }));
-        let json = serde_json::to_value(&response).unwrap();
-        assert_eq!(json["type"], "response");
-        assert_eq!(json["error_kind"], "context_overflow");
-        assert!(json["error"].as_str().unwrap().contains("context overflow"));
-    }
-
-    #[test]
-    fn success_response_reports_finish_reason_and_token_counts() {
-        let response = Response::from_generation(Ok(GenerationOutput {
-            text: "partial".to_string(),
-            finish_reason: FinishReason::Length,
-            prompt_tokens: 12,
-            completion_tokens: 34,
-        }));
-        let json = serde_json::to_value(&response).unwrap();
-        assert_eq!(json["finish_reason"], "length");
-        assert_eq!(json["prompt_tokens"], 12);
-        assert_eq!(json["completion_tokens"], 34);
-        assert!(json["error"].is_null());
-        assert!(json.get("error_kind").is_none());
-    }
-
-    #[test]
-    fn generate_request_seed_is_optional_and_parsed() {
-        let without: Request = serde_json::from_str(r#"{"type":"generate","prompt":"p"}"#).unwrap();
-        let Request::Generate { seed, .. } = without else {
-            panic!("expected generate request");
-        };
-        assert_eq!(seed, None);
-
-        let with: Request =
-            serde_json::from_str(r#"{"type":"generate","prompt":"p","seed":7}"#).unwrap();
-        let Request::Generate { seed, .. } = with else {
-            panic!("expected generate request");
-        };
-        assert_eq!(seed, Some(7));
-        assert_eq!(DEFAULT_SEED, 42);
-    }
-
-    #[test]
-    fn tokenize_request_and_token_count_response_round_trip() {
-        let request: Request =
-            serde_json::from_str(r#"{"type":"tokenize","text":"hello","context_size":4096}"#)
-                .unwrap();
-        assert!(matches!(
-            request,
-            Request::Tokenize { ref text, context_size: Some(4096), model_path: None } if text == "hello"
-        ));
-        let json = serde_json::to_string(&Response::TokenCount { count: 3 }).unwrap();
-        assert_eq!(json, r#"{"type":"token_count","count":3}"#);
-    }
-
-    #[test]
-    fn generate_request_defaults_penalties_when_omitted() {
-        let json =
-            r#"{"type":"generate","prompt":"summarize","temperature":0.5,"top_k":20,"top_p":0.8}"#;
-        let request: Request = serde_json::from_str(json).unwrap();
-        let Request::Generate {
-            temperature,
-            top_k,
-            top_p,
-            presence_penalty,
-            frequency_penalty,
-            repeat_penalty,
-            penalty_last_n,
-            ..
-        } = request
-        else {
-            panic!("expected generate request");
-        };
-
-        let sampling = SamplingConfig::from_request(
-            temperature,
-            top_k,
-            top_p,
-            presence_penalty,
-            frequency_penalty,
-            repeat_penalty,
-            penalty_last_n,
-        );
-
-        assert_eq!(sampling.presence_penalty, 0.0);
-        assert_eq!(sampling.frequency_penalty, 0.0);
-        assert_eq!(sampling.repeat_penalty, 1.0);
-        assert_eq!(sampling.penalty_last_n, 0);
-        assert!(!sampling.uses_penalties());
-    }
-
-    #[test]
-    fn generate_request_deserializes_qwen_penalties() {
-        let json = r#"{"type":"generate","prompt":"summarize","temperature":0.5,"top_k":20,"top_p":0.8,"presence_penalty":0.3,"frequency_penalty":0.0,"repeat_penalty":1.05,"penalty_last_n":256}"#;
-        let request: Request = serde_json::from_str(json).unwrap();
-        let Request::Generate {
-            temperature,
-            top_k,
-            top_p,
-            presence_penalty,
-            frequency_penalty,
-            repeat_penalty,
-            penalty_last_n,
-            ..
-        } = request
-        else {
-            panic!("expected generate request");
-        };
-
-        let sampling = SamplingConfig::from_request(
-            temperature,
-            top_k,
-            top_p,
-            presence_penalty,
-            frequency_penalty,
-            repeat_penalty,
-            penalty_last_n,
-        );
-
-        assert_eq!(sampling.temperature, 0.5);
-        assert_eq!(sampling.top_k, 20);
-        assert_eq!(sampling.top_p, 0.8);
-        assert_eq!(sampling.presence_penalty, 0.3);
-        assert_eq!(sampling.frequency_penalty, 0.0);
-        assert_eq!(sampling.repeat_penalty, 1.05);
-        assert_eq!(sampling.penalty_last_n, 256);
-        assert!(sampling.uses_penalties());
-    }
-}
+mod tests;
