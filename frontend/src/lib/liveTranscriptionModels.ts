@@ -9,6 +9,9 @@ export interface LiveModelStatus {
   downloading: boolean;
   loaded: boolean;
   sizeBytes: number;
+  /** False where the app has no streaming runtime (everything but macOS).
+   * Absent from older backends, which only shipped on macOS. */
+  supported?: boolean;
 }
 
 export interface LiveTranscriptionSettings {
@@ -31,6 +34,11 @@ export interface LiveModelDownloadProgressEvent {
 
 export const LIVE_MODEL_DOWNLOAD_PROGRESS_EVENT = 'live-model-download-progress';
 export const LIVE_MODEL_DISPLAY_NAME = 'Nemotron Streaming 0.6B';
+
+/** Whether this platform can run the Nemotron live model. */
+export function liveModelSupported(settings: LiveTranscriptionSettings | null): boolean {
+  return settings?.liveModelStatus.supported !== false;
+}
 
 export const liveTranscriptionApi = {
   getSettings: () => invoke<LiveTranscriptionSettings>('get_live_transcription_settings'),
