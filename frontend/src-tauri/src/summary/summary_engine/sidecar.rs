@@ -349,6 +349,15 @@ impl SidecarManager {
         ))
     }
 
+    /// Whether switching the helper to `model_path` would stop requests that
+    /// are running (or queued) on another model. Copilot checks this and
+    /// reports "busy" rather than swap models under a summary.
+    pub async fn busy_with_other_model(&self, model_path: &std::path::Path) -> bool {
+        let current = self.current_model_path.read().await;
+        self.active_request_count.load(Ordering::SeqCst) > 0
+            && current.as_deref().is_some_and(|current| current != model_path)
+    }
+
     /// Ensure sidecar is running, spawn if needed
     pub async fn ensure_running(&self, model_path: PathBuf) -> Result<()> {
         // Check if already running with correct model

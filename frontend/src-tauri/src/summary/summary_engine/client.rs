@@ -607,6 +607,16 @@ pub async fn generate_with_builtin_stream(
 ) -> Result<BuiltinStreamCompletion> {
     let (prompt, prefix_chars) =
         format_builtin_prompt_with_prefix(model_name, system_prompt, user_stable, user_rest)?;
+    // Never swap the helper's model under a running summary or timeline
+    // request: that would stop it.
+    if let Ok(model_path) = get_cached_model_path(app_data_dir, model_name) {
+        let manager = SIDECAR_MANAGER.lock().await.clone();
+        if let Some(manager) = manager {
+            if manager.busy_with_other_model(&model_path).await {
+                return Err(anyhow!(SidecarError::Busy(options.timeout)));
+            }
+        }
+    }
     let (manager, model_def, model_path) = running_manager(app_data_dir, model_name).await?;
     let sampling = model_def.sampling.sanitize_for_llama_helper();
     let id = next_request_id();
