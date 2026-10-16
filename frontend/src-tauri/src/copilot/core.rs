@@ -446,7 +446,7 @@ impl Core {
         let Ok(streamer) = self.host.streamer(false).await else {
             return false;
         };
-        let parts = self.prompt_for(&task);
+        let parts = self.prompt_for(streamer.as_ref(), &task).await;
         let cancel = CancellationToken::new();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let stream_cancel = cancel.clone();
@@ -490,6 +490,9 @@ impl Core {
                 verdict == Some(true) && state.active
             }
             Ok(Err(error)) => {
+                if error.kind == StreamErrorKind::Busy {
+                    state.recent_confirms.pop_back();
+                }
                 if matches!(
                     error.kind,
                     StreamErrorKind::Auth | StreamErrorKind::RateLimited
@@ -500,6 +503,9 @@ impl Core {
                 false
             }
             Err(()) => {
+                // Most likely it waited behind a timeline request: it did
+                // not cost a model call, so it does not use up the cap.
+                state.recent_confirms.pop_back();
                 self.record_decision(&mut state, "model: timed out (cancelled)".into());
                 false
             }
@@ -691,10 +697,40 @@ impl Core {
         self.publish();
     }
 
-    fn prompt_for(&self, task: &Task) -> context::PromptParts {
+    fn prompt_with(&self, task: &Task, budget: context::Budget) -> context::PromptParts {
         let timeline = self.host.timeline();
         let state = self.lock();
-        context::build(&state.lines, &timeline, &state.notes, task)
+        context::build_with(&state.lines, &timeline, &state.notes, task, budget)
+    }
+
+    /// The prompt for `task`, shrunk (oldest transcript first, then the live
+    /// summary) until it fits the model's context with room for the answer.
+    /// Sizes are estimated from characters and, near the limit, counted with
+    /// the model's own tokenizer.
+    async fn prompt_for(&self, streamer: &dyn Streamer, task: &Task) -> context::PromptParts {
+        let mut budget = context::Budget::default();
+        let mut parts = self.prompt_with(task, budget);
+        let Some(limit) = streamer.prompt_token_limit(task.max_tokens()) else {
+            return parts;
+        };
+        for _ in 0..6 {
+            let chars = parts.system.len() + parts.stable.len() + parts.rest.len();
+            // Generous estimate (English is ~4 chars per token): only count
+            // for real when it could be close.
+            let estimate = chars / 3;
+            let tokens = if estimate * 2 < limit {
+                estimate
+            } else {
+                streamer.count_tokens(&parts).await.unwrap_or(estimate)
+            };
+            if tokens <= limit || budget.at_floor() {
+                return parts;
+            }
+            let excess_chars = (tokens - limit) * 4 + 400;
+            budget = budget.shrink(excess_chars);
+            parts = self.prompt_with(task, budget);
+        }
+        parts
     }
 
     fn update_message(&self, id: &str, change: impl FnOnce(&mut Message)) {
@@ -753,7 +789,7 @@ impl Core {
         });
         self.publish();
 
-        let parts = self.prompt_for(&task);
+        let parts = self.prompt_for(streamer.as_ref(), &task).await;
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         let max_tokens = task.max_tokens();
         let temperature = task.temperature();
@@ -1010,6 +1046,9 @@ mod tests {
         cloud: bool,
         confirm_delay: Duration,
         confirm_cancelled: Arc<AtomicUsize>,
+        token_limit: Option<u32>,
+        counted: Arc<AtomicUsize>,
+        prompt_chars: Arc<Mutex<Vec<usize>>>,
     }
 
     #[async_trait]
@@ -1023,6 +1062,15 @@ mod tests {
         fn is_cloud(&self) -> bool {
             self.cloud
         }
+        fn prompt_token_limit(&self, max_tokens: u32) -> Option<usize> {
+            self.token_limit
+                .map(|n_ctx| crate::copilot::stream::builtin_prompt_limit(n_ctx, max_tokens))
+        }
+        async fn count_tokens(&self, parts: &context::PromptParts) -> Option<usize> {
+            self.counted.fetch_add(1, Ordering::SeqCst);
+            // A pessimistic tokenizer: 3 characters per token.
+            Some((parts.system.len() + parts.stable.len() + parts.rest.len()) / 3)
+        }
         async fn stream(
             &self,
             parts: &context::PromptParts,
@@ -1033,6 +1081,10 @@ mod tests {
             cancel: &CancellationToken,
         ) -> Result<StreamOutcome, StreamError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            self.prompt_chars
+                .lock()
+                .unwrap()
+                .push(parts.system.len() + parts.stable.len() + parts.rest.len());
             if max_tokens == 5 || parts.rest.contains("Draft what You could say") {
                 assert!(
                     !interactive,
@@ -1088,6 +1140,10 @@ mod tests {
         backlog: Mutex<f64>,
         confirm_delay: Duration,
         confirm_cancelled: Arc<AtomicUsize>,
+        token_limit: Option<u32>,
+        counted: Arc<AtomicUsize>,
+        prompt_chars: Arc<Mutex<Vec<usize>>>,
+        timeline: Vec<TimelineItem>,
         persisted: Mutex<Vec<ChatRow>>,
         states: Mutex<Vec<Snapshot>>,
         deltas: Mutex<Vec<Delta>>,
@@ -1107,6 +1163,10 @@ mod tests {
                 backlog: Mutex::new(0.0),
                 confirm_delay: Duration::ZERO,
                 confirm_cancelled: Arc::new(AtomicUsize::new(0)),
+                token_limit: None,
+                counted: Arc::new(AtomicUsize::new(0)),
+                prompt_chars: Arc::new(Mutex::new(Vec::new())),
+                timeline: Vec::new(),
                 persisted: Mutex::new(Vec::new()),
                 states: Mutex::new(Vec::new()),
                 deltas: Mutex::new(Vec::new()),
@@ -1124,7 +1184,7 @@ mod tests {
             self.deltas.lock().unwrap().push(delta.clone());
         }
         fn timeline(&self) -> Vec<TimelineItem> {
-            Vec::new()
+            self.timeline.clone()
         }
         fn suggestions_enabled(&self) -> bool {
             self.suggestions.load(Ordering::SeqCst)
@@ -1150,6 +1210,9 @@ mod tests {
                 cloud: self.cloud && !force_builtin,
                 confirm_delay: self.confirm_delay,
                 confirm_cancelled: self.confirm_cancelled.clone(),
+                token_limit: self.token_limit,
+                counted: self.counted.clone(),
+                prompt_chars: self.prompt_chars.clone(),
             }))
         }
         async fn persist(&self, rows: &[ChatRow]) -> Result<bool, String> {
@@ -1411,6 +1474,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn on_an_8gb_machine_long_meetings_are_trimmed_to_the_4k_context() {
+        // Regression: the helper caps the cached context at 4096 tokens on
+        // 8 GB machines; late in a meeting the full prompt no longer fit.
+        let mut host = FakeHost::new();
+        host.token_limit = Some(4096);
+        host.timeline = (0..120)
+            .map(|i| TimelineItem {
+                start_ms: i * 30_000,
+                kind: "point".into(),
+                text: format!("entry {i} about the roadmap, the budget and who owns the follow-up"),
+            })
+            .collect();
+        let (host, core) = core_with(host);
+        let mut t = 0;
+        while t < 3600 {
+            core.on_line(Line {
+                start_ms: t * 1000,
+                end_ms: t * 1000 + 6000,
+                speaker: Speaker::You,
+                text:
+                    "we went through the onboarding funnel, pricing tiers and hiring plan in detail"
+                        .into(),
+            });
+            t += 4;
+        }
+        core.set_notes("n".repeat(5_000));
+        core.ask(Some(QuickAction::CatchUp), None).unwrap();
+        settle().await;
+        assert_eq!(core.snapshot().messages[0].status, MessageStatus::Done);
+        let limit = crate::copilot::stream::builtin_prompt_limit(4096, 300);
+        let sent = *host.prompt_chars.lock().unwrap().last().unwrap();
+        assert!(sent / 3 <= limit, "{} estimated tokens > {limit}", sent / 3);
+        assert!(
+            host.counted.load(Ordering::SeqCst) > 0,
+            "counted with the tokenizer"
+        );
+        // Without a small context nothing is trimmed or counted.
+        let (big, core) = core_with(FakeHost::new());
+        core.on_line(line(5, Speaker::You, "Hello"));
+        core.ask(Some(QuickAction::CatchUp), None).unwrap();
+        settle().await;
+        assert_eq!(big.counted.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
     async fn confirms_are_capped_per_minute() {
         let mut host = FakeHost::new();
         host.confirm_reply = "No";
@@ -1457,6 +1565,11 @@ mod tests {
             .last
             .unwrap()
             .contains("timed out"));
+        assert_eq!(
+            core.lock().recent_confirms.len(),
+            0,
+            "a confirm that only waited in the queue does not use up the cap"
+        );
     }
 
     #[tokio::test]

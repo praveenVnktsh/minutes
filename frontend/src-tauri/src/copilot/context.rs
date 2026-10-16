@@ -61,6 +61,58 @@ const STABLE_ALIGN_MS: i64 = 30_000;
 pub const MAX_TIMELINE_CHARS: usize = 4_800;
 pub const MAX_TRANSCRIPT_CHARS: usize = 6_400;
 pub const MAX_NOTES_CHARS: usize = 1_600;
+/// Character budgets for one prompt. The defaults are the hard caps; a
+/// model with a small context gets a shrunken budget (see [`Budget::shrink`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Budget {
+    pub transcript_chars: usize,
+    pub timeline_chars: usize,
+    pub notes_chars: usize,
+}
+
+impl Default for Budget {
+    fn default() -> Self {
+        Self {
+            transcript_chars: MAX_TRANSCRIPT_CHARS,
+            timeline_chars: MAX_TIMELINE_CHARS,
+            notes_chars: MAX_NOTES_CHARS,
+        }
+    }
+}
+
+/// Floors a shrinking budget keeps, so a prompt always has some context.
+const MIN_TRANSCRIPT_CHARS: usize = 1_200;
+const MIN_TIMELINE_CHARS: usize = 600;
+const MIN_NOTES_CHARS: usize = 300;
+
+impl Budget {
+    /// A smaller budget that cuts `excess_chars`: the oldest transcript goes
+    /// first, then the live summary, then notes.
+    pub fn shrink(self, excess_chars: usize) -> Self {
+        let mut left = excess_chars;
+        let mut take = |value: usize, floor: usize| {
+            let cut = left.min(value.saturating_sub(floor));
+            left -= cut;
+            value - cut
+        };
+        let transcript_chars = take(self.transcript_chars, MIN_TRANSCRIPT_CHARS);
+        let timeline_chars = take(self.timeline_chars, MIN_TIMELINE_CHARS);
+        let notes_chars = take(self.notes_chars, MIN_NOTES_CHARS);
+        Self {
+            transcript_chars,
+            timeline_chars,
+            notes_chars,
+        }
+    }
+
+    /// Whether it cannot shrink any further.
+    pub fn at_floor(&self) -> bool {
+        self.transcript_chars <= MIN_TRANSCRIPT_CHARS
+            && self.timeline_chars <= MIN_TIMELINE_CHARS
+            && self.notes_chars <= MIN_NOTES_CHARS
+    }
+}
+
 /// Timeline entries are dropped in blocks, so the prefix moves rarely.
 const TIMELINE_DROP_BLOCK: usize = 10;
 /// Lines kept in memory: enough for the window plus a margin.
@@ -105,7 +157,7 @@ pub fn push_line(lines: &mut Vec<Line>, line: Line) {
     }
 }
 
-fn timeline_block(timeline: &[TimelineItem]) -> String {
+fn timeline_block(timeline: &[TimelineItem], max_chars: usize) -> String {
     if timeline.is_empty() {
         return "(nothing yet)\n".to_string();
     }
@@ -126,7 +178,7 @@ fn timeline_block(timeline: &[TimelineItem]) -> String {
         .collect();
     let mut skip = 0;
     while skip < rendered.len()
-        && rendered[skip..].iter().map(String::len).sum::<usize>() > MAX_TIMELINE_CHARS
+        && rendered[skip..].iter().map(String::len).sum::<usize>() > max_chars
     {
         skip += TIMELINE_DROP_BLOCK;
     }
@@ -141,13 +193,13 @@ fn timeline_block(timeline: &[TimelineItem]) -> String {
     block
 }
 
-fn clip_notes(notes: &str) -> String {
+fn clip_notes(notes: &str, max_chars: usize) -> String {
     let notes = notes.trim();
-    match notes.char_indices().nth(MAX_NOTES_CHARS) {
+    match notes.char_indices().nth(max_chars) {
         // Keep the end: the newest notes are the most relevant.
         Some(_) => {
             let total = notes.chars().count();
-            let tail: String = notes.chars().skip(total - MAX_NOTES_CHARS).collect();
+            let tail: String = notes.chars().skip(total - max_chars).collect();
             format!("…{tail}")
         }
         None => notes.to_string(),
@@ -163,19 +215,30 @@ pub fn window_bounds(latest_ms: i64) -> (i64, i64) {
 
 /// Builds the prompt for `task` from everything Copilot knows right now.
 pub fn build(lines: &[Line], timeline: &[TimelineItem], notes: &str, task: &Task) -> PromptParts {
+    build_with(lines, timeline, notes, task, Budget::default())
+}
+
+/// [`build`] within `budget`.
+pub fn build_with(
+    lines: &[Line],
+    timeline: &[TimelineItem],
+    notes: &str,
+    task: &Task,
+    budget: Budget,
+) -> PromptParts {
     let latest = lines.iter().map(|l| l.end_ms).max().unwrap_or(0);
     let (window_start, stable_cut) = window_bounds(latest);
     let mut window: Vec<&Line> = lines.iter().filter(|l| l.end_ms > window_start).collect();
     // Over the cap (a very talkative window), drop the oldest lines.
     let mut total: usize = window.iter().map(|l| line_text(l).len() + 1).sum();
-    while total > MAX_TRANSCRIPT_CHARS && window.len() > 1 {
+    while total > budget.transcript_chars && window.len() > 1 {
         total -= line_text(window[0]).len() + 1;
         window.remove(0);
     }
 
     let mut stable = String::new();
     stable.push_str("LIVE SUMMARY SO FAR:\n");
-    stable.push_str(&timeline_block(timeline));
+    stable.push_str(&timeline_block(timeline, budget.timeline_chars));
     let anchor = stable.len();
     stable.push_str("\nTRANSCRIPT, LAST FEW MINUTES:\n");
     let split = window.partition_point(|l| l.start_ms < stable_cut);
@@ -192,7 +255,7 @@ pub fn build(lines: &[Line], timeline: &[TimelineItem], notes: &str, task: &Task
     if window.is_empty() {
         rest.push_str("(no speech yet)\n");
     }
-    let notes = clip_notes(notes);
+    let notes = clip_notes(notes, budget.notes_chars);
     if !notes.is_empty() {
         rest.push_str("\nMY NOTES:\n");
         rest.push_str(&notes);
@@ -346,7 +409,7 @@ mod tests {
                 text: format!("entry {i} with enough words to matter for the budget"),
             })
             .collect();
-        let block = timeline_block(&timeline);
+        let block = timeline_block(&timeline, MAX_TIMELINE_CHARS);
         assert!(block.len() <= MAX_TIMELINE_CHARS + 60);
         let left_out: usize = block
             .lines()
@@ -361,6 +424,33 @@ mod tests {
         assert!(block
             .trim_end()
             .ends_with("entry 299 with enough words to matter for the budget"));
+    }
+
+    #[test]
+    fn shrinking_cuts_the_oldest_transcript_first_then_the_summary() {
+        let budget = Budget::default().shrink(3_000);
+        assert_eq!(budget.transcript_chars, MAX_TRANSCRIPT_CHARS - 3_000);
+        assert_eq!(budget.timeline_chars, MAX_TIMELINE_CHARS);
+        let budget = Budget::default().shrink(MAX_TRANSCRIPT_CHARS);
+        assert_eq!(budget.transcript_chars, MIN_TRANSCRIPT_CHARS);
+        assert!(budget.timeline_chars < MAX_TIMELINE_CHARS);
+        assert!(Budget::default().shrink(usize::MAX).at_floor());
+
+        let (lines, timeline) = meeting(60);
+        let full = build(&lines, &timeline, "", &task());
+        let small = build_with(
+            &lines,
+            &timeline,
+            "",
+            &task(),
+            Budget::default().shrink(6_000),
+        );
+        assert!(small.user().len() < full.user().len() - 1_500);
+        // The newest lines stay; the oldest go.
+        let last = lines.last().unwrap();
+        assert!(small
+            .user()
+            .contains(&format!("[{}]", format_time(last.start_ms))));
     }
 
     #[test]

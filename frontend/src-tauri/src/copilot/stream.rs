@@ -21,7 +21,10 @@ use crate::summary::llm_client::{
     compatibility_retry_body, GenerationOptions, LLMProvider,
 };
 use crate::summary::service::LlmConfig;
-use crate::summary::summary_engine::client::{generate_with_builtin_stream, BuiltinStreamOptions};
+use crate::summary::summary_engine::client::{
+    copilot_cache_context, count_builtin_tokens, format_builtin_prompt_with_prefixes,
+    generate_with_builtin_stream, BuiltinStreamOptions,
+};
 use crate::summary::summary_engine::sidecar::SidecarError;
 
 /// The helper's cached Copilot context. Prompts are capped well below it.
@@ -31,6 +34,15 @@ pub const BUILTIN_CACHE_CONTEXT: u32 = 8192;
 const OLLAMA_FALLBACK_NUM_CTX: u32 = 8192;
 /// Compatibility retries per request (each drops what the last rejection named).
 const MAX_COMPATIBILITY_RETRIES: usize = 2;
+/// Room kept free in the cached context besides the prompt and the output.
+pub const BUILTIN_CONTEXT_MARGIN: usize = 256;
+
+/// Prompt tokens that fit in a cached context of `n_ctx` with `max_tokens`
+/// of output.
+pub fn builtin_prompt_limit(n_ctx: u32, max_tokens: u32) -> usize {
+    (n_ctx as usize).saturating_sub(max_tokens as usize + BUILTIN_CONTEXT_MARGIN)
+}
+
 /// Upper bound for one request; first-token and stall timeouts are enforced
 /// by the caller and are much shorter.
 pub const HARD_TIMEOUT: Duration = Duration::from_secs(90);
@@ -92,6 +104,15 @@ pub trait Streamer: Send + Sync {
     fn model(&self) -> &str;
     /// A hosted provider, where "use the built-in model instead" is an option.
     fn is_cloud(&self) -> bool;
+    /// Most prompt tokens a request with `max_tokens` of output may use, when
+    /// the model's context is small enough to matter (the built-in model).
+    fn prompt_token_limit(&self, _max_tokens: u32) -> Option<usize> {
+        None
+    }
+    /// The prompt's size in the model's own tokens, when it can be counted.
+    async fn count_tokens(&self, _parts: &PromptParts) -> Option<usize> {
+        None
+    }
     async fn stream(
         &self,
         parts: &PromptParts,
@@ -398,7 +419,7 @@ impl ProviderStreamer {
                 max_tokens,
                 temperature,
                 timeout: HARD_TIMEOUT,
-                cache_context_size: BUILTIN_CACHE_CONTEXT,
+                cache_context_size: copilot_cache_context(BUILTIN_CACHE_CONTEXT),
                 interactive,
             },
             deltas,
@@ -444,6 +465,29 @@ impl Streamer for ProviderStreamer {
             self.config.provider,
             LLMProvider::BuiltInAI | LLMProvider::Ollama
         )
+    }
+
+    fn prompt_token_limit(&self, max_tokens: u32) -> Option<usize> {
+        (self.config.provider == LLMProvider::BuiltInAI)
+            .then(|| builtin_prompt_limit(copilot_cache_context(BUILTIN_CACHE_CONTEXT), max_tokens))
+    }
+
+    async fn count_tokens(&self, parts: &PromptParts) -> Option<usize> {
+        if self.config.provider != LLMProvider::BuiltInAI {
+            return None;
+        }
+        let dir = self.app_data_dir.as_deref()?;
+        let (prompt, _, _) = format_builtin_prompt_with_prefixes(
+            &self.config.model_name,
+            &parts.system,
+            &parts.stable,
+            &parts.rest,
+            parts.anchor,
+        )
+        .ok()?;
+        count_builtin_tokens(dir, &self.config.model_name, &prompt, None)
+            .await
+            .ok()
     }
 
     async fn stream(

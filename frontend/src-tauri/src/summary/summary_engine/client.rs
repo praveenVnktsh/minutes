@@ -490,6 +490,32 @@ pub fn background_pacing_delay(
     }
 }
 
+/// The cached Copilot context llama-helper will really use: it caps it at
+/// 4096 tokens on machines with 8 GB of RAM or less (llama-helper's
+/// `cache_limits`), so the app budgets prompts for the same number.
+pub fn copilot_cache_context(requested: u32) -> u32 {
+    copilot_cache_context_for(requested, total_memory_bytes())
+}
+
+/// Pure form of [`copilot_cache_context`].
+pub fn copilot_cache_context_for(requested: u32, total_memory: Option<u64>) -> u32 {
+    const LOW_MEMORY_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+    const LOW_MEMORY_CACHE_CONTEXT: u32 = 4096;
+    match total_memory {
+        Some(bytes) if bytes <= LOW_MEMORY_BYTES => requested.min(LOW_MEMORY_CACHE_CONTEXT),
+        _ => requested,
+    }
+}
+
+fn total_memory_bytes() -> Option<u64> {
+    static TOTAL: Lazy<Option<u64>> = Lazy::new(|| {
+        let mut system = sysinfo::System::new();
+        system.refresh_memory();
+        Some(system.total_memory()).filter(|bytes| *bytes > 0)
+    });
+    *TOTAL
+}
+
 /// Ids for generate requests, so the sidecar can cancel one in the helper.
 fn next_request_id() -> u64 {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -880,6 +906,14 @@ mod tests {
             }
             _ => panic!("Wrong response type"),
         }
+    }
+
+    #[test]
+    fn eight_gb_machines_get_the_helpers_smaller_copilot_context() {
+        let gb = 1024 * 1024 * 1024;
+        assert_eq!(copilot_cache_context_for(8192, Some(8 * gb)), 4096);
+        assert_eq!(copilot_cache_context_for(8192, Some(16 * gb)), 8192);
+        assert_eq!(copilot_cache_context_for(8192, None), 8192);
     }
 
     #[test]
