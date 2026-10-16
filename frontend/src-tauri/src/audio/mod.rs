@@ -52,6 +52,15 @@ pub mod retranscription;
 // Import module (import external audio files as new meetings)
 pub mod import;
 
+// Live (streaming) transcription with the Nemotron streaming model.
+pub mod live_streaming;
+
+// Live and final transcription model settings, migration and engine choice.
+pub mod transcription_settings;
+
+// Automatic final transcript pass after a recording.
+pub mod final_pass;
+
 // Transcription task queue (sequential processing of import/retranscribe jobs)
 pub mod transcription_queue;
 

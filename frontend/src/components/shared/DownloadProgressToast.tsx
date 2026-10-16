@@ -7,6 +7,11 @@ import { X, Download, Check, Loader2, ArrowBigDownDash } from 'lucide-react';
 import type { ParakeetDownloadProgressEvent } from '@/lib/parakeet';
 import { BUILTIN_AI_DOWNLOAD_PROGRESS_EVENT, type BuiltInAIDownloadProgressEvent } from '@/lib/builtin-ai';
 import { BYTES_PER_MIB } from '@/lib/download-display';
+import {
+  LIVE_MODEL_DISPLAY_NAME,
+  LIVE_MODEL_DOWNLOAD_PROGRESS_EVENT,
+  type LiveModelDownloadProgressEvent,
+} from '@/lib/liveTranscriptionModels';
 import { badge, toneText } from '@/lib/theme-classes';
 
 interface DownloadProgress {
@@ -306,6 +311,32 @@ export function useDownloadProgressToast() {
       unlistenProgress.then((fn) => fn());
       unlistenComplete.then((fn) => fn());
       unlistenError.then((fn) => fn());
+    };
+  }, [updateDownload, cleanupDownload]);
+
+  // Listen to the live (Nemotron streaming) model download, which also runs
+  // in the background after onboarding.
+  useEffect(() => {
+    const unlisten = listen<LiveModelDownloadProgressEvent>(LIVE_MODEL_DOWNLOAD_PROGRESS_EVENT, (event) => {
+      const { modelName, progress, downloaded_mb, total_mb, speed_mbps, status, error } = event.payload;
+      const downloadData: DownloadProgress = {
+        modelName,
+        displayName: `Live Transcript Model (${LIVE_MODEL_DISPLAY_NAME})`,
+        progress: progress ?? 0,
+        downloadedMb: downloaded_mb ?? 0,
+        totalMb: total_mb ?? 0,
+        speedMbps: speed_mbps ?? 0,
+        unitLabel: 'MiB',
+        status,
+        error: status === 'error' ? categorizeError(error || 'Download failed') : undefined,
+      };
+      updateDownload(modelName, downloadData);
+      if (status === 'completed') cleanupDownload(modelName, 4000);
+      else if (status === 'error') cleanupDownload(modelName, 11000);
+      else if (status === 'cancelled') cleanupDownload(modelName, 6000);
+    });
+    return () => {
+      unlisten.then((fn) => fn());
     };
   }, [updateDownload, cleanupDownload]);
 

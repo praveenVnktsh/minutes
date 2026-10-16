@@ -5,6 +5,7 @@ import { VirtualizedTranscriptView } from '@/components/VirtualizedTranscriptVie
 import { TranscriptButtonGroup } from './TranscriptButtonGroup';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { toast } from 'sonner';
 import { ChevronDown, ChevronUp, Loader2, Search, X } from 'lucide-react';
 import { useAudioPlayer } from '@/hooks/useAudioPlayer';
@@ -13,7 +14,8 @@ import { useDiarizationStatus } from '@/hooks/useDiarizationStatus';
 import { useMeetingActivity } from '@/contexts/MeetingActivityContext';
 import { SpeakerCorrectionDialog, SpeakerIdentity } from './SpeakerCorrectionDialog';
 import { AudioScrubber } from './AudioScrubber';
-import { toneText } from '@/lib/theme-classes';
+import { progress as progressBar, toneText } from '@/lib/theme-classes';
+import { FINAL_PASS_COMPLETE_EVENT, type FinalPassComplete } from '@/lib/liveTranscriptionModels';
 import { SpeakerStatusNotice } from './SpeakerStatusNotice';
 import { ModelProvenanceNote } from './ModelProvenanceNote';
 
@@ -114,9 +116,9 @@ export function TranscriptPanel({
   const transcriptionProgress = useTranscriptionProgress(meetingId);
   const { cancelTranscription } = useMeetingActivity();
 
-  // Segments are about to be replaced by the running pass, so edits made now
-  // would be thrown away.
-  const editsLocked = locked || transcriptionProgress !== null;
+  // A running pass does not lock the transcript: speaker corrections are kept
+  // by time, so they carry over to the rows the pass saves.
+  const editsLocked = locked;
   // Once a pass reaches its speaker stage the new transcript is saved, so it
   // stays readable with a status line instead of sitting under the overlay.
   const isDiarizingPass = transcriptionProgress?.isDiarization ?? false;
@@ -320,6 +322,31 @@ export function TranscriptPanel({
     }
   }, [activeMatch, matchIndices, convertedSegments]);
 
+  // Say when the background pass has swapped in its transcript, or kept the
+  // current one.
+  useEffect(() => {
+    if (!meetingId) return undefined;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listen<FinalPassComplete>(FINAL_PASS_COMPLETE_EVENT, ({ payload }) => {
+      if (payload.meeting_id !== meetingId) return;
+      if (payload.outcome === 'replaced') {
+        toast.success('Transcript improved', {
+          description: payload.model ? `Re-transcribed with ${payload.model}.` : undefined,
+        });
+      } else {
+        toast.info('Kept the live transcript', { description: payload.warning ?? undefined });
+      }
+    }).then((fn) => {
+      if (disposed) fn();
+      else unlisten = fn;
+    }).catch((error) => console.warn('Could not listen for final transcript passes:', error));
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [meetingId]);
+
   // No optimistic state: the activity snapshot removes the surface once the
   // cancellation actually lands.
   const handleCancelTranscription = useCallback(async () => {
@@ -331,8 +358,8 @@ export function TranscriptPanel({
     }
   }, [cancelTranscription, transcriptionProgress]);
 
-  // One copy of the progress markup, shown either in place of an empty
-  // transcript or laid over an existing one.
+  // The full progress surface, shown only in place of an empty transcript (a
+  // first transcription); a pass over an existing one uses the status line.
   const progressSurface = transcriptionProgress ? (
     <div
       role="status"
@@ -379,6 +406,44 @@ export function TranscriptPanel({
           type="button"
           onClick={() => void handleCancelTranscription()}
           className="h-8 rounded-full bg-[var(--surface-2)] px-3 text-xs font-medium text-[var(--ink-muted)] hover:text-ink"
+        >
+          Cancel
+        </button>
+      )}
+    </div>
+  ) : null;
+
+  // A pass over an existing transcript (the automatic final pass, or a manual
+  // re-run) runs in the background: the current transcript stays fully usable
+  // and only this one line under the header shows the pass.
+  const isBackgroundPass = transcriptionProgress !== null && convertedSegments.length > 0;
+  const backgroundPassStatus = isBackgroundPass && !isDiarizingPass && transcriptionProgress ? (
+    <div role="status" aria-live="polite" className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-[var(--ink-muted)]">
+      <Loader2 className="h-3 w-3 animate-spin text-[var(--ink-subtle)]" />
+      <span className="font-medium">
+        {transcriptionProgress.stageLabel === 'Paused while recording'
+          ? 'Improving transcript: paused while recording'
+          : `Improving transcript…${transcriptionProgress.indeterminate ? '' : ` ${transcriptionProgress.percent}%`}`}
+      </span>
+      <div
+        role="progressbar"
+        aria-label="Transcript improvement progress"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={transcriptionProgress.indeterminate ? undefined : transcriptionProgress.percent}
+        className={`h-1 w-20 overflow-hidden rounded-full ${progressBar.track}`}
+      >
+        <div
+          className={`h-full rounded-full ${progressBar.fill} ${transcriptionProgress.indeterminate ? 'w-full animate-pulse opacity-40' : 'transition-all duration-300 ease-out'}`}
+          style={transcriptionProgress.indeterminate ? undefined : { width: `${transcriptionProgress.percent}%` }}
+        />
+      </div>
+      <span className="text-[var(--ink-subtle)]">You can keep using this transcript meanwhile.</span>
+      {transcriptionProgress.cancellable && (
+        <button
+          type="button"
+          onClick={() => void handleCancelTranscription()}
+          className="rounded px-1 font-medium text-[var(--ink-muted)] underline-offset-2 hover:text-ink hover:underline"
         >
           Cancel
         </button>
@@ -468,8 +533,8 @@ export function TranscriptPanel({
         {player.error && (
           <p className={`mt-1 text-[11px] ${toneText.error}`}>{player.error}</p>
         )}
-        {meetingId && meetingFolderPath && convertedSegments.length > 0 && !isRecording
-          && (!transcriptionProgress || isDiarizingPass) && (
+        {backgroundPassStatus}
+        {meetingId && meetingFolderPath && convertedSegments.length > 0 && !isRecording && (
           <SpeakerStatusNotice
             status={diarizationStatus}
             progress={isDiarizingPass && transcriptionProgress ? {
@@ -533,14 +598,6 @@ export function TranscriptPanel({
           </div>
         )}
 
-        {/* A pass over an existing transcript keeps it visible but inert. */}
-        {progressSurface && convertedSegments.length > 0 && !isDiarizingPass && (
-          <div className="absolute inset-0 z-20 flex flex-col items-center justify-center pb-16">
-            {/* Separate scrim layer so the progress text itself stays opaque. */}
-            <div aria-hidden="true" className="absolute inset-0 bg-[var(--surface-0)] opacity-[0.85]" />
-            <div className="relative">{progressSurface}</div>
-          </div>
-        )}
       </div>
 
       {meetingId && (

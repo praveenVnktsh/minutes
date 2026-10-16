@@ -4,6 +4,7 @@
 
 pub mod dedup;
 pub mod engine;
+pub mod live;
 pub mod parakeet_provider;
 pub mod provider;
 pub mod whisper_provider;

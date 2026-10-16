@@ -333,48 +333,19 @@ static STOPPING_TRANSCRIPT_SEGMENTS: Mutex<
 /// to determine the engine, or if the recording session is no longer live by
 /// the time it resolves, this logs and gives up quietly; provenance is a
 /// nice-to-have, never worth failing or delaying a recording over.
-fn record_live_transcription_model<R: Runtime>(app: &AppHandle<R>) {
-    let app = app.clone();
-    tokio::spawn(async move {
-        let engine = match transcription::get_or_init_transcription_engine(&app).await {
-            Ok(engine) => engine,
-            Err(e) => {
-                warn!(
-                    "Could not determine live transcription model for provenance: {}",
-                    e
-                );
-                return;
-            }
-        };
-
-        let provider = match &engine {
-            transcription::TranscriptionEngine::Whisper(_) => "whisper".to_string(),
-            transcription::TranscriptionEngine::Parakeet(_) => "parakeet".to_string(),
-            transcription::TranscriptionEngine::Provider(provider) => {
-                provider.provider_name().to_string()
-            }
-        };
-        let model = engine
-            .get_current_model()
-            .await
-            .unwrap_or_else(|| "unknown".to_string());
-
-        let transcription_model =
-            crate::audio::model_provenance::TranscriptionModel { provider, model };
-
-        match RECORDING_MANAGER.lock() {
-            Ok(mut guard) => match guard.as_mut() {
-                Some(session) => session.record_transcription_model(transcription_model),
-                None => {
-                    warn!("No active recording session to record the transcription model against")
-                }
-            },
-            Err(e) => warn!(
-                "Failed to lock recording manager to record transcription model: {}",
-                e
-            ),
-        }
-    });
+fn record_live_transcription_model(
+    transcription_model: crate::audio::model_provenance::TranscriptionModel,
+) {
+    match RECORDING_MANAGER.lock() {
+        Ok(mut guard) => match guard.as_mut() {
+            Some(session) => session.record_transcription_model(transcription_model),
+            None => warn!("No active recording session to record the transcription model against"),
+        },
+        Err(e) => warn!(
+            "Failed to lock recording manager to record transcription model: {}",
+            e
+        ),
+    }
 }
 
 fn store_transcript_segment(segment: crate::audio::recording_saver::TranscriptSegment) {
@@ -693,20 +664,11 @@ async fn validate_transcription_engine_before_capture<R: Runtime>(
         ));
     }
 
-    if let Err(validation_error) = transcription::validate_transcription_model_ready(app).await {
-        error!("Model validation failed: {}", validation_error);
-        let _ = app.emit(
-            "transcription-error",
-            serde_json::json!({
-                "error": validation_error,
-                "userMessage": format!("Recording cannot start: {}", validation_error),
-                "actionable": false,
-                "phase": "startup"
-            }),
-        );
-        return Err(validation_error);
-    }
-    info!("✅ Transcription engine validation passed");
+    // Decide the live path and load its model now, while a load failure can
+    // still fall back. A missing model never stops the recording: it degrades
+    // to another engine or to no live text, with a notice.
+    transcription::live::prepare_for_recording(app).await;
+    info!("✅ Live transcription prepared");
     Ok(())
 }
 
@@ -1069,18 +1031,26 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
 
     let live_transcription_enabled =
         super::pipeline::LIVE_TRANSCRIPTION_ENABLED.load(Ordering::SeqCst);
-    if live_transcription_enabled {
-        // Start optimized parallel transcription task and store handle
-        let task_handle =
-            transcription::start_transcription_task(app.clone(), transcription_receiver);
-        let mut global_task = TRANSCRIPTION_TASK.lock().unwrap();
-        *global_task = Some(task_handle);
-        drop(global_task);
-
-        // Best-effort: record which model is actually transcribing this
-        // session for the metadata.json provenance note (PRA-577).
-        record_live_transcription_model(&app);
-
+    // Start the live worker for this recording's plan (streaming Nemotron or
+    // a chunked engine). Without a usable engine the recording carries on as
+    // in deferred mode, and the final pass transcribes it afterwards.
+    let pending_receiver = if live_transcription_enabled {
+        match transcription::live::start_worker(&app, transcription_receiver).await {
+            Ok((task_handle, model)) => {
+                *TRANSCRIPTION_TASK.lock().unwrap() = Some(task_handle);
+                // Best-effort: record which model is actually transcribing this
+                // session for the metadata.json provenance note (PRA-577).
+                if let Some(model) = model {
+                    record_live_transcription_model(model);
+                }
+                None
+            }
+            Err(receiver) => Some(receiver),
+        }
+    } else {
+        Some(transcription_receiver)
+    };
+    if pending_receiver.is_none() {
         // Listen for transcript updates so live history survives page reloads.
         use tauri::Listener;
         let listener_id = app.listen("transcript-update", move |event: tauri::Event| {
@@ -1107,7 +1077,7 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
         info!("✅ Transcript-update event listener registered for history persistence");
     } else {
         // Hold onto the receiver so live transcription can be enabled mid-meeting.
-        *PENDING_TRANSCRIPTION_RECEIVER.lock().unwrap() = Some(transcription_receiver);
+        *PENDING_TRANSCRIPTION_RECEIVER.lock().unwrap() = pending_receiver;
         *TRANSCRIPTION_TASK.lock().unwrap() = None;
         *TRANSCRIPT_LISTENER_ID.lock().unwrap() = None;
         info!("⏺️ Deferred transcription mode active; recording audio without loading a live transcription engine");
@@ -1316,18 +1286,26 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
 
     let live_transcription_enabled =
         super::pipeline::LIVE_TRANSCRIPTION_ENABLED.load(Ordering::SeqCst);
-    if live_transcription_enabled {
-        // Start optimized parallel transcription task and store handle
-        let task_handle =
-            transcription::start_transcription_task(app.clone(), transcription_receiver);
-        let mut global_task = TRANSCRIPTION_TASK.lock().unwrap();
-        *global_task = Some(task_handle);
-        drop(global_task);
-
-        // Best-effort: record which model is actually transcribing this
-        // session for the metadata.json provenance note (PRA-577).
-        record_live_transcription_model(&app);
-
+    // Start the live worker for this recording's plan (streaming Nemotron or
+    // a chunked engine). Without a usable engine the recording carries on as
+    // in deferred mode, and the final pass transcribes it afterwards.
+    let pending_receiver = if live_transcription_enabled {
+        match transcription::live::start_worker(&app, transcription_receiver).await {
+            Ok((task_handle, model)) => {
+                *TRANSCRIPTION_TASK.lock().unwrap() = Some(task_handle);
+                // Best-effort: record which model is actually transcribing this
+                // session for the metadata.json provenance note (PRA-577).
+                if let Some(model) = model {
+                    record_live_transcription_model(model);
+                }
+                None
+            }
+            Err(receiver) => Some(receiver),
+        }
+    } else {
+        Some(transcription_receiver)
+    };
+    if pending_receiver.is_none() {
         // Listen for transcript updates so live history survives page reloads.
         use tauri::Listener;
         let listener_id = app.listen("transcript-update", move |event: tauri::Event| {
@@ -1354,7 +1332,7 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
         info!("✅ Transcript-update event listener registered for history persistence");
     } else {
         // Hold onto the receiver so live transcription can be enabled mid-meeting.
-        *PENDING_TRANSCRIPTION_RECEIVER.lock().unwrap() = Some(transcription_receiver);
+        *PENDING_TRANSCRIPTION_RECEIVER.lock().unwrap() = pending_receiver;
         *TRANSCRIPTION_TASK.lock().unwrap() = None;
         *TRANSCRIPT_LISTENER_ID.lock().unwrap() = None;
         info!("⏺️ Deferred transcription mode active; recording audio without loading a live transcription engine");
@@ -1551,6 +1529,10 @@ async fn stop_recording_session<R: Runtime>(
         None
     };
 
+    // The worker has drained: free the streaming model before the final pass
+    // needs the memory, and note which chunked engine (if any) live text used.
+    let live_chunked_provider = transcription::live::release_after_recording();
+
     // The worker has drained, so no more final transcript events can arrive.
     {
         use tauri::Listener;
@@ -1590,25 +1572,19 @@ async fn stop_recording_session<R: Runtime>(
 
     info!("🧠 All transcript chunks processed. Now safely unloading transcription model...");
 
-    // Determine which provider was used and unload the appropriate model (with timeout)
-    let config = match tokio::time::timeout(
-        tokio::time::Duration::from_secs(30), // 30 seconds max for DB operation
-        crate::api::api::api_get_transcript_config(app.clone(), app.clone().state(), None),
-    )
-    .await
+    // Unload only the chunked engine this recording itself used: a streaming
+    // recording loaded none, and Whisper/Parakeet may be busy with a final pass
+    // for another meeting. A running pass unloads its own engine when it
+    // finishes (unload_engine_after_batch).
+    let config = if super::transcription_queue::get_queue()
+        .has_active_task()
+        .await
     {
-        Ok(Ok(Some(config))) => Some(config.provider),
-        Ok(Ok(None)) => None,
-        Ok(Err(e)) => {
-            warn!("⚠️ Failed to get transcript config: {:?}", e);
-            None
-        }
-        Err(_) => {
-            warn!("⏱️ Transcript config timeout (30s), continuing shutdown");
-            None
-        }
+        info!("Keeping transcription engines loaded: a transcription task is running");
+        None
+    } else {
+        live_chunked_provider
     };
-
     match config.as_deref() {
         Some("parakeet") => {
             info!("🦜 Unloading Parakeet model...");
@@ -1638,8 +1614,8 @@ async fn stop_recording_session<R: Runtime>(
                 warn!("⚠️ No Parakeet engine found to unload model");
             }
         }
-        _ => {
-            // Default to Whisper
+        None => info!("No chunked live engine to unload"),
+        Some(_) => {
             info!("🎤 Unloading Whisper model...");
             let engine_clone = {
                 let engine_guard = crate::whisper_engine::commands::WHISPER_ENGINE
@@ -1980,20 +1956,15 @@ pub async fn ensure_live_transcription_running<R: Runtime>(app: &AppHandle<R>) {
         return;
     };
 
-    if let Err(error) = transcription::validate_transcription_model_ready(app).await {
-        let _ = app.emit(
-            "transcription-error",
-            serde_json::json!({
-                "error": error,
-                "userMessage": "Live transcription could not start. Check your model settings.",
-                "actionable": true,
-                "phase": "active"
-            }),
-        );
-        // Return the receiver so a later attempt can retry.
-        *PENDING_TRANSCRIPTION_RECEIVER.lock().unwrap() = Some(receiver);
-        return;
-    }
+    let (handle, model) = match transcription::live::start_worker(app, receiver).await {
+        Ok(started) => started,
+        Err(receiver) => {
+            // start_worker told the user why. Keep the receiver so a later
+            // attempt (after a download) can retry.
+            *PENDING_TRANSCRIPTION_RECEIVER.lock().unwrap() = Some(receiver);
+            return;
+        }
+    };
 
     // Persist live history across reloads (the listener was cleared in deferred mode).
     use tauri::Listener;
@@ -2015,12 +1986,13 @@ pub async fn ensure_live_transcription_running<R: Runtime>(app: &AppHandle<R>) {
     });
     *TRANSCRIPT_LISTENER_ID.lock().unwrap() = Some(listener_id);
 
-    let handle = transcription::start_transcription_task(app.clone(), receiver);
     *TRANSCRIPTION_TASK.lock().unwrap() = Some(handle);
 
     // Best-effort: record which model is actually transcribing this session
     // for the metadata.json provenance note (PRA-577).
-    record_live_transcription_model(app);
+    if let Some(model) = model {
+        record_live_transcription_model(model);
+    }
 
     info!("▶️ Live transcription enabled mid-recording");
 }

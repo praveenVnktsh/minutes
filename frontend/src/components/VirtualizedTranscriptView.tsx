@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useRef, useReducer, startTransition, useEffect, useState, memo, type ReactNode } from "react";
+import { useCallback, useRef, useReducer, startTransition, useEffect, useLayoutEffect, useState, memo, type ReactNode } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { ChevronDown } from "lucide-react";
 import { useAutoScroll } from "@/hooks/useAutoScroll";
@@ -12,6 +12,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover";
 import { Button } from "./ui/button";
 import { motion, AnimatePresence } from "framer-motion";
 import { TranscriptSegmentData } from "@/types";
+import { isWholesaleReplacement, nearestSegmentIndex } from "@/lib/transcriptAnchor";
 import { recordingFill, speakerPalette, transcriptHighlight } from "@/lib/theme-classes";
 
 export interface VirtualizedTranscriptViewProps {
@@ -514,6 +515,58 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
         window.addEventListener('meetily:jump-to-transcript', handleJump);
         return () => window.removeEventListener('meetily:jump-to-transcript', handleJump);
     }, [segments.length, useVirtualization, virtualizer]);
+
+    // Keep the reader's place when the transcript is replaced wholesale (the
+    // final pass swapping in a better transcript): remember the recording time
+    // at the top of the view while scrolling, and after a swap put the row
+    // nearest that time back at the top instead of jumping somewhere else.
+    const anchorTimeRef = useRef<number | null>(null);
+    const previousIdsRef = useRef<string[]>([]);
+    useEffect(() => {
+        const element = scrollRef.current;
+        if (!element) return;
+        let frame = 0;
+        const capture = () => {
+            cancelAnimationFrame(frame);
+            frame = requestAnimationFrame(() => {
+                if (element.scrollTop <= 0) {
+                    anchorTimeRef.current = null;
+                    return;
+                }
+                let index = -1;
+                if (useVirtualization) {
+                    index = virtualizer.getVirtualItems().find((item) => item.end > element.scrollTop)?.index ?? -1;
+                } else {
+                    const top = element.getBoundingClientRect().top;
+                    index = segments.findIndex((segment) => {
+                        const node = document.getElementById(`segment-${segment.id}`);
+                        return node ? node.getBoundingClientRect().bottom > top : false;
+                    });
+                }
+                anchorTimeRef.current = index >= 0 ? segments[index]?.timestamp ?? null : null;
+            });
+        };
+        element.addEventListener('scroll', capture, { passive: true });
+        return () => {
+            element.removeEventListener('scroll', capture);
+            cancelAnimationFrame(frame);
+        };
+    }, [segments, useVirtualization, virtualizer]);
+
+    useLayoutEffect(() => {
+        const ids = segments.map((segment) => segment.id);
+        const replaced = isWholesaleReplacement(previousIdsRef.current, ids);
+        previousIdsRef.current = ids;
+        const time = anchorTimeRef.current;
+        if (!replaced || time === null) return;
+        const index = nearestSegmentIndex(segments, time);
+        if (index < 0) return;
+        if (useVirtualization) {
+            virtualizer.scrollToIndex(index, { align: 'start' });
+        } else {
+            document.getElementById(`segment-${segments[index].id}`)?.scrollIntoView({ block: 'start' });
+        }
+    }, [segments, useVirtualization, virtualizer]);
 
     return (
         <div ref={scrollRef} className="flex flex-col h-full overflow-y-auto px-4 py-2">
