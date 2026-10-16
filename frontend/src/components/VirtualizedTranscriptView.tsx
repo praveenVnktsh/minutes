@@ -13,6 +13,7 @@ import { Button } from "./ui/button";
 import { motion, AnimatePresence } from "framer-motion";
 import { TranscriptSegmentData } from "@/types";
 import { isWholesaleReplacement, nearestSegmentIndex } from "@/lib/transcriptAnchor";
+import { JUMP_TO_TIME_EVENT } from "@/lib/liveTimeline";
 import { recordingFill, speakerPalette, transcriptHighlight } from "@/lib/theme-classes";
 
 export interface VirtualizedTranscriptViewProps {
@@ -515,6 +516,32 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
         window.addEventListener('meetily:jump-to-transcript', handleJump);
         return () => window.removeEventListener('meetily:jump-to-transcript', handleJump);
     }, [segments.length, useVirtualization, virtualizer]);
+
+    // Chapters jump by recording time, not by row: rows change when the final
+    // pass replaces the live transcript, times do not. Same nearest-row rule
+    // as keeping the reader's place across that swap.
+    useEffect(() => {
+        const handleJumpToTime = (event: Event) => {
+            const { seconds } = (event as CustomEvent<{ seconds: number }>).detail ?? {};
+            if (typeof seconds !== 'number' || !Number.isFinite(seconds)) return;
+            const index = nearestSegmentIndex(segments, seconds);
+            if (index < 0) return;
+            const id = segments[index].id;
+            if (useVirtualization) {
+                virtualizer.scrollToIndex(index, { align: 'start', behavior: 'smooth' });
+            } else {
+                document.getElementById(`segment-${id}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }
+            window.setTimeout(() => {
+                document.getElementById(`segment-${id}`)?.animate(
+                    [{ backgroundColor: 'rgba(251, 191, 36, .22)' }, { backgroundColor: 'transparent' }],
+                    { duration: 1600 },
+                );
+            }, 250);
+        };
+        window.addEventListener(JUMP_TO_TIME_EVENT, handleJumpToTime);
+        return () => window.removeEventListener(JUMP_TO_TIME_EVENT, handleJumpToTime);
+    }, [segments, useVirtualization, virtualizer]);
 
     // Keep the reader's place when the transcript is replaced wholesale (the
     // final pass swapping in a better transcript): remember the recording time
