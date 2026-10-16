@@ -7,6 +7,7 @@ import {
   readMeetingSummaryLanguage,
 } from '@/lib/summary-language-preferences';
 import { fetchCompleteTranscripts, originalNotesMarkdown } from '@/lib/meetingExport';
+import { formatSummaryTranscript } from '@/lib/summaryTranscript';
 import {
   flushNotes,
   loadNotes,
@@ -128,7 +129,7 @@ export async function generateAutomaticSummary(meetingId: string, modelConfig: M
     await validateSummaryModel(modelConfig);
     const summaryLanguage = await resolveSummaryLanguage(meetingId, transcriptTexts);
     return {
-      text: transcriptTexts.join('\n'),
+      text: formatSummaryTranscript(transcripts),
       model: modelConfig.provider,
       modelName: modelConfig.model,
       meetingId,

@@ -14,6 +14,7 @@ import {
 import { parseSummaryContent, readSummaryMetadata } from '@/lib/summary-content';
 import { loadSummaryNotesContext, validateSummaryModel } from '@/lib/autoSummary';
 import { fetchCompleteTranscripts } from '@/lib/meetingExport';
+import { formatSummaryTranscript, summarySpeakerLabel } from '@/lib/summaryTranscript';
 import { useConfig } from '@/contexts/ConfigContext';
 
 async function resolveSummaryLanguage(
@@ -532,21 +533,12 @@ export function useSummaryGeneration({
   }, []);
 
   const buildSummaryTranscriptPayload = useCallback((allTranscripts: Transcript[]) => {
-    const formatTime = (seconds: number | undefined, fallbackTimestamp: string): string => {
-      if (seconds === undefined) {
-        return fallbackTimestamp;
-      }
-      const totalSecs = Math.floor(seconds);
-      return `[${Math.floor(totalSecs / 60).toString().padStart(2, '0')}:${(totalSecs % 60).toString().padStart(2, '0')}]`;
-    };
-
     return {
-      transcriptText: allTranscripts
-        .map((transcript) => `${formatTime(transcript.audio_start_time, transcript.timestamp)}${transcript.speaker ? ` [${transcript.speaker === 'mic' ? 'You' : transcript.speaker === 'system' ? 'Others' : transcript.speaker}]` : ''} ${transcript.text}`)
-        .join('\n'),
-      transcriptTexts: allTranscripts.map((transcript) =>
-        `${transcript.speaker ? `[${transcript.speaker === 'mic' ? 'You' : transcript.speaker === 'system' ? 'Others' : transcript.speaker}] ` : ''}${transcript.text}`
-      ),
+      transcriptText: formatSummaryTranscript(allTranscripts),
+      transcriptTexts: allTranscripts.map((transcript) => {
+        const speaker = summarySpeakerLabel(transcript.speaker);
+        return `${speaker ? `[${speaker}] ` : ''}${transcript.text}`;
+      }),
     };
   }, []);
 
