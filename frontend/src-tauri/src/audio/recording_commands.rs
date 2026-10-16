@@ -271,6 +271,15 @@ static RECORDING_MANAGER: Mutex<Option<RecordingSession>> = Mutex::new(None);
 static TRANSCRIPTION_TASK: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
 
 const COMPLETED_TRANSCRIPT_HISTORY_LIMIT: usize = 50;
+/// Longest the stop path waits for the chunked live worker to transcribe the
+/// chunks still queued.
+const CHUNKED_DRAIN_LIMIT: std::time::Duration = std::time::Duration::from_secs(600);
+/// Longest the stop path waits for the streaming worker before cancelling it.
+/// It never holds more than `MAX_BACKLOG_SECONDS` of audio, which decodes in
+/// a few seconds.
+const STREAMING_DRAIN_LIMIT: std::time::Duration = std::time::Duration::from_secs(45);
+/// How long a cancelled streaming worker gets to notice and free its model.
+const STREAMING_CANCEL_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[derive(Default)]
 struct CompletedTranscriptHistory {
@@ -900,6 +909,9 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     };
 
     validate_transcription_engine_before_capture(&app).await?;
+    // Until the recording is live, any early return releases what was just
+    // loaded for live text.
+    let mut prepared_live = transcription::live::PreparedLive::new();
 
     // Notify frontend that startup has begun (surfaces STARTING state)
     app.emit(
@@ -1030,6 +1042,7 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     // Flip recording live + reset per-session flags (speech-detected latch,
     // mic-recovery budget). Shared with the other start path — see helper.
     finalize_recording_start(&app, session_id.clone());
+    prepared_live.disarm();
 
     let live_transcription_enabled =
         super::pipeline::LIVE_TRANSCRIPTION_ENABLED.load(Ordering::SeqCst);
@@ -1159,6 +1172,9 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     };
 
     validate_transcription_engine_before_capture(&app).await?;
+    // Until the recording is live, any early return releases what was just
+    // loaded for live text.
+    let mut prepared_live = transcription::live::PreparedLive::new();
 
     // Notify frontend that startup has begun (surfaces STARTING state)
     app.emit(
@@ -1285,6 +1301,7 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     // Flip recording live + reset per-session flags (speech-detected latch,
     // mic-recovery budget). Shared with the other start path — see helper.
     finalize_recording_start(&app, session_id.clone());
+    prepared_live.disarm();
 
     let live_transcription_enabled =
         super::pipeline::LIVE_TRANSCRIPTION_ENABLED.load(Ordering::SeqCst);
@@ -1499,13 +1516,33 @@ async fn stop_recording_session<R: Runtime>(
             }
         });
 
-        // Wait up to 10 minutes for transcription completion to prevent indefinite hangs
-        let drain_error = match tokio::time::timeout(
-            tokio::time::Duration::from_secs(600), // 10 minutes max
-            &mut task_handle,
-        )
-        .await
-        {
+        // The streaming worker skips any backlog over MAX_BACKLOG_SECONDS, so
+        // a healthy one drains in seconds; past STREAMING_DRAIN_LIMIT it is
+        // cancelled (its blocking thread cannot be aborted) so saving goes
+        // on and the model is freed. The chunked worker must transcribe every
+        // queued chunk, so it keeps the long limit.
+        let streaming = super::pipeline::LIVE_STREAMING_MODE.load(Ordering::SeqCst);
+        let drain_limit = if streaming {
+            STREAMING_DRAIN_LIMIT
+        } else {
+            CHUNKED_DRAIN_LIMIT
+        };
+        let drain_error = match tokio::time::timeout(drain_limit, &mut task_handle).await {
+            Err(_) if streaming => {
+                warn!(
+                    "⏱️ Streaming live transcription still draining after {:?}; cancelling it (the final pass covers the rest)",
+                    drain_limit
+                );
+                super::live_streaming::worker::cancel_current();
+                match tokio::time::timeout(STREAMING_CANCEL_GRACE, &mut task_handle).await {
+                    Ok(_) => info!("Streaming live transcription stopped after cancel"),
+                    Err(_) => {
+                        warn!("Streaming live transcription did not stop after cancel");
+                        task_handle.abort();
+                    }
+                }
+                None
+            }
             Ok(Ok(())) => {
                 info!("✅ ALL transcription chunks processed successfully - no data lost");
                 None

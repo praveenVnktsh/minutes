@@ -27,6 +27,9 @@ pub struct LiveModelStatus {
     pub downloading: bool,
     pub loaded: bool,
     pub size_bytes: u64,
+    /// False on platforms without the streaming runtime (everything but
+    /// macOS): the settings show Nemotron as unavailable there.
+    pub supported: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -44,6 +47,7 @@ pub fn live_model_status<R: Runtime>(app: &AppHandle<R>) -> LiveModelStatus {
         downloading: model::is_downloading(),
         loaded: super::engine::is_loaded(),
         size_bytes: model::total_bytes(),
+        supported: super::SUPPORTED,
     }
 }
 
@@ -75,6 +79,9 @@ pub async fn set_live_transcription_settings<R: Runtime>(
 ) -> Result<LiveTranscriptionSettingsResponse, String> {
     if let Some(live_model) = live_model {
         let choice = match live_model.as_str() {
+            "nemotron-streaming" if !super::SUPPORTED => {
+                return Err("Nemotron live transcription is only available on macOS".to_string())
+            }
             "nemotron-streaming" => LiveModelChoice::NemotronStreaming,
             "chunked" => LiveModelChoice::Chunked,
             other => return Err(format!("Unknown live model '{other}'")),
@@ -96,6 +103,9 @@ pub async fn live_model_get_status<R: Runtime>(app: AppHandle<R>) -> LiveModelSt
 
 #[tauri::command]
 pub async fn live_model_download<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    if !super::SUPPORTED {
+        return Err("Nemotron live transcription is only available on macOS".to_string());
+    }
     let _ = set_store_value(
         &app,
         LIVE_AUTO_DOWNLOAD_DISABLED_KEY,
@@ -169,24 +179,46 @@ pub fn spawn_default_model_setup(app: AppHandle) {
         {
             let available = settings::availability().await;
             if !available.whisper.iter().any(|m| m == &final_model.model) {
-                let _ = set_store_value(
-                    &app,
-                    FINAL_AUTO_DOWNLOAD_ATTEMPTED_KEY,
-                    serde_json::json!(true),
-                );
                 info!(
                     "Downloading the default final transcript model ({}) in the background",
                     final_model.model
                 );
-                if let Err(error) = crate::whisper_engine::commands::whisper_download_model(
+                let result = crate::whisper_engine::commands::whisper_download_model(
                     app.clone(),
                     final_model.model.clone(),
                 )
-                .await
-                {
-                    warn!("Background final model download did not finish: {error}");
+                .await;
+                if let Err(error) = &result {
+                    warn!("Background final model download did not finish, retrying on a later start: {error}");
+                }
+                if final_download_settled(&result) {
+                    let _ = set_store_value(
+                        &app,
+                        FINAL_AUTO_DOWNLOAD_ATTEMPTED_KEY,
+                        serde_json::json!(true),
+                    );
                 }
             }
         }
     });
+}
+
+/// Whether the automatic final-model download is done with for good:
+/// `whisper_download_model` returns `Ok` when the model arrived or the user
+/// cancelled it (cancellation is not an error there), and `Err` for a failure
+/// such as a dropped connection, which is retried on a later start.
+fn final_download_settled<E>(result: &Result<(), E>) -> bool {
+    result.is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_failed_final_download_is_retried_later() {
+        assert!(!final_download_settled(&Err::<(), _>("connection reset")));
+        // Finished, or cancelled by the user: do not start it again.
+        assert!(final_download_settled(&Ok::<(), &str>(())));
+    }
 }
