@@ -42,6 +42,7 @@ pub const APP_NAME: &str = "Minutes";
 pub mod analytics;
 pub mod anthropic;
 pub mod api;
+pub mod app_logging;
 pub mod audio;
 pub mod calendar;
 pub mod config;
@@ -593,6 +594,34 @@ fn meeting_id_from_deep_link(raw: &str) -> Option<String> {
     (!id.is_empty()).then(|| id.to_string())
 }
 
+/// Run an optional startup step so that a panic in it is logged (the panic
+/// hook has already written the report) and setup carries on. Setup runs
+/// inside the macOS launch callback, where an unwinding panic cannot cross
+/// into Objective-C and aborts the whole app instead.
+fn optional_setup_step(name: &str, step: impl FnOnce()) {
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(step)).is_err() {
+        log::error!("Startup step '{name}' panicked; continuing without it");
+    }
+}
+
+/// The database could not be opened, so nothing else can work: say so in a
+/// dialog and quit cleanly, rather than aborting with no explanation.
+fn report_database_failure(app: &tauri::AppHandle, error: &str) {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+    log::error!("Failed to initialize database: {error}");
+    let logs = app_logging::log_dir()
+        .map(|dir| format!("\n\nDetails are in the logs at {}.", dir.display()))
+        .unwrap_or_default();
+    let handle = app.clone();
+    app.dialog()
+        .message(format!(
+            "{APP_NAME} could not open its database and has to quit.\n\n{error}{logs}"
+        ))
+        .title(format!("{APP_NAME} could not start"))
+        .kind(MessageDialogKind::Error)
+        .show(move |_| handle.exit(1));
+}
+
 pub fn run() {
     log::set_max_level(log::LevelFilter::Info);
 
@@ -657,18 +686,27 @@ pub fn run() {
                 )),
             };
 
-            log::info!("Application setup complete");
-
-            // Initialize system tray
-            if let Err(e) = tray::create_tray(_app.handle()) {
-                log::error!("Failed to create system tray: {}", e);
+            // Tauri's own log directory; normally the one main() already uses.
+            match _app.path().app_log_dir() {
+                Ok(dir) => app_logging::use_log_dir(dir),
+                Err(e) => log::warn!("Could not resolve the app log directory: {}", e),
             }
 
+            log::info!("Application setup complete");
+
+            // Every step but the database is optional: a failure (or panic) in
+            // one is logged and the app starts without it.
+            optional_setup_step("system tray", || {
+                if let Err(e) = tray::create_tray(_app.handle()) {
+                    log::error!("Failed to create system tray: {}", e);
+                }
+            });
+
             // Register app-wide shortcuts (toggle recording / window)
-            shortcuts::register(_app.handle());
+            optional_setup_step("global shortcuts", || shortcuts::register(_app.handle()));
 
             // Deep links: minutes://meeting/<id> opens that meeting.
-            {
+            optional_setup_step("deep links", || {
                 let handle = _app.handle().clone();
                 let listener_handle = handle.clone();
                 handle.deep_link().on_open_url(move |event| {
@@ -691,21 +729,27 @@ pub fn run() {
                         }
                     }
                 });
-            }
+            });
 
             // Restore debug mode before anything else uses it.
-            debug_mode::load(_app.handle());
+            optional_setup_step("debug mode", || debug_mode::load(_app.handle()));
 
             // Load the custom transcription vocabulary into the Whisper engine.
-            if let Ok(store) = _app.store("store.json") {
-                if let Some(value) = store.get("transcriptionVocabulary") {
-                    if let Some(vocabulary) = value.as_str() {
-                        whisper_engine::whisper_engine::set_transcription_vocabulary(
-                            vocabulary.to_string(),
-                        );
+            optional_setup_step("transcription vocabulary", || {
+                match _app.store("store.json") {
+                    Ok(store) => {
+                        if let Some(vocabulary) = store
+                            .get("transcriptionVocabulary")
+                            .and_then(|value| value.as_str().map(str::to_string))
+                        {
+                            whisper_engine::whisper_engine::set_transcription_vocabulary(
+                                vocabulary,
+                            );
+                        }
                     }
+                    Err(e) => log::warn!("Could not load store.json: {}", e),
                 }
-            }
+            });
 
             // Initialize notification system with proper defaults
             log::info!("Initializing notification system...");
@@ -738,7 +782,9 @@ pub fn run() {
             });
 
             // Set models directory to use app_data_dir (unified storage location)
-            whisper_engine::commands::set_models_directory(_app.handle());
+            optional_setup_step("whisper models directory", || {
+                whisper_engine::commands::set_models_directory(_app.handle())
+            });
 
             // Initialize Whisper engine on startup
             tauri::async_runtime::spawn(async {
@@ -748,7 +794,9 @@ pub fn run() {
             });
 
             // Set Parakeet models directory
-            parakeet_engine::commands::set_models_directory(_app.handle());
+            optional_setup_step("parakeet models directory", || {
+                parakeet_engine::commands::set_models_directory(_app.handle())
+            });
 
             // Initialize Parakeet engine on startup
             tauri::async_runtime::spawn(async {
@@ -773,36 +821,49 @@ pub fn run() {
                 }
             });
 
-            // Initialize database (handles first launch detection and conditional setup)
-            tauri::async_runtime::block_on(async {
-                database::setup::initialize_database_on_startup(_app.handle()).await
-            })
-            .expect("Failed to initialize database");
+            // Initialize database (handles first launch detection and conditional
+            // setup, and fails summaries the last shutdown interrupted). Without
+            // it nothing works, so a failure is reported and the app quits.
+            let database = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                tauri::async_runtime::block_on(async {
+                    database::setup::initialize_database_on_startup(_app.handle()).await
+                })
+            }))
+            .unwrap_or_else(|_| Err("database setup panicked".to_string()));
+            if let Err(error) = database {
+                report_database_failure(_app.handle(), &error);
+                return Ok(());
+            }
 
             // Initialize transcription queue worker (processes import/retranscribe tasks sequentially)
-            audio::transcription_queue::init_queue_worker(_app.handle());
+            optional_setup_step("transcription queue", || {
+                audio::transcription_queue::init_queue_worker(_app.handle())
+            });
 
             // Live/final transcription defaults: migrate the final model and
             // fetch missing default models in the background. Onboarding fires
             // the event when it finishes, since this skips until then.
-            audio::live_streaming::commands::spawn_default_model_setup(_app.handle().clone());
-            {
+            optional_setup_step("default model setup", || {
                 use tauri::Listener;
+                audio::live_streaming::commands::spawn_default_model_setup(_app.handle().clone());
                 let handle = _app.handle().clone();
                 _app.listen(onboarding::ONBOARDING_COMPLETED_EVENT, move |_| {
                     audio::live_streaming::commands::spawn_default_model_setup(handle.clone());
                 });
-            }
+            });
 
-            // Finish speaker identification that was cut off when the app last quit.
-            audio::diarization::init_resume_worker(_app.handle());
-            audio::final_pass::init_resume_worker(_app.handle());
+            // Finish speaker identification and final passes that were cut off
+            // when the app last quit.
+            optional_setup_step("resume workers", || {
+                audio::diarization::init_resume_worker(_app.handle());
+                audio::final_pass::init_resume_worker(_app.handle());
+            });
 
             // Deliver durable transcription-complete webhooks in the background.
-            webhooks::init_worker(_app.handle());
+            optional_setup_step("webhooks", || webhooks::init_worker(_app.handle()));
 
             // Poll the subscribed calendar feed and raise meeting reminders.
-            calendar::init_worker(_app.handle());
+            optional_setup_step("calendar", || calendar::init_worker(_app.handle()));
 
             // Initialize bundled templates directory for dynamic template discovery
             log::info!("Initializing bundled templates directory...");

@@ -47,8 +47,9 @@ pub fn show_console() -> Result<String, String> {
                 return Err("Failed to allocate console".to_string());
             }
             // Reinitialize stdout, stdin, stderr for the new console
-            std::env::set_var("RUST_LOG", "info");
-            env_logger::init();
+            // The app's logger is already installed (app_logging::init), and
+            // a second init would panic; this only covers a missing one.
+            let _ = env_logger::try_init();
         } else {
             // Show existing console window
             ShowWindow(console_window, SW_SHOW);
