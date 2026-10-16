@@ -16,6 +16,7 @@ import { SummaryUpdaterButtonGroup } from '@/components/MeetingDetails/SummaryUp
 import { SummaryLanguagePill } from '@/components/MeetingDetails/SummaryLanguagePill';
 import { MeetingWorkspace, type NotesMode } from '@/components/MeetingDetails/MeetingWorkspace';
 import { MeetingAssistantPanel } from '@/components/MeetingDetails/MeetingAssistantPanel';
+import { CopilotPanel } from '@/components/MeetingDetails/CopilotPanel';
 import { MeetingRawNotesEditor } from '@/components/MeetingDetails/MeetingRawNotesEditor';
 import { LiveTranscriptPanel } from '@/components/MeetingDetails/LiveTranscriptPanel';
 import { FloatingRecordingControls } from '@/components/MeetingDetails/FloatingRecordingControls';
@@ -405,12 +406,12 @@ export default function PageContent({
           rawNotes={<LiveNotesPad bare />}
           transcript={<LiveTranscriptPanel />}
           assistant={
-            <MeetingAssistantPanel
-              meetingId={meeting.id}
-              modelConfig={modelConfig}
+            <CopilotPanel
+              notesTarget={liveFolderPath ? liveNotesTarget(liveFolderPath) : undefined}
             />
           }
           showAssistant
+          assistantLabel="Copilot"
           peopleCount={0}
           onTitleChange={handleTitleChange}
           onRegenerateTitle={titleRegeneration.regenerateTitle}

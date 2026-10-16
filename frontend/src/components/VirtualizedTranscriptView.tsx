@@ -14,7 +14,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { TranscriptSegmentData } from "@/types";
 import { isWholesaleReplacement, nearestSegmentIndex } from "@/lib/transcriptAnchor";
 import { JUMP_TO_TIME_EVENT } from "@/lib/liveTimeline";
-import { jumpFlashKeyframes, recordingFill, speakerPalette, transcriptHighlight } from "@/lib/theme-classes";
+import { badge, jumpFlashKeyframes, recordingFill, speakerPalette, transcriptHighlight } from "@/lib/theme-classes";
 
 export interface VirtualizedTranscriptViewProps {
     /** Transcript segments to display */
@@ -53,6 +53,8 @@ export interface VirtualizedTranscriptViewProps {
     activeMatchId?: string;
     /** Query to highlight inside segment text. */
     highlightQuery?: string;
+    /** Short tags on segments by id, e.g. Copilot's "Question for you". */
+    segmentTags?: Map<string, string>;
 }
 
 // Threshold for enabling virtualization (below this, use simple rendering)
@@ -241,6 +243,7 @@ const TranscriptSegment = memo(function TranscriptSegment({
     highlight,
     isStreaming,
     showConfidence,
+    tag,
 }: {
     id: string;
     timestamp: number;
@@ -258,6 +261,7 @@ const TranscriptSegment = memo(function TranscriptSegment({
     highlight?: string;
     isStreaming: boolean;
     showConfidence: boolean;
+    tag?: string;
 }) {
     const displayText = cleanStopWords(text) || (text.trim() === '' ? '[Silence]' : text);
 
@@ -307,7 +311,9 @@ const TranscriptSegment = memo(function TranscriptSegment({
             ? transcriptHighlight.match
             : isActive
                 ? transcriptHighlight.playing
-                : '';
+                : tag
+                    ? transcriptHighlight.question
+                    : '';
 
     const renderText = (value: string) => {
         if (!highlight) return value;
@@ -378,6 +384,11 @@ const TranscriptSegment = memo(function TranscriptSegment({
                             onRenameSpeaker={onRenameSpeaker}
                         />
                     )}
+                    {tag && (
+                        <span className={`mb-0.5 inline-block rounded px-1.5 py-px text-[10px] font-semibold uppercase tracking-[0.04em] ${badge.warning}`}>
+                            {tag}
+                        </span>
+                    )}
                     <p className="text-base text-ink leading-relaxed">{renderText(displayText)}</p>
                 </div>
             </div>
@@ -407,6 +418,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
     matchIds,
     activeMatchId,
     highlightQuery,
+    segmentTags,
 }) => {
     // Create scroll ref first - shared between virtualizer and auto-scroll hook
     const scrollRef = useRef<HTMLDivElement>(null);
@@ -698,6 +710,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         highlight={highlightQuery}
                                         isStreaming={isStreaming}
                                         showConfidence={showConfidence}
+                                        tag={segmentTags?.get(segment.id)}
                                     />
                                 </div>
                             );
@@ -764,6 +777,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         highlight={highlightQuery}
                                         isStreaming={isStreaming}
                                         showConfidence={showConfidence}
+                                        tag={segmentTags?.get(segment.id)}
                                     />
                                 </motion.div>
                             );
