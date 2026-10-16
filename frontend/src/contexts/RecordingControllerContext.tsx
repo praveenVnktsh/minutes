@@ -32,7 +32,11 @@ import {
   type ModelWithStatus,
 } from '@/lib/transcription-model-readiness';
 import { markDeferredMeetingForAutoSummary } from '@/lib/autoSummary';
-import { finalPassNotice, finalPassTookOver } from '@/lib/liveTranscriptionModels';
+import {
+  finalPassNotice,
+  finalPassTookOver,
+  type LiveTranscriptionSettings,
+} from '@/lib/liveTranscriptionModels';
 import { toast } from 'sonner';
 import Analytics from '@/lib/analytics';
 import { showRecordingNotification } from '@/lib/recordingNotification';
@@ -469,18 +473,30 @@ export function RecordingControllerProvider({
     setFeedback({ kind, title, message: messageOf(error), settingsSection });
   }, []);
 
+  // Whether any engine can produce live text. The backend falls back from the
+  // configured final model to any downloaded engine (and the live model), so
+  // every one of them counts, starting with the configured provider.
   const checkModelReady = useCallback(async (): Promise<'ready' | 'downloading' | 'missing'> => {
     const config = await invoke<TranscriptConfig | null>('api_get_transcript_config').catch(() => null);
-    const commands = getProviderCommands(config?.provider || 'parakeet');
-    if (!commands) return 'missing';
-    try {
-      await invoke(commands.initialize);
-      if (await invoke<boolean>(commands.hasAvailableModels)) return 'ready';
-      const models = await invoke<ModelWithStatus[]>(commands.getAvailableModels).catch(() => []);
-      return hasDownloadingModel(models) ? 'downloading' : 'missing';
-    } catch {
-      return 'missing';
+    const preferred = config?.provider || 'parakeet';
+    const providers = [preferred, ...['localWhisper', 'parakeet'].filter((provider) => provider !== preferred)];
+    let downloading = false;
+    for (const provider of providers) {
+      const commands = getProviderCommands(provider);
+      if (!commands) continue;
+      try {
+        await invoke(commands.initialize);
+        if (await invoke<boolean>(commands.hasAvailableModels)) return 'ready';
+        const models = await invoke<ModelWithStatus[]>(commands.getAvailableModels).catch(() => []);
+        downloading ||= hasDownloadingModel(models);
+      } catch {
+        // Try the next engine.
+      }
     }
+    const live = await invoke<LiveTranscriptionSettings | null>('get_live_transcription_settings').catch(() => null);
+    if (live?.liveModelStatus?.downloaded) return 'ready';
+    downloading ||= Boolean(live?.liveModelStatus?.downloading);
+    return downloading ? 'downloading' : 'missing';
   }, []);
 
   const persistStartedSession = useCallback(async (session: SessionRecord) => {
@@ -543,14 +559,15 @@ export function RecordingControllerProvider({
     try {
       await invoke('set_live_transcription_enabled', { enabled: liveTranscription });
       if (liveTranscription) {
+        // A missing model never stops a recording: the backend records
+        // without live text and the final pass transcribes it afterwards.
         const readiness = await checkModelReady();
         if (readiness !== 'ready') {
-          const error = readiness === 'downloading'
-            ? 'The transcription model is still downloading. Wait for it to finish, then try again.'
-            : 'Download a transcription model before starting live transcription.';
-          reportError('setup', 'Transcription setup required', error, 'transcription');
-          await rejectRequest(error);
-          return;
+          toast.warning('Recording without live text', {
+            description: readiness === 'downloading'
+              ? 'The transcription model is still downloading. The meeting is transcribed once it finishes.'
+              : 'No transcription model is downloaded yet. Download one in Settings → Transcription; the recording is kept.',
+          });
         }
       }
 
