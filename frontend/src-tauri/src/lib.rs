@@ -796,6 +796,7 @@ pub fn run() {
 
             // Finish speaker identification that was cut off when the app last quit.
             audio::diarization::init_resume_worker(_app.handle());
+            audio::final_pass::init_resume_worker(_app.handle());
 
             // Deliver durable transcription-complete webhooks in the background.
             webhooks::init_worker(_app.handle());
