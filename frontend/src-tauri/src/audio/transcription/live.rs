@@ -45,6 +45,19 @@ pub fn chunked_live_provider() -> Option<String> {
         .clone()
 }
 
+/// Provider of a chunked engine loaded for a recording that is about to start
+/// (prepared, worker not running yet).
+pub fn prepared_chunked_provider() -> Option<String> {
+    let session = SESSION_PLAN.lock().unwrap_or_else(|e| e.into_inner());
+    match session.as_ref() {
+        Some(SessionPlan {
+            plan: LivePlan::Chunked(choice),
+            loaded: Some(Loaded::Chunked(_)),
+        }) => Some(choice.engine.provider.clone()),
+        _ => None,
+    }
+}
+
 fn is_parakeet(provider: &str) -> bool {
     provider == settings::PROVIDER_PARAKEET
 }
@@ -156,7 +169,7 @@ fn plan_notice(plan: &LivePlan) -> Option<String> {
 /// about to start. Sets the pipeline's streaming mode to match. Never fails.
 pub async fn prepare_for_recording<R: Runtime>(app: &AppHandle<R>) {
     let current = settings::load_settings(app);
-    let nemotron_ready = live_streaming::model::is_downloaded(app);
+    let nemotron_ready = live_streaming::SUPPORTED && live_streaming::model::is_downloaded(app);
     let final_model = settings::configured_final_model(app).await;
     let available = settings::availability().await;
     let plan =
@@ -289,6 +302,64 @@ pub async fn start_worker<R: Runtime>(
     *SESSION_PLAN.lock().unwrap_or_else(|e| e.into_inner()) =
         Some(SessionPlan { plan, loaded: None });
     outcome
+}
+
+/// Drop what [`prepare_for_recording`] loaded for a recording that then
+/// failed to start: the Nemotron recognizer cache, or the chunked engine's
+/// model (unless a queued task is using the engines). Nothing else would
+/// release them, since the stop path only runs for a started recording.
+pub fn abandon_prepared() {
+    let session = SESSION_PLAN
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take();
+    LIVE_STREAMING_MODE.store(false, Ordering::SeqCst);
+    live_streaming::engine::unload();
+    if let Some(Loaded::Chunked(engine)) = session.and_then(|s| s.loaded) {
+        let parakeet = matches!(engine, TranscriptionEngine::Parakeet(_));
+        drop(engine);
+        info!("Recording did not start: releasing the prepared live engine");
+        tauri::async_runtime::spawn(async move {
+            if crate::audio::transcription_queue::get_queue()
+                .has_active_task()
+                .await
+            {
+                return;
+            }
+            crate::audio::common::unload_engine_after_batch(parakeet).await;
+        });
+    }
+}
+
+/// Releases the prepared live engine on drop unless [`Self::disarm`]ed, so
+/// every early return of a recording start cleans up.
+pub struct PreparedLive {
+    armed: bool,
+}
+
+impl PreparedLive {
+    pub fn new() -> Self {
+        Self { armed: true }
+    }
+
+    /// The recording started: its stop path owns the engine from here.
+    pub fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Default for PreparedLive {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for PreparedLive {
+    fn drop(&mut self) {
+        if self.armed {
+            abandon_prepared();
+        }
+    }
 }
 
 /// Free the live engine after a recording, so the final pass has the memory.

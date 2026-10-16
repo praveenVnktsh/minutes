@@ -610,6 +610,9 @@ async fn process_import_task<R: Runtime>(app: &AppHandle<R>, task: &Transcriptio
     cancel_watcher.abort();
     app.unlisten(progress_bridge);
     disable_controls(&task.task_id);
+    // Free the engine (Whisper turbo is ~1.6 GB) before anything waits on
+    // the outcome; the next queued task loads what it needs.
+    super::common::unload_engine_after_batch(task.provider.as_deref() == Some("parakeet")).await;
 
     match result {
         Ok(import_result) => {
@@ -809,6 +812,9 @@ async fn process_retranscribe_task<R: Runtime>(app: &AppHandle<R>, task: &Transc
     cancel_watcher.abort();
     app.unlisten(progress_bridge);
     disable_controls(&task.task_id);
+    // Free the engine (Whisper turbo is ~1.6 GB) before anything waits on
+    // the outcome; the next queued task loads what it needs.
+    super::common::unload_engine_after_batch(task.provider.as_deref() == Some("parakeet")).await;
 
     match result {
         Ok(retranscription_result) => {

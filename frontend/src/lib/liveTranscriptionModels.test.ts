@@ -3,8 +3,10 @@ import {
   applyPartial,
   finalPassNotice,
   finalPassTookOver,
+  liveModelSupported,
   orderedPartials,
   type FinalPassStarted,
+  type LiveTranscriptionSettings,
 } from './liveTranscriptionModels';
 
 const queued: FinalPassStarted = {
@@ -61,5 +63,20 @@ describe('applyPartial', () => {
     expect(applyPartial(partials, { source: 'mic', text: 'same', audio_start_time: 2 })).toBe(partials);
     const empty = {};
     expect(applyPartial(empty, { source: 'mic', text: '', audio_start_time: 0 })).toBe(empty);
+  });
+});
+
+describe('liveModelSupported', () => {
+  const settings = (supported?: boolean): LiveTranscriptionSettings => ({
+    liveModel: 'nemotron-streaming',
+    autoFinalPass: true,
+    liveModelStatus: { modelId: 'n', downloaded: false, downloading: false, loaded: false, sizeBytes: 0, supported },
+  });
+
+  test('only an explicit false from the backend makes Nemotron unavailable', () => {
+    expect(liveModelSupported(settings(false))).toBe(false);
+    expect(liveModelSupported(settings(true))).toBe(true);
+    expect(liveModelSupported(settings(undefined))).toBe(true);
+    expect(liveModelSupported(null)).toBe(true);
   });
 });

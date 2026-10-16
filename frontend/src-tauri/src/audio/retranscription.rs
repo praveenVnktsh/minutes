@@ -561,6 +561,10 @@ async fn run_retranscription<R: Runtime>(
     super::diarization::mark_pending_in_tx(&mut tx, &meeting_id)
         .await
         .map_err(|e| anyhow!("Failed to mark diarization pending: {}", e))?;
+    // The transcript is replaced: an interrupted final pass for it is done.
+    super::final_pass::clear_in_tx(&mut tx, &meeting_id)
+        .await
+        .map_err(|e| anyhow!("Failed to clear the pending final pass: {}", e))?;
 
     tx.commit()
         .await
