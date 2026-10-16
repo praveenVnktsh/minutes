@@ -215,10 +215,13 @@ impl<R: Runtime> Host for AppHost<R> {
             (settings.provider, settings.model)
         };
         let config = load_llm_config(&pool, &provider, &model, None).await?;
-        let num_ctx = crate::summary::service::ollama_num_ctx(
+        // Copilot only runs while recording: the recording-time num_ctx every
+        // other call shares, so Ollama never reloads the model mid-meeting.
+        let num_ctx = crate::summary::service::ollama_num_ctx_for(
             &config.provider,
             &config.model_name,
             config.ollama_endpoint.as_deref(),
+            crate::summary::service::OllamaPhase::Recording,
         )
         .await;
         Ok(Arc::new(ProviderStreamer {

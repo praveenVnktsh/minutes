@@ -89,26 +89,45 @@ fn is_openai_reasoning_model(model_name: &str) -> bool {
 }
 
 /// Rewrite an OpenAI-compatible body for a reasoning model: the output cap
-/// moves to `max_completion_tokens` (with room to reason when the call is
-/// brief), sampling fields they reject are dropped, and a brief call asks for
-/// low reasoning effort.
-fn adapt_body_for_openai_reasoning(body: &mut serde_json::Value, brief: bool) {
+/// gets room to reason when the call is brief, sampling fields they reject
+/// are dropped, and a brief call asks for low reasoning effort. OpenAI
+/// itself wants `max_completion_tokens` and `reasoning_effort`; OpenRouter
+/// documents `max_tokens` and its unified `reasoning: {effort}` object.
+fn adapt_body_for_openai_reasoning(
+    body: &mut serde_json::Value,
+    brief: bool,
+    provider: &LLMProvider,
+) {
     let Some(object) = body.as_object_mut() else {
         return;
     };
-    if let Some(cap) = object.remove("max_tokens").and_then(|v| v.as_u64()) {
+    let openrouter = *provider == LLMProvider::OpenRouter;
+    let cap = object
+        .remove("max_tokens")
+        .or_else(|| object.remove("max_completion_tokens"))
+        .and_then(|v| v.as_u64());
+    if let Some(cap) = cap {
         let cap = u32::try_from(cap).unwrap_or(u32::MAX);
         let limit = if brief {
             cap.saturating_add(BRIEF_REASONING_HEADROOM)
         } else {
             cap
         };
-        object.insert("max_completion_tokens".into(), limit.into());
+        let field = if openrouter {
+            "max_tokens"
+        } else {
+            "max_completion_tokens"
+        };
+        object.insert(field.into(), limit.into());
     }
     object.remove("temperature");
     object.remove("top_p");
     if brief {
-        object.insert("reasoning_effort".into(), "low".into());
+        if openrouter {
+            object.insert("reasoning".into(), serde_json::json!({ "effort": "low" }));
+        } else {
+            object.insert("reasoning_effort".into(), "low".into());
+        }
     }
 }
 
@@ -232,7 +251,7 @@ pub(crate) fn build_openai_compat_chat_body(
         seed,
     });
     if *provider != LLMProvider::CustomOpenAI && is_openai_reasoning_model(model_name) {
-        adapt_body_for_openai_reasoning(&mut body, options.brief);
+        adapt_body_for_openai_reasoning(&mut body, options.brief, provider);
     }
     body
 }
@@ -566,16 +585,18 @@ pub(crate) fn compatibility_retry_body(
             provider_name(provider)
         );
         let mut retry_body = request_body.clone();
-        adapt_body_for_openai_reasoning(&mut retry_body, brief);
+        adapt_body_for_openai_reasoning(&mut retry_body, brief, provider);
         return Some(retry_body);
     }
-    if is_openai_compatible
-        && request_body.get("reasoning_effort").is_some()
-        && rejection_mentions(status, error_body, "reasoning_effort")
-    {
-        let mut retry_body = request_body.clone();
-        retry_body.as_object_mut()?.remove("reasoning_effort");
-        return Some(retry_body);
+    for field in ["reasoning_effort", "reasoning"] {
+        if is_openai_compatible
+            && request_body.get(field).is_some()
+            && rejection_mentions(status, error_body, field)
+        {
+            let mut retry_body = request_body.clone();
+            retry_body.as_object_mut()?.remove(field);
+            return Some(retry_body);
+        }
     }
     // Older Claude models (Sonnet 4.5, Haiku 4.5) reject `effort`.
     if *provider == LLMProvider::Claude
@@ -1293,7 +1314,7 @@ mod tests {
             brief: true,
             ..Default::default()
         };
-        for model in ["gpt-5", "gpt-5-mini", "o3", "o4-mini", "openai/gpt-5.1"] {
+        for model in ["gpt-5", "gpt-5-mini", "o3", "o4-mini", "gpt-5.1"] {
             let body =
                 build_openai_compat_chat_body(&LLMProvider::OpenAI, model, "s", "u", &options);
             assert!(body.get("max_tokens").is_none(), "{model}");
@@ -1312,10 +1333,25 @@ mod tests {
         assert!(!is_openai_reasoning_model("gpt-4o-mini"));
         assert!(!is_openai_reasoning_model("omni-model"));
         assert!(!is_openai_reasoning_model("gpt-5-chat-latest"));
+        assert!(is_openai_reasoning_model("openai/gpt-5.1"));
+
+        // OpenRouter takes max_tokens and its unified reasoning object.
+        let routed = build_openai_compat_chat_body(
+            &LLMProvider::OpenRouter,
+            "openai/gpt-5",
+            "s",
+            "u",
+            &options,
+        );
+        assert_eq!(routed["max_tokens"], 150 + BRIEF_REASONING_HEADROOM);
+        assert!(routed.get("max_completion_tokens").is_none());
+        assert_eq!(routed["reasoning"]["effort"], "low");
+        assert!(routed.get("reasoning_effort").is_none());
+        assert!(routed.get("temperature").is_none());
 
         // An unrecognised reasoning model's rejection is retried the same way.
         let retry = compatibility_retry_body(
-            &LLMProvider::OpenRouter,
+            &LLMProvider::OpenAI,
             &plain,
             reqwest::StatusCode::BAD_REQUEST,
             r#"{"error":{"message":"Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.","param":"max_tokens"}}"#,

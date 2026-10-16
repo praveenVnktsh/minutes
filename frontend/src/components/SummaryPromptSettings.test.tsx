@@ -168,6 +168,31 @@ describe('SummaryPromptSettings', () => {
     expect(renderer.root.findAllByProps({ 'data-testid': 'prompt-split-notice' })).toHaveLength(0)
   })
 
+  test('the split notice comes back if the copied prompt was never saved, not after saving', async () => {
+    notesOverride = 'My old custom prompt.'
+    const first = await render('transcriptOnly')
+    await click(button(first, 'Start from my Notes prompt'))
+    // Left without saving: the offer is still there next time.
+    const again = await render('transcriptOnly')
+    expect(again.root.findAllByProps({ 'data-testid': 'prompt-split-notice' })).toHaveLength(1)
+
+    await click(button(again, 'Start from my Notes prompt'))
+    await click(button(again, 'Save prompt'))
+    expect(savedOverride).toBe('My old custom prompt.')
+    savedOverride = null // even if the no-notes prompt is reset later
+    const afterSave = await render('transcriptOnly')
+    const remembered = (() => {
+      try {
+        return typeof localStorage !== 'undefined'
+      } catch {
+        return false
+      }
+    })()
+    expect(afterSave.root.findAllByProps({ 'data-testid': 'prompt-split-notice' })).toHaveLength(
+      remembered ? 0 : 1,
+    )
+  })
+
   test('no split notice without a custom notes prompt, or on the notes card', async () => {
     const plain = await render('transcriptOnly')
     expect(plain.root.findAllByProps({ 'data-testid': 'prompt-split-notice' })).toHaveLength(0)

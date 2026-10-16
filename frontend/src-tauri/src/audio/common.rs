@@ -28,13 +28,10 @@ pub(crate) async fn unload_engine_after_batch(use_parakeet: bool) {
     } else {
         "localWhisper"
     };
-    let live_provider = match crate::audio::transcription::live::prepared_chunked_provider() {
-        Some(prepared) => Some(prepared),
-        None if crate::audio::recording_commands::is_recording().await => {
-            crate::audio::transcription::live::chunked_live_provider()
-        }
-        None => None,
-    };
+    // The claim is set before a starting recording loads its chunked model
+    // and cleared when it stops or fails to start, so it covers a recording
+    // that is starting as well as one that runs.
+    let live_provider = crate::audio::transcription::live::chunked_engine_in_use();
     if crate::audio::transcription::live::live_conflicts(
         live_provider.as_deref(),
         Some(pass_provider),

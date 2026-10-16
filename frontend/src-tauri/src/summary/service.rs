@@ -25,41 +25,91 @@ use tauri::{AppHandle, Manager};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
-/// Context assumed for an Ollama model whose metadata cannot be read.
-const OLLAMA_FALLBACK_CONTEXT: usize = 8192;
 /// Cache-key threshold recorded for hosted models, which run single-pass.
 const HOSTED_TOKEN_THRESHOLD: usize = 100_000;
 
-/// The model's advertised context, from Ollama's metadata (cached), or a
-/// fallback when it cannot be read.
-async fn ollama_model_context(model_name: &str, endpoint: Option<&str>) -> usize {
-    match METADATA_CACHE.get_or_fetch(model_name, endpoint).await {
-        Ok(metadata) => metadata.context_size,
-        Err(e) => {
-            warn!(
-                "Failed to fetch context for {}: {}. Using {} tokens",
-                model_name, e, OLLAMA_FALLBACK_CONTEXT
-            );
-            OLLAMA_FALLBACK_CONTEXT
+/// When an app call to an Ollama model happens. Ollama reloads the model
+/// whenever `num_ctx` changes, and sizes its KV cache to it, so every call
+/// in one phase sends the same value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OllamaPhase {
+    /// While a recording runs: the live summary timeline, meeting chat and
+    /// the live copilot. Kept small so the KV cache stays affordable next to
+    /// live transcription (16k on an 8B model is ~2 GB, too much for an
+    /// 8 GB Mac).
+    Recording,
+    /// After the meeting: the summary, titles and chat. One model reload
+    /// when the meeting ends is the price of the larger context.
+    AfterMeeting,
+}
+
+/// `num_ctx` for every Ollama call made while recording.
+pub(crate) const OLLAMA_RECORDING_NUM_CTX: usize = 8_192;
+/// Context assumed for a model whose real context is unknown: its metadata
+/// could not be read, or only gave a family default or the 4000 fallback.
+const OLLAMA_UNKNOWN_CONTEXT: usize = 8_192;
+/// Smallest `num_ctx` a title call gets: its prompt carries up to 12k
+/// characters of transcript.
+const OLLAMA_MIN_TITLE_NUM_CTX: usize = 8_192;
+
+/// The context window to run an Ollama model with in `phase`, given the
+/// model's own context (None when unknown).
+/// - Recording: 8192, or the model's context when it is known and smaller.
+/// - After the meeting: the model's context capped for memory
+///   (`ContextBudget::for_ollama`), 8192 when unknown.
+pub(crate) fn ollama_context_for(phase: OllamaPhase, model_context: Option<usize>) -> usize {
+    match phase {
+        OllamaPhase::Recording => model_context.map_or(OLLAMA_RECORDING_NUM_CTX, |known| {
+            known.min(OLLAMA_RECORDING_NUM_CTX)
+        }),
+        OllamaPhase::AfterMeeting => {
+            ContextBudget::for_ollama(model_context.unwrap_or(OLLAMA_UNKNOWN_CONTEXT)).n_ctx
         }
     }
 }
 
-/// The `num_ctx` every app call to an Ollama model runs with: summaries,
-/// titles, meeting chat and the live summary timeline. Ollama reloads the
-/// model whenever `num_ctx` changes, so differing values per call (8192 for
-/// titles, the server default for chat) reloaded it on every switch. None for
-/// other providers.
-pub(crate) async fn ollama_num_ctx(
+/// The model's own context from Ollama's metadata (cached), or None when it
+/// cannot be read or is only a guess.
+async fn ollama_model_context(model_name: &str, endpoint: Option<&str>) -> Option<usize> {
+    match METADATA_CACHE.get_or_fetch(model_name, endpoint).await {
+        Ok(metadata) if metadata.context_known => Some(metadata.context_size),
+        Ok(metadata) => {
+            info!(
+                "Ollama context for {} is a guess ({} tokens); treating it as unknown",
+                model_name, metadata.context_size
+            );
+            None
+        }
+        Err(e) => {
+            warn!("Failed to fetch context for {}: {}", model_name, e);
+            None
+        }
+    }
+}
+
+/// The phase a call made now belongs to.
+pub(crate) async fn ollama_phase_now() -> OllamaPhase {
+    if crate::audio::recording_commands::is_recording().await {
+        OllamaPhase::Recording
+    } else {
+        OllamaPhase::AfterMeeting
+    }
+}
+
+/// `num_ctx` for an Ollama call in `phase` (see [`ollama_context_for`]);
+/// None for other providers. Every Ollama call goes through this, so calls
+/// in one phase never make Ollama reload the model.
+pub(crate) async fn ollama_num_ctx_for(
     provider: &LLMProvider,
     model_name: &str,
     endpoint: Option<&str>,
+    phase: OllamaPhase,
 ) -> Option<u32> {
     if *provider != LLMProvider::Ollama {
         return None;
     }
-    let budget = ContextBudget::for_ollama(ollama_model_context(model_name, endpoint).await);
-    Some(u32::try_from(budget.n_ctx).unwrap_or(u32::MAX))
+    let context = ollama_context_for(phase, ollama_model_context(model_name, endpoint).await);
+    Some(u32::try_from(context).unwrap_or(u32::MAX))
 }
 
 static METADATA_CACHE: LazyLock<ModelMetadataCache> =
@@ -546,9 +596,10 @@ impl SummaryService {
         // whole transcript in one pass.
         let context_budget = if provider == LLMProvider::Ollama {
             let model_context = ollama_model_context(&model_name, ollama_endpoint.as_deref()).await;
-            let budget = ContextBudget::for_ollama(model_context);
+            let budget =
+                ContextBudget::new(ollama_context_for(OllamaPhase::AfterMeeting, model_context));
             info!(
-                "✓ Ollama context for {}: model max {} tokens, running with num_ctx {}",
+                "✓ Ollama context for {}: model max {:?} tokens, running with num_ctx {}",
                 model_name, model_context, budget.n_ctx
             );
             Some(budget)
@@ -846,14 +897,15 @@ impl SummaryService {
                 temperature: config.temperature,
                 top_p: config.top_p,
                 // The title prompt carries up to 12k characters of transcript,
-                // more than Ollama's small default context holds; the same
-                // num_ctx as every other call keeps the model loaded.
-                num_ctx: ollama_num_ctx(
+                // so it never runs below 8192, whatever the metadata says.
+                num_ctx: ollama_num_ctx_for(
                     &config.provider,
                     &config.model_name,
                     config.ollama_endpoint.as_deref(),
+                    ollama_phase_now().await,
                 )
-                .await,
+                .await
+                .map(|num_ctx| num_ctx.max(OLLAMA_MIN_TITLE_NUM_CTX as u32)),
                 ..Default::default()
             },
             app_data_dir.as_ref(),
@@ -1359,6 +1411,32 @@ mod tests {
             extract_cached_english_markdown(&raw, &changed_notes_prompt, Some("de")).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn ollama_context_is_small_while_recording_and_never_trusts_a_guess() {
+        // While recording: 8192, or a known smaller model context.
+        assert_eq!(
+            ollama_context_for(OllamaPhase::Recording, Some(131_072)),
+            8_192
+        );
+        assert_eq!(ollama_context_for(OllamaPhase::Recording, None), 8_192);
+        assert_eq!(
+            ollama_context_for(OllamaPhase::Recording, Some(4_096)),
+            4_096
+        );
+        // After the meeting: the model's context capped at 16k, and an
+        // unknown context (the 4000/2048 guesses) is 8192, not the guess.
+        assert_eq!(
+            ollama_context_for(OllamaPhase::AfterMeeting, Some(131_072)),
+            16_384
+        );
+        assert_eq!(ollama_context_for(OllamaPhase::AfterMeeting, None), 8_192);
+        assert_eq!(
+            ollama_context_for(OllamaPhase::AfterMeeting, Some(8_192)),
+            8_192
+        );
+        assert!(OLLAMA_MIN_TITLE_NUM_CTX >= 8_192);
     }
 
     #[test]

@@ -117,9 +117,12 @@ export function SummaryPromptSettings({ kind = 'notes' }: { kind?: SummaryPrompt
   const save = async () => {
     setBusy('saving');
     try {
-      applySettings(
-        await invoke<SummaryPromptSettingsData>('api_save_summary_prompt', { prompt: draft, kind }),
-      );
+      const savedSettings = await invoke<SummaryPromptSettingsData>('api_save_summary_prompt', {
+        prompt: draft,
+        kind,
+      });
+      applySettings(savedSettings);
+      if (kind === 'transcriptOnly' && savedSettings.isCustom) dismissNotice();
       toast.success(`${copy.noun} saved`);
     } catch (error) {
       toast.error(`Could not save the ${copy.noun.toLowerCase()}`, { description: String(error) });
@@ -191,8 +194,10 @@ export function SummaryPromptSettings({ kind = 'notes' }: { kind?: SummaryPrompt
               size="sm"
               variant="outline"
               onClick={() => {
+                // Remembered only once the user saves: leaving without
+                // saving keeps the offer for next time.
                 setDraft(customNotesPrompt);
-                closeNotice();
+                setCustomNotesPrompt(null);
               }}
             >
               Start from my Notes prompt

@@ -133,7 +133,7 @@ pub struct SummaryModelGenerator {
     config: LlmConfig,
     app_data_dir: Option<PathBuf>,
     client: reqwest::Client,
-    /// Ollama's num_ctx, the same as every other app call to the model.
+    /// Ollama's recording-time num_ctx, shared by every call while recording.
     num_ctx: Option<u32>,
 }
 
@@ -151,10 +151,12 @@ impl SummaryModelGenerator {
         let config = load_llm_config(pool, &settings.provider, &settings.model, Some(&settings))
             .await
             .map_err(|e| anyhow!(e))?;
-        let num_ctx = crate::summary::service::ollama_num_ctx(
+        // The timeline only runs while recording.
+        let num_ctx = crate::summary::service::ollama_num_ctx_for(
             &config.provider,
             &config.model_name,
             config.ollama_endpoint.as_deref(),
+            crate::summary::service::OllamaPhase::Recording,
         )
         .await;
         Ok(Self {

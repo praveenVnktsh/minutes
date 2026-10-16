@@ -119,18 +119,16 @@ pub async fn get_meeting_chat(
     meeting_id: String,
     state: State<'_, AppState>,
 ) -> Result<Vec<MeetingChatMessage>, String> {
-    let rows = sqlx::query_as::<
-        _,
-        (
-            String,
-            String,
-            String,
-            String,
-            Option<String>,
-            Option<String>,
-            Option<i64>,
-        ),
-    >(
+    type ChatRow = (
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+    );
+    let rows = sqlx::query_as::<_, ChatRow>(
         "SELECT id, role, content, created_at, kind, label, audio_ms FROM meeting_chat_messages WHERE meeting_id = ? ORDER BY created_at ASC",
     )
     .bind(meeting_id)
@@ -261,11 +259,13 @@ pub async fn chat_with_meeting<R: Runtime>(
             max_tokens,
             temperature: custom.as_ref().and_then(|value| value.temperature),
             top_p: custom.as_ref().and_then(|value| value.top_p),
-            // The same num_ctx as summaries, so Ollama does not reload.
-            num_ctx: crate::summary::service::ollama_num_ctx(
+            // The same num_ctx as every other call in this phase (recording
+            // or after the meeting), so Ollama does not reload.
+            num_ctx: crate::summary::service::ollama_num_ctx_for(
                 &provider,
                 model_name,
                 config.ollama_endpoint.as_deref(),
+                crate::summary::service::ollama_phase_now().await,
             )
             .await,
             ..Default::default()

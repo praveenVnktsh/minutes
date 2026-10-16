@@ -93,6 +93,12 @@ pub fn prepared_chunked_provider() -> Option<String> {
     }
 }
 
+/// The chunked engine family a recording holds, whether it is starting
+/// (claimed or prepared) or running. Batch jobs must not unload it.
+pub fn chunked_engine_in_use() -> Option<String> {
+    prepared_chunked_provider().or_else(chunked_live_provider)
+}
+
 fn is_parakeet(provider: &str) -> bool {
     provider == settings::PROVIDER_PARAKEET
 }
@@ -439,6 +445,13 @@ mod tests {
         ));
         drop(claim);
         assert_eq!(chunked_live_provider(), None);
+
+        // A batch job's unload must see a starting recording's claim, before
+        // is_recording turns true.
+        let claim = ChunkedClaim::new("localWhisper");
+        assert_eq!(chunked_engine_in_use().as_deref(), Some("localWhisper"));
+        drop(claim);
+        assert_eq!(chunked_engine_in_use(), None);
 
         ChunkedClaim::new("parakeet").keep();
         assert_eq!(chunked_live_provider().as_deref(), Some("parakeet"));
