@@ -138,3 +138,43 @@ describe('meeting prompt acknowledgement', () => {
     await act(async () => renderer!.unmount())
   })
 })
+
+type TextNode = { children: Array<TextNode | string> }
+const textOf = (node: TextNode | string): string =>
+  typeof node === 'string' ? node : node.children.map(textOf).join('')
+
+describe('meeting prompt ignore and snooze actions', () => {
+  const show = async () => {
+    let renderer: ReturnType<typeof create>
+    await act(async () => { renderer = create(<MeetingPromptPage />) })
+    await act(async () => {
+      handlers.get('meeting-prompt-show')?.({ payload: { appName: 'Zoom', app: { name: 'zoom.us', bundle_id: 'us.zoom.xos' } } })
+    })
+    const more = renderer!.root.findByProps({ 'aria-label': 'More options' })
+    await act(async () => more.props.onClick())
+    return renderer!
+  }
+  const buttonWithText = (renderer: ReturnType<typeof create>, label: string) =>
+    renderer.root.findAllByType('button').find((button) => textOf(button).includes(label))!
+
+  test("don't ask adds the shown app (by identity) and offers undo", async () => {
+    const renderer = await show()
+    await act(async () => { await buttonWithText(renderer, 'ask for').props.onClick() })
+    expect(invoke).toHaveBeenCalledWith('ignore_meeting_app', { target: { name: 'zoom.us', bundle_id: 'us.zoom.xos' } })
+    expect(JSON.stringify(renderer.toJSON())).toContain('again')
+
+    await act(async () => { await buttonWithText(renderer, 'Undo').props.onClick() })
+    expect(invoke).toHaveBeenCalledWith('unignore_meeting_app', { target: { name: 'zoom.us', bundle_id: 'us.zoom.xos' } })
+    expect(hide).not.toHaveBeenCalled()
+    expect(JSON.stringify(renderer.toJSON())).toContain('Meeting detected')
+    await act(async () => renderer.unmount())
+  })
+
+  test('snooze stops detection for an hour and hides the prompt', async () => {
+    const renderer = await show()
+    await act(async () => { await buttonWithText(renderer, 'Snooze').props.onClick() })
+    expect(invoke).toHaveBeenCalledWith('snooze_meeting_detection', { minutes: 60 })
+    expect(hide).toHaveBeenCalledTimes(1)
+    await act(async () => renderer.unmount())
+  })
+})

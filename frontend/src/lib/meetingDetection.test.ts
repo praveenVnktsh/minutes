@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { detectMeetingApp } from './meetingDetection';
+import { detectMeetingApp, normalizeAppName } from './meetingDetection';
 
 describe('detectMeetingApp', () => {
   test('recognizes supported native meeting applications', () => {
@@ -42,5 +42,25 @@ describe('detectMeetingApp', () => {
 
   test('prefers a known app over the generic fallback', () => {
     expect(detectMeetingApp(['SomeRandomApp', 'zoom.us'], { allowUnknown: true })?.name).toBe('Zoom');
+  });
+});
+
+describe('detectMeetingApp with an ignore list', () => {
+  test('an ignored known app never triggers, by process or display name', () => {
+    expect(detectMeetingApp(['zoom.us'], { ignored: ['zoom.us'] })).toBeNull();
+    expect(detectMeetingApp(['zoom.us'], { ignored: ['Zoom'] })).toBeNull();
+  });
+
+  test('an ignored generic app never triggers, matching names loosely', () => {
+    expect(detectMeetingApp(['Some Tool'], { allowUnknown: true, ignored: [' some   tool.app '] })).toBeNull();
+    expect(normalizeAppName('  SuperWhisper.app ')).toBe('superwhisper');
+  });
+
+  test('a non-ignored app still triggers alongside an ignored one', () => {
+    expect(detectMeetingApp(['zoom.us', 'Slack'], { ignored: ['Zoom'] })?.name).toBe('Slack Huddle');
+  });
+
+  test('dictation tools are not meetings', () => {
+    expect(detectMeetingApp(['Superwhisper', 'Wispr Flow', 'Siri', 'ChatGPT'], { allowUnknown: true })).toBeNull();
   });
 });

@@ -234,7 +234,10 @@ pub fn dismiss_meeting_prompt<R: Runtime>(app: AppHandle<R>) {
 }
 
 /// Position and show the `meeting-prompt` window for a detected app.
-pub async fn maybe_show<R: Runtime>(app: &AppHandle<R>, app_name: &str) {
+pub async fn maybe_show<R: Runtime>(
+    app: &AppHandle<R>,
+    detected: &crate::meeting_detection::DetectedMeeting,
+) {
     if PROMPT_DISMISSED.load(Ordering::SeqCst) {
         return;
     }
@@ -267,7 +270,7 @@ pub async fn maybe_show<R: Runtime>(app: &AppHandle<R>, app_name: &str) {
     if let Err(error) = app.emit_to(
         "meeting-prompt",
         "meeting-prompt-show",
-        serde_json::json!({ "appName": app_name }),
+        serde_json::json!({ "appName": detected.display_name, "app": detected.app }),
     ) {
         log::warn!("Meeting prompt: failed to emit show event: {}", error);
     }

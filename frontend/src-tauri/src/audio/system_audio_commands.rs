@@ -47,29 +47,40 @@ pub async fn start_system_audio_monitoring(
         return Ok(());
     }
 
+    // Warm the ignore list cache before the first event arrives.
+    if let Err(error) = crate::meeting_detection::load_settings(&app_handle) {
+        tracing::warn!("Meeting detection: could not load settings: {error}");
+    }
+
     let mut detector = SystemAudioDetector::new();
 
     // Create callback that emits events to the frontend
     let callback = new_system_audio_callback(move |event| {
         match event {
             SystemAudioEvent::SystemAudioStarted(apps) => {
-                tracing::info!("System audio started by apps: {:?}", apps);
+                tracing::info!("Microphone in use by apps: {:?}", apps);
 
                 // Drive the tray and the floating prompt straight from Rust so
-                // they work even if the webview is hidden/throttled.
-                let detected = crate::meeting_detection::detect_meeting_app(&apps);
-                crate::tray::set_meeting_detected(&app_handle, detected.clone());
+                // they work even if the webview is hidden/throttled. The ignore
+                // list, known-only toggle and snooze are applied here.
+                let detected = crate::meeting_detection::on_active_apps(&apps);
+                crate::tray::set_meeting_detected(
+                    &app_handle,
+                    detected.as_ref().map(|d| d.display_name.clone()),
+                );
 
-                if let Some(name) = detected {
+                if let Some(detected) = detected {
                     let app = app_handle.clone();
                     tauri::async_runtime::spawn(async move {
-                        crate::meeting_prompt::maybe_show(&app, &name).await;
+                        crate::meeting_prompt::maybe_show(&app, &detected).await;
                     });
                 }
 
-                let _ = app_handle.emit("system-audio-started", apps);
+                let names: Vec<String> = apps.into_iter().map(|app| app.name).collect();
+                let _ = app_handle.emit("system-audio-started", names);
             }
             SystemAudioEvent::SystemAudioStopped => {
+                crate::meeting_detection::on_audio_stopped();
                 crate::tray::set_meeting_detected(&app_handle, None);
                 crate::meeting_prompt::reset();
                 let _ = app_handle.emit("system-audio-stopped", ());

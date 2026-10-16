@@ -48,17 +48,46 @@ const NON_MEETING_AUDIO_PATTERNS: RegExp[] = [
   /^minutes$/i,
   /^meetily$/i,
   /coreaudio/i,
+  // Dictation and voice tools that open the mic for a few seconds at a time.
+  /superwhisper/i,
+  /wispr flow/i,
+  /macwhisper/i,
+  /voice control/i,
+  /dictation/i,
+  /voice memos/i,
+  /^siri$/i,
+  /^claude$/i,
+  /^chatgpt$/i,
 ];
 
+/** Lowercase, trim, drop a trailing `.app` and collapse whitespace (matches the Rust detector). */
+export function normalizeAppName(name: string): string {
+  return name.trim().toLowerCase().replace(/\.app$/, '').split(/\s+/).filter(Boolean).join(' ');
+}
+
+function isIgnored(processName: string, ignored: string[]): boolean {
+  const normalized = normalizeAppName(processName);
+  const known = MEETING_APP_PATTERNS.find(({ patterns }) => patterns.some((pattern) => pattern.test(processName)));
+  return ignored.some((entry) => {
+    const target = normalizeAppName(entry);
+    return target !== '' && (target === normalized || (known !== undefined && normalizeAppName(known.name) === target));
+  });
+}
+
+/**
+ * Mirrors detect_meeting_app in src-tauri/src/meeting_detection.rs, which is
+ * what actually drives the tray and prompt.
+ */
 export function detectMeetingApp(
   processNames: string[],
-  options: { allowUnknown?: boolean } = {},
+  options: { allowUnknown?: boolean; ignored?: string[] } = {},
 ): DetectedMeetingApp | null {
   let generic: DetectedMeetingApp | null = null;
 
   for (const processName of processNames) {
     const trimmedName = processName.trim();
     if (!trimmedName) continue;
+    if (options.ignored && isIgnored(trimmedName, options.ignored)) continue;
 
     const match = MEETING_APP_PATTERNS.find(({ patterns }) =>
       patterns.some((pattern) => pattern.test(trimmedName))
