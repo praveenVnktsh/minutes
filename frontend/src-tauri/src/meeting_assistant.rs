@@ -14,6 +14,15 @@ pub struct MeetingChatMessage {
     pub role: String,
     pub content: String,
     pub created_at: String,
+    /// `live_ask` / `live_action` / `live_suggestion` for Copilot moments
+    /// saved during the recording; absent for ordinary chat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// The moment in the recording a Copilot message belongs to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_ms: Option<i64>,
 }
 
 /// `summary_processes.result` holds `{"markdown": ..., "summary_json": [...]}`; anything else
@@ -58,6 +67,9 @@ async fn save_chat_message(
         role: role.to_string(),
         content: content.to_string(),
         created_at: Utc::now().to_rfc3339(),
+        kind: None,
+        label: None,
+        audio_ms: None,
     };
     sqlx::query(
         "INSERT INTO meeting_chat_messages (id, meeting_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -107,8 +119,17 @@ pub async fn get_meeting_chat(
     meeting_id: String,
     state: State<'_, AppState>,
 ) -> Result<Vec<MeetingChatMessage>, String> {
-    let rows = sqlx::query_as::<_, (String, String, String, String)>(
-        "SELECT id, role, content, created_at FROM meeting_chat_messages WHERE meeting_id = ? ORDER BY created_at ASC",
+    type ChatRow = (
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+    );
+    let rows = sqlx::query_as::<_, ChatRow>(
+        "SELECT id, role, content, created_at, kind, label, audio_ms FROM meeting_chat_messages WHERE meeting_id = ? ORDER BY created_at ASC",
     )
     .bind(meeting_id)
     .fetch_all(state.db_manager.pool())
@@ -116,12 +137,17 @@ pub async fn get_meeting_chat(
     .map_err(|error| format!("Could not load meeting chat: {error}"))?;
     Ok(rows
         .into_iter()
-        .map(|(id, role, content, created_at)| MeetingChatMessage {
-            id,
-            role,
-            content,
-            created_at,
-        })
+        .map(
+            |(id, role, content, created_at, kind, label, audio_ms)| MeetingChatMessage {
+                id,
+                role,
+                content,
+                created_at,
+                kind,
+                label,
+                audio_ms,
+            },
+        )
         .collect())
 }
 

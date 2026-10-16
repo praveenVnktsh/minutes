@@ -3,8 +3,8 @@
 import { FormEvent, KeyboardEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { ArrowUp, Bot, ChevronDown, Sparkles } from 'lucide-react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
+import { CitedMarkdown } from '@/components/MeetingDetails/CitedMarkdown';
+import { liveMomentLabel } from '@/lib/copilot';
 import { toast } from 'sonner';
 import { ModelConfig, ModelSettingsModal } from '@/components/ModelSettingsModal';
 import { Dialog, DialogContent, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
@@ -16,6 +16,10 @@ interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
   createdAt: string;
+  /** Set for moments Copilot saved during the recording. */
+  kind?: string;
+  label?: string;
+  audioMs?: number;
 }
 
 interface ChatOperation {
@@ -206,15 +210,21 @@ export function MeetingAssistantPanel({
               </div>
             </div>
           )}
-          {messages.map((message) => (
-            <div key={message.id} className={message.role === 'user' ? 'flex justify-end' : 'flex justify-start'}>
-              <div className={message.role === 'user' ? 'max-w-[88%] rounded-2xl rounded-br-md bg-brand px-3.5 py-2.5 text-xs leading-5 text-brand-foreground' : 'prose prose-sm max-w-full text-xs leading-5 text-[var(--ink-muted)]'}>
-                {message.role === 'assistant'
-                  ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
-                  : message.content}
+          {messages.map((message) => {
+            const live = message.role === 'user' ? liveMomentLabel(message.kind, message.label, message.audioMs) : null;
+            return (
+              <div key={message.id} className={message.role === 'user' ? 'flex flex-col items-end gap-1' : 'flex justify-start'}>
+                {live && (
+                  <span className="text-[10px] font-semibold tracking-[0.06em] text-[var(--ink-subtle)]">{live}</span>
+                )}
+                <div className={message.role === 'user' ? 'max-w-[88%] rounded-2xl rounded-br-md bg-brand px-3.5 py-2.5 text-xs leading-5 text-brand-foreground' : 'prose prose-sm max-w-full text-xs leading-5 text-[var(--ink-muted)]'}>
+                  {message.role === 'assistant'
+                    ? <CitedMarkdown>{message.content}</CitedMarkdown>
+                    : message.content}
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
           {isSending && (
             <div className="flex items-center gap-2 text-sm text-[var(--ink-subtle)]">
               <Sparkles className="h-4 w-4 animate-pulse" /> Reading the meeting…

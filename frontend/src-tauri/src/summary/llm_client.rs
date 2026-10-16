@@ -560,7 +560,7 @@ fn rejection_mentions(status: reqwest::StatusCode, body: &str, needle: &str) -> 
 
 /// The compatibility retry body for a rejected request, if the rejection is
 /// one a smaller request can avoid.
-fn compatibility_retry_body(
+pub(crate) fn compatibility_retry_body(
     provider: &LLMProvider,
     request_body: &serde_json::Value,
     status: reqwest::StatusCode,

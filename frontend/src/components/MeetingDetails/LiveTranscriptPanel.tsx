@@ -9,6 +9,8 @@ import { useRecordingState } from '@/contexts/RecordingStateContext';
 import { useConfig } from '@/contexts/ConfigContext';
 import { Switch } from '@/components/ui/switch';
 import { LiveSummaryPanel } from './LiveSummaryPanel';
+import { useCopilot } from '@/hooks/useCopilot';
+import { isQuestionLine, questionLineStarts } from '@/lib/copilot';
 import {
   LIVE_TRANSCRIPTION_STORAGE_KEY,
   isLiveTranscriptionEnabled,
@@ -99,6 +101,20 @@ export function LiveTranscriptPanel() {
     [transcripts]
   );
 
+  // Lines Copilot answered with a suggestion card get a "Question for you" tag.
+  const copilot = useCopilot();
+  // A key, so streamed tokens (new snapshots) don't re-render the transcript.
+  const startsKey = questionLineStarts(copilot).join(',');
+  const segmentTags = useMemo(() => {
+    const questionStarts = startsKey ? startsKey.split(',').map(Number) : [];
+    const tags = new Map<string, string>();
+    if (questionStarts.length === 0) return tags;
+    for (const t of transcripts) {
+      if (isQuestionLine(questionStarts, t.audio_start_time, t.speaker)) tags.set(t.id, 'Question for you');
+    }
+    return tags;
+  }, [startsKey, transcripts]);
+
   return (
     <div className="flex h-full min-w-0 flex-col bg-[var(--surface-0)] text-ink">
       <div className="mx-auto w-full max-w-[900px] px-8 pb-2 pt-4">
@@ -146,6 +162,7 @@ export function LiveTranscriptPanel() {
             isStopping={isStopping}
             enableStreaming={isRecording}
             showConfidence
+            segmentTags={segmentTags}
           />
         </div>
         {partialLines}

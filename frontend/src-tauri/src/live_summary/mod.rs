@@ -282,6 +282,18 @@ pub fn finish_session(session_id: &str) {
     }
 }
 
+/// The live summary entries of recording session `session_id` so far, for
+/// Copilot's context. Empty when the timeline belongs to another session.
+pub fn entries_for_session(session_id: &str) -> Vec<worker::TimelineEntry> {
+    LATEST
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .filter(|snapshot| snapshot.session_id == session_id)
+        .map(|snapshot| snapshot.entries.clone())
+        .unwrap_or_default()
+}
+
 // ---------------------------------------------------------------------------
 // Commands
 // ---------------------------------------------------------------------------

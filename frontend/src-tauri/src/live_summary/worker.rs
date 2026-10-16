@@ -26,6 +26,8 @@ pub const TICK: Duration = Duration::from_secs(2);
 pub const STOP_GRACE: Duration = Duration::from_secs(15);
 /// Earlier entries the parser checks new ones against for repeats.
 const DEDUPE_HISTORY: usize = 10;
+/// How soon a window Copilot pre-empted is tried again.
+pub const PREEMPTED_RETRY: Duration = Duration::from_secs(10);
 /// Longest back-off after repeated failures, and the wait after a provider
 /// refuses the request (bad key, quota, rate limit).
 pub const MAX_BACKOFF: Duration = Duration::from_secs(600);
@@ -219,8 +221,11 @@ impl Worker {
     /// Back off after a failed request; the window's text goes back into the
     /// queue when the failure was the request's, not the reply's.
     fn record_failure(&mut self, window: Option<Window>, kind: FailureKind) {
-        self.failures += 1;
+        if kind != FailureKind::Preempted {
+            self.failures += 1;
+        }
         let delay = match kind {
+            FailureKind::Preempted => PREEMPTED_RETRY.min(self.config.cadence),
             FailureKind::Unavailable => self.config.max_backoff,
             FailureKind::Transient => {
                 backoff_delay(self.config.cadence, self.failures, self.config.max_backoff)
@@ -319,9 +324,14 @@ impl Worker {
                 }
                 Ok(generated) => generated.text,
                 Err(error) => {
-                    warn!("Live summary request failed: {error}");
+                    if error.kind == FailureKind::Preempted {
+                        info!("Live summary: Copilot needed the model, retrying this window");
+                    } else {
+                        warn!("Live summary request failed: {error}");
+                    }
                     self.record_failure(Some(window), error.kind);
                     match error.kind {
+                        FailureKind::Preempted => self.set_status(TimelineStatus::Listening, None),
                         FailureKind::Unavailable => self
                             .set_status(TimelineStatus::Unavailable, Some(REFUSED_NOTICE.into())),
                         FailureKind::Transient => self
@@ -854,6 +864,37 @@ mod tests {
         let snapshot = task.await.unwrap();
         assert_eq!(snapshot.entries.len(), 1);
         assert_eq!(host.persisted.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_window_preempted_by_copilot_is_retried_quietly() {
+        let mut generator = FakeGenerator::new(Duration::ZERO);
+        generator.fail_first = 1;
+        generator.fail_kind = FailureKind::Preempted;
+        let generator = Arc::new(generator);
+        let host = host_with(generator.clone());
+        let (tx, rx) = unbounded_channel();
+        let finish = CancellationToken::new();
+        let task = tokio::spawn(run(host.clone(), "s".into(), rx, finish.clone(), config()));
+        let mut first = speech(0);
+        first.text = format!("{} budget review", first.text);
+        tx.send(first).unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        finish.cancel();
+        let snapshot = task.await.unwrap();
+        let prompts = generator.prompts.lock().unwrap();
+        assert!(prompts.len() >= 2, "the pre-empted window is retried");
+        assert!(prompts[1].contains("budget review"), "with its text");
+        assert!(
+            !host
+                .published
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|s| s.status == TimelineStatus::Failed),
+            "a pre-emption is not shown as a failure"
+        );
+        assert_eq!(snapshot.entries.len(), 1);
     }
 
     #[tokio::test]

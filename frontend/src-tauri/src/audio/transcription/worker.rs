@@ -211,7 +211,10 @@ async fn run_chunk_worker<R: Runtime>(
     {
         // Create parallel workers for faster processing while preserving ALL chunks
         const NUM_WORKERS: usize = 1; // Serial processing ensures transcripts emit in chronological order
-        let (work_sender, work_receiver) = tokio::sync::mpsc::unbounded_channel::<AudioChunk>();
+        let (work_sender, work_receiver) = tokio::sync::mpsc::unbounded_channel::<(
+            AudioChunk,
+            crate::audio::live_streaming::worker::ChunkedBacklog,
+        )>();
         let work_receiver = Arc::new(tokio::sync::Mutex::new(work_receiver));
 
         // Track completion: AtomicU64 for chunks queued, AtomicU64 for chunks completed
@@ -282,7 +285,9 @@ async fn run_chunk_worker<R: Runtime>(
                     };
 
                     match chunk {
-                        Some(chunk) => {
+                        Some((chunk, _queued)) => {
+                            // `_queued` leaves the live backlog when this
+                            // iteration ends, however it ends.
                             // PERFORMANCE OPTIMIZATION: Reduce logging in hot path
                             // Only log every 10th chunk per worker to reduce I/O overhead
                             let should_log_this_chunk = chunk.chunk_id % 10 == 0;
@@ -523,7 +528,15 @@ async fn run_chunk_worker<R: Runtime>(
                 chunk.chunk_id, queued
             );
 
-            if work_sender.send(chunk).is_err() {
+            let queued = crate::audio::live_streaming::worker::ChunkedBacklog::queued(
+                matches!(
+                    chunk.device_type,
+                    crate::audio::recording_state::DeviceType::System
+                ),
+                chunk.data.len(),
+                chunk.sample_rate,
+            );
+            if work_sender.send((chunk, queued)).is_err() {
                 error!("❌ Failed to send chunk to workers - this should not happen!");
                 break;
             }

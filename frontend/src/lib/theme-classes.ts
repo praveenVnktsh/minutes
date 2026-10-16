@@ -119,6 +119,8 @@ export const transcriptHighlight = {
   match: 'bg-warning/10',
   /** The matched text itself. */
   matchText: 'rounded bg-warning/40 px-0.5 text-inherit',
+  /** A line Copilot thinks was a question for the user. */
+  question: 'bg-warning/10 shadow-[inset_3px_0_0_0_rgb(var(--warning-rgb))]',
   /** The segment the audio player is on. */
   playing: 'bg-info/15 shadow-[inset_3px_0_0_0_rgb(var(--info-rgb))] ring-1 ring-inset ring-info/35',
 };
