@@ -49,6 +49,20 @@ static CHUNKED_QUEUED_MS: [std::sync::atomic::AtomicU64; 2] = [
     std::sync::atomic::AtomicU64::new(0),
 ];
 
+/// Decode time and recording time the streaming worker has processed, in
+/// microseconds, since the process started: their ratio over an interval is
+/// live transcription's real-time factor. Read by the replay harness.
+static DECODE_BUSY_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static DECODED_AUDIO_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// `(busy seconds, recording seconds)` the streaming worker has decoded so far.
+pub fn decode_totals() -> (f64, f64) {
+    (
+        DECODE_BUSY_US.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6,
+        DECODED_AUDIO_US.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6,
+    )
+}
+
 fn chunked_backlog_ms() -> u64 {
     CHUNKED_QUEUED_MS
         .iter()
@@ -283,6 +297,7 @@ mod imp {
                 }
 
                 let backlog = backlog_seconds(&batch);
+                let busy_since = std::time::Instant::now();
                 super::LAST_BACKLOG_MS.store(
                     (backlog.max(0.0) * 1000.0) as u64,
                     std::sync::atomic::Ordering::Relaxed,
@@ -335,6 +350,14 @@ mod imp {
                     transcriber.decode(&mut events);
                 }
                 emit_events(&app, &mut deduper, offset, &mut events);
+                super::DECODE_BUSY_US.fetch_add(
+                    busy_since.elapsed().as_micros() as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                super::DECODED_AUDIO_US.fetch_add(
+                    (backlog.max(0.0) * 1e6) as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
             }
 
             if cancelled {

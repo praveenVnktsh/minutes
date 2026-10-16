@@ -64,6 +64,7 @@ pub mod onboarding;
 pub mod openai;
 pub mod openrouter;
 pub mod parakeet_engine;
+pub mod replay;
 pub mod shortcuts;
 pub mod state;
 pub mod summary;

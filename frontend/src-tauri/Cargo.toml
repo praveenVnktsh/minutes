@@ -52,6 +52,14 @@ hipblas = ["whisper-rs/hipblas"]   # Linux: AMD ROCm HIP
 openblas = ["whisper-rs/openblas"] # Optimized BLAS (Auto-enabled on Windows/Linux)
 openmp = ["whisper-rs/openmp"]     # OpenMP parallel processing
 
+# Developer tool: the pipeline replay harness (examples/replay.rs), which runs
+# the app headless on Tauri's mock runtime. Never part of a release build.
+dev-replay = ["tauri/test"]
+
+[[example]]
+name = "replay"
+required-features = ["dev-replay"]
+
 [build-dependencies]
 tauri-build = { version = "2.3.0", features = [] }
 reqwest = { version = "0.11", features = ["blocking", "multipart", "json", "stream"] }

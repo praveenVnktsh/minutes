@@ -64,6 +64,14 @@ pub fn is_recording_or_stopping() -> bool {
     IS_RECORDING.load(Ordering::SeqCst)
 }
 
+/// Replay harness only: mark a recording live (or stopping) without capture,
+/// so recording-time behaviour such as fewer LLM threads applies to a replay.
+#[cfg(feature = "dev-replay")]
+pub fn set_replay_recording(live: bool, stopping: bool) {
+    IS_RECORDING.store(live, Ordering::SeqCst);
+    IS_RECORDING_STOPPING.store(stopping, Ordering::SeqCst);
+}
+
 fn stopped_capture_needing_cleanup() -> Option<String> {
     if !IS_RECORDING.load(Ordering::SeqCst) || IS_RECORDING_STOPPING.load(Ordering::SeqCst) {
         return None;
