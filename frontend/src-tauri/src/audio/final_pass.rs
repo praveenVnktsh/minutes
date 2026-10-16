@@ -234,8 +234,11 @@ pub async fn keep_live_transcript<R: Runtime>(
 // Surviving a quit: the queue is in memory, the pending pass is not
 // ---------------------------------------------------------------------------
 
-/// Only resume passes queued within this window.
+/// Only resume passes queued within this window; older rows are dropped.
 const RESUME_WINDOW_DAYS: i64 = 7;
+/// Resume a pass at most this many times, so a pass that crashes the app
+/// cannot crash every launch after it.
+const RESUME_MAX_ATTEMPTS: i64 = 3;
 /// Wait before resuming, like the diarization resume, so startup is not
 /// competing with a model load.
 const RESUME_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
@@ -246,6 +249,8 @@ pub(crate) struct PendingFinalPass {
     pub meeting_folder_path: String,
     pub language: Option<String>,
     pub force: bool,
+    /// Times startup has already resumed this pass.
+    pub attempts: i64,
 }
 
 /// Record a queued pass. Re-queuing the same meeting refreshes the row.
@@ -301,12 +306,38 @@ pub(crate) async fn interrupted_passes(
 ) -> sqlx::Result<Vec<PendingFinalPass>> {
     let since = (chrono::Utc::now() - chrono::Duration::days(RESUME_WINDOW_DAYS)).to_rfc3339();
     sqlx::query_as::<_, PendingFinalPass>(
-        "SELECT meeting_id, meeting_folder_path, language, force FROM pending_final_passes \
+        "SELECT meeting_id, meeting_folder_path, language, force, attempts FROM pending_final_passes \
          WHERE queued_at >= ? ORDER BY queued_at",
     )
     .bind(since)
     .fetch_all(pool)
     .await
+}
+
+/// Drop pending passes too old to resume: the live transcript stays, as it
+/// already is, and nothing would ever clear these rows otherwise.
+pub(crate) async fn drop_stale_passes(pool: &sqlx::SqlitePool) -> sqlx::Result<u64> {
+    let since = (chrono::Utc::now() - chrono::Duration::days(RESUME_WINDOW_DAYS)).to_rfc3339();
+    Ok(
+        sqlx::query("DELETE FROM pending_final_passes WHERE queued_at < ?")
+            .bind(since)
+            .execute(pool)
+            .await?
+            .rows_affected(),
+    )
+}
+
+/// Count a resume before queuing it, so a pass that kills the app mid-run is
+/// counted even though it never finishes.
+pub(crate) async fn record_resume_attempt(
+    pool: &sqlx::SqlitePool,
+    meeting_id: &str,
+) -> sqlx::Result<()> {
+    sqlx::query("UPDATE pending_final_passes SET attempts = attempts + 1 WHERE meeting_id = ?")
+        .bind(meeting_id)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 /// Queue again the final passes a quit or crash interrupted. A pass that can
@@ -322,6 +353,11 @@ pub fn init_resume_worker<R: Runtime>(app: &AppHandle<R>) {
         else {
             return;
         };
+        match drop_stale_passes(&pool).await {
+            Ok(0) => {}
+            Ok(dropped) => info!("Final pass resume: dropped {dropped} pass(es) too old to resume"),
+            Err(error) => warn!("Final pass resume: could not drop stale passes: {error}"),
+        }
         let pending = match interrupted_passes(&pool).await {
             Ok(pending) => pending,
             Err(error) => {
@@ -330,21 +366,55 @@ pub fn init_resume_worker<R: Runtime>(app: &AppHandle<R>) {
             }
         };
         for pass in pending {
-            info!(
-                "Final pass resume: the pass for {} was interrupted, queuing it again",
-                pass.meeting_id
-            );
-            match queue_final_pass(
-                &app,
-                pass.meeting_id.clone(),
-                pass.meeting_folder_path.clone(),
-                pass.language.clone(),
-                pass.force,
-            )
-            .await
-            {
-                Ok(started) if started.status == "queued" => {}
-                Ok(started) => {
+            let outcome = if pass.attempts >= RESUME_MAX_ATTEMPTS {
+                warn!(
+                    "Final pass resume: the pass for {} was interrupted {} times, keeping the live transcript",
+                    pass.meeting_id, pass.attempts
+                );
+                Err(format!(
+                    "the final pass was interrupted {} times, so the live transcript was kept",
+                    pass.attempts
+                ))
+            } else {
+                info!(
+                    "Final pass resume: the pass for {} was interrupted, queuing it again",
+                    pass.meeting_id
+                );
+                if let Err(error) = record_resume_attempt(&pool, &pass.meeting_id).await {
+                    // Without the count a crashing pass could loop; skip it this launch.
+                    warn!(
+                        "Final pass resume: could not count the attempt for {}: {error}",
+                        pass.meeting_id
+                    );
+                    continue;
+                }
+                match queue_final_pass(
+                    &app,
+                    pass.meeting_id.clone(),
+                    pass.meeting_folder_path.clone(),
+                    pass.language.clone(),
+                    pass.force,
+                )
+                .await
+                {
+                    Ok(started) if started.status == "queued" => Ok(()),
+                    Ok(started) => Err(started
+                        .message
+                        .unwrap_or_else(|| "the interrupted final pass could not run".into())),
+                    // Left in place: the next start tries again (within the window
+                    // and the attempt limit).
+                    Err(error) => {
+                        warn!(
+                            "Final pass resume: could not requeue the pass for {}: {error}",
+                            pass.meeting_id
+                        );
+                        Ok(())
+                    }
+                }
+            };
+            match outcome {
+                Ok(()) => {}
+                Err(reason) => {
                     let task = TranscriptionTask {
                         task_id: format!("task-{}", uuid::Uuid::new_v4()),
                         task_type: TaskType::Retranscribe,
@@ -365,16 +435,8 @@ pub fn init_resume_worker<R: Runtime>(app: &AppHandle<R>) {
                         crate::meeting_activity::ActivityKind::Retranscription,
                         task.title.clone(),
                     );
-                    let reason = started
-                        .message
-                        .unwrap_or_else(|| "the interrupted final pass could not run".into());
                     keep_live_transcript(&app, &task, &pass.meeting_id, &reason).await;
                 }
-                // Left in place: the next start tries again (within the window).
-                Err(error) => warn!(
-                    "Final pass resume: could not requeue the pass for {}: {error}",
-                    pass.meeting_id
-                ),
             }
         }
     });
@@ -404,7 +466,46 @@ mod tests {
         ))
         .await
         .unwrap();
+        pool.execute(include_str!(
+            "../../migrations/20261016000200_add_pending_final_pass_attempts.sql"
+        ))
+        .await
+        .unwrap();
         pool
+    }
+
+    #[tokio::test]
+    async fn resume_attempts_survive_requeue_and_stale_passes_are_dropped() {
+        let pool = pool().await;
+        mark_queued(&pool, "m1", "/tmp/m1", None, false)
+            .await
+            .unwrap();
+        record_resume_attempt(&pool, "m1").await.unwrap();
+        record_resume_attempt(&pool, "m1").await.unwrap();
+        // The resume re-queues through mark_queued, which must keep the count.
+        mark_queued(&pool, "m1", "/tmp/m1", None, false)
+            .await
+            .unwrap();
+        let pending = interrupted_passes(&pool).await.unwrap();
+        assert_eq!(pending[0].attempts, 2);
+
+        // A pass queued before the resume window is dropped, not left forever.
+        mark_queued(&pool, "m2", "/tmp/m2", None, false)
+            .await
+            .unwrap();
+        let old =
+            (chrono::Utc::now() - chrono::Duration::days(RESUME_WINDOW_DAYS + 1)).to_rfc3339();
+        sqlx::query("UPDATE pending_final_passes SET queued_at = ? WHERE meeting_id = 'm2'")
+            .bind(old)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(drop_stale_passes(&pool).await.unwrap(), 1);
+        let left: Vec<String> = sqlx::query_scalar("SELECT meeting_id FROM pending_final_passes")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(left, vec!["m1".to_string()]);
     }
 
     #[tokio::test]

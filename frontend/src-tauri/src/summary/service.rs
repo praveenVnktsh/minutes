@@ -329,6 +329,11 @@ fn title_transcript_text(segments: &[Transcript]) -> String {
         .join("\n")
 }
 
+/// The error a summary gets when the job running it is gone: the app quit or
+/// crashed mid-run, so nothing will ever finish the pending row.
+pub const INTERRUPTED_SUMMARY_ERROR: &str =
+    "Interrupted: the app was closed while this summary was running. Generate it again.";
+
 /// Summary service - handles all summary generation logic
 pub struct SummaryService;
 
@@ -353,6 +358,16 @@ impl SummaryService {
         }
         info!("Registered cancellation token for meeting: {}", meeting_id);
         token
+    }
+
+    /// True while this process runs the generation identified by `started_at`.
+    /// A pending row without one was orphaned by a quit, crash or lost write.
+    pub(crate) fn has_active_job(meeting_id: &str, started_at: DateTime<Utc>) -> bool {
+        CANCELLATION_REGISTRY
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(meeting_id)
+            .is_some_and(|entry| entry.started_at == started_at)
     }
 
     /// Cancels only the active generation identified by `started_at`.
