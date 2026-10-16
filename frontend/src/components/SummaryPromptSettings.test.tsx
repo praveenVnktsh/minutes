@@ -14,6 +14,8 @@ const DEFAULT_PROMPT = 'You are an expert meeting summarizer.'
 
 // A tiny stand-in for the Rust store: the saved override, or null when none is set.
 let savedOverride: string | null = null
+// The notes prompt's override when a test renders the no-notes card.
+let notesOverride: string | null = null
 let failNext: string | null = null
 let calls: Array<{ command: string; args?: Record<string, unknown> }> = []
 let toasts: Array<{ kind: 'success' | 'error'; message: string }> = []
@@ -34,7 +36,12 @@ mock.module('@tauri-apps/api/core', () => ({
       failNext = null
       throw new Error('store unavailable')
     }
-    if (command === 'api_get_summary_prompt') return settings()
+    if (command === 'api_get_summary_prompt') {
+      if (args?.kind === 'notes' && notesOverride !== null) {
+        return { prompt: notesOverride, defaultPrompt: DEFAULT_PROMPT, isCustom: true }
+      }
+      return settings()
+    }
     if (command === 'api_save_summary_prompt') {
       const prompt = String(args?.prompt ?? '').trim()
       savedOverride = prompt === '' || prompt === DEFAULT_PROMPT ? null : prompt
@@ -55,7 +62,7 @@ mock.module('sonner', () => ({
   }),
 }))
 
-const { SummaryPromptSettings } = await import('./SummaryPromptSettings')
+const { SummaryPromptSettings, PROMPT_SPLIT_NOTICE_KEY } = await import('./SummaryPromptSettings')
 
 async function render(kind?: 'notes' | 'transcriptOnly') {
   let renderer!: ReactTestRenderer
@@ -96,6 +103,12 @@ async function click(node: ReactTestInstance) {
 describe('SummaryPromptSettings', () => {
   beforeEach(() => {
     savedOverride = null
+    notesOverride = null
+    try {
+      localStorage.removeItem(PROMPT_SPLIT_NOTICE_KEY)
+    } catch {
+      // No storage in this runtime: the notice is never remembered.
+    }
     failNext = null
     calls = []
     toasts = []
@@ -141,6 +154,56 @@ describe('SummaryPromptSettings', () => {
       args: { prompt: 'Bullets only.', kind: 'transcriptOnly' },
     })
     expect(toasts).toEqual([{ kind: 'success', message: 'No-notes prompt saved' }])
+  })
+
+  test('a custom notes prompt from before the split gets a one-time notice on the no-notes card', async () => {
+    notesOverride = 'My old custom prompt.'
+    const renderer = await render('transcriptOnly')
+
+    expect(renderer.root.findAllByProps({ 'data-testid': 'prompt-split-notice' })).toHaveLength(1)
+    await click(button(renderer, 'Start from my Notes prompt'))
+
+    expect(textarea(renderer).props.value).toBe('My old custom prompt.')
+    expect(button(renderer, 'Save prompt').props.disabled).toBe(false)
+    expect(renderer.root.findAllByProps({ 'data-testid': 'prompt-split-notice' })).toHaveLength(0)
+  })
+
+  test('the split notice comes back if the copied prompt was never saved, not after saving', async () => {
+    notesOverride = 'My old custom prompt.'
+    const first = await render('transcriptOnly')
+    await click(button(first, 'Start from my Notes prompt'))
+    // Left without saving: the offer is still there next time.
+    const again = await render('transcriptOnly')
+    expect(again.root.findAllByProps({ 'data-testid': 'prompt-split-notice' })).toHaveLength(1)
+
+    await click(button(again, 'Start from my Notes prompt'))
+    await click(button(again, 'Save prompt'))
+    expect(savedOverride).toBe('My old custom prompt.')
+    savedOverride = null // even if the no-notes prompt is reset later
+    const afterSave = await render('transcriptOnly')
+    const remembered = (() => {
+      try {
+        return typeof localStorage !== 'undefined'
+      } catch {
+        return false
+      }
+    })()
+    expect(afterSave.root.findAllByProps({ 'data-testid': 'prompt-split-notice' })).toHaveLength(
+      remembered ? 0 : 1,
+    )
+  })
+
+  test('no split notice without a custom notes prompt, or on the notes card', async () => {
+    const plain = await render('transcriptOnly')
+    expect(plain.root.findAllByProps({ 'data-testid': 'prompt-split-notice' })).toHaveLength(0)
+
+    notesOverride = 'My old custom prompt.'
+    savedOverride = 'Already customised.'
+    const customised = await render('transcriptOnly')
+    expect(customised.root.findAllByProps({ 'data-testid': 'prompt-split-notice' })).toHaveLength(0)
+
+    const notesCard = await render('notes')
+    expect(notesCard.root.findAllByProps({ 'data-testid': 'prompt-split-notice' })).toHaveLength(0)
   })
 
   test('reset clears a saved override and restores the default text', async () => {

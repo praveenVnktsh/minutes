@@ -56,6 +56,108 @@ pub(crate) struct GenerationOptions {
     pub timeout: Option<Duration>,
     /// What a timeout or cancellation does to the shared built-in sidecar.
     pub on_abandon: crate::summary::summary_engine::sidecar::OnAbandon,
+    /// A short answer under a small `output_cap` (the live summary timeline).
+    /// Models that reason before answering (Claude models that think by
+    /// default, OpenAI reasoning models) spend output tokens on that first,
+    /// so a 150-token cap would cut every answer off: they are asked for low
+    /// effort and given reasoning room on top of the cap.
+    pub brief: bool,
+}
+
+/// Reasoning room added on top of a brief call's output cap for models that
+/// think before answering. Low effort on a one-minute window needs far less;
+/// the cap still bounds a runaway reply.
+pub(crate) const BRIEF_REASONING_HEADROOM: u32 = 2_048;
+
+/// OpenAI reasoning models (o-series, GPT-5 family) by name. They reject
+/// `max_tokens` and non-default temperatures and count reasoning against
+/// `max_completion_tokens`.
+fn is_openai_reasoning_model(model_name: &str) -> bool {
+    let name = model_name
+        .rsplit('/')
+        .next()
+        .unwrap_or(model_name)
+        .to_ascii_lowercase();
+    // The chat snapshots (gpt-5-chat-latest) are not reasoning models.
+    if name.contains("-chat") {
+        return false;
+    }
+    ["o1", "o3", "o4", "gpt-5"]
+        .iter()
+        .any(|prefix| name == *prefix || name.starts_with(&format!("{prefix}-")))
+        || name.starts_with("gpt-5.")
+}
+
+/// Rewrite an OpenAI-compatible body for a reasoning model: the output cap
+/// gets room to reason when the call is brief, sampling fields they reject
+/// are dropped, and a brief call asks for low reasoning effort. OpenAI
+/// itself wants `max_completion_tokens` and `reasoning_effort`; OpenRouter
+/// documents `max_tokens` and its unified `reasoning: {effort}` object.
+fn adapt_body_for_openai_reasoning(
+    body: &mut serde_json::Value,
+    brief: bool,
+    provider: &LLMProvider,
+) {
+    let Some(object) = body.as_object_mut() else {
+        return;
+    };
+    let openrouter = *provider == LLMProvider::OpenRouter;
+    let cap = object
+        .remove("max_tokens")
+        .or_else(|| object.remove("max_completion_tokens"))
+        .and_then(|v| v.as_u64());
+    if let Some(cap) = cap {
+        let cap = u32::try_from(cap).unwrap_or(u32::MAX);
+        let limit = if brief {
+            cap.saturating_add(BRIEF_REASONING_HEADROOM)
+        } else {
+            cap
+        };
+        let field = if openrouter {
+            "max_tokens"
+        } else {
+            "max_completion_tokens"
+        };
+        object.insert(field.into(), limit.into());
+    }
+    object.remove("temperature");
+    object.remove("top_p");
+    if brief {
+        if openrouter {
+            object.insert("reasoning".into(), serde_json::json!({ "effort": "low" }));
+        } else {
+            object.insert("reasoning_effort".into(), "low".into());
+        }
+    }
+}
+
+/// The Messages API body for Claude. Current Claude models reject
+/// `temperature`, so Claude gets none. A brief call on a model that thinks by
+/// default (thinking cannot be switched off on every model, so it is not
+/// tried) asks for low effort and gets thinking room on top of its cap.
+pub(crate) fn build_claude_body(
+    model_name: &str,
+    system_prompt: &str,
+    user_prompt: &str,
+    options: &GenerationOptions,
+) -> serde_json::Value {
+    let max_tokens = match options.capped(Some(CLAUDE_MAX_TOKENS)) {
+        Some(cap) if options.brief => cap.saturating_add(BRIEF_REASONING_HEADROOM),
+        cap => cap.unwrap_or(CLAUDE_MAX_TOKENS),
+    };
+    let mut body = serde_json::json!(ClaudeRequest {
+        system: system_prompt.to_string(),
+        model: model_name.to_string(),
+        max_tokens,
+        messages: vec![ChatMessage {
+            role: "user".to_string(),
+            content: user_prompt.to_string(),
+        }],
+    });
+    if options.brief {
+        body["output_config"] = serde_json::json!({ "effort": "low" });
+    }
+    body
 }
 
 impl GenerationOptions {
@@ -140,14 +242,18 @@ pub(crate) fn build_openai_compat_chat_body(
         )
     };
 
-    serde_json::json!(ChatRequest {
+    let mut body = serde_json::json!(ChatRequest {
         model: model_name.to_string(),
         messages: chat_messages(system_prompt, user_prompt),
         max_tokens,
         temperature,
         top_p,
         seed,
-    })
+    });
+    if *provider != LLMProvider::CustomOpenAI && is_openai_reasoning_model(model_name) {
+        adapt_body_for_openai_reasoning(&mut body, options.brief, provider);
+    }
+    body
 }
 
 /// Build the body for Ollama's native `/api/chat`. Unlike the OpenAI-compatible
@@ -443,6 +549,15 @@ fn send_error(error: reqwest::Error, what: &str) -> String {
     }
 }
 
+/// Whether a 400/422 rejection's texts mention `needle` (in the message or as
+/// the named parameter).
+fn rejection_mentions(status: reqwest::StatusCode, body: &str, needle: &str) -> bool {
+    if !matches!(status.as_u16(), 400 | 422) {
+        return false;
+    }
+    json_error_texts(body).is_some_and(|(_, texts)| texts.iter().any(|text| text.contains(needle)))
+}
+
 /// The compatibility retry body for a rejected request, if the rejection is
 /// one a smaller request can avoid.
 fn compatibility_retry_body(
@@ -450,7 +565,50 @@ fn compatibility_retry_body(
     request_body: &serde_json::Value,
     status: reqwest::StatusCode,
     error_body: &str,
+    brief: bool,
 ) -> Option<serde_json::Value> {
+    let is_openai_compatible = matches!(
+        provider,
+        LLMProvider::OpenAI
+            | LLMProvider::Groq
+            | LLMProvider::OpenRouter
+            | LLMProvider::CustomOpenAI
+    );
+    // A reasoning model the name check did not recognise refuses
+    // `max_tokens` and asks for `max_completion_tokens`.
+    if is_openai_compatible
+        && request_body.get("max_tokens").is_some()
+        && rejection_mentions(status, error_body, "max_completion_tokens")
+    {
+        warn!(
+            "{} wants max_completion_tokens (a reasoning model); retrying with it",
+            provider_name(provider)
+        );
+        let mut retry_body = request_body.clone();
+        adapt_body_for_openai_reasoning(&mut retry_body, brief, provider);
+        return Some(retry_body);
+    }
+    for field in ["reasoning_effort", "reasoning"] {
+        if is_openai_compatible
+            && request_body.get(field).is_some()
+            && rejection_mentions(status, error_body, field)
+        {
+            let mut retry_body = request_body.clone();
+            retry_body.as_object_mut()?.remove(field);
+            return Some(retry_body);
+        }
+    }
+    // Older Claude models (Sonnet 4.5, Haiku 4.5) reject `effort`.
+    if *provider == LLMProvider::Claude
+        && request_body.get("output_config").is_some()
+        && (rejection_mentions(status, error_body, "effort")
+            || rejection_mentions(status, error_body, "output_config"))
+    {
+        warn!("Claude rejected output_config.effort; retrying without it");
+        let mut retry_body = request_body.clone();
+        retry_body.as_object_mut()?.remove("output_config");
+        return Some(retry_body);
+    }
     let fields: Vec<&str> = match provider {
         LLMProvider::Ollama if ollama_rejects_think(status, error_body) => {
             warn!("Ollama rejected think; retrying once without it");
@@ -741,18 +899,7 @@ pub(crate) async fn generate_completion(
 
     // Build request body based on provider
     let request_body = match provider {
-        // Current Claude models reject `temperature`, so Claude gets none.
-        LLMProvider::Claude => serde_json::json!(ClaudeRequest {
-            system: system_prompt.to_string(),
-            model: model_name.to_string(),
-            max_tokens: options
-                .capped(Some(CLAUDE_MAX_TOKENS))
-                .unwrap_or(CLAUDE_MAX_TOKENS),
-            messages: vec![ChatMessage {
-                role: "user".to_string(),
-                content: user_prompt.to_string(),
-            }]
-        }),
+        LLMProvider::Claude => build_claude_body(model_name, system_prompt, user_prompt, options),
         LLMProvider::Ollama => {
             build_ollama_chat_body(model_name, system_prompt, user_prompt, options)
         }
@@ -778,35 +925,43 @@ pub(crate) async fn generate_completion(
         .await?
         .map_err(|e| send_error(e, "request"))?;
 
-    let response = if response.status().is_success() {
-        response
-    } else {
+    // A rejection names one field at a time (a reasoning model refuses
+    // `max_tokens`, then `temperature`), so allow a couple of compatibility
+    // retries, each removing what the last rejection named.
+    const MAX_COMPATIBILITY_RETRIES: usize = 2;
+    let mut response = response;
+    let mut request_body = request_body;
+    let mut retries = 0;
+    while !response.status().is_success() {
         let status = response.status();
         let error_body = await_or_cancel(response.text(), cancellation_token)
             .await?
             .unwrap_or_else(|error| format!("Failed to read LLM error response body: {error}"));
-        let Some(retry_body) =
-            compatibility_retry_body(provider, &request_body, status, &error_body)
-        else {
+        let retry_body = (retries < MAX_COMPATIBILITY_RETRIES)
+            .then(|| {
+                compatibility_retry_body(
+                    provider,
+                    &request_body,
+                    status,
+                    &error_body,
+                    options.brief,
+                )
+            })
+            .flatten();
+        let Some(retry_body) = retry_body else {
             return Err(http_status_error(status, &error_body));
         };
+        retries += 1;
         let retry_future = client
-            .post(api_url)
-            .headers(headers)
+            .post(api_url.clone())
+            .headers(headers.clone())
             .json(&retry_body)
             .timeout(options.timeout.unwrap_or(REQUEST_TIMEOUT_DURATION))
             .send();
-        await_or_cancel(retry_future, cancellation_token)
+        response = await_or_cancel(retry_future, cancellation_token)
             .await?
-            .map_err(|e| send_error(e, "retry request"))?
-    };
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let error_body = await_or_cancel(response.text(), cancellation_token)
-            .await?
-            .unwrap_or_else(|error| format!("Failed to read LLM error response body: {error}"));
-        return Err(http_status_error(status, &error_body));
+            .map_err(|e| send_error(e, "retry request"))?;
+        request_body = retry_body;
     }
 
     // Parse response based on provider
@@ -1103,6 +1258,7 @@ mod tests {
             &body,
             reqwest::StatusCode::BAD_REQUEST,
             r#"{"error":{"param":"temperature"}}"#,
+            false,
         )
         .unwrap();
         assert!(retry.get("temperature").is_none());
@@ -1112,8 +1268,102 @@ mod tests {
             &body,
             reqwest::StatusCode::BAD_REQUEST,
             r#"{"error":{"param":"temperature"}}"#,
+            false,
         )
         .is_none());
+    }
+
+    #[test]
+    fn brief_claude_calls_leave_room_for_default_thinking() {
+        // Regression: the live timeline capped Claude at 150 tokens, which
+        // models that think by default spent on thinking, so every window
+        // came back truncated and was skipped.
+        let options = GenerationOptions {
+            output_cap: Some(150),
+            brief: true,
+            ..Default::default()
+        };
+        let body = build_claude_body("claude-opus-5-5", "s", "u", &options);
+        assert_eq!(body["max_tokens"], 150 + BRIEF_REASONING_HEADROOM);
+        assert_eq!(body["output_config"]["effort"], "low");
+        assert!(body.get("thinking").is_none());
+        assert!(body.get("temperature").is_none());
+
+        // A full summary is unchanged.
+        let full = build_claude_body("claude-opus-5-5", "s", "u", &GenerationOptions::default());
+        assert_eq!(full["max_tokens"], CLAUDE_MAX_TOKENS);
+        assert!(full.get("output_config").is_none());
+
+        // Older models that reject effort are retried without it.
+        let retry = compatibility_retry_body(
+            &LLMProvider::Claude,
+            &body,
+            reqwest::StatusCode::BAD_REQUEST,
+            r#"{"type":"error","error":{"type":"invalid_request_error","message":"output_config.effort: This model does not support the effort parameter."}}"#,
+            true,
+        )
+        .unwrap();
+        assert!(retry.get("output_config").is_none());
+        assert_eq!(retry["max_tokens"], body["max_tokens"]);
+    }
+
+    #[test]
+    fn brief_calls_on_openai_reasoning_models_get_reasoning_room() {
+        let options = GenerationOptions {
+            output_cap: Some(150),
+            brief: true,
+            ..Default::default()
+        };
+        for model in ["gpt-5", "gpt-5-mini", "o3", "o4-mini", "gpt-5.1"] {
+            let body =
+                build_openai_compat_chat_body(&LLMProvider::OpenAI, model, "s", "u", &options);
+            assert!(body.get("max_tokens").is_none(), "{model}");
+            assert_eq!(
+                body["max_completion_tokens"],
+                150 + BRIEF_REASONING_HEADROOM,
+                "{model}"
+            );
+            assert_eq!(body["reasoning_effort"], "low", "{model}");
+            assert!(body.get("temperature").is_none(), "{model}");
+        }
+        let plain =
+            build_openai_compat_chat_body(&LLMProvider::OpenAI, "gpt-4o", "s", "u", &options);
+        assert_eq!(plain["max_tokens"], 150);
+        assert!(plain.get("reasoning_effort").is_none());
+        assert!(!is_openai_reasoning_model("gpt-4o-mini"));
+        assert!(!is_openai_reasoning_model("omni-model"));
+        assert!(!is_openai_reasoning_model("gpt-5-chat-latest"));
+        assert!(is_openai_reasoning_model("openai/gpt-5.1"));
+
+        // OpenRouter takes max_tokens and its unified reasoning object.
+        let routed = build_openai_compat_chat_body(
+            &LLMProvider::OpenRouter,
+            "openai/gpt-5",
+            "s",
+            "u",
+            &options,
+        );
+        assert_eq!(routed["max_tokens"], 150 + BRIEF_REASONING_HEADROOM);
+        assert!(routed.get("max_completion_tokens").is_none());
+        assert_eq!(routed["reasoning"]["effort"], "low");
+        assert!(routed.get("reasoning_effort").is_none());
+        assert!(routed.get("temperature").is_none());
+
+        // An unrecognised reasoning model's rejection is retried the same way.
+        let retry = compatibility_retry_body(
+            &LLMProvider::OpenAI,
+            &plain,
+            reqwest::StatusCode::BAD_REQUEST,
+            r#"{"error":{"message":"Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.","param":"max_tokens"}}"#,
+            true,
+        )
+        .unwrap();
+        assert!(retry.get("max_tokens").is_none());
+        assert_eq!(
+            retry["max_completion_tokens"],
+            150 + BRIEF_REASONING_HEADROOM
+        );
+        assert_eq!(retry["reasoning_effort"], "low");
     }
 
     #[test]

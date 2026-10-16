@@ -45,6 +45,41 @@ pub fn chunked_live_provider() -> Option<String> {
         .clone()
 }
 
+fn set_chunked_live_provider(provider: Option<String>) {
+    *CHUNKED_LIVE_PROVIDER
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = provider;
+}
+
+/// Claims the engine family for a recording before its chunked model is
+/// loaded, so a running pass on the same family pauses before the swap
+/// rather than after the worker starts (the gap covered device setup, and a
+/// pass could transcribe with the swapped-in model meanwhile). Dropping the
+/// claim without [`Self::keep`] releases it, so a failed load or an abandoned
+/// start never leaves passes paused.
+struct ChunkedClaim {
+    kept: bool,
+}
+
+impl ChunkedClaim {
+    fn new(provider: &str) -> Self {
+        set_chunked_live_provider(Some(provider.to_string()));
+        Self { kept: false }
+    }
+
+    fn keep(mut self) {
+        self.kept = true;
+    }
+}
+
+impl Drop for ChunkedClaim {
+    fn drop(&mut self) {
+        if !self.kept {
+            set_chunked_live_provider(None);
+        }
+    }
+}
+
 /// Provider of a chunked engine loaded for a recording that is about to start
 /// (prepared, worker not running yet).
 pub fn prepared_chunked_provider() -> Option<String> {
@@ -56,6 +91,12 @@ pub fn prepared_chunked_provider() -> Option<String> {
         }) => Some(choice.engine.provider.clone()),
         _ => None,
     }
+}
+
+/// The chunked engine family a recording holds, whether it is starting
+/// (claimed or prepared) or running. Batch jobs must not unload it.
+pub fn chunked_engine_in_use() -> Option<String> {
+    prepared_chunked_provider().or_else(chunked_live_provider)
 }
 
 fn is_parakeet(provider: &str) -> bool {
@@ -138,9 +179,14 @@ async fn load_plan<R: Runtime>(app: &AppHandle<R>, plan: LivePlan) -> (LivePlan,
         }
     }
     if let LivePlan::Chunked(choice) = &plan {
+        let claim = ChunkedClaim::new(&choice.engine.provider);
         match load_chunked(app, choice).await {
-            Ok(engine) => return (plan, Some(Loaded::Chunked(engine))),
+            Ok(engine) => {
+                claim.keep();
+                return (plan, Some(Loaded::Chunked(engine)));
+            }
             Err(error) => {
+                drop(claim);
                 warn!(
                     "Live engine {} failed to load: {error:#}",
                     choice.engine.display_name()
@@ -283,10 +329,10 @@ pub async fn start_worker<R: Runtime>(
             model,
         )),
         Some(Loaded::Chunked(engine)) => {
+            // Already claimed when the model was loaded; set again in case
+            // the plan was prepared by an older path.
             if let LivePlan::Chunked(choice) = &plan {
-                *CHUNKED_LIVE_PROVIDER
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner()) = Some(choice.engine.provider.clone());
+                set_chunked_live_provider(Some(choice.engine.provider.clone()));
             }
             Ok((
                 super::worker::start_transcription_task_with_engine(app.clone(), receiver, engine),
@@ -294,6 +340,7 @@ pub async fn start_worker<R: Runtime>(
             ))
         }
         None => {
+            set_chunked_live_provider(None);
             LIVE_TRANSCRIPTION_ENABLED.store(false, Ordering::SeqCst);
             Err(receiver)
         }
@@ -315,6 +362,7 @@ pub fn abandon_prepared() {
         .take();
     LIVE_STREAMING_MODE.store(false, Ordering::SeqCst);
     live_streaming::engine::unload();
+    set_chunked_live_provider(None);
     if let Some(Loaded::Chunked(engine)) = session.and_then(|s| s.loaded) {
         let parakeet = matches!(engine, TranscriptionEngine::Parakeet(_));
         drop(engine);
@@ -383,6 +431,32 @@ mod tests {
         assert!(!live_conflicts(None, Some("localWhisper")));
         assert!(!live_conflicts(None, Some("parakeet")));
         assert!(!live_conflicts(None, None));
+    }
+
+    #[test]
+    fn a_chunked_load_claims_the_engine_until_it_is_kept_or_dropped() {
+        // Regression: the provider was only published when the worker
+        // started, after the model was loaded, so a pass on the same family
+        // did not pause while the recording swapped its model.
+        let claim = ChunkedClaim::new("localWhisper");
+        assert!(live_conflicts(
+            chunked_live_provider().as_deref(),
+            Some("localWhisper")
+        ));
+        drop(claim);
+        assert_eq!(chunked_live_provider(), None);
+
+        // A batch job's unload must see a starting recording's claim, before
+        // is_recording turns true.
+        let claim = ChunkedClaim::new("localWhisper");
+        assert_eq!(chunked_engine_in_use().as_deref(), Some("localWhisper"));
+        drop(claim);
+        assert_eq!(chunked_engine_in_use(), None);
+
+        ChunkedClaim::new("parakeet").keep();
+        assert_eq!(chunked_live_provider().as_deref(), Some("parakeet"));
+        assert_eq!(release_after_recording().as_deref(), Some("parakeet"));
+        assert_eq!(chunked_live_provider(), None);
     }
 
     #[test]

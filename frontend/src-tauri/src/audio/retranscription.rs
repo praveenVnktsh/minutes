@@ -361,7 +361,7 @@ async fn run_retranscription<R: Runtime>(
     // Resolved model name actually loaded on the chosen engine, for provenance.
     // `model` may be None (configured default used), so this is read back from
     // the engine rather than the request.
-    let resolved_model_name = if use_parakeet {
+    let mut resolved_model_name = if use_parakeet {
         parakeet_engine.as_ref().unwrap().get_current_model().await
     } else {
         whisper_engine.as_ref().unwrap().get_current_model().await
@@ -421,6 +421,13 @@ async fn run_retranscription<R: Runtime>(
             } else {
                 whisper_engine = Some(get_or_init_whisper(&app, model.as_deref()).await?);
             }
+            // With no explicit model (a resumed pass) the reload follows the
+            // current setting, which may have changed: expect what loaded.
+            resolved_model_name = if use_parakeet {
+                parakeet_engine.as_ref().unwrap().get_current_model().await
+            } else {
+                whisper_engine.as_ref().unwrap().get_current_model().await
+            };
         }
         let segment_duration_sec = (segment.end_timestamp_ms - segment.start_timestamp_ms) / 1000.0;
         emit_progress(
@@ -446,21 +453,66 @@ async fn run_retranscription<R: Runtime>(
             continue;
         }
 
-        // Transcribe this segment
-        let (text, conf) = if use_parakeet {
-            let engine = parakeet_engine.as_ref().unwrap();
-            let text = engine
-                .transcribe_audio(segment.samples.clone())
-                .await
-                .map_err(|e| anyhow!("Parakeet transcription failed on segment {}: {}", i, e))?;
-            (text, 0.9f32)
-        } else {
-            let engine = whisper_engine.as_ref().unwrap();
-            let (text, conf, _) = engine
-                .transcribe_audio_with_confidence(segment.samples.clone(), language.clone())
-                .await
-                .map_err(|e| anyhow!("Whisper transcription failed on segment {}: {}", i, e))?;
-            (text, conf)
+        // Transcribe this segment. A recording that started meanwhile may
+        // have loaded its own model into the shared engine between the check
+        // above and this call; then the text came from the wrong model, so
+        // wait for the recording, reload ours and transcribe it again.
+        let mut redos = 0;
+        let (text, conf) = loop {
+            let (text, conf) = if use_parakeet {
+                let engine = parakeet_engine.as_ref().unwrap();
+                let text = engine
+                    .transcribe_audio(segment.samples.clone())
+                    .await
+                    .map_err(|e| {
+                        anyhow!("Parakeet transcription failed on segment {}: {}", i, e)
+                    })?;
+                (text, 0.9f32)
+            } else {
+                let engine = whisper_engine.as_ref().unwrap();
+                let (text, conf, _) = engine
+                    .transcribe_audio_with_confidence(segment.samples.clone(), language.clone())
+                    .await
+                    .map_err(|e| anyhow!("Whisper transcription failed on segment {}: {}", i, e))?;
+                (text, conf)
+            };
+            let current_model = if use_parakeet {
+                parakeet_engine.as_ref().unwrap().get_current_model().await
+            } else {
+                whisper_engine.as_ref().unwrap().get_current_model().await
+            };
+            match segment_check(
+                resolved_model_name.as_deref(),
+                current_model.as_deref(),
+                redos,
+            ) {
+                SegmentCheck::Keep => break (text, conf),
+                SegmentCheck::GiveUp => {
+                    return Err(anyhow!(
+                        "The transcription model kept changing during the pass (expected {:?}, found {:?}); stopped rather than mix models. Try again when no recording is running.",
+                        resolved_model_name,
+                        current_model
+                    ));
+                }
+                SegmentCheck::Redo => {}
+            }
+            redos += 1;
+            warn!(
+                "Segment {} of {meeting_id} ran while the engine held {:?} instead of {:?}; transcribing it again",
+                i, current_model, resolved_model_name
+            );
+            wait_for_live_engine(&app, &meeting_id, provider.as_deref(), progress).await?;
+            resolved_model_name = if use_parakeet {
+                let engine = get_or_init_parakeet(&app, model.as_deref()).await?;
+                let loaded = engine.get_current_model().await;
+                parakeet_engine = Some(engine);
+                loaded
+            } else {
+                let engine = get_or_init_whisper(&app, model.as_deref()).await?;
+                let loaded = engine.get_current_model().await;
+                whisper_engine = Some(engine);
+                loaded
+            };
         };
 
         // Skip empty transcripts
@@ -654,6 +706,36 @@ async fn run_retranscription<R: Runtime>(
         language,
         warning,
     })
+}
+
+/// Whether the shared engine no longer holds the model this pass loaded. An
+/// unknown model on either side is not treated as a swap.
+fn model_was_swapped(expected: Option<&str>, current: Option<&str>) -> bool {
+    matches!((expected, current), (Some(expected), Some(current)) if expected != current)
+}
+
+/// Times one segment is transcribed again after a model swap before the pass
+/// gives up.
+const MAX_SEGMENT_REDOS: usize = 2;
+
+#[derive(Debug, PartialEq, Eq)]
+enum SegmentCheck {
+    /// The segment ran on the pass's model.
+    Keep,
+    /// It ran on a swapped model: reload and transcribe it again.
+    Redo,
+    /// Swapped again after [`MAX_SEGMENT_REDOS`] redos: fail the task.
+    GiveUp,
+}
+
+fn segment_check(expected: Option<&str>, current: Option<&str>, redos: usize) -> SegmentCheck {
+    if !model_was_swapped(expected, current) {
+        SegmentCheck::Keep
+    } else if redos >= MAX_SEGMENT_REDOS {
+        SegmentCheck::GiveUp
+    } else {
+        SegmentCheck::Redo
+    }
 }
 
 /// While a live recording transcribes with the same engine family (only when
@@ -1073,6 +1155,33 @@ pub async fn is_retranscription_in_progress_command() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_model_swapped_under_the_pass_is_detected() {
+        assert!(model_was_swapped(
+            Some("large-v3-turbo-q5_0"),
+            Some("base.en")
+        ));
+        assert!(!model_was_swapped(
+            Some("large-v3-turbo-q5_0"),
+            Some("large-v3-turbo-q5_0")
+        ));
+        assert!(!model_was_swapped(None, Some("base.en")));
+        assert!(!model_was_swapped(Some("base.en"), None));
+    }
+
+    #[test]
+    fn segment_redos_are_capped() {
+        // Regression: the redo loop had no cap, so a pass whose expected
+        // model could never load again redid one segment forever.
+        assert_eq!(segment_check(Some("a"), Some("a"), 0), SegmentCheck::Keep);
+        assert_eq!(segment_check(Some("a"), Some("b"), 0), SegmentCheck::Redo);
+        assert_eq!(segment_check(Some("a"), Some("b"), 1), SegmentCheck::Redo);
+        assert_eq!(
+            segment_check(Some("a"), Some("b"), MAX_SEGMENT_REDOS),
+            SegmentCheck::GiveUp
+        );
+    }
 
     #[test]
     fn test_create_transcript_segments_empty() {

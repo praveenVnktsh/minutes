@@ -312,11 +312,228 @@ impl StreamingTranscriber {
         self.flush_source(Source::Microphone, events);
         self.flush_source(Source::System, events);
     }
+
+    /// Commit whatever each source has already decoded as finished text,
+    /// without decoding anything more, and close its stream. For a stop that
+    /// cancels a slow drain: the utterance in progress is on screen as a
+    /// partial, and dropping it loses the meeting's last words whenever no
+    /// final pass replaces the live transcript.
+    pub fn commit_decoded(&mut self, events: &mut Vec<LiveEvent>) {
+        for index in 0..self.sources.len() {
+            let source = self.sources[index].source;
+            let mut state = std::mem::replace(
+                &mut self.sources[index],
+                SourceState::new(source, self.sample_rate),
+            );
+            self.update(&mut state, true, events);
+            state.stream = None;
+            state.committed = 0;
+            state.gate.force_close();
+            self.sources[index] = state;
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Same setup as below: a cancelled stop commits the decoded part of the
+    /// utterance in progress instead of dropping it.
+    #[test]
+    #[ignore]
+    fn a_cancelled_stop_keeps_the_decoded_partial() {
+        let Ok(dir) = std::env::var("NEMOTRON_STREAMING_MODEL_DIR") else {
+            return;
+        };
+        let dir = std::path::PathBuf::from(dir);
+        let engine = Arc::new(super::super::engine::create(&dir).expect("model loads"));
+        let audio = read_wav_16k(&dir.join("test_wavs").join("0.wav"));
+        let sr = 16_000u32;
+        let mut transcriber = StreamingTranscriber::new(engine, sr);
+        let mut events = Vec::new();
+        // The first 4 s of speech with no pause, so little or nothing is final.
+        for (i, window) in audio[..(4 * sr as usize).min(audio.len())]
+            .chunks(800)
+            .enumerate()
+        {
+            let start = (i * 800) as f64 / sr as f64;
+            transcriber.push(Source::System, window, start, &mut events);
+            transcriber.decode(&mut events);
+        }
+        let pending = events.iter().rev().find_map(|event| match event {
+            LiveEvent::Partial { text, .. } => Some(text.clone()),
+            _ => None,
+        });
+        assert!(pending.is_some_and(|text| !text.is_empty()), "{events:?}");
+        events.clear();
+        transcriber.commit_decoded(&mut events);
+        let finals: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                LiveEvent::Final { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        eprintln!("{finals:?}");
+        assert!(!finals.is_empty(), "{events:?}");
+        assert!(finals.iter().all(|text| !text.trim().is_empty()));
+    }
+
+    /// Live transcription speed with and without the built-in LLM generating
+    /// at the same time. Needs `NEMOTRON_STREAMING_MODEL_DIR` (with
+    /// `test_wavs/0.wav`), `LLAMA_HELPER_BIN` and `LLAMA_MODEL_PATH`; set
+    /// `LLAMA_CONTENTION_SECONDS` to change the audio length (default 120).
+    /// Prints the real-time factor (compute time / audio time) of both runs.
+    #[test]
+    #[ignore]
+    fn live_transcription_contention_with_the_builtin_llm() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::time::Instant;
+
+        let (Ok(dir), Ok(helper), Ok(model)) = (
+            std::env::var("NEMOTRON_STREAMING_MODEL_DIR"),
+            std::env::var("LLAMA_HELPER_BIN"),
+            std::env::var("LLAMA_MODEL_PATH"),
+        ) else {
+            return;
+        };
+        let seconds: usize = std::env::var("LLAMA_CONTENTION_SECONDS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(120);
+        let dir = std::path::PathBuf::from(dir);
+        let engine = Arc::new(super::super::engine::create(&dir).expect("model loads"));
+        // Two speakers' worth of 48 kHz audio: speech on both sources, offset
+        // so they are not identical, like a call.
+        let speech = read_wav_16k(&dir.join("test_wavs").join("0.wav"));
+        let sr = 48_000usize;
+        let mut system = Vec::with_capacity(seconds * sr);
+        while system.len() < seconds * sr {
+            system.extend(speech.iter().flat_map(|&s| [s, s, s]));
+            system.extend(std::iter::repeat_n(0.0, sr));
+        }
+        system.truncate(seconds * sr);
+        let mut mic = vec![0.0; 3 * sr];
+        mic.extend_from_slice(&system);
+        mic.truncate(seconds * sr);
+
+        let run = |label: &str| -> f64 {
+            let mut transcriber = StreamingTranscriber::new(engine.clone(), sr as u32);
+            let mut events = Vec::new();
+            let window = sr / 20; // the pipeline's 50 ms windows
+            let started = Instant::now();
+            // Decode once per ~560 ms of audio, as the worker batches.
+            for (i, (sys, mic)) in system.chunks(window).zip(mic.chunks(window)).enumerate() {
+                let start = (i * window) as f64 / sr as f64;
+                transcriber.push(Source::System, sys, start, &mut events);
+                transcriber.push(Source::Microphone, mic, start, &mut events);
+                if i % 11 == 10 {
+                    transcriber.decode(&mut events);
+                }
+            }
+            transcriber.finish(&mut events);
+            let rtf = started.elapsed().as_secs_f64() / seconds as f64;
+            let finals = events
+                .iter()
+                .filter(|event| matches!(event, LiveEvent::Final { .. }))
+                .count();
+            eprintln!(
+                "{label}: RTF {rtf:.3} over {seconds} s of two-source audio ({finals} finals)"
+            );
+            rtf
+        };
+
+        let alone = run("live alone");
+
+        // A live-summary-shaped request: ~1,200 words of transcript, 150
+        // output tokens, Qwen chat template with thinking off.
+        let words =
+            "we discussed the onboarding flow and the release date for the new version ".repeat(90);
+        let prompt = format!(
+            "<|im_start|>system\nSummarise the meeting window as JSON entries.<|im_end|>\n<|im_start|>user\n{words}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+        );
+        let request = serde_json::json!({
+            "type": "generate",
+            "prompt": prompt,
+            "max_tokens": 150,
+            "context_size": 8192,
+            "model_path": model,
+            "temperature": 0.2,
+            "seed": 42,
+        })
+        .to_string();
+        let mut child = std::process::Command::new(&helper)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("llama-helper starts");
+        let mut stdin = child.stdin.take().unwrap();
+        let mut stdout = BufReader::new(child.stdout.take().unwrap());
+        let mut generate = move |stdin: &mut std::process::ChildStdin| -> f64 {
+            let started = Instant::now();
+            writeln!(stdin, "{request}").unwrap();
+            stdin.flush().unwrap();
+            let mut line = String::new();
+            stdout.read_line(&mut line).unwrap();
+            assert!(line.contains("\"response\""), "{line}");
+            started.elapsed().as_secs_f64()
+        };
+        let warm = generate(&mut stdin);
+        eprintln!("first generation (model load + run): {warm:.2} s");
+        let solo = generate(&mut stdin);
+        eprintln!("one timeline generation alone: {solo:.2} s");
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let count = Arc::new(AtomicUsize::new(0));
+        let llm = {
+            let stop = stop.clone();
+            let count = count.clone();
+            std::thread::spawn(move || {
+                let mut total = 0.0;
+                while !stop.load(Ordering::SeqCst) {
+                    total += generate(&mut stdin);
+                    count.fetch_add(1, Ordering::SeqCst);
+                }
+                (stdin, total)
+            })
+        };
+        let contended = run("live with back-to-back LLM generations");
+        stop.store(true, Ordering::SeqCst);
+        let (mut stdin, total) = llm.join().unwrap();
+        let generations = count.load(Ordering::SeqCst);
+        eprintln!(
+            "LLM: {generations} generations during the contended run, {:.2} s each on average",
+            total / generations.max(1) as f64
+        );
+        let _ = writeln!(stdin, "{}", serde_json::json!({"type": "shutdown"}));
+        let _ = child.wait();
+        eprintln!("slowdown: {:.2}x", contended / alone);
+        assert!(
+            alone < 1.0,
+            "live transcription alone is slower than real time"
+        );
+    }
+
+    /// 16 kHz mono PCM16 WAV samples.
+    fn read_wav_16k(path: &std::path::Path) -> Vec<f32> {
+        let bytes = std::fs::read(path).unwrap();
+        let mut offset = 12;
+        loop {
+            let id = &bytes[offset..offset + 4];
+            let size =
+                u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().unwrap()) as usize;
+            if id == b"data" {
+                return bytes[offset + 8..offset + 8 + size]
+                    .chunks_exact(2)
+                    .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0)
+                    .collect();
+            }
+            offset += 8 + size;
+        }
+    }
 
     /// End to end against the real model. Set `NEMOTRON_STREAMING_MODEL_DIR` to
     /// a folder holding the pinned files (and `test_wavs/` from the same repo)

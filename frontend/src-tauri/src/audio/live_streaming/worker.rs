@@ -279,9 +279,12 @@ mod imp {
             }
 
             if cancelled {
-                warn!(
-                    "Streaming live transcription cancelled; the final transcript covers the rest"
-                );
+                warn!("Streaming live transcription cancelled; keeping the text decoded so far");
+                // Without the automatic final pass the live transcript is the
+                // one kept: save the utterance in progress, don't drop it.
+                if let Some(transcriber) = transcriber.as_mut() {
+                    transcriber.commit_decoded(&mut events);
+                }
             } else if let Some(transcriber) = transcriber.as_mut() {
                 transcriber.finish(&mut events);
             }
