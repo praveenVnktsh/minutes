@@ -35,6 +35,15 @@ enum Request {
         repeat_penalty: Option<f32>,
         penalty_last_n: Option<i32>,
         stop_tokens: Option<Vec<String>>,
+        /// Sampling seed. Defaults to `DEFAULT_SEED` so identical requests give identical output.
+        seed: Option<u32>,
+    },
+    /// Counts the tokens `text` produces with the loaded model's tokenizer,
+    /// using exactly the tokenization `generate` applies to a prompt.
+    Tokenize {
+        text: String,
+        context_size: Option<u32>,
+        model_path: Option<String>,
     },
     Ping,
     Shutdown,
@@ -45,10 +54,141 @@ enum Request {
 // The variant name preserves the established `{"type":"response"}` wire protocol.
 #[allow(clippy::enum_variant_names)]
 enum Response {
-    Response { text: String, error: Option<String> },
+    Response {
+        text: String,
+        error: Option<String>,
+        /// "stop" when the model ended its turn, "length" when it hit max_tokens.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        finish_reason: Option<&'static str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        prompt_tokens: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        completion_tokens: Option<u32>,
+        /// Machine-readable error class, e.g. "context_overflow".
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error_kind: Option<&'static str>,
+    },
+    TokenCount {
+        count: u32,
+    },
     Pong,
     Goodbye,
-    Error { message: String },
+    Error {
+        message: String,
+    },
+}
+
+impl Response {
+    fn failure(message: String, error_kind: Option<&'static str>) -> Self {
+        Response::Response {
+            text: String::new(),
+            error: Some(message),
+            finish_reason: None,
+            prompt_tokens: None,
+            completion_tokens: None,
+            error_kind,
+        }
+    }
+
+    fn from_generation(result: std::result::Result<GenerationOutput, GenerateError>) -> Self {
+        match result {
+            Ok(output) => Response::Response {
+                text: output.text,
+                error: None,
+                finish_reason: Some(output.finish_reason.as_str()),
+                prompt_tokens: Some(output.prompt_tokens),
+                completion_tokens: Some(output.completion_tokens),
+                error_kind: None,
+            },
+            Err(error) => {
+                let kind = matches!(error, GenerateError::ContextOverflow { .. })
+                    .then_some(ERROR_KIND_CONTEXT_OVERFLOW);
+                Response::failure(format!("Generation failed: {error}"), kind)
+            }
+        }
+    }
+}
+
+/// Fixed default seed: summaries must be reproducible for the same input.
+const DEFAULT_SEED: u32 = 42;
+
+const ERROR_KIND_CONTEXT_OVERFLOW: &str = "context_overflow";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FinishReason {
+    Stop,
+    Length,
+}
+
+impl FinishReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            FinishReason::Stop => "stop",
+            FinishReason::Length => "length",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GenerationOutput {
+    text: String,
+    finish_reason: FinishReason,
+    prompt_tokens: u32,
+    completion_tokens: u32,
+}
+
+#[derive(Debug)]
+enum GenerateError {
+    /// The prompt plus the requested output does not fit in the context window.
+    ContextOverflow {
+        prompt_tokens: usize,
+        max_tokens: i32,
+        context_size: u32,
+    },
+    Other(anyhow::Error),
+}
+
+impl std::fmt::Display for GenerateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GenerateError::ContextOverflow {
+                prompt_tokens,
+                max_tokens,
+                context_size,
+            } => write!(
+                f,
+                "context overflow: prompt has {prompt_tokens} tokens and max_tokens is {max_tokens}, which exceeds the context window of {context_size} tokens"
+            ),
+            GenerateError::Other(error) => write!(f, "{error:#}"),
+        }
+    }
+}
+
+impl From<anyhow::Error> for GenerateError {
+    fn from(error: anyhow::Error) -> Self {
+        GenerateError::Other(error)
+    }
+}
+
+/// Rejects a request whose prompt plus output budget cannot fit in the context,
+/// instead of letting llama_decode fail part-way through.
+fn check_context_budget(
+    prompt_tokens: usize,
+    max_tokens: i32,
+    context_size: u32,
+) -> std::result::Result<(), GenerateError> {
+    if prompt_tokens == 0 {
+        return Err(GenerateError::Other(anyhow::anyhow!("prompt is empty")));
+    }
+    let needed = prompt_tokens as u64 + max_tokens.max(0) as u64;
+    if needed > u64::from(context_size) {
+        return Err(GenerateError::ContextOverflow {
+            prompt_tokens,
+            max_tokens,
+            context_size,
+        });
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -346,14 +486,29 @@ impl ModelState {
         Ok(())
     }
 
+    /// Tokenizes `text` exactly as `generate` tokenizes a prompt. `AddBos::Always`
+    /// maps to llama.cpp's `add_special`, which only prepends BOS when the GGUF's
+    /// `add_bos_token` says so (Gemma: yes, Qwen: no), so templates never double it.
+    fn tokenize(&self, text: &str) -> Result<Vec<llama_cpp_2::token::LlamaToken>> {
+        let model = self.model.as_ref().context("Model not loaded")?;
+        model
+            .str_to_token(text, AddBos::Always)
+            .with_context(|| "failed to tokenize prompt")
+    }
+
     fn generate(
         &mut self,
         prompt: String,
         max_tokens: i32,
         sampling: SamplingConfig,
         stop_tokens: Vec<String>,
-    ) -> Result<String> {
+        seed: u32,
+    ) -> std::result::Result<GenerationOutput, GenerateError> {
         let start_time = Instant::now();
+        let tokens_list = self.tokenize(&prompt)?;
+        eprintln!("📝 Tokenized prompt: {} tokens", tokens_list.len());
+        check_context_budget(tokens_list.len(), max_tokens, self.context_size)?;
+
         let model = self.model.as_ref().context("Model not loaded")?;
 
         // Calculate thread count (conservative default: max(1, (Cores / 2) + 2))
@@ -376,12 +531,6 @@ impl ModelState {
         let mut ctx = model
             .new_context(&self.backend, ctx_params)
             .context("unable to create the llama_context")?;
-
-        let tokens_list = model
-            .str_to_token(&prompt, AddBos::Always)
-            .with_context(|| "failed to tokenize prompt")?;
-
-        eprintln!("📝 Tokenized prompt: {} tokens", tokens_list.len());
 
         // Use context size for batch capacity to handle long prompts
         let batch_size = self.context_size as usize;
@@ -407,10 +556,7 @@ impl ModelState {
 
         use llama_cpp_2::sampling::LlamaSampler;
 
-        let seed = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u32;
+        eprintln!("🎲 Sampling seed: {}", seed);
         let sampler = if sampling.temperature <= 0.0 {
             if sampling.uses_penalties() {
                 LlamaSampler::chain_simple([
@@ -447,11 +593,13 @@ impl ModelState {
             ])
         };
         let mut sampler = pin!(sampler);
+        let mut finish_reason = FinishReason::Stop;
 
         loop {
             // Check if we've generated enough tokens
             if (n_cur - n_prompt_tokens) >= max_tokens {
-                eprintln!("✓ Reached max_tokens limit");
+                eprintln!("⚠️ Reached max_tokens limit; output is truncated");
+                finish_reason = FinishReason::Length;
                 break;
             }
 
@@ -531,7 +679,12 @@ impl ModelState {
         eprintln!("   • Speed: {:.2} tokens/sec", tokens_per_sec);
 
         self.update_activity();
-        Ok(output)
+        Ok(GenerationOutput {
+            text: output,
+            finish_reason,
+            prompt_tokens: u32::try_from(prompt_tokens).unwrap_or(u32::MAX),
+            completion_tokens: u32::try_from(output_tokens).unwrap_or(u32::MAX),
+        })
     }
 }
 
@@ -601,9 +754,11 @@ fn main() -> Result<()> {
                         repeat_penalty,
                         penalty_last_n,
                         stop_tokens,
+                        seed,
                     }) => {
                         let max_tokens = max_tokens.unwrap_or(512);
                         let context_size = context_size.unwrap_or(2048);
+                        let seed = seed.unwrap_or(DEFAULT_SEED);
 
                         let sampling = SamplingConfig::from_request(
                             temperature,
@@ -620,25 +775,45 @@ fn main() -> Result<()> {
                         if let Some(path_str) = model_path {
                             let path = PathBuf::from(path_str);
                             if let Err(e) = state.load_model_if_needed(path, context_size) {
-                                send_response(&Response::Response {
-                                    text: String::new(),
-                                    error: Some(format!("Failed to load model: {}", e)),
-                                })?;
+                                send_response(&Response::failure(
+                                    format!("Failed to load model: {}", e),
+                                    None,
+                                ))?;
                                 continue;
                             }
                         }
 
                         // Generate response with sampling parameters
-                        match state.generate(prompt, max_tokens, sampling, stop_tokens) {
-                            Ok(text) => {
-                                send_response(&Response::Response { text, error: None })?;
+                        let result =
+                            state.generate(prompt, max_tokens, sampling, stop_tokens, seed);
+                        send_response(&Response::from_generation(result))?;
+                    }
+                    Ok(Request::Tokenize {
+                        text,
+                        context_size,
+                        model_path,
+                    }) => {
+                        if let Some(path_str) = model_path {
+                            let context_size = context_size.unwrap_or(state.context_size);
+                            if let Err(e) =
+                                state.load_model_if_needed(PathBuf::from(path_str), context_size)
+                            {
+                                send_response(&Response::Error {
+                                    message: format!("Failed to load model: {}", e),
+                                })?;
+                                continue;
                             }
-                            Err(e) => {
-                                send_response(&Response::Response {
-                                    text: String::new(),
-                                    error: Some(format!("Generation failed: {}", e)),
+                        }
+                        match state.tokenize(&text) {
+                            Ok(tokens) => {
+                                state.update_activity();
+                                send_response(&Response::TokenCount {
+                                    count: u32::try_from(tokens.len()).unwrap_or(u32::MAX),
                                 })?;
                             }
+                            Err(e) => send_response(&Response::Error {
+                                message: format!("Tokenization failed: {:#}", e),
+                            })?,
                         }
                     }
                     Ok(Request::Ping) => {
@@ -672,6 +847,93 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn context_budget_accepts_prompt_that_fits_with_output() {
+        assert!(check_context_budget(1000, 3000, 4096).is_ok());
+        assert!(check_context_budget(1096, 3000, 4096).is_ok());
+    }
+
+    #[test]
+    fn context_budget_rejects_prompt_plus_output_over_window() {
+        let error = check_context_budget(1097, 3000, 4096).unwrap_err();
+        assert!(matches!(
+            error,
+            GenerateError::ContextOverflow {
+                prompt_tokens: 1097,
+                max_tokens: 3000,
+                context_size: 4096
+            }
+        ));
+        assert!(error.to_string().contains("context overflow"));
+    }
+
+    #[test]
+    fn context_budget_rejects_empty_prompt_as_other_error() {
+        assert!(matches!(
+            check_context_budget(0, 10, 4096),
+            Err(GenerateError::Other(_))
+        ));
+    }
+
+    #[test]
+    fn overflow_response_carries_machine_readable_kind() {
+        let response = Response::from_generation(Err(GenerateError::ContextOverflow {
+            prompt_tokens: 5000,
+            max_tokens: 4096,
+            context_size: 8192,
+        }));
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(json["type"], "response");
+        assert_eq!(json["error_kind"], "context_overflow");
+        assert!(json["error"].as_str().unwrap().contains("context overflow"));
+    }
+
+    #[test]
+    fn success_response_reports_finish_reason_and_token_counts() {
+        let response = Response::from_generation(Ok(GenerationOutput {
+            text: "partial".to_string(),
+            finish_reason: FinishReason::Length,
+            prompt_tokens: 12,
+            completion_tokens: 34,
+        }));
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(json["finish_reason"], "length");
+        assert_eq!(json["prompt_tokens"], 12);
+        assert_eq!(json["completion_tokens"], 34);
+        assert!(json["error"].is_null());
+        assert!(json.get("error_kind").is_none());
+    }
+
+    #[test]
+    fn generate_request_seed_is_optional_and_parsed() {
+        let without: Request = serde_json::from_str(r#"{"type":"generate","prompt":"p"}"#).unwrap();
+        let Request::Generate { seed, .. } = without else {
+            panic!("expected generate request");
+        };
+        assert_eq!(seed, None);
+
+        let with: Request =
+            serde_json::from_str(r#"{"type":"generate","prompt":"p","seed":7}"#).unwrap();
+        let Request::Generate { seed, .. } = with else {
+            panic!("expected generate request");
+        };
+        assert_eq!(seed, Some(7));
+        assert_eq!(DEFAULT_SEED, 42);
+    }
+
+    #[test]
+    fn tokenize_request_and_token_count_response_round_trip() {
+        let request: Request =
+            serde_json::from_str(r#"{"type":"tokenize","text":"hello","context_size":4096}"#)
+                .unwrap();
+        assert!(matches!(
+            request,
+            Request::Tokenize { ref text, context_size: Some(4096), model_path: None } if text == "hello"
+        ));
+        let json = serde_json::to_string(&Response::TokenCount { count: 3 }).unwrap();
+        assert_eq!(json, r#"{"type":"token_count","count":3}"#);
+    }
 
     #[test]
     fn generate_request_defaults_penalties_when_omitted() {
