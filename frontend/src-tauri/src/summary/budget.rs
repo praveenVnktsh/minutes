@@ -63,9 +63,8 @@ impl ContextBudget {
     /// Tokens left for variable input (transcript or summaries) once the
     /// output budget, the fixed prompt overhead and the margin are reserved.
     pub fn input_budget(&self, prompt_overhead_tokens: usize) -> usize {
-        self.n_ctx.saturating_sub(
-            self.max_output + prompt_overhead_tokens + self.safety_margin(),
-        )
+        self.n_ctx
+            .saturating_sub(self.max_output + prompt_overhead_tokens + self.safety_margin())
     }
 
     /// A larger output budget for retrying a truncated reply, or None when the
@@ -86,15 +85,13 @@ impl ContextBudget {
 /// accented scripts) is often a token per character or worse, so count each
 /// one as a full token.
 pub fn estimate_tokens(text: &str) -> usize {
-    let (ascii, other) = text
-        .chars()
-        .fold((0_usize, 0_usize), |(ascii, other), c| {
-            if c.is_ascii() {
-                (ascii + 1, other)
-            } else {
-                (ascii, other + 1)
-            }
-        });
+    let (ascii, other) = text.chars().fold((0_usize, 0_usize), |(ascii, other), c| {
+        if c.is_ascii() {
+            (ascii + 1, other)
+        } else {
+            (ascii, other + 1)
+        }
+    });
     ascii.div_ceil(3) + other
 }
 

@@ -497,7 +497,11 @@ mod tests {
     #[test]
     fn summary_presets_are_low_temperature_without_presence_penalty() {
         for model in get_available_models() {
-            assert_eq!(model.sampling.temperature, SUMMARY_TEMPERATURE, "{}", model.name);
+            assert_eq!(
+                model.sampling.temperature, SUMMARY_TEMPERATURE,
+                "{}",
+                model.name
+            );
             assert_eq!(model.sampling.presence_penalty, 0.0, "{}", model.name);
         }
         const { assert!(SUMMARY_TEMPERATURE > 0.0 && SUMMARY_TEMPERATURE <= 0.3) };

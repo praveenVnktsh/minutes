@@ -335,7 +335,10 @@ pub(crate) fn ollama_rejects_think(status: reqwest::StatusCode, body: &str) -> b
 
 /// Sampling fields named in a 400/422 rejection, e.g. OpenAI reasoning models
 /// refusing `temperature`. A retry without them can succeed.
-pub(crate) fn rejected_sampling_fields(status: reqwest::StatusCode, body: &str) -> Vec<&'static str> {
+pub(crate) fn rejected_sampling_fields(
+    status: reqwest::StatusCode,
+    body: &str,
+) -> Vec<&'static str> {
     if !matches!(status.as_u16(), 400 | 422) {
         return Vec::new();
     }
@@ -576,13 +579,9 @@ pub(crate) async fn generate_summary(
         LLMProvider::Ollama => {
             build_ollama_chat_body(model_name, system_prompt, user_prompt, options)
         }
-        _ => build_openai_compat_chat_body(
-            provider,
-            model_name,
-            system_prompt,
-            user_prompt,
-            options,
-        ),
+        _ => {
+            build_openai_compat_chat_body(provider, model_name, system_prompt, user_prompt, options)
+        }
     };
 
     info!(
@@ -740,7 +739,11 @@ mod tests {
 
     #[test]
     fn hosted_providers_get_fixed_low_temperature_and_seed() {
-        for provider in [LLMProvider::OpenAI, LLMProvider::Groq, LLMProvider::OpenRouter] {
+        for provider in [
+            LLMProvider::OpenAI,
+            LLMProvider::Groq,
+            LLMProvider::OpenRouter,
+        ] {
             let body = build_openai_compat_chat_body(
                 &provider,
                 "model",
@@ -787,7 +790,10 @@ mod tests {
             "user",
             &GenerationOptions::default(),
         );
-        assert_eq!(defaulted["temperature"].as_f64(), f32_json(SUMMARY_TEMPERATURE));
+        assert_eq!(
+            defaulted["temperature"].as_f64(),
+            f32_json(SUMMARY_TEMPERATURE)
+        );
         assert!(defaulted.get("max_tokens").is_none());
         assert!(defaulted.get("top_p").is_none());
     }

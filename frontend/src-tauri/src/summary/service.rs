@@ -3,8 +3,8 @@ use crate::database::repositories::{
     meeting::MeetingsRepository, setting::SettingsRepository, summary::SummaryProcessesRepository,
 };
 use crate::ollama::metadata::ModelMetadataCache;
-use crate::summary::language_detection::detect_summary_language;
 use crate::summary::budget::ContextBudget;
+use crate::summary::language_detection::detect_summary_language;
 use crate::summary::llm_client::{generate_summary, GenerationOptions, LLMProvider};
 use crate::summary::metadata::read_detected_summary_language_from_metadata;
 use crate::summary::processor::{
@@ -799,8 +799,7 @@ impl SummaryService {
                 top_p: config.top_p,
                 // The title prompt carries up to 12k characters of transcript,
                 // more than Ollama's small default context holds.
-                num_ctx: (config.provider == LLMProvider::Ollama)
-                    .then_some(TITLE_OLLAMA_NUM_CTX),
+                num_ctx: (config.provider == LLMProvider::Ollama).then_some(TITLE_OLLAMA_NUM_CTX),
             },
             app_data_dir.as_ref(),
             None,

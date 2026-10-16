@@ -279,7 +279,7 @@ pub fn default_transcript_only_system_prompt() -> String {
 
 {SPEAKER_GUIDE}
 
-**FORMAT** — use these sections in this order, and leave out any section that would be empty:
+**FORMAT** — use these sections in this order, and leave out any section that would be empty (never write a section that only says "None"):
 1. `# Title` — one H1 of at most 6 words naming what this specific meeting discussed. Never generic.
 2. `## Summary` — 2-3 sentences on the purpose and outcome of the meeting.
 3. `## Decisions` — one bullet per decision that was actually made.
@@ -319,6 +319,54 @@ pub(crate) fn resolve_summary_system_prompt(override_prompt: Option<&str>, notes
         _ if notes.trim().is_empty() => default_transcript_only_system_prompt(),
         _ => default_notes_system_prompt(),
     }
+}
+
+static PLACEHOLDER_LINE_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"(?i)^(?:[-*+]\s+)?[_*]*(?:none|n/a|nothing)(?:\s+(?:noted|identified|mentioned|stated|discussed|raised))?[_*]*\.?[_*]*$",
+    )
+    .unwrap()
+});
+
+/// Removes `## ` sections whose only content is a placeholder such as
+/// "- None". The prompt asks the model to omit empty sections, but small
+/// models still write them.
+pub(crate) fn drop_placeholder_sections(markdown: &str) -> String {
+    let mut sections: Vec<Vec<&str>> = vec![Vec::new()];
+    for line in markdown.lines() {
+        if line.starts_with("## ") {
+            sections.push(Vec::new());
+        }
+        sections
+            .last_mut()
+            .expect("sections is never empty")
+            .push(line);
+    }
+    let is_placeholder_section = |section: &Vec<&str>| {
+        section.first().is_some_and(|line| line.starts_with("## ")) && {
+            let mut body = section[1..]
+                .iter()
+                .map(|line| line.trim())
+                .filter(|line| !line.is_empty());
+            let first = body.next();
+            first.is_some_and(|line| PLACEHOLDER_LINE_REGEX.is_match(line))
+                && body.all(|line| PLACEHOLDER_LINE_REGEX.is_match(line))
+        }
+    };
+    if !sections.iter().any(is_placeholder_section) {
+        return markdown.to_string();
+    }
+    let kept: Vec<&str> = sections
+        .iter()
+        .filter(|section| !is_placeholder_section(section))
+        .flatten()
+        .copied()
+        .collect();
+    let mut cleaned = kept.join("\n").trim_end().to_string();
+    if markdown.ends_with('\n') {
+        cleaned.push('\n');
+    }
+    cleaned
 }
 
 fn build_final_user_prompt(notes: &str, content: &str) -> String {
@@ -673,9 +721,9 @@ impl SummaryBackend for ProviderBackend<'_> {
         user_prompt: &str,
     ) -> Result<usize, String> {
         if *self.provider != LLMProvider::BuiltInAI {
-            return Ok(
-                estimate_tokens(system_prompt) + estimate_tokens(user_prompt) + CHAT_TEMPLATE_TOKENS,
-            );
+            return Ok(estimate_tokens(system_prompt)
+                + estimate_tokens(user_prompt)
+                + CHAT_TEMPLATE_TOKENS);
         }
         let formatted = crate::summary::summary_engine::format_builtin_prompt(
             self.model_name,
@@ -881,7 +929,7 @@ impl<'a, B: SummaryBackend> SummaryPipeline<'a, B> {
                 true,
             )
             .await?;
-        Ok((cleaned.markdown, chunk_count))
+        Ok((drop_placeholder_sections(&cleaned.markdown), chunk_count))
     }
 
     /// Summarises each transcript chunk. A chunk that overflows the context is
@@ -941,7 +989,9 @@ impl<'a, B: SummaryBackend> SummaryPipeline<'a, B> {
                         }
                         break;
                     }
-                    Err(error) if should_retry_chunk_failure(attempt, self.backend.is_cancelled()) => {
+                    Err(error)
+                        if should_retry_chunk_failure(attempt, self.backend.is_cancelled()) =>
+                    {
                         warn!(
                             "Failed processing chunk {}/{} on attempt {}/{}: {}; retrying",
                             section, total, attempt, MAX_CHUNK_ATTEMPTS, error
@@ -978,7 +1028,10 @@ impl<'a, B: SummaryBackend> SummaryPipeline<'a, B> {
         }
         let overhead = self
             .backend
-            .count_prompt_tokens(COMBINE_SYSTEM_PROMPT, &build_combine_summary_user_prompt(""))
+            .count_prompt_tokens(
+                COMBINE_SYSTEM_PROMPT,
+                &build_combine_summary_user_prompt(""),
+            )
             .await?;
         let combine_budget = budget.input_budget(overhead);
         while summaries.len() > 1 {
@@ -986,8 +1039,7 @@ impl<'a, B: SummaryBackend> SummaryPipeline<'a, B> {
             for summary in &summaries {
                 tokens.push(self.backend.count_tokens(summary).await?);
             }
-            let mut groups =
-                group_within_budget(&tokens, combine_budget, SUMMARY_SEPARATOR_TOKENS);
+            let mut groups = group_within_budget(&tokens, combine_budget, SUMMARY_SEPARATOR_TOKENS);
             if groups.len() == summaries.len() {
                 // No two summaries fit together. Pair them anyway so every
                 // round makes progress; an overflow then surfaces as an error.
@@ -1101,7 +1153,9 @@ pub(crate) async fn generate_meeting_summary<B: SummaryBackend>(
             FinalLanguageAction::NormalizeEnglish => {
                 let (normalized, fallback) = english_markdown_after_normalization_result(
                     &english_markdown,
-                    pipeline.normalize_markdown_to_english(&english_markdown).await,
+                    pipeline
+                        .normalize_markdown_to_english(&english_markdown)
+                        .await,
                     backend.is_cancelled(),
                 )?;
                 english_markdown = normalized.markdown.clone();
@@ -1316,7 +1370,10 @@ mod tests {
             default_transcript_only_system_prompt(),
             chunk_system_prompt(),
         ] {
-            assert!(prompt.contains("`[You]` is the person who recorded"), "{prompt}");
+            assert!(
+                prompt.contains("`[You]` is the person who recorded"),
+                "{prompt}"
+            );
             assert!(prompt.contains("`[Others]`"), "{prompt}");
             assert!(prompt.contains("several different people"), "{prompt}");
         }
@@ -1344,6 +1401,27 @@ mod tests {
         assert!(prompt.contains(ENGLISH_BASE_SUMMARY_INSTRUCTION));
         assert!(prompt.contains("no reasoning"));
         assert!(!prompt.contains(PROMPT_ECHO_TITLE));
+    }
+
+    #[test]
+    fn placeholder_only_sections_are_dropped() {
+        let markdown = "# Launch\n\n## Summary\nShipped.\n\n## Decisions\n- None\n\n## Action items\n- **Priya** — checklist\n\n## Open questions\n- None.\n";
+        assert_eq!(
+            drop_placeholder_sections(markdown),
+            "# Launch\n\n## Summary\nShipped.\n\n## Action items\n- **Priya** — checklist\n"
+        );
+        for placeholder in ["None", "* n/a", "- Nothing", "- None noted.", "_None_"] {
+            let markdown = format!("# T\n\n## Open questions\n{placeholder}\n");
+            assert_eq!(
+                drop_placeholder_sections(&markdown),
+                "# T\n",
+                "{placeholder}"
+            );
+        }
+        let kept = "# T\n\n## Decisions\n- None of the vendors met the bar.\n";
+        assert_eq!(drop_placeholder_sections(kept), kept);
+        let untouched = "# T\n\n- note\n";
+        assert_eq!(drop_placeholder_sections(untouched), untouched);
     }
 
     #[test]
@@ -1529,8 +1607,9 @@ mod tests {
 
     // Pipeline tests against a scripted backend -----------------------------
 
-    type Responder =
-        dyn Fn(usize, &str, &str, &GenerationOptions) -> Result<LlmCompletion, String> + Send + Sync;
+    type Responder = dyn Fn(usize, &str, &str, &GenerationOptions) -> Result<LlmCompletion, String>
+        + Send
+        + Sync;
 
     /// Counts one token per character so budgets are easy to reason about.
     struct FakeBackend {
@@ -1651,8 +1730,14 @@ mod tests {
         .unwrap();
         assert_eq!(generated.final_markdown, "# Notes");
         let calls = backend.calls();
-        assert_eq!(calls.len(), 1, "unknown language must not add a normalization pass");
-        assert!(calls[0].1.contains("<transcript>\n[00:01] [You] hello\n</transcript>"));
+        assert_eq!(
+            calls.len(),
+            1,
+            "unknown language must not add a normalization pass"
+        );
+        assert!(calls[0]
+            .1
+            .contains("<transcript>\n[00:01] [You] hello\n</transcript>"));
         assert_eq!(calls[0].2.max_tokens, Some(4_096));
         assert_eq!(calls[0].2.num_ctx, None);
     }
@@ -1694,8 +1779,9 @@ mod tests {
 
     #[tokio::test]
     async fn repeated_truncation_fails_instead_of_saving_partial_notes() {
-        let backend =
-            FakeBackend::new(LLMProvider::BuiltInAI, |_, _, _, _| truncated("# Notes\n- half"));
+        let backend = FakeBackend::new(LLMProvider::BuiltInAI, |_, _, _, _| {
+            truncated("# Notes\n- half")
+        });
         let error = run(&backend, "short", Some(ContextBudget::new(32_768)), None)
             .await
             .unwrap_err();
@@ -1750,7 +1836,13 @@ mod tests {
         });
         // Unique lines, so identical prompts can only come from a resend.
         let text: String = (0..200)
-            .map(|i| format!("[{:02}:{:02}] [You] item {i}: plan the launch.\n", i / 60, i % 60))
+            .map(|i| {
+                format!(
+                    "[{:02}:{:02}] [You] item {i}: plan the launch.\n",
+                    i / 60,
+                    i % 60
+                )
+            })
             .collect();
         run(&backend, &text, Some(budget), None).await.unwrap();
 
@@ -1772,7 +1864,62 @@ mod tests {
                 "an overflowing chunk was resent unchanged"
             );
         }
-        assert!(chunk_prompts.iter().any(|user| user.chars().count() <= 1_800));
+        assert!(chunk_prompts
+            .iter()
+            .any(|user| user.chars().count() <= 1_800));
+    }
+
+    /// Manual smoke test against a real built-in model:
+    /// MEETILY_LLAMA_HELPER=<path to llama-helper> MINUTES_SMOKE_APP_DIR=<app data dir>
+    /// cargo test -p meetily builtin_summary_is_deterministic -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore = "needs a downloaded built-in model and the llama-helper binary"]
+    async fn builtin_summary_is_deterministic() {
+        let Ok(app_dir) = std::env::var("MINUTES_SMOKE_APP_DIR") else {
+            return;
+        };
+        let app_dir = PathBuf::from(app_dir);
+        let model = std::env::var("MINUTES_SMOKE_MODEL").unwrap_or_else(|_| "qwen3.5:4b".into());
+        let client = Client::new();
+        let backend = ProviderBackend {
+            client: &client,
+            provider: &LLMProvider::BuiltInAI,
+            model_name: &model,
+            api_key: "",
+            ollama_endpoint: None,
+            custom_openai_endpoint: None,
+            app_data_dir: Some(&app_dir),
+            cancellation_token: None,
+        };
+        let text = "[00:00] [You] Okay, let's settle the launch date for the mobile app.\n\
+[00:05] [Others] Design needs one more week for the onboarding screens.\n\
+[00:12] [You] Then we ship on March 14th. Priya, can you update the release checklist by Friday?\n\
+[00:20] [Others] Sure. Also, do we still need the Android tablet layout?\n\
+[00:26] [You] Not for launch, let's revisit in April.";
+        let mut outputs = Vec::new();
+        for _ in 0..2 {
+            let generated = generate_meeting_summary(
+                &backend,
+                &model,
+                text,
+                "",
+                &default_transcript_only_system_prompt(),
+                Some(ContextBudget::new(32_768)),
+                &GenerationOptions::default(),
+                None,
+                Some("en"),
+                None,
+            )
+            .await
+            .unwrap();
+            outputs.push(generated.final_markdown);
+            // Restart the helper so the second run is a fresh process.
+            crate::summary::summary_engine::force_shutdown_sidecar()
+                .await
+                .unwrap();
+        }
+        println!("{}", outputs[0]);
+        assert_eq!(outputs[0], outputs[1]);
     }
 
     #[tokio::test]
@@ -1780,9 +1927,14 @@ mod tests {
         let backend = FakeBackend::new(LLMProvider::BuiltInAI, |index, _, _, _| {
             reply(if index == 0 { "# Notizen" } else { "# Notes" })
         });
-        let generated = run(&backend, "kurz", Some(ContextBudget::new(32_768)), Some("de"))
-            .await
-            .unwrap();
+        let generated = run(
+            &backend,
+            "kurz",
+            Some(ContextBudget::new(32_768)),
+            Some("de"),
+        )
+        .await
+        .unwrap();
         assert_eq!(generated.final_markdown, "# Notes");
         assert_eq!(backend.calls().len(), 2);
     }
