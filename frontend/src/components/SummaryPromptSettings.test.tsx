@@ -57,10 +57,10 @@ mock.module('sonner', () => ({
 
 const { SummaryPromptSettings } = await import('./SummaryPromptSettings')
 
-async function render() {
+async function render(kind?: 'notes' | 'transcriptOnly') {
   let renderer!: ReactTestRenderer
   await act(async () => {
-    renderer = create(<SummaryPromptSettings />)
+    renderer = create(<SummaryPromptSettings kind={kind} />)
   })
   return renderer
 }
@@ -121,11 +121,26 @@ describe('SummaryPromptSettings', () => {
 
     expect(calls.at(-1)).toEqual({
       command: 'api_save_summary_prompt',
-      args: { prompt: 'Write terse bullet points.' },
+      args: { prompt: 'Write terse bullet points.', kind: 'notes' },
     })
     expect(status(renderer)).toBe('Custom')
     expect(button(renderer, 'Save prompt').props.disabled).toBe(true)
     expect(toasts).toEqual([{ kind: 'success', message: 'Notes prompt saved' }])
+  })
+
+  test('the no-notes card edits its own prompt kind', async () => {
+    const renderer = await render('transcriptOnly')
+    expect(calls[0]).toEqual({ command: 'api_get_summary_prompt', args: { kind: 'transcriptOnly' } })
+    expect(textarea(renderer).props['aria-label']).toBe('No-notes prompt')
+
+    await type(renderer, 'Bullets only.')
+    await click(button(renderer, 'Save prompt'))
+
+    expect(calls.at(-1)).toEqual({
+      command: 'api_save_summary_prompt',
+      args: { prompt: 'Bullets only.', kind: 'transcriptOnly' },
+    })
+    expect(toasts).toEqual([{ kind: 'success', message: 'No-notes prompt saved' }])
   })
 
   test('reset clears a saved override and restores the default text', async () => {
