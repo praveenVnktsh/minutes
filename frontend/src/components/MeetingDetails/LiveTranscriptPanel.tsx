@@ -8,6 +8,7 @@ import { useTranscripts } from '@/contexts/TranscriptContext';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
 import { useConfig } from '@/contexts/ConfigContext';
 import { Switch } from '@/components/ui/switch';
+import { LiveSummaryPanel } from './LiveSummaryPanel';
 import {
   LIVE_TRANSCRIPTION_STORAGE_KEY,
   isLiveTranscriptionEnabled,
@@ -117,6 +118,7 @@ export function LiveTranscriptPanel() {
           )}
         </div>
       </div>
+      {(!toggleAvailable || liveEnabled) && <LiveSummaryPanel active={isRecording && !isPaused} />}
       {toggleAvailable && !liveEnabled ? (
         <div className="flex flex-1 flex-col items-center justify-center gap-2 px-8 pb-16 text-center">
           <p className="text-sm font-medium text-[var(--ink-muted)]">Live transcription is off</p>

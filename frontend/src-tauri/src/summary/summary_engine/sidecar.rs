@@ -10,7 +10,8 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{oneshot, Mutex, RwLock};
+use tokio_util::sync::CancellationToken;
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -31,6 +32,11 @@ pub struct SidecarManager {
 
     /// Stdout reader for receiving responses
     stdout_reader: Arc<Mutex<Option<BufReader<ChildStdout>>>>,
+
+    /// Held for one whole request/response round trip. llama-helper answers
+    /// one line per request, in order, so two callers interleaving their
+    /// write/read halves would read each other's replies.
+    exchange_lock: Arc<Mutex<()>>,
 
     /// Last activity timestamp
     last_activity: Arc<RwLock<Instant>>,
@@ -94,6 +100,7 @@ impl SidecarManager {
             child_process: Arc::new(Mutex::new(None)),
             stdin_writer: Arc::new(Mutex::new(None)),
             stdout_reader: Arc::new(Mutex::new(None)),
+            exchange_lock: Arc::new(Mutex::new(())),
             last_activity: Arc::new(RwLock::new(Instant::now())),
             is_healthy: Arc::new(AtomicBool::new(false)),
             should_shutdown: Arc::new(AtomicBool::new(false)),
@@ -355,6 +362,8 @@ impl SidecarManager {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit()) // Log stderr to main process
+            // A shutdown future dropped part-way must not leak a running helper.
+            .kill_on_drop(true)
             .env("LLAMA_IDLE_TIMEOUT", self.idle_timeout_secs.to_string());
 
         #[cfg(target_os = "windows")]
@@ -416,65 +425,110 @@ impl SidecarManager {
         Ok(())
     }
 
-    /// Send a request to the sidecar and wait for response
-    pub async fn send_request(&self, request_json: String, timeout: Duration) -> Result<String> {
-        // Track active request
-        let _guard = RequestGuard::new(self.active_request_count.clone());
-
-        // Write request to stdin
-        {
-            let mut stdin_lock = self.stdin_writer.lock().await;
-            let stdin = stdin_lock
-                .as_mut()
-                .ok_or_else(|| anyhow!("Sidecar not running"))?;
-
-            stdin
-                .write_all(request_json.as_bytes())
-                .await
-                .context("Failed to write request to stdin")?;
-            stdin
-                .write_all(b"\n")
-                .await
-                .context("Failed to write newline")?;
-            stdin.flush().await.context("Failed to flush stdin")?;
-        }
-
-        // Read response from stdout with timeout
-        match tokio::time::timeout(timeout, self.read_response()).await {
-            Ok(Ok(response)) => {
-                self.update_activity().await;
-                Ok(response)
+    /// Send a request to the sidecar and wait for its response.
+    ///
+    /// Requests are serialized: the whole write/read round trip runs under
+    /// `exchange_lock`, and time spent waiting for that lock does not count
+    /// toward `timeout`. Cancelling while still waiting for the lock never
+    /// touches the sidecar.
+    ///
+    /// Once the request is written, `on_abandon` decides what a timeout or
+    /// cancellation does: [`OnAbandon::StopSidecar`] kills the helper so the
+    /// generation stops at once; [`OnAbandon::LetFinish`] returns to the caller
+    /// immediately and leaves the reply to be read and discarded in the
+    /// background (up to `ABANDONED_DRAIN_LIMIT`), so other callers sharing
+    /// the sidecar are unaffected.
+    pub async fn send_request(
+        &self,
+        request_json: String,
+        timeout: Duration,
+        cancellation_token: Option<&CancellationToken>,
+        on_abandon: OnAbandon,
+    ) -> Result<String> {
+        let guard = RequestGuard::new(self.active_request_count.clone());
+        let exchange = {
+            let lock = self.exchange_lock.clone().lock_owned();
+            match cancellation_token {
+                Some(token) => tokio::select! {
+                    biased;
+                    _ = token.cancelled() => return Err(anyhow!(SidecarError::Cancelled)),
+                    exchange = lock => exchange,
+                },
+                None => lock.await,
             }
-            Ok(Err(e)) => Err(e),
-            Err(_) => {
-                // Timeout reached - shutdown sidecar to stop generation
-                log::error!("Request timeout after {:?}, shutting down sidecar", timeout);
+        };
+
+        let pipes = self.pipes();
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let drain_limit = timeout.max(ABANDONED_DRAIN_LIMIT);
+        let round_trip = tokio::spawn(async move {
+            let _exchange = exchange;
+            let _guard = guard;
+            let result =
+                match tokio::time::timeout(drain_limit, pipes.round_trip(&request_json)).await {
+                    Ok(result) => result,
+                    Err(_) => {
+                        // The reply never came: the line protocol is out of
+                        // step, so the helper has to go.
+                        log::error!(
+                            "llama-helper gave no reply within {:?}, stopping it",
+                            drain_limit
+                        );
+                        pipes.kill().await;
+                        Err(anyhow!(SidecarError::TimedOut(drain_limit)))
+                    }
+                };
+            if result.is_ok() {
+                *pipes.last_activity.write().await = Instant::now();
+            }
+            let _ = reply_tx.send(result);
+        });
+
+        let cancelled = async {
+            match cancellation_token {
+                Some(token) => token.cancelled().await,
+                None => std::future::pending().await,
+            }
+        };
+        let abandoned = tokio::select! {
+            reply = reply_rx => {
+                return reply.unwrap_or_else(|_| {
+                    Err(anyhow!("Sidecar request task ended without a reply"))
+                });
+            }
+            _ = tokio::time::sleep(timeout) => SidecarError::TimedOut(timeout),
+            _ = cancelled => SidecarError::Cancelled,
+        };
+        match on_abandon {
+            OnAbandon::StopSidecar => {
+                log::warn!("{abandoned}; shutting down the sidecar to stop generation");
                 if let Err(shutdown_err) = self.shutdown().await {
-                    log::error!("Failed to shutdown sidecar after timeout: {}", shutdown_err);
+                    log::error!("Failed to shutdown sidecar: {}", shutdown_err);
                 }
-                Err(anyhow!("Request timed out after {:?}", timeout))
+                // The kill ends the read with EOF, which releases the lock.
+                let _ = tokio::time::timeout(Duration::from_secs(5), round_trip).await;
             }
+            OnAbandon::LetFinish => {
+                log::info!("{abandoned}; leaving the reply to finish in the background");
+            }
+        }
+        Err(anyhow!(abandoned))
+    }
+
+    fn pipes(&self) -> Pipes {
+        Pipes {
+            child_process: self.child_process.clone(),
+            stdin_writer: self.stdin_writer.clone(),
+            stdout_reader: self.stdout_reader.clone(),
+            is_healthy: self.is_healthy.clone(),
+            current_model_path: self.current_model_path.clone(),
+            last_activity: self.last_activity.clone(),
         }
     }
 
     /// Read a single line response from stdout
     async fn read_response(&self) -> Result<String> {
-        let mut stdout_lock = self.stdout_reader.lock().await;
-        let reader = stdout_lock
-            .as_mut()
-            .ok_or_else(|| anyhow!("Sidecar not running"))?;
-
-        let mut line = String::new();
-        reader
-            .read_line(&mut line)
-            .await
-            .context("Failed to read response from stdout")?;
-
-        if line.is_empty() {
-            return Err(anyhow!("Sidecar closed stdout (process may have crashed)"));
-        }
-
-        Ok(line.trim().to_string())
+        self.pipes().read_line().await
     }
 
     /// Send ping to keep sidecar alive
@@ -483,7 +537,12 @@ impl SidecarManager {
         let timeout = Duration::from_secs(5);
 
         // Note: We don't use send_request here to avoid incrementing active_request_count
-        // for internal health checks, as that would prevent graceful shutdown
+        // for internal health checks, as that would prevent graceful shutdown.
+        // A busy sidecar is alive by definition, so skip the ping rather than
+        // queue behind (or interleave with) a real request.
+        let Ok(_exchange) = self.exchange_lock.try_lock() else {
+            return Ok(());
+        };
 
         // Write request
         {
@@ -567,42 +626,32 @@ impl SidecarManager {
             .await;
         }
 
-        // Kill process if still running
-        {
-            let mut child_lock = self.child_process.lock().await;
-            if let Some(mut child) = child_lock.take() {
-                match tokio::time::timeout(Duration::from_secs(3), child.wait()).await {
-                    Ok(Ok(status)) => {
-                        log::info!("Sidecar exited with status: {}", status);
-                    }
-                    Ok(Err(e)) => {
-                        log::error!("Failed to wait for sidecar: {}", e);
-                    }
-                    Err(_) => {
-                        log::warn!("Sidecar didn't exit gracefully, killing");
-                        let _ = child.kill().await;
-                    }
+        // Detach the process before awaiting its exit, so a caller dropping
+        // this future part-way (a select!, an abort) cannot leave the manager
+        // half shut down: it is already unhealthy with no model, so the next
+        // request respawns, and the child is `kill_on_drop`, so dropping it
+        // mid-wait still ends the process. stdout is cleared only after the
+        // process is gone: a request mid-read holds its lock until EOF.
+        self.is_healthy.store(false, Ordering::SeqCst);
+        let child = self.child_process.lock().await.take();
+        *self.stdin_writer.lock().await = None;
+        *self.current_model_path.write().await = None;
+
+        if let Some(mut child) = child {
+            match tokio::time::timeout(Duration::from_secs(3), child.wait()).await {
+                Ok(Ok(status)) => {
+                    log::info!("Sidecar exited with status: {}", status);
+                }
+                Ok(Err(e)) => {
+                    log::error!("Failed to wait for sidecar: {}", e);
+                }
+                Err(_) => {
+                    log::warn!("Sidecar didn't exit gracefully, killing");
+                    let _ = child.kill().await;
                 }
             }
         }
-
-        // Clear handles
-        {
-            let mut stdin_lock = self.stdin_writer.lock().await;
-            *stdin_lock = None;
-        }
-
-        {
-            let mut stdout_lock = self.stdout_reader.lock().await;
-            *stdout_lock = None;
-        }
-
-        {
-            let mut current_model = self.current_model_path.write().await;
-            *current_model = None;
-        }
-
-        self.is_healthy.store(false, Ordering::SeqCst);
+        *self.stdout_reader.lock().await = None;
 
         log::info!("Sidecar shutdown complete");
         Ok(())
@@ -631,6 +680,7 @@ impl SidecarManager {
             child_process: self.child_process.clone(),
             stdin_writer: self.stdin_writer.clone(),
             stdout_reader: self.stdout_reader.clone(),
+            exchange_lock: self.exchange_lock.clone(),
             last_activity: self.last_activity.clone(),
             is_healthy: self.is_healthy.clone(),
             should_shutdown: self.should_shutdown.clone(),
@@ -679,6 +729,7 @@ impl SidecarManager {
             child_process: self.child_process.clone(),
             stdin_writer: self.stdin_writer.clone(),
             stdout_reader: self.stdout_reader.clone(),
+            exchange_lock: self.exchange_lock.clone(),
             last_activity: self.last_activity.clone(),
             is_healthy: self.is_healthy.clone(),
             should_shutdown: self.should_shutdown.clone(),
@@ -727,6 +778,90 @@ impl SidecarManager {
 
             log::debug!("Idle check loop exited");
         });
+    }
+}
+
+/// What a timed-out or cancelled request does to the sidecar.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum OnAbandon {
+    /// Kill the helper so the generation stops immediately (a user cancel).
+    #[default]
+    StopSidecar,
+    /// Leave the helper running; its reply is read and dropped in the
+    /// background. For background callers (the live timeline) that share the
+    /// sidecar with the summary and must never interrupt it.
+    LetFinish,
+}
+
+/// Longest an abandoned request may keep the sidecar busy before the helper is
+/// stopped to get the protocol back in step.
+pub const ABANDONED_DRAIN_LIMIT: Duration = Duration::from_secs(models::GENERATION_TIMEOUT_SECS);
+
+#[derive(Debug, thiserror::Error)]
+pub enum SidecarError {
+    #[error("Generation cancelled by user")]
+    Cancelled,
+    #[error("Request timed out after {0:?}")]
+    TimedOut(Duration),
+}
+
+/// The handles one request needs, owned, so its round trip can outlive the
+/// caller (see [`OnAbandon::LetFinish`]).
+struct Pipes {
+    child_process: Arc<Mutex<Option<Child>>>,
+    stdin_writer: Arc<Mutex<Option<ChildStdin>>>,
+    stdout_reader: Arc<Mutex<Option<BufReader<ChildStdout>>>>,
+    is_healthy: Arc<AtomicBool>,
+    current_model_path: Arc<RwLock<Option<PathBuf>>>,
+    last_activity: Arc<RwLock<Instant>>,
+}
+
+impl Pipes {
+    async fn round_trip(&self, request_json: &str) -> Result<String> {
+        {
+            let mut stdin_lock = self.stdin_writer.lock().await;
+            let stdin = stdin_lock
+                .as_mut()
+                .ok_or_else(|| anyhow!("Sidecar not running"))?;
+            stdin
+                .write_all(request_json.as_bytes())
+                .await
+                .context("Failed to write request to stdin")?;
+            stdin
+                .write_all(b"\n")
+                .await
+                .context("Failed to write newline")?;
+            stdin.flush().await.context("Failed to flush stdin")?;
+        }
+        self.read_line().await
+    }
+
+    async fn read_line(&self) -> Result<String> {
+        let mut stdout_lock = self.stdout_reader.lock().await;
+        let reader = stdout_lock
+            .as_mut()
+            .ok_or_else(|| anyhow!("Sidecar not running"))?;
+        let mut line = String::new();
+        reader
+            .read_line(&mut line)
+            .await
+            .context("Failed to read response from stdout")?;
+        if line.is_empty() {
+            return Err(anyhow!("Sidecar closed stdout (process may have crashed)"));
+        }
+        Ok(line.trim().to_string())
+    }
+
+    /// Stop the helper without the polite shutdown request.
+    async fn kill(&self) {
+        self.is_healthy.store(false, Ordering::SeqCst);
+        let child = self.child_process.lock().await.take();
+        *self.stdin_writer.lock().await = None;
+        *self.current_model_path.write().await = None;
+        if let Some(mut child) = child {
+            let _ = child.kill().await;
+        }
+        *self.stdout_reader.lock().await = None;
     }
 }
 

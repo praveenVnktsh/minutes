@@ -237,6 +237,8 @@ fn finalize_recording_start<R: Runtime>(app: &AppHandle<R>, session_id: String) 
         &session_id,
         crate::meeting_activity::ActivityStatus::Recording,
     );
+    // Infallible and non-blocking: the live summary never affects recording.
+    crate::live_summary::start_session(app, session_id);
 }
 
 struct RecordingSession {
@@ -1541,6 +1543,9 @@ async fn stop_recording_session<R: Runtime>(
             info!("✅ Transcript-update listener removed");
         }
     }
+    // The live summary has every final segment now: let it write its last
+    // entry in the background (bounded), without delaying the save.
+    crate::live_summary::finish_session(&session_id);
 
     let manager_for_cleanup = RECORDING_MANAGER.lock().unwrap().take();
     if let Some((stopping_session_id, segments)) =

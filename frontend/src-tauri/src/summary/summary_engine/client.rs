@@ -14,7 +14,7 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use super::models;
-use super::sidecar::SidecarManager;
+use super::sidecar::{OnAbandon, SidecarManager};
 
 // ============================================================================
 // Request/Response Types
@@ -227,21 +227,11 @@ async fn send_cancellable(
     request_json: String,
     timeout: Duration,
     cancellation_token: Option<&CancellationToken>,
+    on_abandon: OnAbandon,
 ) -> Result<String> {
-    let Some(token) = cancellation_token else {
-        return manager.send_request(request_json, timeout).await;
-    };
-    tokio::select! {
-        result = manager.send_request(request_json, timeout) => result,
-        _ = token.cancelled() => {
-            log::warn!("Generation cancelled by user, shutting down sidecar");
-            // Shutdown sidecar to stop generation immediately
-            if let Err(e) = manager.shutdown().await {
-                log::error!("Failed to shutdown sidecar during cancellation: {}", e);
-            }
-            Err(anyhow!("Generation cancelled by user"))
-        }
-    }
+    manager
+        .send_request(request_json, timeout, cancellation_token, on_abandon)
+        .await
 }
 
 /// Formats the prompt exactly as `generate_with_builtin` will, so token counts
@@ -274,12 +264,31 @@ pub async fn count_builtin_tokens(
         request_json,
         Duration::from_secs(TOKENIZE_TIMEOUT_SECS),
         cancellation_token,
+        // Counting is cheap and runs under the summary's own cancellation.
+        OnAbandon::StopSidecar,
     )
     .await?;
     parse_token_count_response(&response_json)
 }
 
 const TOKENIZE_TIMEOUT_SECS: u64 = 120;
+
+/// Per-call overrides for [`generate_with_builtin`]. `None` keeps the model's
+/// own sampling defaults, the fixed seed and the standard timeout.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct BuiltinGenerateOptions {
+    /// Output budget; `None` uses `models::DEFAULT_MAX_TOKENS`.
+    pub max_tokens: Option<u32>,
+    /// Sampling temperature; `None` uses the model's default.
+    pub temperature: Option<f32>,
+    /// Sampling seed; `None` uses [`BUILTIN_SEED`].
+    pub seed: Option<u32>,
+    /// Time the request may take once it reaches the sidecar (waiting for
+    /// another caller's request does not count).
+    pub timeout: Option<Duration>,
+    /// What a timeout or cancellation does to the shared sidecar.
+    pub on_abandon: OnAbandon,
+}
 
 /// Generate text using built-in AI
 ///
@@ -288,7 +297,7 @@ const TOKENIZE_TIMEOUT_SECS: u64 = 120;
 /// * `model_name` - Model name (e.g., "gemma3:1b")
 /// * `system_prompt` - System instructions for the model
 /// * `user_prompt` - User message/task
-/// * `max_tokens` - Output budget; `None` uses `models::DEFAULT_MAX_TOKENS`
+/// * `options` - Output budget, sampling overrides, timeout and abandon policy
 /// * `cancellation_token` - Optional token for cancellation
 ///
 /// # Returns
@@ -298,7 +307,7 @@ pub async fn generate_with_builtin(
     model_name: &str,
     system_prompt: &str,
     user_prompt: &str,
-    max_tokens: Option<u32>,
+    options: BuiltinGenerateOptions,
     cancellation_token: Option<&CancellationToken>,
 ) -> Result<BuiltinCompletion> {
     if cancellation_token.is_some_and(CancellationToken::is_cancelled) {
@@ -317,7 +326,8 @@ pub async fn generate_with_builtin(
 
     // Prepare generation request with model-specific sampling parameters
     let sampling = model_def.sampling.sanitize_for_llama_helper();
-    let max_tokens = max_tokens
+    let max_tokens = options
+        .max_tokens
         .and_then(|value| i32::try_from(value).ok())
         .filter(|value| *value > 0)
         .unwrap_or(models::DEFAULT_MAX_TOKENS);
@@ -326,7 +336,7 @@ pub async fn generate_with_builtin(
         max_tokens: Some(max_tokens),
         context_size: Some(model_def.context_size),
         model_path: Some(model_path.to_string_lossy().to_string()),
-        temperature: Some(sampling.temperature),
+        temperature: Some(options.temperature.unwrap_or(sampling.temperature)),
         top_k: Some(sampling.top_k),
         top_p: Some(sampling.top_p),
         presence_penalty: Some(sampling.presence_penalty),
@@ -334,15 +344,23 @@ pub async fn generate_with_builtin(
         repeat_penalty: Some(sampling.repeat_penalty),
         penalty_last_n: Some(sampling.penalty_last_n),
         stop_tokens: Some(sampling.stop_tokens),
-        seed: Some(BUILTIN_SEED),
+        seed: Some(options.seed.unwrap_or(BUILTIN_SEED)),
     };
 
     let request_json = serde_json::to_string(&request)?;
-    let timeout = Duration::from_secs(models::GENERATION_TIMEOUT_SECS);
+    let timeout = options
+        .timeout
+        .unwrap_or(Duration::from_secs(models::GENERATION_TIMEOUT_SECS));
 
     log::info!("Sending generation request to sidecar (max_tokens: {max_tokens})");
-    let response_json =
-        send_cancellable(&manager, request_json, timeout, cancellation_token).await?;
+    let response_json = send_cancellable(
+        &manager,
+        request_json,
+        timeout,
+        cancellation_token,
+        options.on_abandon,
+    )
+    .await?;
 
     if cancellation_token.is_some_and(CancellationToken::is_cancelled) {
         return Err(anyhow!("Generation cancelled"));

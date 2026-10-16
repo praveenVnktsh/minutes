@@ -373,7 +373,14 @@ async fn delete_meeting_with_transaction(
         .execute(&mut *transaction)
         .await?;
 
-    // 4. Finally, delete the meeting
+    // 4. Delete live summary timeline entries. The foreign key cascades too;
+    // deleting explicitly keeps this independent of the foreign_keys pragma.
+    sqlx::query("DELETE FROM meeting_timeline_entries WHERE meeting_id = ?")
+        .bind(meeting_id)
+        .execute(&mut *transaction)
+        .await?;
+
+    // 5. Finally, delete the meeting
     let result = sqlx::query("DELETE FROM meetings WHERE id = ?")
         .bind(meeting_id)
         .execute(&mut *transaction)

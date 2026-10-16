@@ -223,6 +223,7 @@ pub async fn chat_with_meeting<R: Runtime>(
             temperature: custom.as_ref().and_then(|value| value.temperature),
             top_p: custom.as_ref().and_then(|value| value.top_p),
             num_ctx: None,
+            ..Default::default()
         },
         app_data_dir.as_ref(),
         None,

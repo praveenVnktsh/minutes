@@ -43,6 +43,33 @@ pub(crate) struct GenerationOptions {
     pub top_p: Option<f32>,
     /// Context window to run Ollama with (`options.num_ctx`).
     pub num_ctx: Option<u32>,
+    /// Sampling seed for providers that accept one; `None` uses
+    /// `SUMMARY_SEED`. Retries vary it so they can produce something new.
+    pub seed: Option<u32>,
+    /// Temperature for every provider that accepts one (built-in AI and
+    /// custom endpoints included), overriding their defaults and the user's
+    /// setting. For background callers that need a fixed low temperature.
+    pub sampling_temperature: Option<f32>,
+    /// Hard output cap applied to every provider, hosted ones included.
+    pub output_cap: Option<u32>,
+    /// Request timeout; `None` keeps each provider's default.
+    pub timeout: Option<Duration>,
+    /// What a timeout or cancellation does to the shared built-in sidecar.
+    pub on_abandon: crate::summary::summary_engine::sidecar::OnAbandon,
+}
+
+impl GenerationOptions {
+    fn seed(&self) -> u32 {
+        self.seed.unwrap_or(SUMMARY_SEED)
+    }
+
+    /// `limit` capped by `output_cap`.
+    fn capped(&self, limit: Option<u32>) -> Option<u32> {
+        match (limit, self.output_cap) {
+            (Some(limit), Some(cap)) => Some(limit.min(cap)),
+            (limit, cap) => limit.or(cap),
+        }
+    }
 }
 
 // Generic structure for OpenAI-compatible API chat messages
@@ -94,13 +121,23 @@ pub(crate) fn build_openai_compat_chat_body(
 ) -> serde_json::Value {
     let (max_tokens, temperature, top_p, seed) = if *provider == LLMProvider::CustomOpenAI {
         (
-            options.max_tokens,
-            Some(options.temperature.unwrap_or(SUMMARY_TEMPERATURE)),
+            options.capped(options.max_tokens),
+            Some(
+                options
+                    .sampling_temperature
+                    .or(options.temperature)
+                    .unwrap_or(SUMMARY_TEMPERATURE),
+            ),
             options.top_p,
             None,
         )
     } else {
-        (None, Some(SUMMARY_TEMPERATURE), None, Some(SUMMARY_SEED))
+        (
+            options.capped(None),
+            Some(options.sampling_temperature.unwrap_or(SUMMARY_TEMPERATURE)),
+            None,
+            Some(options.seed()),
+        )
     };
 
     serde_json::json!(ChatRequest {
@@ -123,13 +160,13 @@ pub(crate) fn build_ollama_chat_body(
     options: &GenerationOptions,
 ) -> serde_json::Value {
     let mut model_options = serde_json::json!({
-        "temperature": SUMMARY_TEMPERATURE,
-        "seed": SUMMARY_SEED,
+        "temperature": options.sampling_temperature.unwrap_or(SUMMARY_TEMPERATURE),
+        "seed": options.seed(),
     });
     if let Some(num_ctx) = options.num_ctx {
         model_options["num_ctx"] = num_ctx.into();
     }
-    if let Some(max_tokens) = options.max_tokens {
+    if let Some(max_tokens) = options.capped(options.max_tokens) {
         model_options["num_predict"] = max_tokens.into();
     }
     serde_json::json!({
@@ -242,10 +279,20 @@ impl ClaudeChatResponse {
                 .content
                 .iter()
                 .any(|block| matches!(block.block_type.as_str(), "thinking" | "redacted_thinking")),
-            truncated: self.stop_reason.as_deref() == Some("max_tokens"),
+            truncated: claude_stop_reason_truncates(self.stop_reason.as_deref()),
             prompt_tokens: None,
         })
     }
+}
+
+/// Claude stops early either at its output budget or, on models that take
+/// more context than the request fits, at the end of the context window.
+/// Either way the answer is incomplete.
+fn claude_stop_reason_truncates(stop_reason: Option<&str>) -> bool {
+    matches!(
+        stop_reason,
+        Some("max_tokens") | Some("model_context_window_exceeded")
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -483,7 +530,13 @@ pub(crate) async fn generate_summary(
             model_name,
             system_prompt,
             user_prompt,
-            options.max_tokens,
+            crate::summary::summary_engine::client::BuiltinGenerateOptions {
+                max_tokens: options.capped(options.max_tokens),
+                temperature: options.sampling_temperature,
+                seed: options.seed,
+                timeout: options.timeout,
+                on_abandon: options.on_abandon,
+            },
             cancellation_token,
         )
         .await
@@ -570,7 +623,9 @@ pub(crate) async fn generate_summary(
         LLMProvider::Claude => serde_json::json!(ClaudeRequest {
             system: system_prompt.to_string(),
             model: model_name.to_string(),
-            max_tokens: CLAUDE_MAX_TOKENS,
+            max_tokens: options
+                .capped(Some(CLAUDE_MAX_TOKENS))
+                .unwrap_or(CLAUDE_MAX_TOKENS),
             messages: vec![ChatMessage {
                 role: "user".to_string(),
                 content: user_prompt.to_string(),
@@ -595,7 +650,7 @@ pub(crate) async fn generate_summary(
         .post(api_url.clone())
         .headers(headers.clone())
         .json(&request_body)
-        .timeout(REQUEST_TIMEOUT_DURATION)
+        .timeout(options.timeout.unwrap_or(REQUEST_TIMEOUT_DURATION))
         .send();
     let response = await_or_cancel(request_future, cancellation_token)
         .await?
@@ -620,7 +675,7 @@ pub(crate) async fn generate_summary(
             .post(api_url)
             .headers(headers)
             .json(&retry_body)
-            .timeout(REQUEST_TIMEOUT_DURATION)
+            .timeout(options.timeout.unwrap_or(REQUEST_TIMEOUT_DURATION))
             .send();
         await_or_cancel(retry_future, cancellation_token)
             .await?
@@ -776,6 +831,7 @@ mod tests {
                 temperature: Some(0.3),
                 top_p: Some(0.8),
                 num_ctx: None,
+                ..Default::default()
             },
         );
         assert_eq!(custom["max_tokens"], 12);
