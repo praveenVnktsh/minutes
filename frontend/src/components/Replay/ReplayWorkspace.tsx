@@ -8,7 +8,7 @@
  * reach the recorder, the transcription engines or the meetings database.
  */
 
-import { memo, useMemo, useRef, type ReactNode } from 'react';
+import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { toast } from 'sonner';
 import { MeetingWorkspace } from '@/components/MeetingDetails/MeetingWorkspace';
 import { LiveTranscriptPanel } from '@/components/MeetingDetails/LiveTranscriptPanel';
@@ -54,7 +54,7 @@ const neverRecords = async () => {
 
 function ReplayNotes({ notes }: { notes: string }) {
   return (
-    <div className="h-full overflow-y-auto px-8 pb-24">
+    <div data-replay-notes className="h-full overflow-y-auto px-8 pb-24">
       <p className="mb-3 text-[11px] font-semibold uppercase tracking-[0.08em] text-ink-subtle">Notes Copilot was given</p>
       {notes.trim() ? (
         <pre className="whitespace-pre-wrap font-sans text-sm leading-6 text-ink">{notes}</pre>
@@ -221,10 +221,32 @@ export function ReplayWorkspace({
  * the left because the pill offsets itself by that much.
  */
 function PillLayer({ sidebarWidth, children }: { sidebarWidth: number; children: ReactNode }) {
+  const layerRef = useRef<HTMLDivElement>(null);
+  const [right, setRight] = useState(0);
+  // Centre the pill over the notes column so it never covers the Copilot
+  // input (the debug drawer makes the workspace narrower than in a meeting).
+  useEffect(() => {
+    const layer = layerRef.current;
+    const workspace = layer?.parentElement;
+    if (!layer || !workspace || typeof ResizeObserver === 'undefined') return undefined;
+    const measure = () => {
+      const notes = workspace.querySelector('[data-replay-notes]');
+      if (!notes) return;
+      const inset = Math.max(0, workspace.getBoundingClientRect().right - notes.getBoundingClientRect().right);
+      setRight((current) => (Math.abs(current - inset) < 1 ? current : inset));
+    };
+    const observer = new ResizeObserver(measure);
+    observer.observe(workspace);
+    const notes = workspace.querySelector('[data-replay-notes]');
+    if (notes) observer.observe(notes);
+    measure();
+    return () => observer.disconnect();
+  });
   return (
     <div
-      className="pointer-events-none absolute inset-y-0 right-0 z-30"
-      style={{ left: -sidebarWidth, transform: 'translateZ(0)' }}
+      ref={layerRef}
+      className="pointer-events-none absolute inset-y-0 z-30"
+      style={{ left: -sidebarWidth, right, transform: 'translateZ(0)' }}
     >
       {children}
     </div>

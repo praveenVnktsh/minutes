@@ -20,6 +20,8 @@ const AUDIO_NOTE: Record<AudioReason, string> = {
 /** Marker names offered for previous/next, most useful first. */
 const PREFERRED_MARKERS = ['copilot-state', 'card', 'detector', 'live-timeline-update', 'transcript-update', 'copilot-request', 'phase', 'log'];
 
+const LANES_KEY = 'meetily:replay-lanes';
+
 const iconButton = 'flex h-8 w-8 items-center justify-center rounded-full text-ink-muted hover:bg-surface-2 hover:text-ink disabled:opacity-40';
 
 export function TransportBar({
@@ -41,6 +43,23 @@ export function TransportBar({
   const timeRef = useRef<HTMLSpanElement>(null);
   const markers = PREFERRED_MARKERS.filter((name) => names.includes(name)).concat(names.filter((name) => !PREFERRED_MARKERS.includes(name)));
   const [marker, setMarker] = useState(markers[0] ?? 'transcript-update');
+  const [compact, setCompact] = useState(() => {
+    try {
+      const value = localStorage.getItem(LANES_KEY);
+      if (value !== null) return value === 'compact';
+    } catch {
+      // No storage: decide by the window.
+    }
+    return typeof window !== 'undefined' && window.innerHeight < 1200;
+  });
+  const toggleCompact = () => setCompact((value) => {
+    try {
+      localStorage.setItem(LANES_KEY, value ? 'full' : 'compact');
+    } catch {
+      // Remembered for this window only.
+    }
+    return !value;
+  });
 
   // The time readout follows every frame without re-rendering React.
   useEffect(() => {
@@ -93,7 +112,7 @@ export function TransportBar({
         >
           {state.playing ? <Pause className="h-4 w-4 fill-current" /> : <Play className="h-4 w-4 fill-current" />}
         </button>
-        <span ref={timeRef} className="min-w-[230px] font-mono text-xs tabular-nums text-ink" />
+        <span ref={timeRef} className="min-w-[212px] font-mono text-[11px] tabular-nums text-ink" />
         <div className="flex h-8 items-center rounded-full bg-surface-2 p-0.5" role="group" aria-label="Speed">
           {SPEEDS.map((speed) => (
             <button
@@ -166,6 +185,12 @@ export function TransportBar({
           axis={state.axis}
           selected={selected}
           onSelect={onSelect}
+          compact={compact}
+          headerExtra={
+            <button type="button" onClick={toggleCompact} aria-pressed={!compact} className="rounded px-1.5 py-0.5 hover:bg-surface-2 hover:text-ink">
+              {compact ? 'All lanes' : 'Fewer lanes'}
+            </button>
+          }
         />
       </div>
     </section>

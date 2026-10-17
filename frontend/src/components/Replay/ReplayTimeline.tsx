@@ -8,14 +8,15 @@
  * to zoom, double-click to fit.
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { clock, type LaneItem, type Lanes, type ReplayRecord, type SeriesPoint } from '@/lib/replay/reducer';
 import type { ReplayPlayer } from '@/lib/replay/player';
 import type { Axis } from '@/lib/replay/transport';
 
 const LABEL_W = 116;
-const LANE_H = 16;
-const LIVE_H = 36;
+/** Lane heights: the full view, and the compact one (fewer, thinner lanes). */
+const SIZES = { full: { lane: 12, live: 28 }, compact: { lane: 11, live: 20 } };
+const COMPACT_LANES = new Set(['phase', 'others', 'you', 'summary', 'copilot', 'live']);
 const AXIS_H = 16;
 
 interface Palette {
@@ -62,7 +63,11 @@ export function ReplayTimeline({
   axis,
   selected,
   onSelect,
+  compact = false,
+  headerExtra,
 }: {
+  compact?: boolean;
+  headerExtra?: ReactNode;
   player: ReplayPlayer;
   lanes: Lanes;
   records: ReplayRecord[];
@@ -81,7 +86,14 @@ export function ReplayTimeline({
   const [tip, setTip] = useState<{ x: number; y: number; text: string } | null>(null);
   const rangeRef = useRef<HTMLSpanElement>(null);
 
-  const height = lanes.order.reduce((h, [id]) => h + (id === 'live' ? LIVE_H : LANE_H), 0) + 4 + AXIS_H;
+  const size = compact ? SIZES.compact : SIZES.full;
+  const LANE_H = size.lane;
+  const LIVE_H = size.live;
+  const order = useMemo(
+    () => (compact ? lanes.order.filter(([id]) => COMPACT_LANES.has(id)) : lanes.order),
+    [compact, lanes.order],
+  );
+  const height = order.reduce((h, [id]) => h + (id === 'live' ? LIVE_H : LANE_H), 0) + 4 + AXIS_H;
 
   const fit = useCallback(() => {
     const end = Math.max(1000, player.endOf(axis));
@@ -106,7 +118,7 @@ export function ReplayTimeline({
     const { v0, v1 } = viewRef.current;
     const xOf = (ms: number) => LABEL_W + ((ms - v0) / (v1 - v0)) * (width - LABEL_W);
     const theme = document.documentElement.className;
-    const key = [width, height, dpr, v0, v1, axis, theme, selected ?? -1].join('|');
+    const key = [width, height, dpr, v0, v1, axis, theme, selected ?? -1, order.length].join('|');
     if (key !== layerKeyRef.current) {
       layerKeyRef.current = key;
       const layer = layerRef.current ?? document.createElement('canvas');
@@ -133,7 +145,7 @@ export function ReplayTimeline({
         c.fillText(clock(t), x + 2, height - 4);
       }
       let y = 2;
-      for (const [id] of lanes.order) {
+      for (const [id] of order) {
         const h = id === 'live' ? LIVE_H : LANE_H;
         c.strokeStyle = p.hair;
         c.beginPath();
@@ -208,15 +220,15 @@ export function ReplayTimeline({
     // Lane names over everything.
     ctx.fillStyle = p.surface1;
     ctx.fillRect(0, 0, LABEL_W - 4, height - AXIS_H);
-    ctx.font = '10px "Source Sans 3", sans-serif';
+    ctx.font = `${compact ? 9 : 10}px "Source Sans 3", sans-serif`;
     ctx.fillStyle = p.subtle;
     let y = 2;
-    for (const [id, name] of lanes.order) {
+    for (const [id, name] of order) {
       const h = id === 'live' ? LIVE_H : LANE_H;
-      ctx.fillText(name, 8, y + h / 2 + 3);
+      ctx.fillText(name, 8, y + h / 2 + (compact ? 3 : 3.5));
       y += h;
     }
-  }, [axis, height, lanes, player, selected]);
+  }, [axis, compact, height, lanes, order, player, selected, LANE_H, LIVE_H]);
 
   useEffect(() => {
     fit();
@@ -297,6 +309,8 @@ export function ReplayTimeline({
     <div className="min-w-0">
       <div className="flex items-center justify-between px-1 pb-1 text-[10px] text-ink-subtle">
         <span ref={rangeRef} />
+        <span className="flex items-center gap-1">
+          {headerExtra}
         <button
           type="button"
           onClick={() => { fit(); draw(); }}
@@ -304,6 +318,7 @@ export function ReplayTimeline({
         >
           Fit
         </button>
+        </span>
       </div>
       <div ref={wrapRef} className="relative w-full">
         <canvas

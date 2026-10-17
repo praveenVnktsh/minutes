@@ -172,7 +172,7 @@ function LoadedReplay({
   const player = useMemo(() => new ReplayPlayer(source), [source]);
   const view = useSyncExternalStore(source.subscribe, source.getView, source.getView);
   const playerState = useSyncExternalStore(player.subscribe, player.getState, player.getState);
-  const [drawerOpen, setDrawerOpen] = useState(() => storedFlag(DRAWER_KEY, true));
+  const [drawerOpen, setDrawerOpen] = useState(() => storedFlag(DRAWER_KEY, typeof window !== 'undefined' && window.innerWidth >= 1600));
   const [pauseWhileAnswering, setPauseWhileAnswering] = useState(() => storedFlag(PAUSE_KEY, true));
   const [asks, setAsks] = useState<any[]>(loaded.asks);
   const [selected, setSelected] = useState<number | null>(null);

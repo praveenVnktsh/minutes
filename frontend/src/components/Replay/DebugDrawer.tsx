@@ -218,7 +218,7 @@ export const DebugDrawer = memo(function DebugDrawer({
                     {(c.detail ?? []).length > 0 && (
                       <details className="mt-0.5 text-ink-subtle">
                         <summary className="cursor-pointer">{c.detail.length} details</summary>
-                        <ul className="list-disc pl-4">{c.detail.map((d: string) => <li key={d}>{d}</li>)}</ul>
+                        <ul className="list-disc pl-4">{c.detail.map((d: string, k: number) => <li key={k}>{d}</li>)}</ul>
                       </details>
                     )}
                   </td>

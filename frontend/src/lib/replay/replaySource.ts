@@ -149,6 +149,8 @@ export class ReplaySource implements LiveSource {
   private readonly notes: Array<{ i: number; text: string }>;
   /** What the listeners currently hold. */
   private shown = { copilot: false, timeline: false, partials: new Set<string>() };
+  /** What deliverState last sent (null: something else was sent since). */
+  private delivered: { copilot: string | null; timeline: unknown } = { copilot: null, timeline: null };
   private liveMessages: CopilotMessage[] = [];
   private liveProgress: LiveAskProgress[] = [];
   private view: ReplayView;
@@ -296,8 +298,11 @@ export class ReplaySource implements LiveSource {
   /** A live ask's progress from Rust (`replay-copilot` events). */
   handleLiveEvent(requestId: string, event: string, data: any): void {
     const message = this.liveMessages.find((m) => m.id === requestId);
-    const progress = this.liveProgress.find((p) => p.id === requestId);
-    if (!message || !progress) return;
+    const found = this.liveProgress.find((p) => p.id === requestId);
+    if (!message || !found) return;
+    // A new object per change, so the drawer sees it.
+    const progress: LiveAskProgress = { ...found };
+    this.liveProgress = this.liveProgress.map((p) => (p.id === requestId ? progress : p));
     let changed = true;
     switch (event) {
       case 'queued':
@@ -459,6 +464,8 @@ export class ReplaySource implements LiveSource {
   }
 
   private emit(event: string, payload: unknown): void {
+    if (event === COPILOT_STATE_EVENT || event === COPILOT_DELTA_EVENT) this.delivered.copilot = null;
+    if (event === LIVE_TIMELINE_UPDATE_EVENT) this.delivered.timeline = null;
     const set = this.listeners.get(event);
     if (!set) return;
     for (const handler of [...set]) handler({ payload });
@@ -505,11 +512,14 @@ export class ReplaySource implements LiveSource {
 
   /** Delivers the cursor's state as one snapshot (after a seek or a jump). */
   private deliverState(): void {
-    const copilot = this.composeCopilot(clone(this.state.copilot));
+    const copilotKey = this.copilotKey();
+    const unchanged = copilotKey === this.delivered.copilot;
+    const copilot = unchanged ? this.composeCopilot(this.state.copilot) : this.composeCopilot(clone(this.state.copilot));
     const timeline = this.state.timeline;
     if ((!copilot && this.shown.copilot) || (!timeline && this.shown.timeline)) {
       // "None" cannot be delivered: remount the workspace, which rehydrates.
       this.epoch += 1;
+      this.delivered = { copilot: null, timeline: null };
       this.shown = {
         copilot: Boolean(copilot),
         timeline: Boolean(timeline),
@@ -517,13 +527,16 @@ export class ReplaySource implements LiveSource {
       };
       return;
     }
-    if (copilot) {
+    // Unchanged slices are not re-sent, so a long jump re-renders only what moved.
+    if (copilot && !unchanged) {
       this.emit(COPILOT_STATE_EVENT, copilot);
       this.shown.copilot = true;
+      this.delivered.copilot = copilotKey;
     }
-    if (timeline) {
+    if (timeline && timeline !== this.delivered.timeline) {
       this.emit(LIVE_TIMELINE_UPDATE_EVENT, timeline);
       this.shown.timeline = true;
+      this.delivered.timeline = timeline;
     }
     for (const source of [...this.shown.partials]) {
       if (!this.state.partials[source]) {
@@ -534,6 +547,15 @@ export class ReplaySource implements LiveSource {
       this.emit(TRANSCRIPT_PARTIAL_EVENT, { source: partial.source, text: partial.text, audio_start_time: partial.start });
     }
     this.shown.partials = new Set(Object.keys(this.state.partials));
+  }
+
+  /** Changes whenever the composed Copilot snapshot would. */
+  private copilotKey(): string {
+    const c = this.state.copilot;
+    const parts = [this.state.lines.length > 0 ? 1 : 0, this.liveMessages.length, c ? c.sessionId : '-', c ? c.lineCount : 0, c ? String(c.active) : '-'];
+    for (const m of c?.messages ?? []) parts.push(`${m.id}:${m.status}:${m.cardState}:${(m.reply ?? '').length}`);
+    for (const m of this.liveMessages) parts.push(`${m.id}:${m.status}:${m.reply.length}`);
+    return parts.join('|');
   }
 
   private notesAt(n: number): string {
@@ -556,7 +578,7 @@ export class ReplaySource implements LiveSource {
       phase: state.phase,
       transcripts: state.lines.map(lineToTranscript),
       notes: this.notesAt(state.n),
-      live: this.liveProgress.map((p) => ({ ...p })),
+      live: this.liveProgress,
     };
   }
 
