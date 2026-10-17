@@ -27,10 +27,13 @@ use crate::audio::transcription_settings::{load_settings, LiveEngineChoice};
 /// than this contend with capture and the UI without speeding decode up.
 const NUM_THREADS: i32 = 2;
 
-/// What Auto runs: the Neural Engine. Measured on an M5 over two real
-/// meetings (see the PR "Nemotron on the GPU and Neural Engine"): same
-/// accuracy as the GPU, the lowest CPU and power, and it leaves the GPU to
-/// the final pass and the built-in LLM.
+/// What Auto runs: the Neural Engine. Measured on an M5 with two real
+/// meeting clips (two streams): the same words as the GPU (both ~3% from the
+/// CPU export), ~5% CPU against ~9% for the GPU and ~160% for sherpa, ready
+/// in ~0.5 s against ~13–15 s for the GPU (its shaders compile on every
+/// launch), and it leaves the GPU to the final pass and the built-in LLM.
+/// It also kept up in Low Power Mode on a loaded machine, where the CPU
+/// engine fell behind. See the design doc's "Engines" section.
 pub const AUTO_COMPUTE: Compute = Compute::NeuralEngine;
 
 /// An engine the live model can run on.
