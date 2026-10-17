@@ -142,6 +142,10 @@ jobs:
           echo "✓ macOS build will use Metal GPU acceleration (enabled by default)"
           echo "✓ CoreML acceleration available for Apple Silicon"
 
+      - name: Build nemotron-helper sidecar
+        shell: bash
+        run: bash nemotron-helper/build.sh release
+
       - name: Build llama-helper sidecar
         run: |
           echo "Building llama-helper sidecar with Metal support..."

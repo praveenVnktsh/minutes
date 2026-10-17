@@ -48,6 +48,11 @@ target_dir="${CARGO_TARGET_DIR:-$root/target}"
 mkdir -p frontend/src-tauri/binaries
 cp "$target_dir/debug/llama-helper" "frontend/src-tauri/binaries/llama-helper-${target}"
 
+# The Core ML live-transcription helper (Swift) is the other externalBin.
+step "test and stage the nemotron-helper sidecar"
+swift test --package-path nemotron-helper
+bash nemotron-helper/build.sh debug
+
 step "rust tests"
 cargo test -p meetily
 

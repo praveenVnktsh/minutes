@@ -163,3 +163,53 @@ live transcript and lets the pass's `ready` drive them.
   recording is live.
 - **Resumed meetings.** The pass re-transcribes the concatenated `audio.mp4`, so the
   timeline stays consistent.
+
+## Engines: GPU, Neural Engine, CPU (2026-10-17)
+
+The live model can run on three engines, picked in Settings → Live transcription →
+Advanced → "Live transcription engine" (`store.json` key `liveTranscriptionEngine`:
+`auto` | `gpu` | `neural-engine` | `cpu`, default `auto`).
+
+- **CPU**: sherpa-onnx with the int8 560 ms export above (unchanged).
+- **GPU / Neural Engine**: Core ML, through the `nemotron-helper` sidecar (Swift,
+  `nemotron-helper/` in the repo, bundled as an externalBin like `llama-helper`). It
+  runs FluidInference's Core ML export of the same checkpoint with the same 560 ms
+  chunking (`FluidInference/nemotron-speech-streaming-en-0.6b-coreml`,
+  `nemotron_coreml_560ms`, pinned revision, every file size + SHA-256 checked), with
+  log-mel features computed on the continuous signal in Swift.
+- ORT's Core ML execution provider was not used (see the diarization benchmark note:
+  sherpa's static ORT shadows it, and two ORT copies crashed at exit).
+- A 160 ms Core ML export (speech-swift) was tried first and rejected: ~35% word
+  disagreement with the CPU output on a real meeting clip.
+
+**Protocol.** Binary request frames on the helper's stdin (`op u8, stream u32, len
+u32, payload`: open, audio f32, finish, reset, close, decode, shutdown) and JSON-line
+replies on stdout; only `decode` replies, with each stream's tokens and token times.
+The Rust side (`live_streaming::native`) implements the same `Recognizer` trait as
+sherpa, so segmentation, partials, backlog skip-ahead and cancel are unchanged.
+
+**Measured** (M5, 24 GB, two streams, Low Power Mode off, machine loaded by other
+work, load average 15–45):
+
+| Engine | Words vs CPU output | WER vs Whisper turbo | Speed (RTF, flat out) | Token latency p50/p95 | CPU | Whole-GPU busy | RSS | Ready in |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| CPU (sherpa) | — | 6.2% | 1.48 | 0.39 / 0.68 s | ~163% | (baseline ~22–38%) | 1.46 GB | ~1 s |
+| Neural Engine | 3.0% | 7.0% | 0.12 | 0.27 / 0.59 s | ~5% | ~22% (= baseline) | 215 MB | ~0.5 s |
+| GPU | 3.1% | 7.0% | 0.20 | 0.26 / 0.59 s | ~9% | ~58% | 424 MB | ~13–15 s |
+
+Accuracy on a 3-minute meeting clip, usage over 5 minutes in real time. No thermal
+throttling in any run. With Low Power Mode on and the machine heavily loaded, the
+Neural Engine still ran at RTF 0.71 over 15 minutes while the CPU engine fell behind
+real time.
+
+**Auto = Neural Engine**: same accuracy as the GPU, the least CPU, memory and GPU, and
+it starts at once. The GPU recompiles its shaders on every launch (~10–20 s); the
+helper starts loading in the background so recording is not delayed, and the first
+live text waits for it. Core ML's Neural Engine compile is cached by the system (first
+compile ~75 s; prepared in the background after download and at app start).
+
+**Fallback.** If the Core ML model or helper is missing, or fails to load, the CPU
+engine runs; if the helper dies mid-meeting, the worker keeps the decoded text and
+continues on the CPU (with a notice). The live-model card downloads the bundle the
+engine setting needs (Core ML for Auto/GPU/Neural Engine, sherpa for CPU); existing
+users keep using sherpa until the Core ML bundle has downloaded in the background.

@@ -19,6 +19,9 @@ cargo build --manifest-path "$REPO_DIR/Cargo.toml" --release -p llama-helper --f
 mkdir -p "$SIDECAR_DIR"
 cp "$REPO_DIR/target/release/llama-helper" "$SIDECAR_DIR/llama-helper-$TARGET_TRIPLE"
 
+echo "Building nemotron-helper (Core ML live transcription)..."
+bash "$REPO_DIR/nemotron-helper/build.sh" release
+
 echo "Building the local Minutes app..."
 cd "$FRONTEND_DIR"
 bunx tauri build \

@@ -208,6 +208,10 @@ jobs:
           fi
           echo "platform=${patched_platform}" >> $GITHUB_OUTPUT
 
+      - name: Build nemotron-helper sidecar
+        shell: bash
+        run: bash nemotron-helper/build.sh release
+
       - name: Build llama-helper sidecar
         shell: bash
         run: |

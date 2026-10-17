@@ -21,6 +21,7 @@ use crate::config::{DEFAULT_PARAKEET_MODEL, DEFAULT_WHISPER_MODEL};
 const STORE_FILE: &str = "store.json";
 pub const LIVE_MODEL_KEY: &str = "liveTranscriptionModel";
 pub const AUTO_FINAL_PASS_KEY: &str = "autoFinalTranscriptPass";
+pub const LIVE_ENGINE_KEY: &str = "liveTranscriptionEngine";
 /// When the final pass runs: [`FinalPassTiming`]. Replaces the on/off
 /// [`AUTO_FINAL_PASS_KEY`], which is still read when this key is absent and
 /// still written alongside it.
@@ -58,11 +59,52 @@ impl LiveModelChoice {
     }
 }
 
+/// Where the streaming live model runs (Settings → Advanced).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LiveEngineChoice {
+    /// The measured best (see `live_streaming::engine::AUTO_COMPUTE`).
+    Auto,
+    /// Core ML on the GPU.
+    Gpu,
+    /// Core ML on the Neural Engine.
+    NeuralEngine,
+    /// sherpa-onnx on the CPU.
+    Cpu,
+}
+
+impl LiveEngineChoice {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Gpu => "gpu",
+            Self::NeuralEngine => "neural-engine",
+            Self::Cpu => "cpu",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "auto" => Some(Self::Auto),
+            "gpu" => Some(Self::Gpu),
+            "neural-engine" => Some(Self::NeuralEngine),
+            "cpu" => Some(Self::Cpu),
+            _ => None,
+        }
+    }
+
+    /// Unset or unrecognised values mean Auto.
+    pub fn from_stored(value: Option<&str>) -> Self {
+        value.and_then(Self::parse).unwrap_or(Self::Auto)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LiveTranscriptionSettings {
     pub live_model: LiveModelChoice,
     pub auto_final_pass: bool,
+    pub live_engine: LiveEngineChoice,
 }
 
 impl LiveTranscriptionSettings {
@@ -70,6 +112,7 @@ impl LiveTranscriptionSettings {
         Self {
             live_model: LiveModelChoice::from_stored(live_model),
             auto_final_pass: auto_final_pass.unwrap_or(true),
+            live_engine: LiveEngineChoice::Auto,
         }
     }
 }
@@ -359,13 +402,18 @@ pub fn decide_final_pass(
 
 pub fn load_settings<R: Runtime>(app: &AppHandle<R>) -> LiveTranscriptionSettings {
     match app.store(STORE_FILE) {
-        Ok(store) => LiveTranscriptionSettings::from_stored(
-            store.get(LIVE_MODEL_KEY).as_ref().and_then(|v| v.as_str()),
-            store
-                .get(AUTO_FINAL_PASS_KEY)
-                .as_ref()
-                .and_then(|v| v.as_bool()),
-        ),
+        Ok(store) => LiveTranscriptionSettings {
+            live_engine: LiveEngineChoice::from_stored(
+                store.get(LIVE_ENGINE_KEY).as_ref().and_then(|v| v.as_str()),
+            ),
+            ..LiveTranscriptionSettings::from_stored(
+                store.get(LIVE_MODEL_KEY).as_ref().and_then(|v| v.as_str()),
+                store
+                    .get(AUTO_FINAL_PASS_KEY)
+                    .as_ref()
+                    .and_then(|v| v.as_bool()),
+            )
+        },
         Err(error) => {
             warn!("Transcription settings store unavailable, using defaults: {error}");
             LiveTranscriptionSettings::from_stored(None, None)
@@ -555,6 +603,26 @@ mod tests {
         let settings = LiveTranscriptionSettings::from_stored(None, None);
         assert_eq!(settings.live_model, LiveModelChoice::NemotronStreaming);
         assert!(settings.auto_final_pass);
+        assert_eq!(settings.live_engine, LiveEngineChoice::Auto);
+    }
+
+    #[test]
+    fn live_engine_choices_round_trip_and_unknown_means_auto() {
+        for choice in [
+            LiveEngineChoice::Auto,
+            LiveEngineChoice::Gpu,
+            LiveEngineChoice::NeuralEngine,
+            LiveEngineChoice::Cpu,
+        ] {
+            assert_eq!(LiveEngineChoice::parse(choice.as_str()), Some(choice));
+            let json = serde_json::to_string(&choice).unwrap();
+            assert_eq!(json, format!("\"{}\"", choice.as_str()));
+        }
+        assert_eq!(LiveEngineChoice::from_stored(None), LiveEngineChoice::Auto);
+        assert_eq!(
+            LiveEngineChoice::from_stored(Some("tpu")),
+            LiveEngineChoice::Auto
+        );
     }
 
     #[test]

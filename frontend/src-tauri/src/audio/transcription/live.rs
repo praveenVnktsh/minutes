@@ -215,7 +215,7 @@ fn plan_notice(plan: &LivePlan) -> Option<String> {
 /// about to start. Sets the pipeline's streaming mode to match. Never fails.
 pub async fn prepare_for_recording<R: Runtime>(app: &AppHandle<R>) {
     let current = settings::load_settings(app);
-    let nemotron_ready = live_streaming::model::is_downloaded(app);
+    let nemotron_ready = live_streaming::model::is_usable(app);
     let final_model = settings::configured_final_model(app).await;
     let available = settings::availability().await;
     let plan =
@@ -246,11 +246,15 @@ pub async fn prepare_for_recording<R: Runtime>(app: &AppHandle<R>) {
     *SESSION_PLAN.lock().unwrap_or_else(|e| e.into_inner()) = Some(SessionPlan { plan, loaded });
 }
 
-fn provenance(plan: &LivePlan) -> Option<TranscriptionModel> {
+/// `streaming_model` is the bundle the loaded streaming engine runs (the Core
+/// ML or the CPU export of the same model).
+fn provenance(plan: &LivePlan, streaming_model: Option<&str>) -> Option<TranscriptionModel> {
     match plan {
         LivePlan::Streaming => Some(TranscriptionModel {
             provider: "nemotron-streaming".to_string(),
-            model: live_streaming::model::MODEL_ID.to_string(),
+            model: streaming_model
+                .unwrap_or(live_streaming::model::SHERPA.id)
+                .to_string(),
         }),
         LivePlan::Chunked(choice) => Some(TranscriptionModel {
             provider: if choice.engine.is_parakeet() {
@@ -322,7 +326,11 @@ pub async fn start_worker<R: Runtime>(
         }
     };
 
-    let model = provenance(&plan);
+    let streaming_model = match &loaded {
+        Some(Loaded::Streaming(engine)) => Some(engine.model_id()),
+        _ => None,
+    };
+    let model = provenance(&plan, streaming_model);
     let outcome = match loaded {
         Some(Loaded::Streaming(engine)) => Ok((
             live_streaming::start_streaming_transcription_task(app.clone(), receiver, engine),

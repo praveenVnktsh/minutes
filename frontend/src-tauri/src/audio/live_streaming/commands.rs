@@ -8,8 +8,8 @@ use tauri_plugin_store::StoreExt;
 
 use super::model;
 use crate::audio::transcription_settings::{
-    self as settings, LiveModelChoice, LiveTranscriptionSettings, AUTO_FINAL_PASS_KEY,
-    LIVE_MODEL_KEY,
+    self as settings, LiveEngineChoice, LiveModelChoice, LiveTranscriptionSettings,
+    AUTO_FINAL_PASS_KEY, LIVE_ENGINE_KEY, LIVE_MODEL_KEY,
 };
 
 const STORE_FILE: &str = "store.json";
@@ -39,11 +39,11 @@ pub struct LiveTranscriptionSettingsResponse {
 
 pub fn live_model_status<R: Runtime>(app: &AppHandle<R>) -> LiveModelStatus {
     LiveModelStatus {
-        model_id: model::MODEL_ID,
+        model_id: model::needed_bundle(app).id,
         downloaded: model::is_downloaded(app),
         downloading: model::is_downloading(),
         loaded: super::engine::is_loaded(),
-        size_bytes: model::total_bytes(),
+        size_bytes: model::needed_bundle(app).total_bytes(),
     }
 }
 
@@ -72,7 +72,18 @@ pub async fn set_live_transcription_settings<R: Runtime>(
     app: AppHandle<R>,
     live_model: Option<String>,
     auto_final_pass: Option<bool>,
+    live_engine: Option<String>,
 ) -> Result<LiveTranscriptionSettingsResponse, String> {
+    if let Some(live_engine) = live_engine {
+        let choice = LiveEngineChoice::parse(&live_engine)
+            .ok_or_else(|| format!("Unknown live transcription engine '{live_engine}'"))?;
+        let previous = settings::load_settings(&app).live_engine;
+        set_store_value(&app, LIVE_ENGINE_KEY, serde_json::json!(choice.as_str()))?;
+        info!("Live transcription engine set to {}", choice.as_str());
+        if choice != previous {
+            apply_engine_change(&app).await;
+        }
+    }
     if let Some(live_model) = live_model {
         let choice = match live_model.as_str() {
             "nemotron-streaming" => LiveModelChoice::NemotronStreaming,
@@ -87,6 +98,26 @@ pub async fn set_live_transcription_settings<R: Runtime>(
         info!("Automatic final transcript pass set to {enabled}");
     }
     get_live_transcription_settings(app).await
+}
+
+/// After the engine setting changed: drop the loaded engine unless a
+/// recording uses it (the next recording loads the new one), and fetch or
+/// compile the new engine's model in the background. The live model card
+/// shows that download like any other.
+async fn apply_engine_change<R: Runtime>(app: &AppHandle<R>) {
+    if !crate::audio::recording_commands::is_recording().await {
+        super::engine::unload();
+    }
+    if model::is_downloaded(app) {
+        super::engine::spawn_prepare(app.clone(), false);
+    } else if !model::is_downloading() {
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Err(error) = model::download(&app).await {
+                warn!("Live model download for the new engine did not finish: {error:#}");
+            }
+        });
+    }
 }
 
 #[tauri::command]
@@ -161,6 +192,12 @@ pub fn spawn_default_model_setup(app: AppHandle) {
             if let Err(error) = model::download(&app).await {
                 warn!("Background live model download did not finish: {error:#}");
             }
+        } else if current.live_model == LiveModelChoice::NemotronStreaming
+            && model::is_downloaded(&app)
+        {
+            // Keeps Core ML's compiled-model cache warm (it is rebuilt after
+            // OS updates), so recordings start without the compile.
+            super::engine::spawn_prepare(app.clone(), true);
         }
 
         let final_model = settings::configured_final_model(&app).await;

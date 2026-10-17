@@ -1,15 +1,15 @@
-//! Two-source streaming transcription on top of the sherpa recognizer, free
-//! of Tauri so it can be exercised end to end in tests.
+//! Two-source streaming transcription on top of a [`Recognizer`] (sherpa on
+//! the CPU, or Core ML in the helper), free of Tauri so it can be exercised
+//! end to end in tests.
 //!
-//! Each source (microphone, system) has its own `OnlineStream` and silence
+//! Each source (microphone, system) has its own recognizer stream and silence
 //! gate. Audio is fed as it arrives; `decode` runs every ready stream as one
 //! batch and reports partial text and finished utterances as [`LiveEvent`]s.
 
 use std::sync::Arc;
 
-use sherpa_onnx::OnlineStream;
-
 use super::engine::StreamingEngine;
+use super::recognizer::StreamId;
 use super::gate::{join_tokens, next_commit, segment_bounds, GateAction, SilenceGate};
 use crate::audio::RecordingDeviceType;
 
@@ -73,7 +73,7 @@ pub enum LiveEvent {
 struct SourceState {
     source: Source,
     gate: SilenceGate,
-    stream: Option<OnlineStream>,
+    stream: Option<StreamId>,
     /// Recording time of the stream's zero.
     origin: f64,
     /// Samples fed to the current stream: its current time.
@@ -101,6 +101,9 @@ pub struct StreamingTranscriber {
     engine: Arc<StreamingEngine>,
     sample_rate: u32,
     sources: [SourceState; 2],
+    /// The engine's first failure (the helper exited or stopped answering).
+    /// Nothing more is decoded once set; the worker decides what to do.
+    failure: Option<String>,
 }
 
 impl StreamingTranscriber {
@@ -112,6 +115,7 @@ impl StreamingTranscriber {
                 SourceState::new(Source::Microphone, sample_rate),
                 SourceState::new(Source::System, sample_rate),
             ],
+            failure: None,
         }
     }
 
@@ -119,9 +123,35 @@ impl StreamingTranscriber {
         self.sample_rate
     }
 
+    /// Recording time of the newest decoded token on `source`, for latency
+    /// measurements.
+    #[cfg(test)]
+    pub fn last_token_time(&self, source: Source) -> Option<f64> {
+        let state = &self.sources[source.index()];
+        let result = self.engine.recognizer.result(state.stream?)?;
+        result
+            .times
+            .last()
+            .map(|t| state.origin + result.start + t)
+    }
+
+    /// Why the engine stopped working, if it did.
+    pub fn failure(&self) -> Option<&str> {
+        self.failure.as_deref()
+    }
+
+    fn fail(&mut self, error: anyhow::Error) {
+        if self.failure.is_none() {
+            log::warn!("Live transcription engine failed: {error:#}");
+            self.failure = Some(format!("{error:#}"));
+        }
+    }
+
     fn feed(&self, state: &mut SourceState, samples: &[f32]) {
-        if let Some(stream) = state.stream.as_ref() {
-            stream.accept_waveform(self.sample_rate as i32, samples);
+        if let Some(id) = state.stream {
+            self.engine
+                .recognizer
+                .accept(id, self.sample_rate, samples);
             state.fed += samples.len() as u64;
         }
     }
@@ -156,7 +186,17 @@ impl StreamingTranscriber {
             } => {
                 // A stream left over from a forced close is finished first.
                 self.finish_stream(&mut state, events);
-                state.stream = Some(self.engine.recognizer.create_stream());
+                state.stream = if self.failure.is_some() {
+                    None
+                } else {
+                    match self.engine.recognizer.create_stream(self.sample_rate) {
+                        Ok(id) => Some(id),
+                        Err(error) => {
+                            self.fail(error);
+                            None
+                        }
+                    }
+                };
                 state.origin = origin_seconds;
                 state.fed = 0;
                 state.committed = 0;
@@ -174,22 +214,17 @@ impl StreamingTranscriber {
 
     /// Decode every ready stream, batched, and report what changed.
     pub fn decode(&mut self, events: &mut Vec<LiveEvent>) {
-        let recognizer = &self.engine.recognizer;
-        loop {
-            let ready: Vec<&OnlineStream> = self
-                .sources
-                .iter()
-                .filter_map(|state| state.stream.as_ref())
-                .filter(|stream| recognizer.is_ready(stream))
-                .collect();
-            if ready.is_empty() {
-                break;
-            }
-            if ready.len() == 1 {
-                recognizer.decode(ready[0]);
-            } else {
-                recognizer.decode_multiple_streams(&ready);
-            }
+        let open: Vec<StreamId> = self
+            .sources
+            .iter()
+            .filter_map(|state| state.stream)
+            .collect();
+        if open.is_empty() || self.failure.is_some() {
+            return;
+        }
+        if let Err(error) = self.engine.recognizer.decode(&open) {
+            self.fail(error);
+            return;
         }
 
         for index in 0..self.sources.len() {
@@ -206,20 +241,15 @@ impl StreamingTranscriber {
     /// Commit what the segmentation rules allow (everything when `finishing`),
     /// then report the rest as the partial line.
     fn update(&self, state: &mut SourceState, finishing: bool, events: &mut Vec<LiveEvent>) {
-        let Some(stream) = state.stream.as_ref() else {
+        let Some(stream) = state.stream else {
             return;
         };
-        let Some(result) = self.engine.recognizer.get_result(stream) else {
+        let Some(result) = self.engine.recognizer.result(stream) else {
             return;
         };
-        let base = result.start_time.unwrap_or(0.0) as f64;
+        let base = result.start;
         let tokens = result.tokens;
-        let times: Vec<f64> = result
-            .timestamps
-            .unwrap_or_default()
-            .iter()
-            .map(|&t| base + t as f64)
-            .collect();
+        let times: Vec<f64> = result.times.iter().map(|&t| base + t).collect();
         let len = tokens.len().min(times.len());
         // A hypothesis can only shrink after a reset, which zeroes `committed`.
         state.committed = state.committed.min(len);
@@ -269,7 +299,7 @@ impl StreamingTranscriber {
             && len > RESET_AFTER_TOKENS
             && quiet_for >= RESET_AFTER_SILENCE_SECONDS
         {
-            if let Some(stream) = state.stream.as_ref() {
+            if let Some(stream) = state.stream {
                 self.engine.recognizer.reset(stream);
             }
             state.committed = 0;
@@ -278,19 +308,22 @@ impl StreamingTranscriber {
 
     /// Flush a stream: pad, mark input finished, decode the rest, commit it,
     /// and drop the stream.
-    fn finish_stream(&self, state: &mut SourceState, events: &mut Vec<LiveEvent>) {
-        let Some(stream) = state.stream.as_ref() else {
+    fn finish_stream(&mut self, state: &mut SourceState, events: &mut Vec<LiveEvent>) {
+        let Some(stream) = state.stream else {
             return;
         };
-        let padding = vec![0.0f32; (TAIL_PADDING_SECONDS * self.sample_rate as f64) as usize];
-        stream.accept_waveform(self.sample_rate as i32, &padding);
-        stream.input_finished();
-        let recognizer = &self.engine.recognizer;
-        while recognizer.is_ready(stream) {
-            recognizer.decode(stream);
+        if self.failure.is_none() {
+            let padding = vec![0.0f32; (TAIL_PADDING_SECONDS * self.sample_rate as f64) as usize];
+            let recognizer = &self.engine.recognizer;
+            recognizer.accept(stream, self.sample_rate, &padding);
+            recognizer.input_finished(stream);
+            if let Err(error) = recognizer.decode(&[stream]) {
+                self.fail(error);
+            }
         }
         // `fed` excludes the padding, which is not part of the recording.
         self.update(state, true, events);
+        self.engine.recognizer.close(stream);
         state.stream = None;
         state.committed = 0;
     }
@@ -326,10 +359,22 @@ impl StreamingTranscriber {
                 SourceState::new(source, self.sample_rate),
             );
             self.update(&mut state, true, events);
-            state.stream = None;
+            if let Some(stream) = state.stream.take() {
+                self.engine.recognizer.close(stream);
+            }
             state.committed = 0;
             state.gate.force_close();
             self.sources[index] = state;
+        }
+    }
+}
+
+impl Drop for StreamingTranscriber {
+    fn drop(&mut self) {
+        for state in &mut self.sources {
+            if let Some(stream) = state.stream.take() {
+                self.engine.recognizer.close(stream);
+            }
         }
     }
 }
