@@ -177,6 +177,11 @@ impl NativeRecognizer {
         let (sender, lines) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                // Replies are JSON objects; anything else is a stray log line.
+                if !line.trim_start().starts_with('{') {
+                    warn!("nemotron-helper (stdout): {line}");
+                    continue;
+                }
                 if sender.send(line).is_err() {
                     break;
                 }

@@ -12,9 +12,14 @@
 import Foundation
 import NemotronCore
 
+// Replies go to the original stdout; anything else written to fd 1 (Core ML
+// and Espresso print diagnostics there) is sent to stderr so it cannot
+// corrupt the protocol.
+let replyHandle = FileHandle(fileDescriptor: dup(STDOUT_FILENO), closeOnDealloc: false)
+dup2(STDERR_FILENO, STDOUT_FILENO)
 
 func emit(_ line: String) {
-    FileHandle.standardOutput.write((line + "\n").data(using: .utf8)!)
+    replyHandle.write((line + "\n").data(using: .utf8)!)
 }
 
 func fail(_ message: String) -> Never {
@@ -80,7 +85,7 @@ if let file = arguments["transcribe"] {
             let end = min(offset + step, samples.count)
             session.accept(Array(samples[offset..<end]))
             let t = Date()
-            try session.decodeReady()
+            try autoreleasepool { try session.decodeReady() }
             chunkTimes.append(Date().timeIntervalSince(t) * 1000)
             if firstTokenAudio == nil, !session.tokenIds.isEmpty {
                 firstTokenAudio = Double(end) / Double(rate)
@@ -134,8 +139,12 @@ while let header = readExactly(Request.headerSize) {
     guard length <= 64 << 20, let payload = length == 0 ? Data() : readExactly(length) else { break }
     guard let op else { continue }
     if op == .shutdown { break }
-    if let reply = server.handle(Request(op: op, stream: stream, payload: payload)) {
-        emit(reply)
+    // Core ML's outputs are autoreleased; with no run loop nothing drains
+    // them, and a long meeting runs out of IOSurfaces.
+    autoreleasepool {
+        if let reply = server.handle(Request(op: op, stream: stream, payload: payload)) {
+            emit(reply)
+        }
     }
 }
 exit(0)
