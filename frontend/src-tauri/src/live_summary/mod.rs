@@ -246,7 +246,7 @@ impl<R: Runtime> WorkerHost for AppHost<R> {
             Ok(Ok(Some(document))) => document.user_notes(),
             Ok(Ok(None)) => Vec::new(),
             Ok(Err(error)) => {
-                perf_debug!("Enhanced notes: could not read the user's notes: {error}");
+                log::debug!("Enhanced notes: could not read the user's notes: {error}");
                 Vec::new()
             }
             Err(_) => Vec::new(),
