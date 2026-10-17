@@ -15,41 +15,13 @@ name = "app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 
-# Hardware acceleration features for whisper-rs
-# Cross-platform GPU acceleration with smart defaults
-#
-# BUILD INSTRUCTIONS:
-# ===================
-# macOS:     cargo build --release              (Metal GPU auto-enabledon)
-#
-# Windows:   cargo build --release              (CPU with OpenBLAS)
-#            cargo build --release --features cuda    (NVIDIA GPU)
-#            cargo build --release --features vulkan  (AMD/Intel GPU)
-#
-# Linux:     cargo build --release              (CPU with OpenBLAS)
-#            cargo build --release --features cuda    (NVIDIA GPU)
-#            cargo build --release --features hipblas (AMD GPU with ROCm)
-#            cargo build --release --features vulkan  (Other GPUs)
-#
-# QUICK START: Use the helper scripts!
-#   ./build-gpu.sh (Unix/macOS)
-#   .\build-gpu.ps1 (Windows PowerShell)
-#
+# Minutes is a macOS (Apple Silicon) app. whisper-rs always builds with Metal
+# and CoreML (see [dependencies]); these features exist for the build scripts
+# that pass them explicitly.
 [features]
-default = ["platform-default"]  # Automatically enables best backend per platform
-
-# Platform-appropriate defaults - see target-specific dependencies below
-platform-default = []
-
-# Manual GPU acceleration options (for power users to override defaults)
-metal = ["whisper-rs/metal"]       # macOS: Apple Metal GPU (Auto-enabled on macOS)
-coreml = ["whisper-rs/coreml"]     # macOS: Apple CoreML acceleration
-cuda = ["whisper-rs/cuda"]         # Windows/Linux: NVIDIA CUDA GPU
-vulkan = ["whisper-rs/vulkan"]     # Windows/Linux: AMD/Intel Vulkan GPU
-hipblas = ["whisper-rs/hipblas"]   # Linux: AMD ROCm HIP
-
-# CPU optimizations (fallback for systems without GPU)
-openblas = ["whisper-rs/openblas"] # Optimized BLAS (Auto-enabled on Windows/Linux)
+default = []
+metal = ["whisper-rs/metal"]       # Apple Metal GPU (always on via the whisper-rs dependency)
+coreml = ["whisper-rs/coreml"]     # Apple CoreML acceleration
 openmp = ["whisper-rs/openmp"]     # OpenMP parallel processing
 
 # Developer tool: the pipeline replay harness (examples/replay.rs), which runs
@@ -63,11 +35,7 @@ required-features = ["dev-replay"]
 [build-dependencies]
 tauri-build = { version = "2.3.0", features = [] }
 reqwest = { version = "0.11", features = ["blocking", "multipart", "json", "stream"] }
-which = "6.0.1"
-zip = "2.2"           # ZIP extraction (Windows, macOS)
-tar = "0.4"           # TAR extraction (Linux)
-xz2 = "0.1"           # XZ decompression (Linux)
-sha2 = "0.10"
+zip = "2.2"           # ZIP extraction (FFmpeg sidecar download)
 
 
 [dependencies]
@@ -81,7 +49,7 @@ hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
 
-# Cross-platform audio capture
+# Microphone capture
 cpal = "0.15.3"
 
 # Wav encoding - now using manual WAV creation instead of hound
@@ -113,8 +81,8 @@ nnnoiseless = "0.5"
 sonora = { version = "0.2", default-features = false }
 
 # Speech recognition and async utilities
-# NOTE: whisper-rs is declared in platform-specific sections below (macOS/Windows/Linux)
-# to ensure correct GPU features are enabled per platform
+# Metal GPU + CoreML acceleration for whisper.cpp on Apple Silicon.
+whisper-rs = { version = "0.13.2", features = ["raw-api", "metal", "coreml"] }
 futures-util = "0.3"
 silero_rs = { git = "https://github.com/emotechlab/silero-rs", rev = "26a6460", package = "silero" }
 
@@ -179,19 +147,12 @@ tauri-plugin-process = "2.3.0"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-deep-link = "2"
 
-# Desktop-only single instance guard
-[target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
 tauri-plugin-single-instance = "=2.3.7"
-
-# macOS-specific dependencies with Metal GPU acceleration
-[target.'cfg(target_os = "macos")'.dependencies]
-tauri = { version = "2.6.2", features = ["protocol-asset", "macos-private-api", "tray-icon"] }
-once_cell = "1.17.1"
-objc = "0.2.7"
 tauri-plugin-log = { version = "2.6.0", features = ["colored"] }
-anyhow = "1.0"
+
+# macOS system integration
+objc = "0.2.7"
 time = { version = "0.3", features = ["formatting"] }
-reqwest = { version = "0.11", features = ["multipart", "json"] }
 core-graphics = "0.23"
 cidre = { git = "https://github.com/yury/cidre", rev = "a9587fa", features = ["av"] }
 dasp = "0.11.0"
@@ -199,32 +160,6 @@ futures-channel = "0.3.31"
 sherpa-onnx = "1.13.8"
 bzip2 = "0.4"
 tar = "0.4"
-
-# PERFORMANCE: Enable Metal GPU + CoreML acceleration automatically on macOS
-# CoreML provides additional acceleration for Apple Silicon chips
-whisper-rs = { version = "0.13.2", features = ["raw-api", "metal", "coreml"] }
-
-# Windows-specific dependencies
-# Default: CPU-only build (no BLAS)
-# Users can enable features manually:
-#   --features cuda     (NVIDIA GPUs)
-#   --features vulkan   (AMD/Intel GPUs)
-#   --features openblas (OpenBLAS optimization, requires BLAS_INCLUDE_DIRS)
-[target.'cfg(target_os = "windows")'.dependencies]
-whisper-rs = { version = "0.13.2", features = ["raw-api"] }
-ort = { version = "2.0.0-rc.10", features = ["load-dynamic"] }
-futures-channel = "0.3.31"
-
-# Linux-specific dependencies
-# Default: CPU-only build (no BLAS)
-# Users can enable features manually:
-#   --features cuda     (NVIDIA GPUs)
-#   --features vulkan   (AMD/Intel GPUs)
-#   --features hipblas  (AMD ROCm)
-#   --features openblas (OpenBLAS optimization, requires BLAS_INCLUDE_DIRS)
-[target.'cfg(target_os = "linux")'.dependencies]
-whisper-rs = { version = "0.13.2", features = ["raw-api"] }
-futures-channel = "0.3.31"
 
 [dev-dependencies]
 tempfile = "3.3.0"
