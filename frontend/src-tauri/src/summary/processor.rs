@@ -2,6 +2,7 @@ use crate::summary::budget::{
     chars_per_token, estimate_tokens, group_within_budget, shrink_chunk_tokens, ContextBudget,
     MIN_CHUNK_TOKENS, SUMMARY_SEED,
 };
+use crate::summary::live_outline::{Outline, SECTION_MAX_OUTPUT_TOKENS};
 use crate::summary::llm_client::{
     generate_completion, GenerationOptions, LLMProvider, LlmCompletion, LlmError, LlmErrorKind,
 };
@@ -73,7 +74,7 @@ pub fn require_visible_markdown(stage: &str, cleaned: &CleanedLlmMarkdown) -> Re
     }
 }
 
-const MAX_CHUNK_ATTEMPTS: usize = 2;
+pub(crate) const MAX_CHUNK_ATTEMPTS: usize = 2;
 
 fn should_retry_chunk_failure(attempt: usize, cancelled: bool) -> bool {
     attempt < MAX_CHUNK_ATTEMPTS && !cancelled
@@ -90,7 +91,7 @@ fn seed_for_attempt(base: Option<u32>, attempt: usize) -> Option<u32> {
     Some(base.unwrap_or(SUMMARY_SEED).wrapping_add(offset))
 }
 
-const ENGLISH_BASE_SUMMARY_INSTRUCTION: &str =
+pub(crate) const ENGLISH_BASE_SUMMARY_INSTRUCTION: &str =
     "**Write the summary/report in English regardless of transcript language; non-English prose is invalid.**";
 
 fn resolve_cached_english<'a>(
@@ -239,7 +240,7 @@ fn translation_system_prompt(target_language: &str) -> String {
 
 /// Explains the speaker labels `formatSummaryTranscript` (frontend) writes on
 /// every transcript line.
-const SPEAKER_GUIDE: &str = "Transcript lines look like `[mm:ss] [Speaker] text`. `[You]` is the person who recorded this meeting (the user). `[Others]` is everyone heard through the computer's audio: remote participants, possibly several different people, so never treat all `[Others]` lines as one person. Use a person's name only when the transcript states it.";
+pub(crate) const SPEAKER_GUIDE: &str = "Transcript lines look like `[mm:ss] [Speaker] text`. `[You]` is the person who recorded this meeting (the user). `[Others]` is everyone heard through the computer's audio: remote participants, possibly several different people, so never treat all `[Others]` lines as one person. Use a person's name only when the transcript states it.";
 
 fn chunk_system_prompt() -> String {
     format!("You are an expert meeting summarizer.\n\n{SPEAKER_GUIDE}")
@@ -955,16 +956,16 @@ pub(crate) fn truncation_error_for(
     )
 }
 
-fn chars_for_tokens(tokens: usize, chars_per_token: f64) -> usize {
+pub(crate) fn chars_for_tokens(tokens: usize, chars_per_token: f64) -> usize {
     ((tokens as f64 * chars_per_token * CHUNK_SIZE_SAFETY).floor() as usize).max(1)
 }
 
 /// Runs the summary passes against one backend, with one output budget and,
 /// for local models, one context budget.
-struct SummaryPipeline<'a, B: SummaryBackend> {
-    backend: &'a B,
+pub(crate) struct SummaryPipeline<'a, B: SummaryBackend> {
+    pub(crate) backend: &'a B,
     options: GenerationOptions,
-    budget: Option<ContextBudget>,
+    pub(crate) budget: Option<ContextBudget>,
     reasoning_stripped: AtomicBool,
 }
 
@@ -1007,7 +1008,7 @@ impl<'a, B: SummaryBackend> SummaryPipeline<'a, B> {
 
     /// [`Self::complete`] for the `attempt`th try of the same prompt, which
     /// samples with a different seed after the first.
-    async fn complete_attempt(
+    pub(crate) async fn complete_attempt(
         &self,
         stage: &str,
         system_prompt: &str,
@@ -1351,6 +1352,7 @@ pub(crate) async fn generate_meeting_summary<B: SummaryBackend>(
     summary_language: Option<&str>,
     detected_transcript_language: Option<&str>,
     cached_english: Option<&str>,
+    outline: Option<&Outline>,
 ) -> Result<GeneratedMeetingSummary, String> {
     if backend.is_cancelled() {
         return Err(CANCELLED_ERROR.to_string());
@@ -1361,6 +1363,15 @@ pub(crate) async fn generate_meeting_summary<B: SummaryBackend>(
         model_name
     );
     let pipeline = SummaryPipeline::new(backend, options, context_budget);
+    // Section calls write a handful of bullets: a smaller output reserve
+    // leaves more of the context for the topic's transcript.
+    let section_pipeline = outline.map(|_| {
+        let budget = context_budget.map(|budget| ContextBudget {
+            max_output: budget.max_output.min(SECTION_MAX_OUTPUT_TOKENS),
+            ..budget
+        });
+        SummaryPipeline::new(backend, options, budget)
+    });
 
     let (mut english_markdown, successful_chunk_count) =
         if let Some(cached) = resolve_cached_english(cached_english, summary_language) {
@@ -1369,6 +1380,10 @@ pub(crate) async fn generate_meeting_summary<B: SummaryBackend>(
                 cached.len()
             );
             (cached.to_string(), 1_i64)
+        } else if let (Some(outline), Some(section_pipeline)) = (outline, &section_pipeline) {
+            section_pipeline
+                .outline_notes(outline, text, custom_prompt)
+                .await?
         } else {
             pipeline
                 .english_notes(text, custom_prompt, final_prompt)
@@ -1402,7 +1417,10 @@ pub(crate) async fn generate_meeting_summary<B: SummaryBackend>(
         final_markdown,
         english_markdown,
         successful_chunk_count,
-        reasoning_stripped: pipeline.reasoning_stripped(),
+        reasoning_stripped: pipeline.reasoning_stripped()
+            || section_pipeline
+                .as_ref()
+                .is_some_and(SummaryPipeline::reasoning_stripped),
         normalization_fallback,
     })
 }
@@ -2002,6 +2020,7 @@ mod tests {
             None,
             detected_language,
             None,
+            None,
         )
         .await
     }
@@ -2142,6 +2161,201 @@ mod tests {
         let final_call = calls.last().unwrap();
         assert!(final_call.0.contains("`## Summary`"));
         assert!(final_call.1.contains("combined summary"));
+    }
+
+    mod from_live_notes {
+        use super::*;
+        use crate::summary::live_outline::{build_outline, section_system_prompt, LiveNote};
+
+        fn note(min: i64, kind: &str, text: &str, topic: &str) -> LiveNote {
+            let speaker = (kind == "action").then_some("You");
+            LiveNote::new(
+                min * 60_000,
+                min * 60_000 + 20_000,
+                kind,
+                text,
+                speaker,
+                Some(topic),
+            )
+        }
+
+        /// Ten minutes of transcript, one line every 30 s, `filler` chars long.
+        fn transcript(filler: usize) -> String {
+            (0..20)
+                .map(|i| {
+                    format!(
+                        "[{:02}:{:02}] [Others] line {i} {}",
+                        i / 2,
+                        (i % 2) * 30,
+                        "x".repeat(filler)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+
+        fn notes() -> Vec<LiveNote> {
+            vec![
+                note(0, "point", "Pricing at forty per seat", "Pricing"),
+                note(2, "decision", "Annual plan ships first", "Pricing"),
+                note(5, "point", "Two engineers to hire", "Hiring"),
+                note(7, "action", "post the job ads", "Hiring"),
+            ]
+        }
+
+        async fn run_outline(
+            backend: &FakeBackend,
+            text: &str,
+            user_notes: &str,
+            budget: Option<ContextBudget>,
+        ) -> Result<GeneratedMeetingSummary, String> {
+            let outline = build_outline(&notes(), text, user_notes).unwrap();
+            generate_meeting_summary(
+                backend,
+                "model",
+                text,
+                user_notes,
+                &resolve_summary_system_prompt(None, None, user_notes),
+                budget,
+                &GenerationOptions::default(),
+                None,
+                Some("en"),
+                None,
+                Some(&outline),
+            )
+            .await
+        }
+
+        fn section_calls(backend: &FakeBackend) -> Vec<String> {
+            backend
+                .calls()
+                .into_iter()
+                .filter(|(system, _, _)| *system == section_system_prompt())
+                .map(|(_, user, _)| user)
+                .collect()
+        }
+
+        #[tokio::test]
+        async fn each_topic_is_written_from_its_own_transcript_slice() {
+            let backend = FakeBackend::new(LLMProvider::Claude, |_, system, user, _| {
+                if system == title_system_prompt() {
+                    return reply("Pricing and Hiring Plan");
+                }
+                if user.contains("Part of the meeting: Pricing") {
+                    reply("- Forty dollars per seat [00:30]\nQuestion: Monthly price? [01:00]")
+                } else {
+                    reply("- Two engineers, backend first [05:00]\nAction: Priya — draft the role (due: Monday) [06:00]")
+                }
+            });
+            let generated = run_outline(&backend, &transcript(10), "", None)
+                .await
+                .unwrap();
+
+            let sections = section_calls(&backend);
+            assert_eq!(sections.len(), 2, "one call per topic");
+            assert!(sections[0].contains("[04:30] [Others] line 9"));
+            assert!(!sections[0].contains("[05:00] [Others] line 10"));
+            assert!(sections[1].contains("[05:00] [Others] line 10"));
+            assert!(!sections[1].contains("[04:30] [Others]"));
+            assert!(sections[0].contains("DECISION: Annual plan ships first"));
+            assert!(sections[1].contains("ACTION (You): post the job ads"));
+            assert_eq!(
+                generated.final_markdown,
+                "# Pricing and Hiring Plan\n\n## Pricing\n\n- Forty dollars per seat [00:30]\n\n## Hiring\n\n- Two engineers, backend first [05:00]\n\n## Decisions\n\n- Annual plan ships first [02:00]\n\n## Action items\n\n- **You** — post the job ads [07:00]\n- **Priya** — draft the role (due: Monday) [06:00]\n\n## Open questions\n\n- Monthly price? [01:00]\n"
+            );
+            // One title call plus one per section.
+            assert_eq!(generated.successful_chunk_count, 3);
+        }
+
+        #[tokio::test]
+        async fn user_notes_reach_their_topic_and_survive_a_model_that_drops_them() {
+            let backend = FakeBackend::new(LLMProvider::Claude, |_, system, _, _| {
+                if system == title_system_prompt() {
+                    reply("Planning")
+                } else {
+                    reply("- Something said [00:30]")
+                }
+            });
+            let generated = run_outline(
+                &backend,
+                &transcript(10),
+                "[06:10]\nbackend or frontend first?",
+                None,
+            )
+            .await
+            .unwrap();
+            let sections = section_calls(&backend);
+            assert!(!sections[0].contains("<my_notes>"));
+            assert!(sections[1].contains("<my_notes>\n- backend or frontend first?\n</my_notes>"));
+            assert!(generated
+                .final_markdown
+                .contains("## Hiring\n\n- backend or frontend first?\n- Something said\n"));
+            // The Hiring copy of the bullet lost its link: 00:30 is not in Hiring.
+            assert!(generated
+                .final_markdown
+                .contains("## Pricing\n\n- Something said [00:30]"));
+        }
+
+        #[tokio::test]
+        async fn a_failed_section_keeps_its_live_notes() {
+            let backend = FakeBackend::new(LLMProvider::Claude, |_, system, user, _| {
+                if system == title_system_prompt() {
+                    reply("Planning")
+                } else if user.contains("Part of the meeting: Hiring") {
+                    Err(LlmError::new(LlmErrorKind::Other, "server error"))
+                } else {
+                    reply("- Pricing bullet [00:30]")
+                }
+            });
+            let generated = run_outline(&backend, &transcript(10), "", None)
+                .await
+                .unwrap();
+            assert!(generated.final_markdown.contains(
+                "## Hiring\n\n- Two engineers to hire [05:00]\n- post the job ads [07:00]"
+            ));
+        }
+
+        #[tokio::test]
+        async fn a_section_too_long_for_the_context_is_written_in_pieces() {
+            let budget = ContextBudget::new(8_000);
+            let backend = FakeBackend::new(LLMProvider::BuiltInAI, |_, system, user, _| {
+                if system == title_system_prompt() {
+                    reply("Planning")
+                } else if system == section_system_prompt() && user.chars().count() > 5_500 {
+                    Err(LlmError::new(
+                        LlmErrorKind::ContextOverflow,
+                        "context overflow",
+                    ))
+                } else {
+                    reply("- A bullet")
+                }
+            });
+            run_outline(&backend, &transcript(400), "", Some(budget))
+                .await
+                .unwrap();
+            let sections = section_calls(&backend);
+            let window = budget.n_ctx - budget.max_output.min(1_536);
+            for (system, user, _) in backend.calls() {
+                if system == section_system_prompt() {
+                    assert!(system.chars().count() + user.chars().count() <= window);
+                }
+            }
+            // Pricing (10 lines of ~420 chars) does not fit one call.
+            let pricing = sections
+                .iter()
+                .filter(|user| user.contains("Part of the meeting: Pricing"))
+                .count();
+            assert!(pricing >= 2, "{pricing} pricing calls");
+            // Every transcript line is sent exactly once, overflowed calls aside.
+            for i in 0..20 {
+                let marker = format!("] [Others] line {i} ");
+                let sent = sections
+                    .iter()
+                    .filter(|user| user.chars().count() <= 5_500 && user.contains(&marker))
+                    .count();
+                assert_eq!(sent, 1, "line {i} sent {sent} times");
+            }
+        }
     }
 
     #[tokio::test]
@@ -2310,6 +2524,7 @@ mod tests {
                 &GenerationOptions::default(),
                 None,
                 Some("en"),
+                None,
                 None,
             )
             .await

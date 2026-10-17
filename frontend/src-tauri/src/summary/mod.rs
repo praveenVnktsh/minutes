@@ -31,7 +31,10 @@ pub struct CustomOpenAIConfig {
 
 pub(crate) mod budget;
 pub mod commands;
+#[cfg(test)]
+mod enhanced_eval;
 pub(crate) mod language_detection;
+pub(crate) mod live_outline;
 pub mod llm_client;
 pub(crate) mod metadata;
 pub mod processor;

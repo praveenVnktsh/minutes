@@ -18,7 +18,7 @@ pub mod scheduler;
 pub mod worker;
 
 #[cfg(test)]
-mod eval;
+pub(crate) mod eval;
 #[cfg(test)]
 mod smoke;
 

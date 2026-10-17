@@ -122,7 +122,7 @@ Reply with JSON only, no other text:\n\
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Variant {
+pub(crate) enum Variant {
     Old,
     New,
 }
@@ -156,15 +156,15 @@ struct WindowRun {
     decided: Option<String>,
 }
 
-struct RunResult {
-    entries: Vec<TimelineEntry>,
+pub(crate) struct RunResult {
+    pub(crate) entries: Vec<TimelineEntry>,
     windows: Vec<WindowRun>,
     /// Model requests made: notes calls and topic steps.
     requests: usize,
 }
 
 /// Final live transcript segments of a replay run, on audio time.
-fn load_segments(events: &Path, until_ms: Option<i64>) -> anyhow::Result<Vec<Segment>> {
+pub(crate) fn load_segments(events: &Path, until_ms: Option<i64>) -> anyhow::Result<Vec<Segment>> {
     let text = std::fs::read_to_string(events)?;
     let mut segments = Vec::new();
     for line in text.lines() {
@@ -203,12 +203,12 @@ fn load_segments(events: &Path, until_ms: Option<i64>) -> anyhow::Result<Vec<Seg
     Ok(segments)
 }
 
-struct Model {
-    app_data: PathBuf,
-    name: String,
-    client: reqwest::Client,
+pub(crate) struct Model {
+    pub(crate) app_data: PathBuf,
+    pub(crate) name: String,
+    pub(crate) client: reqwest::Client,
     /// Topic step requests made, for the request rate.
-    topic_calls: AtomicUsize,
+    pub(crate) topic_calls: AtomicUsize,
 }
 
 impl Model {
@@ -411,7 +411,11 @@ fn parse_reply(
 /// Replays the segments through the scheduler on a simulated clock: segments
 /// arrive at their audio end time, a request occupies the model for its real
 /// latency, and text arriving meanwhile merges into the next window.
-async fn run_variant(variant: Variant, segments: &[Segment], model: &Model) -> RunResult {
+pub(crate) async fn run_variant(
+    variant: Variant,
+    segments: &[Segment],
+    model: &Model,
+) -> RunResult {
     let topic_calls_before = model.topic_calls.load(Ordering::SeqCst);
     let mut scheduler = WindowScheduler::new(Duration::ZERO);
     let mut entries: Vec<TimelineEntry> = Vec::new();

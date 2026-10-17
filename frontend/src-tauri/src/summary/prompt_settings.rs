@@ -16,6 +16,53 @@ use crate::summary::processor::{
 };
 
 const STORE_FILE: &str = "store.json";
+/// Whether enhanced notes build on the live notes (`live_outline`).
+pub const FROM_LIVE_NOTES_KEY: &str = "summaryFromLiveNotes";
+
+/// "Build notes from live notes". An absent or unreadable value means on.
+pub fn from_live_notes_from_stored(value: Option<&serde_json::Value>) -> bool {
+    value.and_then(serde_json::Value::as_bool).unwrap_or(true)
+}
+
+pub fn from_live_notes_enabled<R: Runtime>(app: &AppHandle<R>) -> bool {
+    match app.store(STORE_FILE) {
+        Ok(store) => from_live_notes_from_stored(store.get(FROM_LIVE_NOTES_KEY).as_ref()),
+        Err(e) => {
+            log::warn!("summary settings: could not open {}: {}", STORE_FILE, e);
+            true
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SummaryFromLiveNotesSettings {
+    pub enabled: bool,
+}
+
+#[tauri::command]
+pub async fn api_get_summary_from_live_notes<R: Runtime>(
+    app: AppHandle<R>,
+) -> SummaryFromLiveNotesSettings {
+    SummaryFromLiveNotesSettings {
+        enabled: from_live_notes_enabled(&app),
+    }
+}
+
+#[tauri::command]
+pub async fn api_set_summary_from_live_notes<R: Runtime>(
+    app: AppHandle<R>,
+    enabled: bool,
+) -> Result<SummaryFromLiveNotesSettings, String> {
+    let store = app
+        .store(STORE_FILE)
+        .map_err(|e| format!("Failed to open settings store: {}", e))?;
+    store.set(FROM_LIVE_NOTES_KEY, serde_json::json!(enabled));
+    store
+        .save()
+        .map_err(|e| format!("Failed to save settings store: {}", e))?;
+    Ok(SummaryFromLiveNotesSettings { enabled })
+}
 
 /// Which final-pass prompt a setting is about.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -170,6 +217,22 @@ mod tests {
     use serde_json::json;
 
     const DEFAULT: &str = "Default prompt text";
+
+    #[test]
+    fn from_live_notes_is_on_unless_turned_off() {
+        assert!(from_live_notes_from_stored(None));
+        assert!(from_live_notes_from_stored(Some(&serde_json::json!(
+            "junk"
+        ))));
+        assert!(from_live_notes_from_stored(Some(&serde_json::json!(true))));
+        assert!(!from_live_notes_from_stored(Some(&serde_json::json!(
+            false
+        ))));
+        assert_eq!(
+            serde_json::to_value(SummaryFromLiveNotesSettings { enabled: false }).unwrap(),
+            serde_json::json!({ "enabled": false })
+        );
+    }
 
     #[test]
     fn normalize_keeps_custom_prompt_trimmed() {

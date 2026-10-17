@@ -1101,6 +1101,8 @@ pub fn run() {
             summary::prompt_settings::api_get_summary_prompt,
             summary::prompt_settings::api_save_summary_prompt,
             summary::prompt_settings::api_reset_summary_prompt,
+            summary::prompt_settings::api_get_summary_from_live_notes,
+            summary::prompt_settings::api_set_summary_from_live_notes,
             // Template commands
             summary::template_commands::api_list_templates,
             summary::template_commands::api_get_template_details,

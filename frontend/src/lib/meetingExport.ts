@@ -1,6 +1,7 @@
 import type { MeetingSummary, Transcript } from '@/types';
 import type { LiveNotesDocument } from '@/lib/liveNotes';
 import { formatNoteTimestamp } from '@/lib/liveNotes';
+import { citationHrefSeconds } from '@/lib/copilot';
 
 export interface TranscriptPage {
   transcripts: Transcript[];
@@ -82,6 +83,8 @@ function inlineMarkdown(content: unknown): string {
     if (inline.type === 'link') {
       const label = inlineMarkdown(inline.content);
       const href = typeof inline.href === 'string' ? inline.href : '';
+      // A `[MM:SS]` transcript link only works inside the app: export its text.
+      if (citationHrefSeconds(href) !== null) return label;
       return href ? `[${label}](${href})` : label;
     }
 

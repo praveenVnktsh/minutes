@@ -1,17 +1,19 @@
 use crate::database::models::{Setting, Transcript};
+use crate::database::repositories::timeline::TimelineRepository;
 use crate::database::repositories::{
     meeting::MeetingsRepository, setting::SettingsRepository, summary::SummaryProcessesRepository,
 };
 use crate::ollama::metadata::ModelMetadataCache;
 use crate::summary::budget::ContextBudget;
 use crate::summary::language_detection::detect_summary_language;
+use crate::summary::live_outline::{build_outline, section_system_prompt, LiveNote, Outline};
 use crate::summary::llm_client::{generate_summary, GenerationOptions, LLMProvider};
 use crate::summary::metadata::read_detected_summary_language_from_metadata;
 use crate::summary::processor::{
     build_title_user_prompt, clean_llm_markdown_detailed, extract_meeting_name_from_markdown,
     generate_meeting_summary, is_prompt_echo_title, language_name_from_code,
     require_visible_markdown, resolve_summary_system_prompt, sanitize_generated_title,
-    title_system_prompt, ProviderBackend,
+    title_system_prompt, ProviderBackend, SummaryPrompt, SummaryPromptKind,
 };
 use crate::summary::templates::{self, Template};
 use chrono::{DateTime, Utc};
@@ -656,7 +658,26 @@ impl SummaryService {
         };
         let template_fingerprint = template_cache_fingerprint(&template);
 
-        let notes_prompt_fingerprint = stable_text_fingerprint(&effective_notes_prompt.text);
+        let outline = Self::live_notes_outline(
+            &app,
+            &pool,
+            &meeting_id,
+            &text,
+            &custom_prompt,
+            &effective_notes_prompt,
+        )
+        .await;
+        // The live-notes path is a different prompt over different inputs, so
+        // it never reuses an English summary made the other way.
+        let notes_prompt_fingerprint = match &outline {
+            Some(outline) => stable_text_fingerprint(&format!(
+                "{}\n--live-outline-v1--\n{}\n{}",
+                effective_notes_prompt.text,
+                section_system_prompt(),
+                outline.fingerprint_text()
+            )),
+            None => stable_text_fingerprint(&effective_notes_prompt.text),
+        };
 
         let cache_source = build_summary_cache_source(
             &text,
@@ -729,6 +750,7 @@ impl SummaryService {
             summary_language.as_deref(),
             detected_summary_language.as_deref(),
             cached_english.as_deref(),
+            outline.as_ref(),
         )
         .await;
 
@@ -827,6 +849,51 @@ impl SummaryService {
             }
         }
         Self::cleanup_cancellation_token(&meeting_id, started_at);
+    }
+
+    /// The live-notes skeleton for this meeting's enhanced notes, or None for
+    /// the transcript path: the setting is off, the user saved their own
+    /// summary prompt, or the live notes cannot carry the notes (see
+    /// `live_outline::Fallback`).
+    async fn live_notes_outline<R: tauri::Runtime>(
+        app: &AppHandle<R>,
+        pool: &SqlitePool,
+        meeting_id: &str,
+        text: &str,
+        notes: &str,
+        prompt: &SummaryPrompt,
+    ) -> Option<Outline> {
+        if !crate::summary::prompt_settings::from_live_notes_enabled(app) {
+            info!("Enhanced notes from live notes is off; using the transcript path");
+            return None;
+        }
+        if prompt.kind == SummaryPromptKind::Custom {
+            info!("A custom summary prompt is saved; using the transcript path");
+            return None;
+        }
+        let rows = match TimelineRepository::list_for_meeting(pool, meeting_id).await {
+            Ok(rows) => rows,
+            Err(error) => {
+                warn!("Could not load live notes for {meeting_id} ({error}); using the transcript path");
+                return None;
+            }
+        };
+        let entries: Vec<LiveNote> = rows.iter().map(LiveNote::from).collect();
+        match build_outline(&entries, text, notes) {
+            Ok(outline) => {
+                info!(
+                    "Enhanced notes for {} build on {} live notes in {} sections",
+                    meeting_id,
+                    outline.notes.len(),
+                    outline.sections.len()
+                );
+                Some(outline)
+            }
+            Err(reason) => {
+                info!("Enhanced notes for {meeting_id} use the transcript path: {reason}");
+                None
+            }
+        }
     }
 
     /// Asks the configured summary model for a fresh meeting title from the stored
