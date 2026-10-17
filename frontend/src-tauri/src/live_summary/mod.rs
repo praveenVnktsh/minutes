@@ -18,6 +18,8 @@ pub mod scheduler;
 pub mod worker;
 
 #[cfg(test)]
+mod bench;
+#[cfg(test)]
 mod eval;
 #[cfg(test)]
 mod smoke;

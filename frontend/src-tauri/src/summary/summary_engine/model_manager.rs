@@ -402,6 +402,7 @@ impl ModelManager {
             &file_path,
             &model_def.download_url,
             model_def.size_mb,
+            model_def.sha256.as_deref(),
             progress_callback,
         )
         .await
@@ -422,6 +423,7 @@ impl ModelManager {
         file_path: &Path,
         download_url: &str,
         expected_size_mb: u64,
+        expected_sha256: Option<&str>,
         progress_callback: Option<Box<dyn Fn(DownloadProgress) + Send>>,
     ) -> Result<()> {
         // The only early return that skips the finaliser: the reservation this
@@ -435,6 +437,7 @@ impl ModelManager {
                 file_path,
                 download_url,
                 expected_size_mb,
+                expected_sha256,
                 progress_callback,
             )
             .await;
@@ -465,6 +468,7 @@ impl ModelManager {
         file_path: &Path,
         download_url: &str,
         expected_size_mb: u64,
+        expected_sha256: Option<&str>,
         progress_callback: Option<Box<dyn Fn(DownloadProgress) + Send>>,
     ) -> Result<()> {
         // Clear cancellation flag
@@ -877,6 +881,32 @@ impl ModelManager {
         // Small delay to ensure UI receives 100% event
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
+        if let Some(expected) = expected_sha256 {
+            let path = partial_path.clone();
+            let actual = tokio::task::spawn_blocking(move || sha256_file(&path))
+                .await
+                .map_err(|e| anyhow!("Checksum task failed: {e}"))??;
+            if !actual.eq_ignore_ascii_case(&expected) {
+                log::error!(
+                    "Checksum mismatch for {}: expected {}, got {}",
+                    model_name,
+                    expected,
+                    actual
+                );
+                // A whole file with the wrong bytes: resuming from it would
+                // only reproduce them.
+                let _ = fs::remove_file(&partial_path).await;
+                let error_msg = "The downloaded file failed its checksum".to_string();
+                {
+                    let mut models = self.available_models.write().await;
+                    if let Some(model_info) = models.get_mut(model_name) {
+                        model_info.status = ModelStatus::Error(error_msg.clone());
+                    }
+                }
+                return Err(anyhow!(error_msg));
+            }
+        }
+
         if let Err(e) = self.validate_gguf_file(&partial_path).await {
             log::error!("Downloaded file failed validation: {}", e);
 
@@ -1016,9 +1046,41 @@ impl ModelManager {
     }
 }
 
+/// Hex SHA-256 of a file, read in 1 MiB blocks.
+fn sha256_file(path: &Path) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; 1 << 20];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sha256_file_matches_a_known_digest() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x");
+        std::fs::write(&path, b"abc").unwrap();
+        assert_eq!(
+            sha256_file(&path).unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
     use std::sync::Mutex;
     use tempfile::tempdir;
     use tokio::io::AsyncReadExt;
@@ -1206,6 +1268,7 @@ mod tests {
                 &url,
                 TEST_MODEL_SIZE_MB,
                 None,
+                None,
             )
             .await
             .expect_err("connecting to a dead address must fail");
@@ -1218,6 +1281,7 @@ mod tests {
                 &file_path,
                 &url,
                 TEST_MODEL_SIZE_MB,
+                None,
                 None,
             )
             .await
@@ -1250,6 +1314,7 @@ mod tests {
                     &download_path,
                     &download_url,
                     TEST_MODEL_SIZE_MB,
+                    None,
                     Some(Box::new(move |progress| {
                         if progress.downloaded_bytes >= 4 {
                             if let Some(sender) =
@@ -1274,6 +1339,7 @@ mod tests {
                 &file_path,
                 &url,
                 TEST_MODEL_SIZE_MB,
+                None,
                 None,
             )
             .await
@@ -1304,6 +1370,7 @@ mod tests {
                 &file_path,
                 &url,
                 TEST_MODEL_SIZE_MB,
+                None,
                 None,
             )
             .await
@@ -1340,6 +1407,7 @@ mod tests {
                 &file_path,
                 &url,
                 TEST_MODEL_SIZE_MB,
+                None,
                 Some(Box::new(move |progress| {
                     callback_events
                         .lock()
@@ -1394,6 +1462,7 @@ mod tests {
                 &url,
                 BAND_ACCEPTS_ANY_SMALL_FILE_MB,
                 None,
+                None,
             )
             .await
             .expect_err("a transfer cut short must fail");
@@ -1413,6 +1482,7 @@ mod tests {
                 &file_path,
                 &url,
                 BAND_ACCEPTS_ANY_SMALL_FILE_MB,
+                None,
                 None,
             )
             .await
@@ -1443,6 +1513,7 @@ mod tests {
                 &url,
                 TEST_MODEL_SIZE_MB,
                 None,
+                None,
             )
             .await
             .expect("the staged partial is resumed rather than re-fetched");
@@ -1464,6 +1535,7 @@ mod tests {
                 &file_path,
                 &url,
                 TEST_MODEL_SIZE_MB,
+                None,
                 None,
             )
             .await

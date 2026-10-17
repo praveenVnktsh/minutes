@@ -207,6 +207,10 @@ notes with a number not in their transcript, judged the same way for every varia
 
 ## Model call
 
+> Updated by [live notes: minimum model](2026-10-17-live-notes-min-model.md): with Built-in
+> AI, live notes use the compact prompt, reuse the system prompt's state between windows, and
+> run on `gemma4:e2b` (its own helper) once it is downloaded.
+
 `llm.rs` resolves the provider and model from the summary model setting, the same way
 `SummaryService::regenerate_meeting_title` does. That resolution is shared:
 `summary::service::load_llm_config` is now `pub(crate)`.

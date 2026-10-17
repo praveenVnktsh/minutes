@@ -137,6 +137,29 @@ pub struct SummaryModelGenerator {
     client: reqwest::Client,
     /// Ollama's recording-time num_ctx, shared by every call while recording.
     num_ctx: Option<u32>,
+    /// Built-in AI: the model live notes run on (the live notes model once
+    /// it is downloaded, else the summary model) and whether that needs the
+    /// second helper.
+    builtin: Option<(String, bool)>,
+}
+
+/// Providers that run the built-in model.
+pub fn is_builtin(provider: &str) -> bool {
+    matches!(provider, "builtin-ai" | "local-llama" | "localllama")
+}
+
+/// The built-in model live notes use with `summary_model` as the summary
+/// model, and whether it runs on its own helper: the live notes model once
+/// its file is in the models folder, else the summary model itself.
+pub fn live_notes_model(models_dir: &std::path::Path, summary_model: &str) -> (String, bool) {
+    use crate::summary::summary_engine::models::{get_model_by_name, LIVE_NOTES_MODEL};
+    let downloaded = get_model_by_name(LIVE_NOTES_MODEL)
+        .is_some_and(|model| models_dir.join(model.gguf_file).is_file());
+    if downloaded && summary_model != LIVE_NOTES_MODEL {
+        (LIVE_NOTES_MODEL.to_string(), true)
+    } else {
+        (summary_model.to_string(), false)
+    }
 }
 
 impl SummaryModelGenerator {
@@ -161,8 +184,16 @@ impl SummaryModelGenerator {
             crate::summary::service::OllamaPhase::Recording,
         )
         .await;
+        let builtin = (is_builtin(&settings.provider)).then(|| {
+            let models_dir = app_data_dir
+                .as_deref()
+                .map(crate::summary::summary_engine::models::get_models_directory)
+                .unwrap_or_default();
+            live_notes_model(&models_dir, &config.model_name)
+        });
         Ok(Self {
             num_ctx,
+            builtin,
             provider_id: settings.provider,
             config,
             app_data_dir,
@@ -178,7 +209,10 @@ impl Generator for SummaryModelGenerator {
     }
 
     fn model(&self) -> &str {
-        &self.config.model_name
+        match &self.builtin {
+            Some((model, _)) => model,
+            None => &self.config.model_name,
+        }
     }
 
     async fn generate(
@@ -187,6 +221,42 @@ impl Generator for SummaryModelGenerator {
         user_prompt: &str,
         cancel: &CancellationToken,
     ) -> Result<Generated, GenerateError> {
+        if let (Some((model, own_helper)), Some(app_data_dir)) =
+            (&self.builtin, self.app_data_dir.as_ref())
+        {
+            use crate::summary::summary_engine::client::{
+                generate_live_notes, BuiltinGenerateOptions, LiveNotesRequest,
+            };
+            let options = generation_options();
+            // No grammar: the live notes model keeps the compact format on
+            // its own (no unreadable window in the benchmark), and checking
+            // every token against a grammar made generation 10-25 % slower.
+            let grammar = None;
+            return generate_live_notes(
+                app_data_dir,
+                LiveNotesRequest {
+                    model_name: model,
+                    system_prompt,
+                    user_prompt,
+                    grammar,
+                    own_helper: *own_helper,
+                    options: BuiltinGenerateOptions {
+                        max_tokens: options.max_tokens,
+                        temperature: options.sampling_temperature,
+                        seed: options.seed,
+                        timeout: options.timeout,
+                        on_abandon: options.on_abandon,
+                    },
+                },
+                Some(cancel),
+            )
+            .await
+            .map(|completion| Generated {
+                text: completion.text,
+                truncated: completion.truncated,
+            })
+            .map_err(|error| GenerateError::from_provider_error(error.to_string()));
+        }
         let mut options = generation_options();
         options.num_ctx = self.num_ctx;
         generate_summary(
@@ -214,6 +284,27 @@ impl Generator for SummaryModelGenerator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_notes_use_their_model_once_it_is_downloaded() {
+        use crate::summary::summary_engine::models::{get_model_by_name, LIVE_NOTES_MODEL};
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            live_notes_model(dir.path(), "qwen3.5:4b"),
+            ("qwen3.5:4b".to_string(), false)
+        );
+        let file = get_model_by_name(LIVE_NOTES_MODEL).unwrap().gguf_file;
+        std::fs::write(dir.path().join(file), b"GGUF").unwrap();
+        assert_eq!(
+            live_notes_model(dir.path(), "qwen3.5:4b"),
+            (LIVE_NOTES_MODEL.to_string(), true)
+        );
+        // Already the summary model: one helper serves both.
+        assert_eq!(
+            live_notes_model(dir.path(), LIVE_NOTES_MODEL),
+            (LIVE_NOTES_MODEL.to_string(), false)
+        );
+    }
     use crate::summary::llm_client::LLMProvider;
     use crate::summary::llm_client::{build_ollama_chat_body, build_openai_compat_chat_body};
 

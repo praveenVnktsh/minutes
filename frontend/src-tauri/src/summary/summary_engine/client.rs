@@ -54,6 +54,15 @@ enum Request {
         /// Fewer CPU threads while a recording runs (see [`generation_threads`]).
         #[serde(skip_serializing_if = "Option::is_none")]
         n_threads: Option<i32>,
+        /// Flash attention; `None` lets llama.cpp decide.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        flash_attn: Option<bool>,
+        /// KV cache element type ("f16", "q8_0", "q4_0").
+        #[serde(skip_serializing_if = "Option::is_none")]
+        kv_cache_type: Option<&'static str>,
+        /// GBNF the output must follow.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        grammar: Option<&'static str>,
     },
     Tokenize {
         text: String,
@@ -178,6 +187,9 @@ fn parse_token_count_response(response_json: &str) -> Result<usize> {
 
 lazy_static::lazy_static! {
     static ref SIDECAR_MANAGER: Arc<Mutex<Option<Arc<SidecarManager>>>> = Arc::new(Mutex::new(None));
+    /// A second helper for live notes when they run on another model than
+    /// Copilot and summaries, so the two never reload each other's model.
+    static ref LIVE_NOTES_SIDECAR: Arc<Mutex<Option<Arc<SidecarManager>>>> = Arc::new(Mutex::new(None));
 }
 
 // Model path cache to avoid repeated filesystem I/O and model lookups. Keyed
@@ -398,6 +410,9 @@ pub async fn generate_with_builtin(
         cache_anchor_chars: None,
         cache_context_size: None,
         n_threads: generation_threads(),
+        flash_attn: None,
+        kv_cache_type: None,
+        grammar: None,
     };
 
     let request_json = serde_json::to_string(&request)?;
@@ -452,6 +467,152 @@ pub async fn generate_with_builtin(
         completion.truncated
     );
     Ok(completion)
+}
+
+/// n_ctx of the cached context live notes use: Copilot's, so when both run
+/// on the same model they share the helper's one cached context instead of
+/// rebuilding it every time they alternate.
+pub const LIVE_NOTES_CACHE_CONTEXT: u32 = 8192;
+
+/// One live notes request.
+#[derive(Debug, Clone, Copy)]
+pub struct LiveNotesRequest<'a> {
+    pub model_name: &'a str,
+    pub system_prompt: &'a str,
+    pub user_prompt: &'a str,
+    /// GBNF the answer must follow.
+    pub grammar: Option<&'static str>,
+    /// Run on the live notes helper (another model than the main helper's).
+    pub own_helper: bool,
+    pub options: BuiltinGenerateOptions,
+}
+
+/// The helper live notes run on: the main one, or their own.
+async fn live_notes_manager(
+    app_data_dir: &Path,
+    model_name: &str,
+    own_helper: bool,
+) -> Result<(Arc<SidecarManager>, models::ModelDef, PathBuf)> {
+    if !own_helper {
+        return running_manager(app_data_dir, model_name).await;
+    }
+    let model_def = models::get_model_by_name(model_name)
+        .ok_or_else(|| anyhow!("Unknown model: {}", model_name))?;
+    let model_path = get_cached_model_path(app_data_dir, model_name)?;
+    let manager = {
+        let mut slot = LIVE_NOTES_SIDECAR.lock().await;
+        if slot.is_none() {
+            log::info!("Starting the live notes helper");
+            *slot = Some(Arc::new(SidecarManager::new(app_data_dir.to_path_buf())?));
+        }
+        slot.clone().unwrap()
+    };
+    manager.ensure_running(model_path.clone()).await?;
+    Ok((manager, model_def, model_path))
+}
+
+/// A live notes window on a built-in model. Unlike [`generate_with_builtin`]
+/// it keeps the template head and system prompt evaluated between windows
+/// (llama-helper's prefix checkpoint), so each window only evaluates its own
+/// text, and it can constrain the answer with a grammar.
+pub async fn generate_live_notes(
+    app_data_dir: &Path,
+    request: LiveNotesRequest<'_>,
+    cancellation_token: Option<&CancellationToken>,
+) -> Result<BuiltinCompletion> {
+    if cancellation_token.is_some_and(CancellationToken::is_cancelled) {
+        return Err(anyhow!("Generation cancelled before starting"));
+    }
+    let LiveNotesRequest {
+        model_name,
+        system_prompt,
+        user_prompt,
+        grammar,
+        own_helper,
+        options,
+    } = request;
+    let (prompt, prefix_chars) =
+        format_builtin_prompt_with_prefix(model_name, system_prompt, "", user_prompt)?;
+    let (manager, model_def, model_path) =
+        live_notes_manager(app_data_dir, model_name, own_helper).await?;
+    let sampling = model_def.sampling.sanitize_for_llama_helper();
+    let id = next_request_id();
+    let request = Request::Generate {
+        prompt,
+        max_tokens: Some(
+            options
+                .max_tokens
+                .and_then(|value| i32::try_from(value).ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(models::DEFAULT_MAX_TOKENS),
+        ),
+        context_size: Some(model_def.context_size),
+        model_path: Some(model_path.to_string_lossy().to_string()),
+        temperature: Some(options.temperature.unwrap_or(sampling.temperature)),
+        top_k: Some(sampling.top_k),
+        top_p: Some(sampling.top_p),
+        presence_penalty: Some(sampling.presence_penalty),
+        frequency_penalty: Some(sampling.frequency_penalty),
+        repeat_penalty: Some(sampling.repeat_penalty),
+        penalty_last_n: Some(sampling.penalty_last_n),
+        stop_tokens: Some(sampling.stop_tokens),
+        seed: Some(options.seed.unwrap_or(BUILTIN_SEED)),
+        id: Some(id),
+        stream: None,
+        cache_prompt: Some(true),
+        cache_prefix_chars: Some(prefix_chars),
+        cache_anchor_chars: None,
+        cache_context_size: Some(
+            copilot_cache_context(LIVE_NOTES_CACHE_CONTEXT).min(model_def.context_size),
+        ),
+        n_threads: generation_threads(),
+        flash_attn: None,
+        kv_cache_type: None,
+        grammar,
+    };
+    let timeout = options
+        .timeout
+        .unwrap_or(Duration::from_secs(models::GENERATION_TIMEOUT_SECS));
+    if !own_helper && options.on_abandon == OnAbandon::Yield {
+        // On the shared helper: never back to back with Copilot.
+        let last_end = *LAST_GENERATION_END
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let delay = background_pacing_delay(
+            last_end,
+            crate::clock::now().into_std(),
+            crate::audio::recording_commands::is_recording_or_stopping(),
+        );
+        if !delay.is_zero() {
+            match cancellation_token {
+                Some(token) => tokio::select! {
+                    _ = token.cancelled() => return Err(anyhow!(SidecarError::Cancelled)),
+                    _ = crate::clock::sleep(delay) => {}
+                },
+                None => crate::clock::sleep(delay).await,
+            }
+        }
+    }
+    let response_json = manager
+        .send(SidecarRequest {
+            json: serde_json::to_string(&request)?,
+            id: Some(id),
+            priority: options.on_abandon.priority(),
+            timeout,
+            timeout_includes_queue: false,
+            cancellation_token,
+            on_abandon: options.on_abandon,
+            tokens: None,
+        })
+        .await;
+    if !own_helper {
+        note_generation_end();
+    }
+    let response_json = response_json?;
+    if cancellation_token.is_some_and(CancellationToken::is_cancelled) {
+        return Err(anyhow!("Generation cancelled"));
+    }
+    parse_generate_response(&response_json)
 }
 
 /// CPU threads llama-helper may use while a recording is live. Live
@@ -710,6 +871,9 @@ pub async fn generate_with_builtin_stream(
         cache_anchor_chars: (anchor_chars > 0).then_some(anchor_chars),
         cache_context_size: Some(options.cache_context_size.min(model_def.context_size)),
         n_threads: generation_threads(),
+        flash_attn: None,
+        kv_cache_type: None,
+        grammar: None,
     };
     let response_json = manager
         .send(SidecarRequest {
@@ -734,12 +898,12 @@ pub async fn generate_with_builtin_stream(
 /// Shutdown the global sidecar (graceful cleanup)
 /// Detaches the current manager and spawns a background task to drain active requests
 pub async fn shutdown_sidecar_gracefully() -> Result<()> {
-    let manager_opt = {
-        let mut global_manager = SIDECAR_MANAGER.lock().await;
-        global_manager.take()
-    };
+    let managers = [
+        SIDECAR_MANAGER.lock().await.take(),
+        LIVE_NOTES_SIDECAR.lock().await.take(),
+    ];
 
-    if let Some(manager) = manager_opt {
+    for manager in managers.into_iter().flatten() {
         log::info!("Detaching sidecar manager for graceful shutdown");
 
         // Spawn background task to wait for active requests and then kill
@@ -757,12 +921,12 @@ pub async fn shutdown_sidecar_gracefully() -> Result<()> {
 /// Directly kills the process without waiting for active requests to complete.
 /// This is synchronous and blocks until the sidecar is terminated.
 pub async fn force_shutdown_sidecar() -> Result<()> {
-    let manager_opt = {
-        let mut global_manager = SIDECAR_MANAGER.lock().await;
-        global_manager.take()
-    };
+    let managers = [
+        SIDECAR_MANAGER.lock().await.take(),
+        LIVE_NOTES_SIDECAR.lock().await.take(),
+    ];
 
-    if let Some(manager) = manager_opt {
+    for manager in managers.into_iter().flatten() {
         log::info!("Force shutting down sidecar for app exit");
         // Call shutdown() directly - sends shutdown command and force kills after 3s
         manager.shutdown().await?;
@@ -842,6 +1006,9 @@ mod tests {
             cache_anchor_chars: None,
             cache_context_size: None,
             n_threads: None,
+            flash_attn: None,
+            kv_cache_type: None,
+            grammar: None,
         };
 
         let json = serde_json::to_string(&request).unwrap();
@@ -1005,6 +1172,9 @@ mod tests {
             cache_anchor_chars: None,
             cache_context_size: None,
             n_threads: None,
+            flash_attn: None,
+            kv_cache_type: None,
+            grammar: None,
         })
         .unwrap();
         assert!(json.contains("\"id\":4"));

@@ -18,7 +18,7 @@ use super::facts::Figures;
 use super::glossary::Glossary;
 use super::llm::{FailureKind, GenerateError, Generated, Generator, REQUEST_TIMEOUT};
 use super::notes::{decide_topic, NoteContext, MIN_TOPIC_MS};
-use super::parse::{parse_notes, parse_topic_decision, ParsedEntry};
+use super::parse::{parse_notes, parse_topic_decision, ParsedEntry, TopicDecision};
 use super::prompt::{self, PreviousEntry, PromptContext};
 use super::scheduler::{Segment, Window, WindowScheduler, CADENCE};
 use crate::database::repositories::timeline::TimelineEntryRow;
@@ -56,7 +56,7 @@ pub enum TimelineStatus {
     Stopped,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
 pub struct TimelineEntry {
     pub id: String,
     pub start_ms: i64,
@@ -219,6 +219,54 @@ pub fn uses_topic_step(provider: &str) -> bool {
         provider,
         "builtin-ai" | "local-llama" | "localllama" | "ollama"
     )
+}
+
+/// Providers that get the compact prompt (`prompt::compact_system_prompt`):
+/// the built-in model, where every output token is local compute and the
+/// answer can be held to its grammar.
+pub fn uses_compact_prompt(provider: &str) -> bool {
+    super::llm::is_builtin(provider)
+}
+
+/// The notes call's prompts for `provider`.
+pub fn notes_prompts(
+    provider: &str,
+    window: &Window,
+    context: &PromptContext<'_>,
+) -> (&'static str, String) {
+    if uses_compact_prompt(provider) {
+        (
+            prompt::compact_system_prompt(),
+            prompt::compact_user_prompt(window, context),
+        )
+    } else {
+        (
+            prompt::system_prompt(),
+            prompt::user_prompt(window, context),
+        )
+    }
+}
+
+/// The window's topic from a compact reply's topic line: the topic step
+/// folded into the notes call, judged as `decide_topic` judges the step's
+/// answer (a young topic is kept, a near-duplicate reuses the current title).
+/// The meeting's first notes take the proposed title.
+pub fn folded_topic(raw: &str, notes: &NotesSoFar, window_start_ms: i64) -> Option<String> {
+    let decision = super::parse::compact_topic(raw)?;
+    match notes.current_topic.as_deref() {
+        Some(current) => decide_topic(
+            Some(&decision),
+            Some(current),
+            prompt::topic_since(&notes.previous, current),
+            window_start_ms,
+            &notes.topics,
+            Some(&notes.glossary),
+        ),
+        None => match decision {
+            TopicDecision::New(title) => super::notes::normalize_topic(&title),
+            TopicDecision::Same => None,
+        },
+    }
 }
 
 /// The topic step (`prompt::topic_user_prompt`): the window's topic.
@@ -480,7 +528,8 @@ impl Worker {
                 Ok(decided) => decided,
                 Err(error) => return (window, provider, model, Err(error), None),
             };
-            let user = prompt::user_prompt(
+            let (system, user) = notes_prompts(
+                &provider,
                 &window,
                 &PromptContext {
                     decided_topic: decided.as_deref(),
@@ -489,7 +538,7 @@ impl Worker {
             );
             let notes_call = token.child_token();
             let result = tokio::select! {
-                result = generator.generate(prompt::system_prompt(), &user, &notes_call) => result,
+                result = generator.generate(system, &user, &notes_call) => result,
                 _ = crate::clock::sleep_until(deadline) => {
                     notes_call.cancel();
                     Err(GenerateError::transient("the window ran out of time"))
@@ -568,6 +617,11 @@ impl Worker {
             .map(|e| e.text.clone())
             .collect();
         let notes = NotesSoFar::of(&self.snapshot.entries);
+        // Without a topic step answer, a compact reply's topic line names it.
+        let decided = match decided {
+            None if uses_compact_prompt(&provider) => folded_topic(&raw, &notes, window.start_ms),
+            decided => decided,
+        };
         // A note's figures must come from what it was written from.
         let figures = Figures::of(&support_text(&self.carryover, &window.segments));
         let context = NoteContext {
@@ -887,7 +941,9 @@ mod tests {
                 topic_answer: Mutex::new(r#"{"same":true}"#.into()),
                 topic_fail: Mutex::new(None),
                 topic_hang: false,
-                provider: "builtin-ai",
+                // JSON prompt with the topic step; `builtin-ai` gets the
+                // compact prompt.
+                provider: "ollama",
             }
         }
     }
@@ -945,10 +1001,16 @@ mod tests {
                         "Roadmap adds offline sync before the beta",
                         "Support hours extend into weekends",
                     ][call % 6];
-                    Ok(Generated {
-                        text: format!(
+                    let text = if system == prompt::compact_system_prompt() {
+                        let topic = if call == 0 { "launch plan" } else { "same" };
+                        format!("topic: {topic}\n00:01|decision|-|{text}\n")
+                    } else {
+                        format!(
                             r#"{{"entries":[{{"kind":"decision","text":"{text}","speaker":"Others","topic":"launch plan"}}]}}"#
-                        ),
+                        )
+                    };
+                    Ok(Generated {
+                        text,
                         truncated: false,
                     })
                 }
@@ -1048,6 +1110,35 @@ mod tests {
             .all(|e| e.topic.as_deref() == Some("Launch Plan") && e.speaker.is_none()));
         let persisted = host.persisted.lock().unwrap();
         assert_eq!(persisted[0].topic.as_deref(), Some("Launch Plan"));
+    }
+
+    #[tokio::test]
+    async fn the_built_in_model_gets_the_compact_prompt_and_its_topic_line() {
+        let mut fake = FakeGenerator::new(Duration::ZERO);
+        fake.provider = "builtin-ai";
+        let generator = Arc::new(fake);
+        let host = host_with(generator.clone());
+        let (tx, rx) = unbounded_channel();
+        let finish = CancellationToken::new();
+        let task = tokio::spawn(run(host.clone(), "s".into(), rx, finish.clone(), config()));
+        tx.send(speech(0)).unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        tx.send(speech(60)).unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        finish.cancel();
+        let snapshot = task.await.unwrap();
+
+        let prompts = generator.prompts.lock().unwrap();
+        assert!(prompts[0].starts_with("Current topic: none yet (name it)\n"));
+        assert!(prompts[1].contains("Current topic: Launch Plan (since 00:01)\n"));
+        assert!(prompts[1].contains("topic: Launch Plan\n00:01|decision|-|"));
+        let topics: Vec<_> = snapshot
+            .entries
+            .iter()
+            .map(|e| e.topic.as_deref())
+            .collect();
+        assert_eq!(topics, vec![Some("Launch Plan"), Some("Launch Plan")]);
+        assert!(snapshot.entries.iter().all(|e| e.kind == "decision"));
     }
 
     #[tokio::test]

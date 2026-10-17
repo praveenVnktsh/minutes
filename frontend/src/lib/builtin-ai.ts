@@ -1,4 +1,7 @@
 // Types for Built-in AI (Summary Models) integration
+
+/** The small built-in model live notes run on while recording (models.rs `LIVE_NOTES_MODEL`). */
+export const LIVE_NOTES_MODEL = 'gemma4:e2b';
 export interface BuiltInModelInfo {
   name: string;
   display_name: string;

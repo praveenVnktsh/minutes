@@ -133,8 +133,17 @@ fn calculate_gpu_layers(
     layers
 }
 
+/// More layers than any model has: llama.cpp offloads them all.
+const ALL_LAYERS: u32 = 999;
+
 /// Get default GPU layer count with smart detection
 pub(crate) fn get_default_gpu_layers(model_path: &PathBuf, context_size: u32) -> u32 {
+    // Apple Silicon: memory is unified, so every layer goes on Metal. A
+    // partial offload only moves work to the CPU, where live transcription
+    // runs, and the estimate below guessed too few layers for larger models.
+    if cfg!(feature = "metal") {
+        return ALL_LAYERS;
+    }
     let vram = detect_vram_gb();
     // TODO: Use actual model metadata instead of heuristics
     // Heuristic: Estimate total layers based on file size

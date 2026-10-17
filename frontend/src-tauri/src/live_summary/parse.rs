@@ -136,11 +136,95 @@ fn parse_with(
     context: Option<&NoteContext<'_>>,
 ) -> Result<Vec<ParsedEntry>, ParseError> {
     let cleaned = strip_fences(&strip_think(raw));
+    let items = match compact_items(&cleaned) {
+        Some(items) => items,
+        None => json_items(&cleaned)?,
+    };
+    refine_items(
+        items,
+        window_start_ms,
+        window_end_ms,
+        max_entries,
+        previous_texts,
+        context,
+    )
+}
+
+/// The compact answer (`prompt::compact_system_prompt`): a `topic: …` line,
+/// then `none` or lines `mm:ss|kind|owner|note` (`mm:ss|kind|owner|topic|note`
+/// is read too). `None` when the reply is not in that format.
+fn compact_items(text: &str) -> Option<Vec<Value>> {
+    let mut saw_topic = false;
+    let mut saw_none = false;
+    let mut items = Vec::new();
+    for line in text.lines() {
+        let line = line.trim().trim_start_matches(['-', '*', ' ']);
+        if topic_line(line).is_some() {
+            saw_topic = true;
+            continue;
+        }
+        let bare = line.trim_end_matches('.').to_ascii_lowercase();
+        if bare == "none" || bare == "nothing" {
+            saw_none = true;
+            continue;
+        }
+        let parts: Vec<&str> = line.split('|').map(str::trim).collect();
+        if parts.len() < 4 || parse_clock_ms(parts[0]).is_none() {
+            continue;
+        }
+        let (topic, note) = if parts.len() >= 5 {
+            (Value::String(parts[3].to_string()), parts[4..].join(" | "))
+        } else {
+            (Value::Null, parts[3].to_string())
+        };
+        let owner = match parts[2] {
+            "" | "-" | "none" | "null" => Value::Null,
+            owner => Value::String(owner.to_string()),
+        };
+        items.push(serde_json::json!({
+            "start": parts[0],
+            "kind": parts[1],
+            "speaker": owner,
+            "topic": topic,
+            "text": note,
+        }));
+    }
+    (!items.is_empty() || saw_none || saw_topic && !text.contains('{')).then_some(items)
+}
+
+/// The title after `topic:`, if `line` is a topic line.
+fn topic_line(line: &str) -> Option<&str> {
+    let (label, rest) = line.split_once(':')?;
+    label
+        .trim()
+        .eq_ignore_ascii_case("topic")
+        .then(|| rest.trim().trim_matches('"'))
+}
+
+/// The topic line of a compact answer: `same`, or the new topic.
+pub fn compact_topic(raw: &str) -> Option<TopicDecision> {
+    let cleaned = strip_fences(&strip_think(raw));
+    let title = cleaned
+        .lines()
+        .map(|l| l.trim().trim_start_matches(['-', '*', ' ']))
+        .find_map(topic_line)?;
+    let bare = title.trim_end_matches('.').trim();
+    if bare.is_empty() {
+        return None;
+    }
+    if bare.eq_ignore_ascii_case("same") {
+        return Some(TopicDecision::Same);
+    }
+    Some(TopicDecision::New(bare.to_string()))
+}
+
+/// The entry objects of a JSON reply.
+fn json_items(cleaned: &str) -> Result<Vec<Value>, ParseError> {
     // The reply as written and with its brackets repaired: the one with more
     // entries wins, so `[{a},{"text":"b"]}` keeps b rather than stopping at
     // the first object that happens to parse.
-    let direct = reply_json_value(&cleaned);
-    let repaired = reply_json_value(&repair_brackets(&cleaned));
+    let direct = reply_json_value(cleaned);
+    let repaired = reply_json_value(&repair_brackets(cleaned));
     let count = |value: &Option<Value>| {
         value
             .clone()
@@ -152,10 +236,10 @@ fn parse_with(
     } else {
         direct.or(repaired)
     };
-    let items = match value {
-        Some(value) => entry_items(value).ok_or(ParseError::UnexpectedShape)?,
+    match value {
+        Some(value) => entry_items(value).ok_or(ParseError::UnexpectedShape),
         None => {
-            let salvaged = salvage_objects(&cleaned);
+            let salvaged = salvage_objects(cleaned);
             if salvaged.is_empty() {
                 return Err(if cleaned.contains('{') || cleaned.contains('[') {
                     ParseError::UnexpectedShape
@@ -163,10 +247,19 @@ fn parse_with(
                     ParseError::NoJson
                 });
             }
-            salvaged
+            Ok(salvaged)
         }
-    };
+    }
+}
 
+fn refine_items(
+    items: Vec<Value>,
+    window_start_ms: i64,
+    window_end_ms: i64,
+    max_entries: usize,
+    previous_texts: &[String],
+    context: Option<&NoteContext<'_>>,
+) -> Result<Vec<ParsedEntry>, ParseError> {
     let window_end_ms = window_end_ms.max(window_start_ms);
     let mut refiner = context.map(Refiner::new);
     let mut seen: Vec<HashSet<String>> = previous_texts.iter().map(|t| word_set(t)).collect();
@@ -240,6 +333,13 @@ pub fn parse_topic_decision(raw: &str) -> Option<TopicDecision> {
 /// of tokens, or the template opened it) is dropped up to the first JSON.
 fn strip_think(raw: &str) -> String {
     let mut text = raw.to_string();
+    // Gemma 4's thought channel.
+    while let Some(open) = text.find("<|channel>") {
+        match text[open..].find("<channel|>") {
+            Some(close) => text.replace_range(open..open + close + "<channel|>".len(), ""),
+            None => text.truncate(open),
+        }
+    }
     while let Some(open) = text.find("<think>") {
         match text[open..].find("</think>") {
             Some(close) => text.replace_range(open..open + close + "</think>".len(), ""),
@@ -656,6 +756,69 @@ mod tests {
 
     fn parse(raw: &str) -> Result<Vec<ParsedEntry>, ParseError> {
         parse_entries(raw, START, END, 3, &[])
+    }
+
+    #[test]
+    fn compact_lines_are_parsed() {
+        let raw = "topic: Launch plan\n\
+                   01:10|point|-|Offline sync bug is the last blocker\n\
+                   01:40|action|You|send support the launch announcement\n";
+        let entries = parse(raw).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].start_ms, 70_000);
+        assert_eq!(entries[0].kind, EntryKind::Point);
+        assert_eq!(entries[0].speaker, None);
+        assert_eq!(entries[0].topic, None);
+        assert_eq!(entries[0].text, "Offline sync bug is the last blocker");
+        assert_eq!(entries[1].kind, EntryKind::Action);
+        assert_eq!(entries[1].speaker.as_deref(), Some("You"));
+        // With a topic field, and with a bullet in front.
+        let entries = parse("- 01:05|decision|-|Budget|Budget approved by finance").unwrap();
+        assert_eq!(entries[0].kind, EntryKind::Decision);
+        assert_eq!(entries[0].topic.as_deref(), Some("Budget"));
+    }
+
+    #[test]
+    fn compact_none_is_an_empty_answer() {
+        for raw in [
+            "topic: same\nnone",
+            "topic: Budget\nNone.",
+            "none",
+            " none\n",
+            "topic: same",
+        ] {
+            assert_eq!(parse(raw).unwrap(), Vec::new(), "{raw}");
+        }
+        assert!(parse("I have nothing to add").is_err());
+    }
+
+    #[test]
+    fn notes_under_three_words_are_dropped() {
+        let raw = "topic: same\n02:06|action|Others|do that\n02:10|point|-|Launch moves to May";
+        let kept = parse_notes(raw, START, END, 3, &NoteContext::default()).unwrap();
+        let texts: Vec<&str> = kept.iter().map(|e| e.text.as_str()).collect();
+        assert_eq!(texts, ["Launch moves to May"]);
+    }
+
+    #[test]
+    fn the_compact_topic_line_is_read() {
+        assert_eq!(
+            compact_topic("topic: same\nnone"),
+            Some(TopicDecision::Same)
+        );
+        assert_eq!(compact_topic("Topic: Same."), Some(TopicDecision::Same));
+        assert_eq!(
+            compact_topic("topic: Acme data platform\n01:00|point|-|x"),
+            Some(TopicDecision::New("Acme data platform".into()))
+        );
+        assert_eq!(compact_topic("01:00|point|-|x"), None);
+        assert_eq!(compact_topic("{\"entries\":[]}"), None);
+    }
+
+    #[test]
+    fn a_gemma4_thought_channel_is_dropped() {
+        let raw = "<|channel>thought\nhmm<channel|>topic: Budget\n01:10|point|-|Budget approved by finance";
+        assert_eq!(parse(raw).unwrap()[0].text, "Budget approved by finance");
     }
 
     #[test]

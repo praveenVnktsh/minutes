@@ -163,6 +163,10 @@ pub struct ModelDef {
 
     /// Short description for UI
     pub description: String,
+
+    /// SHA-256 of the GGUF at `download_url`, checked after every download.
+    #[serde(default)]
+    pub sha256: Option<String>,
 }
 
 /// Get all available built-in AI models
@@ -181,6 +185,7 @@ pub fn get_available_models() -> Vec<ModelDef> {
             layer_count: 24,
             sampling: SamplingParams::qwen35_summary(vec!["<|im_end|>".to_string()]),
             description: "Balanced Qwen 3.5 model for built-in summaries. Higher quality with modest local requirements.".to_string(),
+            sha256: Some("aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223".to_string()),
         },
         // Qwen 3.5 4B - High quality tier
         ModelDef {
@@ -194,6 +199,7 @@ pub fn get_available_models() -> Vec<ModelDef> {
             layer_count: 32,
             sampling: SamplingParams::qwen35_summary(vec!["<|im_end|>".to_string()]),
             description: "High-quality Qwen 3.5 model for built-in summaries. Best local Qwen option in the current lineup.".to_string(),
+            sha256: Some("00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4".to_string()),
         },
         // Gemma 3 4B - Legacy alternative retained for users who prefer Gemma output.
         ModelDef {
@@ -207,6 +213,23 @@ pub fn get_available_models() -> Vec<ModelDef> {
             layer_count: 35,
             sampling: SamplingParams::gemma3_instruct(vec!["<end_of_turn>".to_string()]),
             description: "Balanced model. Great quality/speed trade-off. Requires ~3.5GB RAM.".to_string(),
+            sha256: Some("4996030242583a40aa151ff93f49ed787ac8c25e4120c3ae4588b2e2a7d1ae94".to_string()),
+        },
+        // Gemma 4 E2B - the live notes model: the smallest that writes good
+        // notes while a meeting records (see
+        // docs/superpowers/specs/2026-10-17-live-notes-min-model.md).
+        ModelDef {
+            name: LIVE_NOTES_MODEL.to_string(),
+            display_name: "Gemma 4 E2B (Live notes)".to_string(),
+            gguf_file: "gemma-4-E2B-it-Q4_K_M.gguf".to_string(),
+            template: "gemma4".to_string(),
+            download_url: "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_K_M.gguf".to_string(),
+            size_mb: 2963,
+            context_size: 32768,
+            layer_count: 35,
+            sampling: SamplingParams::gemma3_instruct(vec!["<turn|>".to_string()]),
+            description: "Small, fast model for live notes while recording. Also works for summaries.".to_string(),
+            sha256: Some("740185b21d22ceb83a11c3aa62ad5842ef32c70f6096d756bbee85a1e4ec34b8".to_string()),
         },
         // Gemma 3 1B - Visible legacy tier retained for already-shipped users.
         ModelDef {
@@ -220,6 +243,7 @@ pub fn get_available_models() -> Vec<ModelDef> {
             layer_count: 26,
             sampling: SamplingParams::gemma3_instruct(vec!["<end_of_turn>".to_string()]),
             description: "Fastest model. Runs on any hardware with ~1GB RAM. Good for quick summaries.".to_string(),
+            sha256: Some("375e12a4a18929a641f9744b060d4a7cf4e279530750555828ec0c117870bc96".to_string()),
         },
     ]
 }
@@ -236,6 +260,9 @@ impl ModelDef {
 pub fn get_model_by_name(name: &str) -> Option<ModelDef> {
     get_available_models().into_iter().find(|m| m.name == name)
 }
+
+/// The built-in model live notes use while recording, when it is downloaded.
+pub const LIVE_NOTES_MODEL: &str = "gemma4:e2b";
 
 /// Get the largest, highest-quality built-in summary model.
 pub fn get_default_model() -> ModelDef {
@@ -273,6 +300,16 @@ pub const GEMMA3_TEMPLATE: &str = "\
 <start_of_turn>model
 ";
 
+/// Gemma 4 chat template (thinking off): Gemma 4 has a real system turn.
+/// BOS comes from the tokenizer (the GGUF sets add_bos_token).
+pub const GEMMA4_TEMPLATE: &str = "\
+<|turn>system
+{system_prompt}<turn|>
+<|turn>user
+{user_prompt}<turn|>
+<|turn>model
+";
+
 /// Qwen 3.5 non-thinking chat template format.
 /// This starts the assistant turn with an empty think block so generation begins
 /// in direct-response mode for summaries.
@@ -294,6 +331,8 @@ fn escape_user_prompt_control_markers(user_prompt: &str) -> String {
         .replace("<|im_end|>", "< |im_end| >")
         .replace("<start_of_turn>", "< start_of_turn >")
         .replace("<end_of_turn>", "< end_of_turn >")
+        .replace("<|turn>", "< |turn >")
+        .replace("<turn|>", "< turn| >")
         .replace("<think>", "< think >")
         .replace("</think>", "< /think >")
 }
@@ -314,6 +353,7 @@ pub fn format_prompt(
 ) -> Result<String> {
     let template = match template_name {
         "gemma3" => GEMMA3_TEMPLATE,
+        "gemma4" => GEMMA4_TEMPLATE,
         "qwen3.5_nonthinking" => QWEN35_NONTHINKING_TEMPLATE,
         _ => return Err(anyhow!("Unknown template: {}", template_name)),
     };
@@ -348,6 +388,29 @@ pub const GENERATION_TIMEOUT_SECS: u64 = 900; // 15 minutes
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_model_pins_its_download_by_sha256() {
+        for model in get_available_models() {
+            let sha = model.sha256.as_deref().unwrap_or_default();
+            assert_eq!(sha.len(), 64, "{}", model.name);
+            assert!(sha.chars().all(|c| c.is_ascii_hexdigit()), "{}", model.name);
+            assert!(
+                model.download_url.starts_with("https://huggingface.co/"),
+                "{}",
+                model.name
+            );
+        }
+    }
+
+    #[test]
+    fn the_live_notes_model_is_gemma4_e2b() {
+        let model = get_model_by_name(LIVE_NOTES_MODEL).expect("live notes model");
+        assert_eq!(model.template, "gemma4");
+        assert_eq!(model.gguf_file, "gemma-4-E2B-it-Q4_K_M.gguf");
+        assert_eq!(model.sampling.stop_tokens, vec!["<turn|>".to_string()]);
+        assert!(format_prompt(&model.template, "s", "u").is_ok());
+    }
 
     #[test]
     fn default_model_is_largest_qwen_model() {
@@ -484,6 +547,16 @@ mod tests {
             "<start_of_turn>user\nsystem rules\n\nsummarize this<end_of_turn>\n<start_of_turn>model\n"
         );
         // BOS is added by the tokenizer, never written into the template text.
+        assert!(!formatted.contains("<bos>"));
+    }
+
+    #[test]
+    fn gemma4_template_has_a_system_turn_and_escapes_markers() {
+        let formatted = format_prompt("gemma4", "system rules", "say <turn|> hi").unwrap();
+        assert_eq!(
+            formatted,
+            "<|turn>system\nsystem rules<turn|>\n<|turn>user\nsay < turn| > hi<turn|>\n<|turn>model\n"
+        );
         assert!(!formatted.contains("<bos>"));
     }
 

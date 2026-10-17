@@ -7,7 +7,7 @@ import type { PermissionStatus, OnboardingPermissions, OnboardingStep, SetupChec
 import { resolveOnboardingSummaryModelStatus } from '@/lib/onboarding-summary-model';
 import { ParakeetAPI } from '@/lib/parakeet';
 import type { CancelDownloadOutcome, ParakeetDownloadProgressEvent } from '@/lib/parakeet';
-import { BUILTIN_AI_DOWNLOAD_PROGRESS_EVENT, BuiltInAIAPI } from '@/lib/builtin-ai';
+import { BUILTIN_AI_DOWNLOAD_PROGRESS_EVENT, BuiltInAIAPI, LIVE_NOTES_MODEL } from '@/lib/builtin-ai';
 import type { BuiltInAIDownloadProgressEvent } from '@/lib/builtin-ai';
 import { mibToBytes } from '@/lib/download-display';
 import { DEFAULT_PARAKEET_MODEL } from '@/constants/modelDefaults';
@@ -88,6 +88,8 @@ interface OnboardingContextType {
   // showing a guessed size before the transfer starts is worse than one showing none.
   parakeetSizeBytes: number | null;
   summaryModelSizeBytes: number | null;
+  /** Catalogue size of the live notes model; null until known. */
+  liveNotesModelSizeBytes: number | null;
   databaseExists: boolean;
   isBackgroundDownloading: boolean;
   // Permissions
@@ -140,6 +142,7 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
   const [recommendedSummaryModel, setRecommendedSummaryModel] = useState<string>('');
   const [parakeetSizeBytes, setParakeetSizeBytes] = useState<number | null>(null);
   const [summaryModelSizeBytes, setSummaryModelSizeBytes] = useState<number | null>(null);
+  const [liveNotesModelSizeBytes, setLiveNotesModelSizeBytes] = useState<number | null>(null);
   const [databaseExists, setDatabaseExists] = useState(false);
   const [isBackgroundDownloading, setIsBackgroundDownloading] = useState(false);
   // Transfers believed to be in flight. Cancelling or finishing one only lowers the
@@ -443,6 +446,23 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
     };
   }, []);
 
+  // The live notes model is fixed, so its size is read once.
+  useEffect(() => {
+    let cancelled = false;
+    BuiltInAIAPI.getModelInfo(LIVE_NOTES_MODEL)
+      .then((info) => {
+        if (!cancelled && info && info.size_bytes > 0) {
+          setLiveNotesModelSizeBytes(info.size_bytes);
+        }
+      })
+      .catch((error) => {
+        console.warn('[OnboardingContext] Failed to load live notes model catalogue size:', error);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // The summary model is not known on mount - it arrives from the recommendation - so this
   // follows the selection rather than running once.
   useEffect(() => {
@@ -702,6 +722,18 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
         activeDownloadsRef.current.add('summary');
         requestSummaryModelDownload(summaryModel);
       }
+
+      // The live notes model follows on its own: nothing waits for it, and until it is
+      // there live notes run on the summary model.
+      if (includeSummary && summaryModel !== LIVE_NOTES_MODEL) {
+        BuiltInAIAPI.isModelReady(LIVE_NOTES_MODEL)
+          .then((ready) => {
+            if (!ready) {
+              return invoke('builtin_ai_download_model', { modelName: LIVE_NOTES_MODEL });
+            }
+          })
+          .catch((err) => console.error('[OnboardingContext] Live notes model download failed:', err));
+      }
     } catch (error) {
       console.error('[OnboardingContext] Failed to start background downloads:', error);
       setIsBackgroundDownloading(false);
@@ -832,6 +864,7 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
         recommendedSummaryModel,
         parakeetSizeBytes,
         summaryModelSizeBytes,
+        liveNotesModelSizeBytes,
         databaseExists,
         isBackgroundDownloading,
         permissions,

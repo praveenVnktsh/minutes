@@ -33,6 +33,9 @@ pub const MAX_TOPIC_WORDS: usize = 5;
 /// A rewritten note needs at least this many words to stay.
 const MIN_REWRITTEN_WORDS: usize = 3;
 
+/// Notes shorter than this say nothing on their own and are dropped.
+pub const MIN_NOTE_WORDS: usize = 3;
+
 /// What the rules need besides the note itself.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NoteContext<'a> {
@@ -105,6 +108,10 @@ impl<'a> Refiner<'a> {
             Narration::Drop => return None,
         }
         text = fit(&text);
+        // "do that", "agreed": nothing a reader can use.
+        if word_count(&text) < MIN_NOTE_WORDS {
+            return None;
+        }
 
         entry.kind = match entry.kind {
             EntryKind::Action if !is_task(&text, entry.speaker.as_deref()) => EntryKind::Point,
@@ -1544,7 +1551,7 @@ mod tests {
             .unwrap();
         assert_eq!(second.topic.as_deref(), Some("Pricing Tiers"));
         let third = refiner
-            .refine(note(EntryKind::Point, "Dates confirmed", None, None))
+            .refine(note(EntryKind::Point, "Launch dates confirmed", None, None))
             .unwrap();
         assert_eq!(third.topic.as_deref(), Some("Pricing Tiers"));
     }

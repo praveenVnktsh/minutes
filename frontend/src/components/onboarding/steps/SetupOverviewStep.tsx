@@ -19,6 +19,7 @@ export function SetupOverviewStep() {
     goNext,
     parakeetSizeBytes,
     summaryModelSizeBytes,
+    liveNotesModelSizeBytes,
     selectedSummaryModel,
     startBackgroundDownloads,
   } = useOnboarding();
@@ -51,12 +52,19 @@ export function SetupOverviewStep() {
       sizeBytes: summaryModelSizeBytes,
       note: 'Continues in the background — you can start using Minutes before it finishes.',
     },
+    {
+      number: 3,
+      type: 'live-notes',
+      title: 'Download Live Notes Engine',
+      sizeBytes: liveNotesModelSizeBytes,
+      note: 'A small model for notes while you record. Optional; downloads last.',
+    },
   ];
 
   // A total is only honest once both numbers are real, so a half-known total is no total.
   const totalLabel =
-    parakeetSizeBytes !== null && summaryModelSizeBytes !== null
-      ? formatBytes(parakeetSizeBytes + summaryModelSizeBytes)
+    parakeetSizeBytes !== null && summaryModelSizeBytes !== null && liveNotesModelSizeBytes !== null
+      ? formatBytes(parakeetSizeBytes + summaryModelSizeBytes + liveNotesModelSizeBytes)
       : SIZE_UNKNOWN;
 
   const handleContinue = () => {
