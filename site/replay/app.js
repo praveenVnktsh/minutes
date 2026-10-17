@@ -165,15 +165,15 @@
     const rows = runs.map((r) => {
       const tone = r.status === 'done' ? 'success' : r.status === 'running' ? 'info' : 'warning';
       const score = r.passed == null ? '–' : `${r.passed}✓ ${r.failed}✗`;
-      const created = r.started_at ? new Date(r.started_at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
+      const created = r.started_at && !Number.isNaN(Date.parse(r.started_at)) ? new Date(r.started_at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
       return `<tr data-run="${esc(r.name)}" class="${r.name === view.run ? 'current' : ''}">
         <td><b>${esc(r.name)}</b></td>
         <td class="rec">${esc(r.recording || r.audio_name || '')}</td>
-        <td class="mono">${r.duration_s ? `${(r.duration_s / 60).toFixed(1)} min` : '–'}</td>
+        <td class="mono">${Number(r.duration_s) > 0 ? `${(Number(r.duration_s) / 60).toFixed(1)} min` : '–'}</td>
         <td>${badge(tone, r.status)}</td>
         <td class="mono">${esc(score)}</td>
         <td class="subtle">${esc(created)}</td>
-        <td class="subtle">${r.interactive ? `${r.interactive} asked` : ''}</td></tr>`;
+        <td class="subtle">${Number(r.interactive) > 0 ? `${num(r.interactive)} asked` : ''}</td></tr>`;
     }).join('');
     return `<table class="runs-table"><thead><tr><th>Run</th><th>Recording</th><th>Length</th><th>Status</th><th>Criteria</th><th>Created</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
   }
@@ -428,9 +428,20 @@
   // Rendering helpers
   // ---------------------------------------------------------------------
 
+  // Everything from a run (events, report, runs list, saved asks) is data:
+  // into HTML it goes through esc() as text or num() as a number.
   function esc(text) {
     return String(text ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   }
+
+  /** A number from the data, for HTML: finite, else `fallback`. */
+  function num(value, fallback = '–') {
+    if (value == null || value === '' || typeof value === 'boolean') return fallback;
+    const n = Number(value);
+    return Number.isFinite(n) ? String(n) : fallback;
+  }
+
+  const arr = (value) => (Array.isArray(value) ? value : []);
 
   const CITE = /\[(?:(\d{1,2}):)?(\d{1,2}):(\d{2})\]/g;
 
@@ -537,20 +548,20 @@
 
   function renderStatic() {
     const meta = view.info.meta;
-    const limits = (meta.limitations || []).map((l) => `<p class="limit">${esc(l)}</p>`).join('');
+    const limits = arr(meta.limitations).map((l) => `<p class="limit">${esc(l)}</p>`).join('');
     const report = view.report;
     let score = `<p class="subtle">${view.served ? 'No report.json yet (the run has not finished).' : 'Open the run\'s <b>report.json</b> too to see the pass criteria.'}</p>`;
     if (report && Array.isArray(report.criteria)) {
       const tone = { pass: 'success', fail: 'error', not_applicable: 'neutral', info: 'info' };
       const label = { pass: 'Pass', fail: 'Fail', not_applicable: 'n/a', info: 'Info' };
       const rows = report.criteria.map((c) => `
-        <tr><td>${esc(c.label)}${(c.detail || []).length ? `<details class="detail"><summary>${c.detail.length} details</summary><ul>${c.detail.map((d) => `<li>${esc(d)}</li>`).join('')}</ul></details>` : ''}</td>
+        <tr><td>${esc(c.label)}${arr(c.detail).length ? `<details class="detail"><summary>${arr(c.detail).length} details</summary><ul>${arr(c.detail).map((d) => `<li>${esc(d)}</li>`).join('')}</ul></details>` : ''}</td>
         <td>${badge(tone[c.status] || 'neutral', label[c.status] || c.status)}</td><td class="muted">${esc(c.value)}</td></tr>`).join('');
       const passed = report.criteria.filter((c) => c.status === 'pass').length;
       const failed = report.criteria.filter((c) => c.status === 'fail').length;
       score = `<p class="subtle">${passed} passed · ${failed} failed</p><table><thead><tr><th>Criterion</th><th>Result</th><th>Value</th></tr></thead><tbody>${rows}</tbody></table>`;
     }
-    const duration = meta.duration_s ? `${(meta.duration_s / 60).toFixed(1)} min` : '';
+    const duration = Number(meta.duration_s) > 0 ? `${(Number(meta.duration_s) / 60).toFixed(1)} min` : '';
     const mode = meta.realtime ? 'real time' : meta.speed === 0 || meta.realtime === false ? 'unpaced (simulated meeting clock)' : `${meta.speed ?? 1}×`;
     const runMeta = view.runs.find((r) => r.name === view.run);
     $('run').innerHTML = `
@@ -568,11 +579,11 @@
   function renderRequests() {
     const rows = view.info.requests.map((r) => {
       const s = r.stats || {};
-      return `<tr data-row-i="${r.i}"><td><button type="button" data-at="${r.i}">${esc(R.clock(r.audioMs))}</button></td><td>${esc(r.kind || '')}</td>
+      return `<tr data-row-i="${num(r.i, '0')}"><td><button type="button" data-at="${num(r.i, '0')}">${esc(R.clock(r.audioMs))}</button></td><td>${esc(r.kind || '')}</td>
         <td>${badge(r.status === 'done' ? 'success' : r.status === 'error' ? 'error' : 'neutral', r.status || '')}</td>
-        <td class="mono">${s.firstTokenMs ?? '–'}</td><td class="mono">${s.totalMs ?? '–'}</td>
-        <td class="mono">${s.tokensPerSecond != null ? Number(s.tokensPerSecond).toFixed(1) : '–'}</td>
-        <td class="mono">${s.reusedTokens ?? '–'}/${s.promptTokens ?? '–'}</td></tr>`;
+        <td class="mono">${num(s.firstTokenMs)}</td><td class="mono">${num(s.totalMs)}</td>
+        <td class="mono">${num(s.tokensPerSecond) === '–' ? '–' : Number(s.tokensPerSecond).toFixed(1)}</td>
+        <td class="mono">${num(s.reusedTokens)}/${num(s.promptTokens)}</td></tr>`;
     }).join('');
     $('requests').innerHTML = rows
       ? `<table><thead><tr><th>At</th><th>Kind</th><th>Status</th><th>First ms</th><th>Total ms</th><th>tok/s</th><th>Reused</th></tr></thead><tbody>${rows}</tbody></table>`
@@ -584,11 +595,11 @@
     const cls = () => 'future';
     const det = view.info.detector.filter((d) => !filter || d.step === filter);
     $('detector').innerHTML = det.length
-      ? `<table><tbody>${det.map((d) => `<tr class="${cls(d.i)}"><td><button type="button" data-at="${d.i}">${esc(R.clock(d.audioMs))}</button></td><td>${badge(d.step === 'confirm_yes' ? 'warning' : d.step === 'skipped' ? 'neutral' : d.step && d.step.startsWith('confirm_') && d.step !== 'confirm_no' ? 'error' : 'info', d.step)}</td><td>${esc(d.decision)}</td><td class="subtle">line ${esc(R.clock(d.lineMs))}</td></tr>`).join('')}</tbody></table>`
+      ? `<table><tbody>${det.map((d) => `<tr class="${cls(d.i)}"><td><button type="button" data-at="${num(d.i, '0')}">${esc(R.clock(d.audioMs))}</button></td><td>${badge(d.step === 'confirm_yes' ? 'warning' : d.step === 'skipped' ? 'neutral' : d.step && d.step.startsWith('confirm_') && d.step !== 'confirm_no' ? 'error' : 'info', d.step)}</td><td>${esc(d.decision)}</td><td class="subtle">line ${esc(R.clock(d.lineMs))}</td></tr>`).join('')}</tbody></table>`
       : '<p class="subtle">No detector decisions.</p>';
     const side = view.info.sidecar;
     $('sidecar').innerHTML = side.length
-      ? `<table><tbody>${side.map((s) => `<tr class="${cls(s.i)}"><td><button type="button" data-at="${s.i}">${esc(R.clock(s.audioMs))}</button></td><td>${badge(s.what === 'preempt' || s.what === 'timeline-preempted' ? 'warning' : s.what === 'timeout' ? 'error' : 'neutral', s.what)}</td><td class="mono">${esc(s.id ?? '')}</td><td>${esc(s.priority || '')}</td><td class="subtle">${esc(s.detail || '')}</td></tr>`).join('')}</tbody></table>`
+      ? `<table><tbody>${side.map((s) => `<tr class="${cls(s.i)}"><td><button type="button" data-at="${num(s.i, '0')}">${esc(R.clock(s.audioMs))}</button></td><td>${badge(s.what === 'preempt' || s.what === 'timeline-preempted' ? 'warning' : s.what === 'timeout' ? 'error' : 'neutral', s.what)}</td><td class="mono">${esc(s.id ?? '')}</td><td>${esc(s.priority || '')}</td><td class="subtle">${esc(s.detail || '')}</td></tr>`).join('')}</tbody></table>`
       : '<p class="subtle">No llama-helper activity.</p>';
     logRows = [...document.querySelectorAll('#detector tr, #sidecar tr, #requests tr[data-row-i]')].map((tr) => {
       const button = tr.querySelector('[data-at]');
@@ -685,7 +696,7 @@
     else if (t && t.status === 'disabled') notice = '<p class="notice neutral">Live summary is off. Turn it on in Settings → Summary.</p>';
     const marker = (kind) => (kind === 'decision' ? badge('success', 'Decision') : kind === 'action' ? badge('info', 'Action') : '');
     const list = entries.length
-      ? `<ol>${entries.map((e, k) => `<li class="${grew && k === entries.length - 1 ? 'fresh' : ''}"><span class="ls-time"><button type="button" data-seconds="${Math.floor(e.start_ms / 1000)}" class="cite-plain">${esc(R.clock(e.start_ms))}</button></span><span class="ls-text">${marker(e.kind)}${esc(e.text)}${e.speaker ? `<span class="ls-speaker">· ${esc(e.speaker)}</span>` : ''}</span></li>`).join('')}</ol>`
+      ? `<ol>${entries.map((e, k) => `<li class="${grew && k === entries.length - 1 ? 'fresh' : ''}"><span class="ls-time"><button type="button" data-seconds="${num(Math.floor(Number(e.start_ms) / 1000), '0')}" class="cite-plain">${esc(R.clock(e.start_ms))}</button></span><span class="ls-text">${marker(e.kind)}${esc(e.text)}${e.speaker ? `<span class="ls-speaker">· ${esc(e.speaker)}</span>` : ''}</span></li>`).join('')}</ol>`
       : '';
     const listening = live && (!t || (t.status !== 'disabled' && t.status !== 'unavailable'));
     const tail = listening
@@ -707,7 +718,7 @@
   });
 
   function lineHtml(line, tag) {
-    return `<div class="row${view.playing ? ' rise' : ''}" data-start="${line.start}" data-i="${line.i}">
+    return `<div class="row${view.playing ? ' rise' : ''}" data-start="${num(line.start, '0')}" data-i="${num(line.i, '0')}">
       <span class="row-time">[${esc(R.clock(line.start * 1000))}]</span>
       <div class="row-body"><span class="chip ${line.source === 'mic' ? 'mic' : 'system'}">${line.source === 'mic' ? 'You' : 'Others'}</span>${tag ? `<span class="row-tag">${esc(tag)}</span>` : ''}
       <p class="row-text">${esc(line.text)}</p></div></div>`;
@@ -753,10 +764,10 @@
     if (!stats && !extra) return '';
     const s = stats || {};
     const parts = [];
-    if (s.firstTokenMs != null) parts.push(`first word ${(s.firstTokenMs / 1000).toFixed(2)} s`);
+    if (s.firstTokenMs != null) parts.push(`first word ${(Number(s.firstTokenMs) / 1000).toFixed(2)} s`);
     if (s.tokensPerSecond != null) parts.push(`${Number(s.tokensPerSecond).toFixed(1)} tok/s`);
     if (s.promptTokens != null) parts.push(`prompt ${s.reusedTokens ?? 0}/${s.promptTokens} tokens reused`);
-    if (s.totalMs != null) parts.push(`total ${(s.totalMs / 1000).toFixed(1)} s`);
+    if (s.totalMs != null) parts.push(`total ${(Number(s.totalMs) / 1000).toFixed(1)} s`);
     if (extra) parts.push(extra);
     return `<p class="stats">${esc(parts.join(' · '))}</p>`;
   }
@@ -773,7 +784,7 @@
   /** A live ask (the viewer's own question to the real Copilot). */
   function askHtml(a) {
     const working = a.status === 'pending' || a.status === 'streaming';
-    const when = `<button type="button" data-seek-audio="${a.audio_ms}" title="Go to this moment">[${esc(R.clock(a.audio_ms))}]</button>`;
+    const when = `<button type="button" data-seek-audio="${num(a.audio_ms, '0')}" title="Go to this moment">[${esc(R.clock(a.audio_ms))}]</button>`;
     let body;
     if (a.status === 'error') {
       body = `<div class="err-card" role="alert"><b>Copilot couldn't get an answer</b><p>${esc(a.error || 'Unknown error')}</p></div>`;
@@ -781,11 +792,11 @@
     else if (working) body = `<p class="working"><span class="pulse">✦</span> ${esc(a.phase || 'Listening back…')}</p>`;
     else body = '';
     const actions = working
-      ? `<div class="actions-row"><button type="button" class="small" data-ask-stop="${a.key}">■ Stop</button></div>`
-      : a.reply ? `<div class="actions-row"><button type="button" class="small" data-ask-copy="${a.key}">Copy</button></div>` : '';
+      ? `<div class="actions-row"><button type="button" class="small" data-ask-stop="${num(a.key, '0')}">■ Stop</button></div>`
+      : a.reply ? `<div class="actions-row"><button type="button" class="small" data-ask-copy="${num(a.key, '0')}">Copy</button></div>` : '';
     const stats = a.stats || (a.firstTokenMs != null ? { firstTokenMs: a.firstTokenMs } : null);
-    const extra = [a.model, a.context ? `${a.context.lines} lines · ${a.context.timeline} summary entries${a.context.notes_chars ? ' · notes' : ''}` : '', a.warm_ms > 1500 ? `model load ${(a.warm_ms / 1000).toFixed(1)} s` : ''].filter(Boolean).join(' · ');
-    return `<div class="live-ask" id="ask-${a.key}"><div class="bubble-wrap"><div class="bubble live"><small>You asked live at ${when}${a.action ? ` · ${esc(a.prompt)}` : ''}</small>${a.action ? '' : esc(a.prompt)}</div></div>${body}${a.status === 'stopped' ? '<p class="stats">Stopped</p>' : ''}${actions}${statsLine(stats, extra)}</div>`;
+    const extra = [a.model, a.context ? `${num(a.context.lines)} lines · ${num(a.context.timeline)} summary entries${a.context.notes_chars ? ' · notes' : ''}` : '', Number(a.warm_ms) > 1500 ? `model load ${(Number(a.warm_ms) / 1000).toFixed(1)} s` : ''].filter(Boolean).join(' · ');
+    return `<div class="live-ask" id="ask-${num(a.key, '0')}"><div class="bubble-wrap"><div class="bubble live"><small>You asked live at ${when}${a.action ? ` · ${esc(a.prompt)}` : ''}</small>${a.action ? '' : esc(a.prompt)}</div></div>${body}${a.status === 'stopped' ? '<p class="stats">Stopped</p>' : ''}${actions}${statsLine(stats, extra)}</div>`;
   }
 
   function renderCopilot(s) {
@@ -793,7 +804,7 @@
     const messages = (c && c.messages) || [];
     const ready = s.lines.length > 0;
     const asksKey = view.asks.map((a) => `${a.key}${a.status}${(a.reply || '').length}`).join(',');
-    const key = `${ready}|${c && c.suggestionsEnabled}|${messages.map((m) => `${m.id.slice(0, 6)}${m.status}${(m.reply || '').length}${m.cardState || ''}`).join(',')}|${asksKey}|${!!view.asking}`;
+    const key = `${ready}|${c && c.suggestionsEnabled}|${messages.map((m) => `${String(m.id).slice(0, 6)}${m.status}${(m.reply || '').length}${m.cardState || ''}`).join(',')}|${asksKey}|${!!view.asking}`;
     if (key === keys.copilot) return;
     keys.copilot = key;
     const fired = new Set(messages.filter((m) => m.action && (m.status === 'pending' || m.status === 'streaming')).map((m) => m.action));
@@ -994,7 +1005,7 @@
   function renderAsks() {
     $('asks-count').textContent = view.asks.length ? String(view.asks.length) : '';
     $('asks').innerHTML = view.asks.length
-      ? `<table><tbody>${view.asks.map((a) => `<tr class="ask-row"><td><button type="button" data-seek-audio="${a.audio_ms}">${esc(R.clock(a.audio_ms))}</button></td><td>${esc(a.prompt)}</td><td>${badge(a.status === 'done' ? 'success' : a.status === 'error' ? 'error' : 'neutral', a.status || '')}</td><td class="mono">${a.stats && a.stats.firstTokenMs != null ? `${(a.stats.firstTokenMs / 1000).toFixed(2)} s` : '–'}</td></tr>`).join('')}</tbody></table>`
+      ? `<table><tbody>${view.asks.map((a) => `<tr class="ask-row"><td><button type="button" data-seek-audio="${num(a.audio_ms, '0')}">${esc(R.clock(a.audio_ms))}</button></td><td>${esc(a.prompt)}</td><td>${badge(a.status === 'done' ? 'success' : a.status === 'error' ? 'error' : 'neutral', a.status || '')}</td><td class="mono">${a.stats && num(a.stats.firstTokenMs) !== '–' ? `${(Number(a.stats.firstTokenMs) / 1000).toFixed(2)} s` : '–'}</td></tr>`).join('')}</tbody></table>`
       : '<p class="subtle">Questions you ask the Copilot here are saved to the run\'s interactive.jsonl.</p>';
     keys.copilot = null;
     if (view.state) renderCopilot(view.state);
@@ -1493,7 +1504,7 @@
     $('inspector').innerHTML = `
       <p><b>${esc(record.name)}</b> <span class="subtle">${esc(record.type)} · #${i} · ${esc(R.clock(record.audio_ms))} meeting · ${esc(R.clock(record.t_ms))} wall</span></p>
       <pre class="json">${esc(JSON.stringify(record.payload, null, 2))}</pre>
-      ${linked.length ? `<p class="subtle">Linked events</p><ul class="linked">${linked.map((r) => `<li><button type="button" data-at="${r.i}">${esc(R.clock(r.audio_ms))}</button> ${esc(r.name)} ${esc((r.payload && (r.payload.phase || r.payload.step)) || '')}</li>`).join('')}</ul>` : ''}`;
+      ${linked.length ? `<p class="subtle">Linked events</p><ul class="linked">${linked.map((r) => `<li><button type="button" data-at="${num(r.i, '0')}">${esc(R.clock(r.audio_ms))}</button> ${esc(r.name)} ${esc((r.payload && (r.payload.phase || r.payload.step)) || '')}</li>`).join('')}</ul>` : ''}`;
     drawTimeline();
   }
 

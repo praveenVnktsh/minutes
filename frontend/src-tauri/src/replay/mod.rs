@@ -15,9 +15,12 @@
 //!     --audio "/path/to/meeting/audio.mp4"
 //! ```
 //!
-//! [`serve`] (`… --example replay -- serve`) serves the viewer and the runs on
-//! 127.0.0.1, with a live Copilot that answers about any moment of a run
-//! ([`live_copilot`] rebuilds what Copilot knew then from the events).
+//! `serve` (`… --example replay -- serve`, `dev-replay` only) serves the
+//! viewer and the runs on 127.0.0.1, with a live Copilot that answers about
+//! any moment of a run: [`live_copilot`] rebuilds what Copilot knew then from
+//! the events, [`live_ask`] asks it, and [`runs`] reads the run folders. Those
+//! three are always compiled (pure, or the app's own Copilot), so release
+//! builds carry no server and no embedded viewer.
 //!
 //! Outputs stay on this machine, under the app data folder's `replays/`.
 //! Recordings are private: never commit or upload them, their event logs or
@@ -25,11 +28,16 @@
 //! in the browser.
 
 pub mod events;
+pub mod live_ask;
 pub mod live_copilot;
 pub mod report;
+pub mod runs;
 pub mod script;
-pub mod serve;
 pub mod trace;
+
+/// The HTTP server and its embedded copy of `site/replay`: developer builds only.
+#[cfg(feature = "dev-replay")]
+pub mod serve;
 
 use std::path::{Path, PathBuf};
 
