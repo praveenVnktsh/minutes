@@ -1,12 +1,10 @@
 import { afterAll, describe, expect, mock, test } from 'bun:test';
 
-// Restore the real modules afterwards so a mocked `invoke` or `platform` cannot
-// leak into a later file.
+// Restore the real module afterwards so a mocked `invoke` cannot leak into a
+// later file.
 const originalCore = { ...(await import('@tauri-apps/api/core')) };
-const originalOs = { ...(await import('@tauri-apps/plugin-os')) };
 afterAll(() => {
   mock.module('@tauri-apps/api/core', () => originalCore);
-  mock.module('@tauri-apps/plugin-os', () => originalOs);
 });
 
 let invokeResult: () => Promise<unknown> = async () => undefined;
@@ -18,11 +16,6 @@ mock.module('@tauri-apps/api/core', () => ({
     return await invokeResult();
   },
 }));
-
-// The settings fixes are macOS-only, so the tests that exercise them need the
-// platform to say so.
-let platformName = 'macos';
-mock.module('@tauri-apps/plugin-os', () => ({ platform: () => platformName }));
 
 // The setup check module must load after the Tauri mocks are registered.
 const {
@@ -169,7 +162,6 @@ describe('describeChannelOutcome', () => {
     // at the system-audio route for the user who did expect to hear something.
     expect(fix).toBeUndefined();
     expect(message).toMatch(/screen recording/i);
-    expect(message).toMatch(/loopback/i);
     expect(message).not.toMatch(/fail|error|went wrong/i);
   });
 
@@ -409,7 +401,6 @@ describe('skippedSetupCheckRecord', () => {
 
 describe('applySetupCheckFix', () => {
   test('opens the microphone pane and the screen recording pane', async () => {
-    platformName = 'macos';
     invokeCalls.length = 0;
     invokeResult = async () => undefined;
 
@@ -423,7 +414,6 @@ describe('applySetupCheckFix', () => {
   });
 
   test('leaves the step to its own buttons for the other fixes', async () => {
-    platformName = 'macos';
     invokeCalls.length = 0;
 
     expect(await applySetupCheckFix('retry')).toBe(false);
@@ -433,7 +423,6 @@ describe('applySetupCheckFix', () => {
   });
 
   test('reports back when the settings pane could not be opened', async () => {
-    platformName = 'macos';
     invokeResult = async () => {
       throw new Error('open_system_settings is not registered');
     };
@@ -441,12 +430,4 @@ describe('applySetupCheckFix', () => {
     expect(await applySetupCheckFix('open-mic-settings')).toBe(false);
   });
 
-  test('does nothing off macOS, where there is no pane to open', async () => {
-    platformName = 'windows';
-    invokeCalls.length = 0;
-    invokeResult = async () => undefined;
-
-    expect(await applySetupCheckFix('open-screen-recording-settings')).toBe(false);
-    expect(invokeCalls).toEqual([]);
-  });
 });

@@ -33,34 +33,15 @@ export const PERMISSION_PANES = {
 export type PermissionPane = (typeof PERMISSION_PANES)[keyof typeof PERMISSION_PANES];
 
 /**
- * Mirrors `micCheck.ts`'s own `isMacOS()`: a dynamic import of
- * `@tauri-apps/plugin-os` so a non-Tauri context (tests, a stray web render)
- * does not crash, falling back to a userAgent sniff when the plugin itself is
- * unavailable. `open_system_settings` exists only on macOS, so every caller
- * that might invoke it needs this same check.
- */
-export async function isMacOS(): Promise<boolean> {
-  try {
-    const { platform } = await import('@tauri-apps/plugin-os');
-    return platform() === 'macos';
-  } catch {
-    return typeof navigator !== 'undefined' && navigator.userAgent.includes('Mac');
-  }
-}
-
-/**
- * Opens a macOS privacy pane. Resolves false when it could not be opened —
- * off macOS, where there is nothing to open, or when the invoke itself
- * failed — so the caller can fall back to written instructions instead of
- * throwing in front of the user.
+ * Opens a macOS privacy pane. Resolves false when the invoke failed, so the
+ * caller can fall back to written instructions instead of throwing in front
+ * of the user.
  *
  * The `{ preferencePane: pane }` argument object is the whole point of this
  * function: `open_system_settings` requires it, and a caller that builds the
  * invoke by hand is exactly how FR-04 happened the first time.
  */
 export async function openPermissionSettings(pane: PermissionPane): Promise<boolean> {
-  if (!(await isMacOS())) return false;
-
   try {
     await invoke('open_system_settings', { preferencePane: pane });
     return true;

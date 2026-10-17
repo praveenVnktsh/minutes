@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React from 'react';
 import { Info } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { OnboardingContainer } from '../OnboardingContainer';
@@ -26,20 +26,6 @@ export function SetupOverviewStep() {
     selectedSummaryModel,
     startBackgroundDownloads,
   } = useOnboarding();
-  const [isMac, setIsMac] = useState(false);
-
-  useEffect(() => {
-    const checkPlatform = async () => {
-      try {
-        const { platform } = await import('@tauri-apps/plugin-os');
-        setIsMac(platform() === 'macos');
-      } catch (e) {
-        setIsMac(navigator.userAgent.includes('Mac'));
-      }
-    };
-    checkPlatform();
-  }, []);
-
   const steps = [
     {
       number: 1,
@@ -93,7 +79,7 @@ export function SetupOverviewStep() {
       title="Setup Overview"
       description="Minutes requires that you download the Transcription & Summarization AI models for the software to work."
       step={2}
-      totalSteps={isMac ? 4 : 3}
+      totalSteps={4}
     >
       <div className="flex flex-col items-center space-y-10">
         {/* Steps Card */}

@@ -287,7 +287,7 @@ function describeMicrophoneOutcome(report: ChannelReport): SetupCheckDescription
     case 'permission_denied':
       return {
         title: 'Minutes is blocked from the microphone',
-        message: `Your operating system is withholding audio from ${device}, so Minutes recorded nothing at all. Switch Minutes on under System Settings › Privacy & Security › Microphone on macOS, or Settings › Privacy & security › Microphone on Windows, then run the check again.`,
+        message: `Your operating system is withholding audio from ${device}, so Minutes recorded nothing at all. Switch Minutes on under System Settings › Privacy & Security › Microphone, then run the check again.`,
         fix: { label: 'Open microphone settings', kind: 'open-mic-settings' },
       };
 
@@ -361,7 +361,7 @@ function describeSystemAudioOutcome(report: ChannelReport): SetupCheckDescriptio
     case 'no_audio_detected':
       return {
         title: 'Nothing was playing',
-        message: `Minutes listened to ${device} and your computer was quiet, which is exactly what a machine with nothing playing sounds like. If you did expect to hear something, check how system audio reaches Minutes: screen recording permission on macOS, or the loopback device on Windows and Linux.`,
+        message: `Minutes listened to ${device} and your computer was quiet, which is exactly what a machine with nothing playing sounds like. If you did expect to hear something, check that Minutes has screen recording permission.`,
       };
 
     case 'permission_denied':

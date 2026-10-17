@@ -240,19 +240,9 @@ export class Analytics {
     return this.currentUserId;
   }
 
-  // Platform/Device detection methods
+  // Platform/Device detection methods. Minutes runs only on macOS.
   static async getPlatform(): Promise<string> {
-    try {
-      // Use browser's user agent as fallback
-      const userAgent = navigator.userAgent.toLowerCase();
-      if (userAgent.includes('mac')) return 'macOS';
-      if (userAgent.includes('win')) return 'Windows';
-      if (userAgent.includes('linux')) return 'Linux';
-      return 'unknown';
-    } catch (error) {
-      console.error('Failed to get platform:', error);
-      return 'unknown';
-    }
+    return 'macOS';
   }
 
   static async getOSVersion(): Promise<string> {

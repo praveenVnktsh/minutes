@@ -163,7 +163,7 @@ const TONE_CLASSES: Record<CardTone, string> = {
  */
 const MANUAL_FIX_INSTRUCTIONS: Partial<Record<SetupCheckFixKind, string>> = {
   'open-mic-settings':
-    'Minutes could not open the settings for you. Open them yourself: System Settings › Privacy & Security › Microphone on macOS, or Settings › Privacy & security › Microphone on Windows. Switch Minutes on, then run the check again.',
+    'Minutes could not open the settings for you. Open them yourself: System Settings › Privacy & Security › Microphone. Switch Minutes on, then run the check again.',
   'open-screen-recording-settings':
     'Minutes could not open the settings for you. Open them yourself: System Settings › Privacy & Security › Screen Recording on macOS. Switch Minutes on, quit and reopen Minutes, then run the check again.',
   'retry-download':
