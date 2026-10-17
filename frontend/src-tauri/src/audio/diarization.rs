@@ -43,7 +43,6 @@ const NEMOTRON_ENGINE: EngineInfo = EngineInfo {
     embedding_model: "sortformer-aosc",
 };
 
-#[cfg(target_os = "macos")]
 const PYANNOTE_ENGINE: EngineInfo = EngineInfo {
     engine: "sherpa-onnx-1.13.8",
     segmentation_model: "pyannote-segmentation-3.0",
@@ -56,26 +55,19 @@ const NEMOTRON_DIR: &str = "nemotron-3";
 const DOWNLOAD_READ_TIMEOUT: Duration = Duration::from_secs(60);
 pub(crate) const DOWNLOAD_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
-#[cfg(target_os = "macos")]
 const PYANNOTE_SEGMENTATION_DIR: &str = "sherpa-onnx-pyannote-segmentation-3-0";
 // fp32 segmentation detects speaker boundaries more accurately than the int8
 // build; the extra ~4 MB on disk is a worthwhile trade for a local app.
-#[cfg(target_os = "macos")]
 const PYANNOTE_SEGMENTATION_FILE: &str = "model.onnx";
-#[cfg(target_os = "macos")]
 const PYANNOTE_SEGMENTATION_ARCHIVE_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2";
 // VoxCeleb ResNet34 with large-margin training. English-focused and a much
 // stronger speaker discriminator than NeMo titanet-small, at a smaller size.
-#[cfg(target_os = "macos")]
 const PYANNOTE_EMBEDDING_FILE: &str = "wespeaker_en_voxceleb_resnet34_LM.onnx";
-#[cfg(target_os = "macos")]
 const PYANNOTE_EMBEDDING_MODEL_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/wespeaker_en_voxceleb_resnet34_LM.onnx";
 // Fast clustering merges speakers above this cosine threshold. Override at
 // runtime with MEETILY_DIARIZATION_THRESHOLD to tune without rebuilding.
-#[cfg(target_os = "macos")]
 const DEFAULT_CLUSTER_THRESHOLD: f32 = 0.8;
 
-#[cfg(target_os = "macos")]
 fn cluster_threshold() -> f32 {
     std::env::var("MEETILY_DIARIZATION_THRESHOLD")
         .ok()
@@ -488,14 +480,12 @@ async fn run_nemotron<R: Runtime>(
 // pyannote + WeSpeaker via sherpa-onnx (macOS fallback)
 // ---------------------------------------------------------------------------
 
-#[cfg(target_os = "macos")]
 struct PyannoteModels {
     segmentation: PathBuf,
     embedding: PathBuf,
 }
 
 /// Fetch one of the small pyannote/WeSpeaker files (a few MB), buffered.
-#[cfg(target_os = "macos")]
 async fn download_small(url: &str, destination: &Path) -> Result<()> {
     if destination.exists() && destination.metadata()?.len() > 0 {
         return Ok(());
@@ -512,7 +502,6 @@ async fn download_small(url: &str, destination: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
 async fn ensure_pyannote_models<R: Runtime>(
     app: &AppHandle<R>,
     meeting_id: &str,
@@ -570,7 +559,6 @@ async fn ensure_pyannote_models<R: Runtime>(
     })
 }
 
-#[cfg(target_os = "macos")]
 fn diarize_with_pyannote(
     samples: &[f32],
     models: &PyannoteModels,
@@ -627,7 +615,6 @@ fn diarize_with_pyannote(
 }
 
 /// Run the sherpa-onnx pyannote pipeline over the meeting audio.
-#[cfg(target_os = "macos")]
 async fn run_pyannote<R: Runtime>(
     app: &AppHandle<R>,
     meeting_id: &str,
@@ -709,7 +696,6 @@ async fn diarize_meeting_audio<R: Runtime>(
 
     // pyannote's clustering can target an exact speaker count; Sortformer can
     // only be capped afterwards, so prefer pyannote when a count is given.
-    #[cfg(target_os = "macos")]
     if num_speakers.is_some() {
         log::info!("Diarization: speaker count given, using the pyannote engine");
         let turns = run_pyannote(app, meeting_id, &mut audio, num_speakers).await?;
@@ -718,7 +704,6 @@ async fn diarize_meeting_audio<R: Runtime>(
 
     match run_nemotron(app, meeting_id, &mut audio, num_speakers).await {
         Ok(turns) => Ok((turns, NEMOTRON_ENGINE)),
-        #[cfg(target_os = "macos")]
         Err(error) => {
             log::warn!(
                 "Diarization: Nemotron-3 failed, falling back to pyannote: {:#}",
@@ -727,8 +712,6 @@ async fn diarize_meeting_audio<R: Runtime>(
             let turns = run_pyannote(app, meeting_id, &mut audio, num_speakers).await?;
             Ok((turns, PYANNOTE_ENGINE))
         }
-        #[cfg(not(target_os = "macos"))]
-        Err(error) => Err(error.context("Nemotron-3 speaker diarization failed")),
     }
 }
 
@@ -2085,7 +2068,6 @@ mod tests {
         assert_eq!(single_speakers.len(), 1);
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     #[ignore = "requires downloaded models and MEETILY_DIARIZATION_FIXTURE"]
     fn pyannote_diarizes_real_multi_speaker_fixture() {

@@ -80,14 +80,7 @@ pub fn log_device_capabilities(
     info!("  ───────────────────────────────────────────────────────────");
 
     // Add platform-specific diagnostics
-    #[cfg(target_os = "macos")]
     log_macos_specific_info(device, config);
-
-    #[cfg(target_os = "windows")]
-    log_windows_specific_info(device, config);
-
-    #[cfg(target_os = "linux")]
-    log_linux_specific_info(device, config);
 
     info!("╚═══════════════════════════════════════════════════════════╝");
 
@@ -144,7 +137,6 @@ fn check_for_issues(
 }
 
 /// macOS-specific diagnostic information
-#[cfg(target_os = "macos")]
 fn log_macos_specific_info(_device: &AudioDevice, _config: &SupportedStreamConfig) {
     use cidre::core_audio::hardware::System;
 
@@ -171,45 +163,6 @@ fn log_macos_specific_info(_device: &AudioDevice, _config: &SupportedStreamConfi
                 info!("    Device UID:      {}", uid.to_string());
             }
         }
-    }
-}
-
-/// Windows-specific diagnostic information
-#[cfg(target_os = "windows")]
-fn log_windows_specific_info(device: &AudioDevice, _config: &SupportedStreamConfig) {
-    info!("  Windows-Specific:");
-    info!("    Device Name:     {}", device.name);
-
-    // Check if WASAPI naming patterns detected
-    let name_lower = device.name.to_lowercase();
-    if name_lower.contains("bluetooth") {
-        info!("    WASAPI Type:     Bluetooth (detected from name)");
-    } else if name_lower.contains("usb") {
-        info!("    WASAPI Type:     USB");
-    } else if name_lower.contains("realtek") || name_lower.contains("conexant") {
-        info!("    WASAPI Type:     Built-in Audio Chip");
-    }
-}
-
-/// Linux-specific diagnostic information
-#[cfg(target_os = "linux")]
-fn log_linux_specific_info(device: &AudioDevice, _config: &SupportedStreamConfig) {
-    info!("  Linux-Specific:");
-    info!("    Device Name:     {}", device.name);
-
-    // Check for BlueZ/PulseAudio patterns
-    let name_lower = device.name.to_lowercase();
-    if name_lower.contains("bluez") {
-        info!("    Audio Stack:     BlueZ (Bluetooth)");
-        if name_lower.contains(".a2dp") {
-            info!("    Bluetooth Codec: A2DP (Advanced Audio Distribution Profile)");
-        } else if name_lower.contains(".hfp") || name_lower.contains(".hsp") {
-            info!("    Bluetooth Codec: HFP/HSP (Headset Profile)");
-        }
-    } else if name_lower.contains("pulse") || name_lower.contains("monitor") {
-        info!("    Audio Stack:     PulseAudio");
-    } else if name_lower.contains("alsa") || name_lower.contains("hda") {
-        info!("    Audio Stack:     ALSA");
     }
 }
 

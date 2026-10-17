@@ -1,9 +1,7 @@
 use anyhow::Result;
-#[cfg(target_os = "macos")]
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use log::{debug, error, info, warn};
 use std::sync::Arc;
-#[cfg(target_os = "macos")]
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -78,16 +76,13 @@ fn propagate_save_result(
 // IO proc starts firing normally. Total cost: ~300 ms added to recording
 // start, ~150 ms added to the disconnect-fallback hot-swap path.
 
-#[cfg(target_os = "macos")]
 const AUDIO_WAKE_DURATION: Duration = Duration::from_millis(300);
 
-#[cfg(target_os = "macos")]
 const AUDIO_WAKE_SWAP_DURATION: Duration = Duration::from_millis(150);
 
 /// Synchronous implementation of the wake. Must be called from a blocking
 /// thread (not directly from async code) because it sleeps 300 ms and does
 /// sync cpal I/O. The async wrapper below routes to it via spawn_blocking.
-#[cfg(target_os = "macos")]
 fn wake_audio_connection_sync(speaker_device_name: &str) -> Result<()> {
     info!(
         "[AUDIO_WAKE] Waking audio via speaker: '{}'",
@@ -160,7 +155,6 @@ fn wake_audio_connection_sync(speaker_device_name: &str) -> Result<()> {
 /// so the 300 ms sleep doesn't block the tokio runtime. Non-fatal — the caller
 /// should log the error and proceed if this fails; recording will still work,
 /// it just may have the 60-90s silent startup on BT.
-#[cfg(target_os = "macos")]
 pub(super) async fn wake_audio_connection(speaker_device_name: &str) -> Result<()> {
     let name = speaker_device_name.to_string();
     tokio::task::spawn_blocking(move || wake_audio_connection_sync(&name))
@@ -178,7 +172,6 @@ pub(super) async fn wake_audio_connection(speaker_device_name: &str) -> Result<(
 ///     found (e.g. the original BT output just disappeared, and we're
 ///     waking the MacBook speakers instead)
 ///   - Still handles both F32 and I16 sample formats for robustness
-#[cfg(target_os = "macos")]
 pub async fn wake_audio_connection_for_swap(speaker_device_name: &str) -> Result<()> {
     let name = speaker_device_name.to_string();
     tokio::task::spawn_blocking(move || {
@@ -411,8 +404,8 @@ impl RecordingManager {
     pub async fn stop_streams_and_force_flush(&mut self) -> Result<()> {
         info!("🚀 Stopping recording streams with IMMEDIATE pipeline flush");
 
-        // CRITICAL: Stop device monitor FIRST to prevent continuous WASAPI polling on Windows
-        // This fixes the slow shutdown issue where device enumeration runs for 90+ seconds
+        // CRITICAL: Stop device monitor FIRST so device enumeration cannot keep
+        // running during shutdown
         if let Some(ref mut monitor) = self.device_monitor {
             info!("Stopping device monitor first...");
             monitor.stop_monitoring().await;
@@ -824,7 +817,7 @@ mod tests {
     }
 }
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(test)]
 mod wake_tests {
     use super::*;
 

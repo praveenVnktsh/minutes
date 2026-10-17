@@ -36,8 +36,6 @@ pub struct ContinuousVadProcessor {
 
 impl ContinuousVadProcessor {
     pub fn new(input_sample_rate: u32, redemption_time_ms: u32) -> Result<Self> {
-        crate::ensure_onnx_runtime_available()?;
-
         // Use STRICT settings to prevent silence from reaching Whisper
         // CONTINUOUS SPEECH FIX: Tuned for capturing complete 5+ second utterances
         // Previous: 0.55/0.40 with 400ms redemption was fragmenting speech into 40ms segments

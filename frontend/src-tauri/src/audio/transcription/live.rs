@@ -215,7 +215,7 @@ fn plan_notice(plan: &LivePlan) -> Option<String> {
 /// about to start. Sets the pipeline's streaming mode to match. Never fails.
 pub async fn prepare_for_recording<R: Runtime>(app: &AppHandle<R>) {
     let current = settings::load_settings(app);
-    let nemotron_ready = live_streaming::SUPPORTED && live_streaming::model::is_downloaded(app);
+    let nemotron_ready = live_streaming::model::is_downloaded(app);
     let final_model = settings::configured_final_model(app).await;
     let available = settings::availability().await;
     let plan =

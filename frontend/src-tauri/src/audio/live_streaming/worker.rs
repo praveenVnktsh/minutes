@@ -167,7 +167,6 @@ pub fn drop_stale_windows(queued: &mut Vec<AudioChunk>) -> usize {
     before - queued.len()
 }
 
-#[cfg(target_os = "macos")]
 mod imp {
     use super::*;
     use std::time::Duration;
@@ -394,20 +393,7 @@ pub fn start_streaming_transcription_task<R: Runtime>(
     receiver: UnboundedReceiver<AudioChunk>,
     engine: Arc<StreamingEngine>,
 ) -> tokio::task::JoinHandle<()> {
-    #[cfg(target_os = "macos")]
-    {
-        imp::start(app, receiver, engine)
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (app, engine);
-        let cancel = register_cancel();
-        let mut receiver = receiver;
-        tokio::spawn(async move {
-            while !cancel.load(Ordering::SeqCst) && receiver.recv().await.is_some() {}
-            clear_cancel(&cancel);
-        })
-    }
+    imp::start(app, receiver, engine)
 }
 
 #[cfg(test)]

@@ -258,7 +258,7 @@ pub async fn complete_onboarding<R: Runtime>(
         .map_err(|e| format!("Failed to load onboarding status: {}", e))?;
 
     status.completed = true;
-    status.current_step = 4; // Max step (4 on macOS with permissions, 3 on other platforms)
+    status.current_step = 4; // Max step (the permissions step included)
     status.model_status.parakeet = "downloaded".to_string();
     status.model_status.summary = "downloaded".to_string();
     status.model_status.selected_summary_model = Some(model.clone());

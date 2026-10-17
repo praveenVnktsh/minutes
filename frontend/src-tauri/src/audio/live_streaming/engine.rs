@@ -9,7 +9,6 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
 use log::info;
-#[cfg(target_os = "macos")]
 use sherpa_onnx::{OnlineRecognizer, OnlineRecognizerConfig};
 use tauri::{AppHandle, Runtime};
 
@@ -17,36 +16,18 @@ use super::model;
 
 /// Intra-op threads. Two streams are decoded as one batch, and more threads
 /// than this contend with capture and the UI without speeding decode up.
-#[cfg(target_os = "macos")]
 const NUM_THREADS: i32 = 2;
 
-#[cfg(target_os = "macos")]
 pub struct StreamingEngine {
     pub recognizer: OnlineRecognizer,
 }
 
-/// Never constructed: [`create`] always fails off macOS (see the module docs
-/// in `live_streaming`).
-#[cfg(not(target_os = "macos"))]
-pub struct StreamingEngine {
-    _never: std::convert::Infallible,
-}
-
 static ENGINE: Mutex<Option<Arc<StreamingEngine>>> = Mutex::new(None);
 
-#[cfg(target_os = "macos")]
 fn path_string(dir: &Path, name: &str) -> Option<String> {
     Some(dir.join(name).to_string_lossy().into_owned())
 }
 
-#[cfg(not(target_os = "macos"))]
-pub fn create(_dir: &Path) -> Result<StreamingEngine> {
-    Err(anyhow!(
-        "Nemotron live transcription is only available on macOS"
-    ))
-}
-
-#[cfg(target_os = "macos")]
 pub fn create(dir: &Path) -> Result<StreamingEngine> {
     let mut config = OnlineRecognizerConfig::default();
     config.model_config.transducer.encoder = path_string(dir, model::ENCODER);
@@ -66,9 +47,6 @@ pub fn create(dir: &Path) -> Result<StreamingEngine> {
 /// Load the recognizer, or reuse the loaded one. Blocking (~2 s): call it
 /// from `spawn_blocking` or before capture starts.
 pub fn get_or_load<R: Runtime>(app: &AppHandle<R>) -> Result<Arc<StreamingEngine>> {
-    if !super::SUPPORTED {
-        return create(Path::new("")).map(Arc::new);
-    }
     let mut guard = ENGINE.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(engine) = guard.as_ref() {
         return Ok(engine.clone());

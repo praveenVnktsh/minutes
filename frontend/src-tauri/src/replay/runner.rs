@@ -293,10 +293,7 @@ fn link_tree(from: &Path, to: &Path) -> Result<()> {
         if kind.is_dir() {
             link_tree(&entry.path(), &target)?;
         } else {
-            #[cfg(unix)]
             std::os::unix::fs::symlink(entry.path(), &target)?;
-            #[cfg(not(unix))]
-            std::fs::copy(entry.path(), &target).map(|_| ())?;
         }
     }
     Ok(())
@@ -973,13 +970,7 @@ pub fn run(options: Options) -> Result<PathBuf> {
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("mp4");
-    #[cfg(unix)]
     std::os::unix::fs::symlink(
-        &options.audio,
-        meeting_folder.join(format!("audio.{extension}")),
-    )?;
-    #[cfg(not(unix))]
-    std::fs::copy(
         &options.audio,
         meeting_folder.join(format!("audio.{extension}")),
     )?;

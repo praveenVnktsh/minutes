@@ -4,14 +4,11 @@ use futures_util::{Stream, StreamExt};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-#[cfg(target_os = "macos")]
 use super::core_audio::CoreAudioCapture;
-#[cfg(target_os = "macos")]
 use futures_channel::mpsc;
-#[cfg(target_os = "macos")]
 use log::info;
 
-/// System audio capture using Core Audio tap (macOS) or CPAL (other platforms)
+/// System audio capture using a Core Audio tap
 pub struct SystemAudioCapture {
     _host: cpal::Host,
 }
@@ -39,68 +36,59 @@ impl SystemAudioCapture {
     }
 
     pub fn start_system_audio_capture(&self) -> Result<SystemAudioStream> {
-        #[cfg(target_os = "macos")]
-        {
-            info!("Starting Core Audio system capture (macOS)");
-            // Use Core Audio tap for system audio capture
-            let core_audio = CoreAudioCapture::new()?;
-            let core_audio_stream = core_audio.stream()?;
-            let sample_rate = core_audio_stream.sample_rate();
+        info!("Starting Core Audio system capture (macOS)");
+        // Use Core Audio tap for system audio capture
+        let core_audio = CoreAudioCapture::new()?;
+        let core_audio_stream = core_audio.stream()?;
+        let sample_rate = core_audio_stream.sample_rate();
 
-            // Convert CoreAudioStream to SystemAudioStream
-            let (tx, rx) = mpsc::unbounded::<Vec<f32>>();
-            let (drop_tx, drop_rx) = std::sync::mpsc::channel::<()>();
+        // Convert CoreAudioStream to SystemAudioStream
+        let (tx, rx) = mpsc::unbounded::<Vec<f32>>();
+        let (drop_tx, drop_rx) = std::sync::mpsc::channel::<()>();
 
-            // Spawn task to forward Core Audio samples
-            tokio::spawn(async move {
-                use futures_util::StreamExt;
-                let mut stream = core_audio_stream;
-                let mut buffer = Vec::new();
-                let chunk_size = 1024;
+        // Spawn task to forward Core Audio samples
+        tokio::spawn(async move {
+            use futures_util::StreamExt;
+            let mut stream = core_audio_stream;
+            let mut buffer = Vec::new();
+            let chunk_size = 1024;
 
-                loop {
-                    // Check if we should stop
-                    if drop_rx.try_recv().is_ok() {
-                        break;
-                    }
+            loop {
+                // Check if we should stop
+                if drop_rx.try_recv().is_ok() {
+                    break;
+                }
 
-                    // Poll the Core Audio stream
-                    match stream.next().await {
-                        Some(sample) => {
-                            buffer.push(sample);
-                            if buffer.len() >= chunk_size {
-                                if tx.unbounded_send(buffer.clone()).is_err() {
-                                    break;
-                                }
-                                buffer.clear();
+                // Poll the Core Audio stream
+                match stream.next().await {
+                    Some(sample) => {
+                        buffer.push(sample);
+                        if buffer.len() >= chunk_size {
+                            if tx.unbounded_send(buffer.clone()).is_err() {
+                                break;
                             }
+                            buffer.clear();
                         }
-                        None => break,
                     }
+                    None => break,
                 }
+            }
 
-                // Send any remaining samples
-                if !buffer.is_empty() {
-                    let _ = tx.unbounded_send(buffer);
-                }
-            });
+            // Send any remaining samples
+            if !buffer.is_empty() {
+                let _ = tx.unbounded_send(buffer);
+            }
+        });
 
-            let receiver = rx.map(futures_util::stream::iter).flatten();
+        let receiver = rx.map(futures_util::stream::iter).flatten();
 
-            info!("Core Audio system capture started successfully");
+        info!("Core Audio system capture started successfully");
 
-            Ok(SystemAudioStream {
-                drop_tx,
-                sample_rate,
-                receiver: Box::pin(receiver),
-            })
-        }
-
-        #[cfg(not(target_os = "macos"))]
-        {
-            // For non-macOS platforms, you would implement WASAPI/ALSA loopback here
-            anyhow::bail!("System audio capture not yet implemented for this platform")
-        }
+        Ok(SystemAudioStream {
+            drop_tx,
+            sample_rate,
+            receiver: Box::pin(receiver),
+        })
     }
 
     pub fn check_system_audio_permissions() -> bool {

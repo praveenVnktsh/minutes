@@ -45,18 +45,8 @@ impl LiveModelChoice {
     }
 
     /// Unset or unrecognised values mean the default, so a user who never
-    /// picked a live model gets Nemotron. On platforms without the streaming
-    /// runtime the choice is always chunked.
+    /// picked a live model gets Nemotron.
     pub fn from_stored(value: Option<&str>) -> Self {
-        Self::from_stored_on(value, crate::audio::live_streaming::SUPPORTED)
-    }
-
-    /// [`Self::from_stored`] for a platform that does (`nemotron_supported`)
-    /// or does not run Nemotron.
-    pub fn from_stored_on(value: Option<&str>, nemotron_supported: bool) -> Self {
-        if !nemotron_supported {
-            return Self::Chunked;
-        }
         match value {
             Some("chunked") => Self::Chunked,
             _ => Self::NemotronStreaming,
@@ -477,14 +467,7 @@ mod tests {
     #[test]
     fn unset_settings_default_to_nemotron_and_auto_final_pass() {
         let settings = LiveTranscriptionSettings::from_stored(None, None);
-        assert_eq!(
-            settings.live_model,
-            LiveModelChoice::from_stored_on(None, crate::audio::live_streaming::SUPPORTED)
-        );
-        assert_eq!(
-            LiveModelChoice::from_stored_on(None, true),
-            LiveModelChoice::NemotronStreaming
-        );
+        assert_eq!(settings.live_model, LiveModelChoice::NemotronStreaming);
         assert!(settings.auto_final_pass);
     }
 
@@ -494,19 +477,9 @@ mod tests {
         assert_eq!(settings.live_model, LiveModelChoice::Chunked);
         assert!(!settings.auto_final_pass);
         assert_eq!(
-            LiveModelChoice::from_stored_on(Some("something-old"), true),
+            LiveModelChoice::from_stored(Some("something-old")),
             LiveModelChoice::NemotronStreaming
         );
-    }
-
-    #[test]
-    fn platforms_without_nemotron_always_use_the_chunked_engine() {
-        for stored in [None, Some("nemotron-streaming"), Some("chunked")] {
-            assert_eq!(
-                LiveModelChoice::from_stored_on(stored, false),
-                LiveModelChoice::Chunked
-            );
-        }
     }
 
     #[test]

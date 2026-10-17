@@ -509,14 +509,7 @@ fn digital_silence_outcome(channel: ProbeChannel) -> ChannelOutcome {
         return ChannelOutcome::NoAudioDetected;
     }
 
-    #[cfg(target_os = "macos")]
-    {
-        ChannelOutcome::PermissionDenied
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        ChannelOutcome::NoAudioDetected
-    }
+    ChannelOutcome::PermissionDenied
 }
 
 fn parakeet_engine() -> Option<Arc<ParakeetEngine>> {
@@ -610,11 +603,7 @@ mod tests {
     fn microphone_digital_silence_indicts_the_permission_on_macos_only() {
         let outcome = classify_capture(ProbeChannel::Microphone, &[0.0; 4096], 0.0);
 
-        #[cfg(target_os = "macos")]
         assert_eq!(outcome, Some(ChannelOutcome::PermissionDenied));
-
-        #[cfg(not(target_os = "macos"))]
-        assert_eq!(outcome, Some(ChannelOutcome::NoAudioDetected));
     }
 
     #[test]

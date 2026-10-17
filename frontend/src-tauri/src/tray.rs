@@ -189,17 +189,11 @@ fn set_recording_window_indicators<R: Runtime>(
         let _ = window.set_title(&title);
 
         // Dock badges are macOS-only in Tauri.
-        #[cfg(target_os = "macos")]
-        {
-            let _ = window.set_badge_label(Some("REC".to_string()));
-        }
+        let _ = window.set_badge_label(Some("REC".to_string()));
     } else {
         let _ = window.set_title(crate::APP_NAME);
 
-        #[cfg(target_os = "macos")]
-        {
-            let _ = window.set_badge_label(None);
-        }
+        let _ = window.set_badge_label(None);
     }
 }
 
@@ -866,7 +860,6 @@ pub(crate) fn hide_main_window<R: Runtime>(app: &AppHandle<R>) {
 }
 
 /// On macOS, switch between a regular app (Dock icon, app menu) and a tray-only accessory app.
-#[cfg(target_os = "macos")]
 fn set_dock_visible<R: Runtime>(app: &AppHandle<R>, visible: bool) {
     let policy = if visible {
         tauri::ActivationPolicy::Regular
@@ -877,9 +870,6 @@ fn set_dock_visible<R: Runtime>(app: &AppHandle<R>, visible: bool) {
         log::error!("Failed to set activation policy: {}", e);
     }
 }
-
-#[cfg(not(target_os = "macos"))]
-fn set_dock_visible<R: Runtime>(_app: &AppHandle<R>, _visible: bool) {}
 
 pub(crate) fn focus_main_window<R: Runtime>(app: &AppHandle<R>) {
     if let Some(window) = app.get_webview_window("main") {

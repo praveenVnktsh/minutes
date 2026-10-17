@@ -38,14 +38,7 @@ fn app_identifier() -> Option<String> {
 
 /// Where Tauri's `app_log_dir()` points for `identifier`.
 fn default_log_dir(identifier: &str) -> Option<PathBuf> {
-    #[cfg(target_os = "macos")]
-    {
-        dirs::home_dir().map(|home| home.join("Library/Logs").join(identifier))
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        dirs::data_local_dir().map(|dir| dir.join(identifier).join("logs"))
-    }
+    dirs::home_dir().map(|home| home.join("Library/Logs").join(identifier))
 }
 
 /// The directory logs and panic reports go to, if one could be resolved.
@@ -270,10 +263,7 @@ mod tests {
     #[test]
     fn log_dir_follows_tauri_convention() {
         let dir = default_log_dir("com.example.app").expect("a home directory");
-        #[cfg(target_os = "macos")]
         assert!(dir.ends_with("Library/Logs/com.example.app"));
-        #[cfg(not(target_os = "macos"))]
-        assert!(dir.ends_with("com.example.app/logs"));
     }
 
     #[test]

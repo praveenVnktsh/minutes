@@ -123,22 +123,6 @@ impl WhisperEngine {
                 log::info!("macOS detected - attempting to enable Metal GPU acceleration");
                 true
             }
-            WhisperCompiledBackend::Cuda => {
-                log::info!("CUDA feature enabled - attempting GPU acceleration");
-                true
-            }
-            WhisperCompiledBackend::Vulkan => {
-                log::info!("Vulkan feature enabled - attempting GPU acceleration");
-                true
-            }
-            WhisperCompiledBackend::HipBlas => {
-                log::info!("HIP BLAS feature enabled - attempting GPU acceleration");
-                true
-            }
-            WhisperCompiledBackend::Cpu => {
-                log::info!("No GPU acceleration features detected - using CPU processing");
-                false
-            }
         }
     }
 
@@ -202,17 +186,8 @@ impl WhisperEngine {
         #[cfg(feature = "metal")]
         log::info!("Apple Metal GPU support: enabled");
 
-        #[cfg(feature = "openblas")]
-        log::info!("OpenBLAS CPU optimization: enabled");
-
         #[cfg(feature = "coreml")]
         log::info!("Apple CoreML support: enabled");
-
-        #[cfg(feature = "cuda")]
-        log::info!("NVIDIA CUDA support: enabled");
-
-        #[cfg(feature = "vulkan")]
-        log::info!("Vulkan GPU support: enabled");
 
         #[cfg(feature = "openmp")]
         log::info!("OpenMP parallel processing: enabled");

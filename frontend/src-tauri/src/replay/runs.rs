@@ -248,14 +248,11 @@ mod tests {
             assert!(run_dir(root.path(), bad).is_none(), "{bad}");
         }
         let outside = tempfile::tempdir().unwrap();
-        #[cfg(unix)]
-        {
-            std::os::unix::fs::symlink(outside.path(), root.path().join("link")).unwrap();
-            assert!(
-                run_dir(root.path(), "link").is_none(),
-                "a symlink out of the root"
-            );
-        }
+        std::os::unix::fs::symlink(outside.path(), root.path().join("link")).unwrap();
+        assert!(
+            run_dir(root.path(), "link").is_none(),
+            "a symlink out of the root"
+        );
     }
 
     #[test]
@@ -329,10 +326,7 @@ mod tests {
         let source = recording.path().join("audio.m4a");
         std::fs::write(&source, b"x").unwrap();
         std::fs::write(meeting.join("other.txt"), "secret").unwrap();
-        #[cfg(unix)]
         std::os::unix::fs::symlink(&source, meeting.join("audio.m4a")).unwrap();
-        #[cfg(not(unix))]
-        std::fs::copy(&source, meeting.join("audio.m4a")).unwrap();
         let (path, kind) = run_audio(&run).unwrap();
         assert_eq!(path, source.canonicalize().unwrap());
         assert_eq!(kind, "audio/mp4");

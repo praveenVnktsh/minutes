@@ -27,9 +27,6 @@ pub struct LiveModelStatus {
     pub downloading: bool,
     pub loaded: bool,
     pub size_bytes: u64,
-    /// False on platforms without the streaming runtime (everything but
-    /// macOS): the settings show Nemotron as unavailable there.
-    pub supported: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -47,7 +44,6 @@ pub fn live_model_status<R: Runtime>(app: &AppHandle<R>) -> LiveModelStatus {
         downloading: model::is_downloading(),
         loaded: super::engine::is_loaded(),
         size_bytes: model::total_bytes(),
-        supported: super::SUPPORTED,
     }
 }
 
@@ -79,9 +75,6 @@ pub async fn set_live_transcription_settings<R: Runtime>(
 ) -> Result<LiveTranscriptionSettingsResponse, String> {
     if let Some(live_model) = live_model {
         let choice = match live_model.as_str() {
-            "nemotron-streaming" if !super::SUPPORTED => {
-                return Err("Nemotron live transcription is only available on macOS".to_string())
-            }
             "nemotron-streaming" => LiveModelChoice::NemotronStreaming,
             "chunked" => LiveModelChoice::Chunked,
             other => return Err(format!("Unknown live model '{other}'")),
@@ -103,9 +96,6 @@ pub async fn live_model_get_status<R: Runtime>(app: AppHandle<R>) -> LiveModelSt
 
 #[tauri::command]
 pub async fn live_model_download<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
-    if !super::SUPPORTED {
-        return Err("Nemotron live transcription is only available on macOS".to_string());
-    }
     let _ = set_store_value(
         &app,
         LIVE_AUTO_DOWNLOAD_DISABLED_KEY,

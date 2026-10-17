@@ -83,63 +83,6 @@ use tokio::sync::RwLock;
 
 static RECORDING_FLAG: AtomicBool = AtomicBool::new(false);
 
-#[cfg(target_os = "windows")]
-static ONNX_RUNTIME_INIT_ERROR: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-
-pub(crate) fn ensure_onnx_runtime_available() -> anyhow::Result<()> {
-    #[cfg(target_os = "windows")]
-    if let Some(error) = ONNX_RUNTIME_INIT_ERROR.get() {
-        anyhow::bail!("{error}");
-    }
-
-    Ok(())
-}
-
-#[cfg(target_os = "windows")]
-fn catch_onnx_runtime_init<F, E>(init: F) -> Result<(), String>
-where
-    F: FnOnce() -> Result<(), E>,
-    E: std::fmt::Display,
-{
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(init)) {
-        Ok(result) => result.map_err(|error| error.to_string()),
-        Err(payload) => {
-            let message = payload
-                .downcast_ref::<&str>()
-                .copied()
-                .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
-                .unwrap_or("unknown panic");
-            Err(format!("ONNX Runtime initialization panicked: {message}"))
-        }
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn record_onnx_runtime_failure(error: String) {
-    log::error!("{error}");
-    let _ = ONNX_RUNTIME_INIT_ERROR.set(error);
-}
-
-#[cfg(all(test, target_os = "windows"))]
-mod onnx_runtime_tests {
-    use super::catch_onnx_runtime_init;
-
-    #[test]
-    fn catch_onnx_runtime_init_converts_errors_and_panics() {
-        assert!(catch_onnx_runtime_init(|| Ok::<(), &str>(())).is_ok());
-        assert_eq!(
-            catch_onnx_runtime_init(|| Err::<(), _>("initializer error")),
-            Err("initializer error".to_string())
-        );
-
-        let error = catch_onnx_runtime_init(|| -> Result<(), &str> {
-            panic!("synthetic loader panic");
-        })
-        .unwrap_err();
-        assert!(error.contains("synthetic loader panic"));
-    }
-}
-
 // Global language preference storage (default to "auto-translate" for automatic translation to English)
 static LANGUAGE_PREFERENCE: std::sync::LazyLock<StdMutex<String>> =
     std::sync::LazyLock::new(|| StdMutex::new("auto-translate".to_string()));
@@ -628,11 +571,8 @@ fn report_database_failure(app: &tauri::AppHandle, error: &str) {
 pub fn run() {
     log::set_max_level(log::LevelFilter::Info);
 
-    let mut builder = tauri::Builder::default();
-
-    #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
-    {
-        builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
             log_info!(
                 "Second app instance requested with args: {:?}, cwd: {:?}",
                 args,
@@ -640,10 +580,7 @@ pub fn run() {
             );
 
             tray::focus_main_window(app);
-        }));
-    }
-
-    builder
+        }))
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())
@@ -661,35 +598,6 @@ pub fn run() {
             tokio::sync::Mutex::new(None),
         )))
         .setup(|_app| {
-            #[cfg(target_os = "windows")]
-            match _app
-                .path()
-                .resolve("onnxruntime.dll", tauri::path::BaseDirectory::Resource)
-            {
-                Ok(runtime_path) => {
-                    match catch_onnx_runtime_init(|| {
-                        ort::init_from(runtime_path.to_string_lossy().into_owned())
-                            .with_telemetry(false)
-                            .commit()
-                            .map(|_| ())
-                    }) {
-                        Ok(()) => log::info!(
-                            "Initialized bundled ONNX Runtime from {}",
-                            runtime_path.display()
-                        ),
-                        Err(error) => record_onnx_runtime_failure(format!(
-                            "Failed to initialize bundled ONNX Runtime from {}: {}",
-                            runtime_path.display(),
-                            error
-                        )),
-                    }
-                }
-                Err(error) => record_onnx_runtime_failure(format!(
-                    "Failed to resolve bundled ONNX Runtime resource: {}",
-                    error
-                )),
-            };
-
             // Tauri's own log directory; normally the one main() already uses.
             match _app.path().app_log_dir() {
                 Ok(dir) => app_logging::use_log_dir(dir),
@@ -1182,7 +1090,6 @@ pub fn run() {
             onboarding::reset_onboarding_status_cmd,
             onboarding::complete_onboarding,
             // System settings commands
-            #[cfg(target_os = "macos")]
             utils::open_system_settings,
             // Retranscription commands
             audio::retranscription::start_retranscription_command,
@@ -1230,7 +1137,6 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|_app_handle, event| {
             match event {
-                #[cfg(target_os = "macos")]
                 tauri::RunEvent::Reopen { .. } => {
                     tray::focus_main_window(_app_handle);
                 }

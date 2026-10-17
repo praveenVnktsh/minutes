@@ -1150,30 +1150,10 @@ pub async fn open_meeting_folder<R: Runtime>(
                     return Err(format!("Recording folder not found: {}", folder_path));
                 }
 
-                // Open folder based on OS
-                #[cfg(target_os = "macos")]
-                {
-                    std::process::Command::new("open")
-                        .arg(&folder_path)
-                        .spawn()
-                        .map_err(|e| format!("Failed to open folder: {}", e))?;
-                }
-
-                #[cfg(target_os = "windows")]
-                {
-                    std::process::Command::new("explorer")
-                        .arg(&folder_path)
-                        .spawn()
-                        .map_err(|e| format!("Failed to open folder: {}", e))?;
-                }
-
-                #[cfg(target_os = "linux")]
-                {
-                    std::process::Command::new("xdg-open")
-                        .arg(&folder_path)
-                        .spawn()
-                        .map_err(|e| format!("Failed to open folder: {}", e))?;
-                }
+                std::process::Command::new("open")
+                    .arg(&folder_path)
+                    .spawn()
+                    .map_err(|e| format!("Failed to open folder: {}", e))?;
 
                 log_info!("Successfully opened folder: {}", folder_path);
                 Ok(())
@@ -1193,8 +1173,7 @@ pub async fn open_meeting_folder<R: Runtime>(
 ///
 /// Anything else — a local path, a `file:` handler, a shell string — is
 /// refused, so a crafted argument cannot ask the OS to run something. Quotes
-/// and control characters are rejected too, because the Windows path below
-/// quotes the URL into a `cmd.exe` command line.
+/// and control characters are rejected too.
 fn is_browser_url_allowed(url: &str) -> bool {
     if url.trim() != url || url.is_empty() {
         return false;
@@ -1206,23 +1185,6 @@ fn is_browser_url_allowed(url: &str) -> bool {
 
     let lower = url.to_ascii_lowercase();
     lower.starts_with("http://") || lower.starts_with("https://")
-}
-
-#[cfg(windows)]
-fn open_url_on_windows(url: &str) -> std::io::Result<std::process::Output> {
-    use std::os::windows::process::CommandExt;
-    use std::process::Command;
-
-    // `cmd.exe` parses this command line itself, so Rust's argument quoting is
-    // not enough: an unquoted `&` in a query string would split the command and
-    // `start` would take the URL as a window title. `raw_arg` writes the quotes
-    // through verbatim, and the empty quoted argument is `start`'s title.
-    Command::new("cmd")
-        .raw_arg("/C")
-        .raw_arg("start")
-        .raw_arg("\"\"")
-        .raw_arg(format!("\"{}\"", url))
-        .output()
 }
 
 /// Where the feedback preflight asks whether a repository accepts issues.
@@ -1319,23 +1281,7 @@ pub async fn open_external_url(url: String) -> Result<(), String> {
         return Err(format!("Refusing to open unsupported URL: {}", url));
     }
 
-    let result = if cfg!(target_os = "windows") {
-        #[cfg(windows)]
-        {
-            open_url_on_windows(&url)
-        }
-        #[cfg(not(windows))]
-        {
-            unreachable!()
-        }
-    } else if cfg!(target_os = "macos") {
-        Command::new("open").arg(&url).output()
-    } else {
-        // Linux and other Unix-like systems
-        Command::new("xdg-open").arg(&url).output()
-    };
-
-    match result {
+    match Command::new("open").arg(&url).output() {
         Ok(_) => Ok(()),
         Err(e) => Err(format!("Failed to open URL: {}", e)),
     }

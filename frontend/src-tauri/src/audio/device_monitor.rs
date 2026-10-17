@@ -6,7 +6,6 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-#[cfg(target_os = "macos")]
 use cidre::{core_audio as ca, os};
 
 use super::devices::{list_audio_devices, AudioDevice};
@@ -83,14 +82,12 @@ impl MonitoredDevice {
 //---------- Core Audio callback-driven device detection (macOS)----------
 
 /// Callback data shared between the Core Audio listener and the monitor loop.
-#[cfg(target_os = "macos")]
 struct ListenerCallbackData {
     /// Wakes the monitor loop for immediate device check
     notify: Arc<tokio::sync::Notify>,
 }
 
 /// RAII guard that unregisters the Core Audio property listener on drop.
-#[cfg(target_os = "macos")]
 struct DeviceChangeListenerGuard {
     data_ptr: *mut ListenerCallbackData,
 }
@@ -98,10 +95,8 @@ struct DeviceChangeListenerGuard {
 // SAFETY: data_ptr points to a Box<ListenerCallbackData> whose fields are Send + Sync.
 // The pointer is created in register_device_change_listeners() and only
 // used for cleanup in Drop — always on the same tokio task.
-#[cfg(target_os = "macos")]
 unsafe impl Send for DeviceChangeListenerGuard {}
 
-#[cfg(target_os = "macos")]
 impl Drop for DeviceChangeListenerGuard {
     fn drop(&mut self) {
         let ptr = self.data_ptr as *mut ();
@@ -123,7 +118,6 @@ impl Drop for DeviceChangeListenerGuard {
 }
 
 /// Core Audio callback: hardware device list changed (add/remove).
-#[cfg(target_os = "macos")]
 extern "C-unwind" fn device_list_changed_callback(
     _obj_id: ca::Obj,
     _number_addresses: u32,
@@ -138,7 +132,6 @@ extern "C-unwind" fn device_list_changed_callback(
 
 /// Register the Core Audio property listener for device list changes.
 /// Returns an RAII guard that unregisters the listener on drop.
-#[cfg(target_os = "macos")]
 fn register_device_change_listeners(
     notify: Arc<tokio::sync::Notify>,
 ) -> Option<DeviceChangeListenerGuard> {
@@ -170,7 +163,7 @@ pub struct AudioDeviceMonitor {
     event_sender: mpsc::UnboundedSender<DeviceEvent>,
     stop_signal: Arc<tokio::sync::Notify>,
     /// Wakes the monitor loop instantly when Core Audio reports a device
-    /// change (macOS); never signaled on other platforms.
+    /// change.
     device_change_notify: Arc<tokio::sync::Notify>,
     /// Mailbox for hot-swap device updates. When a mic hot-swap completes,
     /// the new device names are written here. The monitor loop reads it on
@@ -296,7 +289,6 @@ impl AudioDeviceMonitor {
         let mut last_device_list = Vec::new();
         let check_interval = Duration::from_secs(2); // Poll every 2 seconds
 
-        #[cfg(target_os = "macos")]
         let _listener_guard = register_device_change_listeners(device_change_notify.clone());
 
         loop {
