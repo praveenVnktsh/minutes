@@ -33,16 +33,32 @@ Speaker labels:\n\
 - \"Others\" is everyone else on the call (system audio). It may be several different people.\n\
 \n\
 Entry kinds:\n\
-- \"decision\": something the group agreed or decided.\n\
-- \"action\": someone committed to do something (say who, if known).\n\
-- \"point\": any other notable topic, fact or question.\n\
+- \"action\": a concrete follow-up that someone in this meeting committed to do, such as sending, booking or checking something. \
+Goals, plans, opinions and strategy are not actions, even when they mention the future.\n\
+- \"decision\": something the people in this meeting agreed or decided.\n\
+- \"point\": any other fact, number, name or question worth remembering.\n\
 \n\
-Rules:\n\
-- Each \"text\" is at most 15 words, plain language, no filler.\n\
-- Only cover the new transcript. Never repeat or rephrase an entry listed as already noted.\n\
+Writing \"text\":\n\
+- Write the point itself. The speaker is shown next to the entry, so never say who spoke: \
+no \"Others discuss\", \"Speaker explains\", \"You suggest\", \"They note\".\n\
+- At most 12 words, written like a note. Keep every entry in the same plain style.\n\
+- Prefer specifics: names, numbers, dates. Leave out vague words such as \"interesting\", \"exciting\", \"rapidly\".\n\
+- Spell names as the transcript does; if a name was already noted, reuse the spelling from the entries already noted.\n\
+- One entry per point. Never repeat or rephrase an entry listed as already noted.\n\
+\n\
+Fields:\n\
 - \"start\" and \"end\" are mm:ss times copied from the transcript lines the entry covers.\n\
-- \"speaker\" is \"You\", \"Others\" or null.\n\
+- \"speaker\" is the label of those lines, \"You\" or \"Others\", or null.\n\
 - If nothing new or meaningful was said, return {\"entries\":[]}.\n\
+\n\
+Examples:\n\
+- \"Others: we've grown from about forty to almost a hundred people this year\" is \
+{\"kind\":\"point\",\"text\":\"Team grew from about 40 to almost 100 people this year.\"}, \
+not \"Others discuss rapid team growth.\"\n\
+- \"Others: the plan is to open a Berlin office next spring\" is \
+{\"kind\":\"point\",\"text\":\"Plan: Berlin office next spring.\"}: a plan, not an action.\n\
+- \"You: I'll send Lena the revised budget by Friday\" is \
+{\"kind\":\"action\",\"text\":\"Send Lena the revised budget by Friday.\"}\n\
 \n\
 Reply with JSON only, no other text:\n\
 {\"entries\":[{\"start\":\"mm:ss\",\"end\":\"mm:ss\",\"kind\":\"point\",\"text\":\"...\",\"speaker\":\"Others\"}]}"
@@ -150,6 +166,46 @@ mod tests {
         assert!(prompt.contains("{\"entries\":[]}"));
         assert!(prompt.contains("decision"));
         assert!(prompt.contains("action"));
+    }
+
+    #[test]
+    fn system_prompt_asks_for_the_point_not_who_said_it() {
+        let prompt = system_prompt();
+        assert!(prompt.contains("never say who spoke"));
+        assert!(prompt.contains("\"Others discuss\""));
+        assert!(prompt.contains("At most 12 words"));
+    }
+
+    #[test]
+    fn system_prompt_keeps_actions_to_follow_ups_from_this_meeting() {
+        let prompt = system_prompt();
+        assert!(
+            prompt.contains("a concrete follow-up that someone in this meeting committed to do")
+        );
+        assert!(prompt.contains("Goals, plans, opinions and strategy are not actions"));
+    }
+
+    #[test]
+    fn system_prompt_keeps_names_spelled_as_already_noted() {
+        assert!(system_prompt().contains("reuse the spelling from the entries already noted"));
+    }
+
+    #[test]
+    fn system_prompt_examples_never_name_the_speaker_in_the_text() {
+        let prompt = system_prompt();
+        let examples: Vec<&str> = prompt
+            .split("\"text\":\"")
+            .skip(1)
+            .map(|rest| rest.split('"').next().unwrap())
+            .filter(|text| !text.is_empty() && *text != "...")
+            .collect();
+        assert!(examples.len() >= 3, "{examples:?}");
+        for text in examples {
+            for subject in ["You ", "Others ", "Speaker ", "They "] {
+                assert!(!text.starts_with(subject), "{text}");
+            }
+            assert!(text.split_whitespace().count() <= 12, "{text}");
+        }
     }
 
     #[test]
