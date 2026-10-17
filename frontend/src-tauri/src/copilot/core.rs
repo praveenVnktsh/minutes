@@ -265,6 +265,11 @@ pub struct Core {
     state: Mutex<State>,
 }
 
+/// Links a line's detector decisions to the card they open.
+fn decision_id(line_ms: i64) -> String {
+    format!("line-{line_ms}")
+}
+
 fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339()
 }
@@ -349,8 +354,16 @@ impl Core {
         }
     }
 
-    fn record_decision(&self, state: &mut State, text: String) {
+    fn record_decision(&self, state: &mut State, text: String, step: &'static str, line_ms: i64) {
         perf_debug!("Copilot detector: {}", text);
+        crate::replay::trace::emit("detector", || {
+            serde_json::json!({
+                "decision_id": decision_id(line_ms),
+                "step": step,
+                "line_ms": line_ms,
+                "decision": text,
+            })
+        });
         state.debug.detector.last = Some(text);
     }
 
@@ -358,12 +371,18 @@ impl Core {
     /// a one-word model confirmation, then the draft.
     fn consider_suggestion(self: &Arc<Self>, line: Line) {
         let decision = rule_check(&line.text);
-        let now = Instant::now();
+        // Meeting time: the replay harness runs it faster than real time.
+        let now = crate::clock::now();
         {
             let mut state = self.lock();
             if !decision.passed() {
                 state.debug.detector.rule_reject += 1;
-                self.record_decision(&mut state, format!("rule: no ({})", decision.reason()));
+                self.record_decision(
+                    &mut state,
+                    format!("rule: no ({})", decision.reason()),
+                    "rule_reject",
+                    line.start_ms,
+                );
                 return;
             }
             state.debug.detector.rule_pass += 1;
@@ -416,6 +435,8 @@ impl Core {
                 self.record_decision(
                     &mut state,
                     format!("rule: yes ({}), skipped: {reason}", decision.reason()),
+                    "skipped",
+                    line.start_ms,
                 );
                 return;
             }
@@ -425,6 +446,8 @@ impl Core {
             self.record_decision(
                 &mut state,
                 format!("rule: yes ({}), confirming", decision.reason()),
+                "confirming",
+                line.start_ms,
             );
         }
         let core = self.clone();
@@ -446,6 +469,7 @@ impl Core {
         let Ok(streamer) = self.host.streamer(false).await else {
             return false;
         };
+        let _busy = crate::clock::busy();
         let parts = self.prompt_for(streamer.as_ref(), &task).await;
         let cancel = CancellationToken::new();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -460,7 +484,7 @@ impl Core {
         });
         let result = tokio::select! {
             joined = &mut handle => Ok(joined),
-            _ = tokio::time::sleep(self.config.first_token_timeout) => {
+            _ = crate::clock::sleep(self.config.first_token_timeout) => {
                 cancel.cancel();
                 let _ = handle.await;
                 Err(())
@@ -486,7 +510,12 @@ impl Core {
                         outcome.text.chars().take(24).collect::<String>()
                     ),
                 };
-                self.record_decision(&mut state, format!("model: {label}"));
+                let step = match verdict {
+                    Some(true) => "confirm_yes",
+                    Some(false) => "confirm_no",
+                    None => "confirm_unknown",
+                };
+                self.record_decision(&mut state, format!("model: {label}"), step, line.start_ms);
                 verdict == Some(true) && state.active
             }
             Ok(Err(error)) => {
@@ -497,16 +526,26 @@ impl Core {
                     error.kind,
                     StreamErrorKind::Auth | StreamErrorKind::RateLimited
                 ) {
-                    state.paused_until = Some(Instant::now() + self.config.refusal_pause);
+                    state.paused_until = Some(crate::clock::now() + self.config.refusal_pause);
                 }
-                self.record_decision(&mut state, format!("model: failed ({})", error.message));
+                self.record_decision(
+                    &mut state,
+                    format!("model: failed ({})", error.message),
+                    "confirm_failed",
+                    line.start_ms,
+                );
                 false
             }
             Err(()) => {
                 // Most likely it waited behind a timeline request: it did
                 // not cost a model call, so it does not use up the cap.
                 state.recent_confirms.pop_back();
-                self.record_decision(&mut state, "model: timed out (cancelled)".into());
+                self.record_decision(
+                    &mut state,
+                    "model: timed out (cancelled)".into(),
+                    "confirm_timeout",
+                    line.start_ms,
+                );
                 false
             }
         }
@@ -519,7 +558,14 @@ impl Core {
             if !state.active {
                 return;
             }
-            state.last_card_at = Some(Instant::now());
+            state.last_card_at = Some(crate::clock::now());
+            crate::replay::trace::emit("card", || {
+                serde_json::json!({
+                    "decision_id": decision_id(line.start_ms),
+                    "message_id": id,
+                    "line_ms": line.start_ms,
+                })
+            });
             state.messages.push(Message {
                 id: id.clone(),
                 kind: MessageKind::Suggestion,
@@ -763,7 +809,14 @@ impl Core {
         force_builtin: bool,
         cancel: CancellationToken,
     ) {
+        // Latency is measured on the real clock; timeouts run on meeting time.
         let started = Instant::now();
+        let clock_started = crate::clock::now();
+        let _busy = crate::clock::busy();
+        crate::replay::trace::emit(
+            "copilot-request",
+            || serde_json::json!({ "id": id, "phase": "start", "task": format!("{task:?}") }),
+        );
         let streamer = match self.host.streamer(force_builtin).await {
             Ok(streamer) => streamer,
             Err(error) => {
@@ -810,12 +863,12 @@ impl Core {
         });
 
         let mut first_token: Option<Duration> = None;
-        let mut last_token = started;
+        let mut last_token = clock_started;
         let mut timed_out = false;
         let mut rx_closed = false;
         let result = loop {
             let deadline = match first_token {
-                None => started + self.config.first_token_timeout,
+                None => clock_started + self.config.first_token_timeout,
                 Some(_) => last_token + self.config.stall_timeout,
             };
             tokio::select! {
@@ -823,8 +876,14 @@ impl Core {
                 delta = rx.recv(), if !timed_out && !rx_closed => {
                     match delta {
                         Some(delta) => {
+                            if first_token.is_none() {
+                                let ms = started.elapsed().as_millis() as u64;
+                                crate::replay::trace::emit("copilot-request", || {
+                                    serde_json::json!({ "id": id, "phase": "first-token", "first_token_ms": ms })
+                                });
+                            }
                             first_token.get_or_insert_with(|| started.elapsed());
-                            last_token = Instant::now();
+                            last_token = crate::clock::now();
                             self.append(&id, delta);
                         }
                         None => rx_closed = true,
@@ -837,7 +896,7 @@ impl Core {
                     }
                     break joined.unwrap_or_else(|e| Err(StreamError::new(StreamErrorKind::Other, format!("Copilot's request task failed: {e}"))));
                 }
-                _ = tokio::time::sleep_until(deadline), if !timed_out => {
+                _ = crate::clock::sleep_until(deadline), if !timed_out => {
                     timed_out = true;
                     cancel.cancel();
                 }
@@ -947,6 +1006,16 @@ impl Core {
                 }
             }
             let stats = message.stats.clone();
+            crate::replay::trace::emit("copilot-request", || {
+                serde_json::json!({
+                    "id": id,
+                    "phase": "done",
+                    "status": message.status,
+                    "error": message.error,
+                    "kind": message.kind,
+                    "stats": message.stats,
+                })
+            });
             let keep = !message.reply.trim().is_empty()
                 && matches!(message.status, MessageStatus::Done | MessageStatus::Stopped)
                 && message.card_state != Some(CardState::NotForMe);
@@ -955,7 +1024,7 @@ impl Core {
                 state.debug.last = stats;
             }
             if refused {
-                state.paused_until = Some(Instant::now() + self.config.refusal_pause);
+                state.paused_until = Some(crate::clock::now() + self.config.refusal_pause);
             }
             if let Some(rows) = rows {
                 state.unsaved.extend(rows);

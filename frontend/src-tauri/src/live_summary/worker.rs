@@ -154,8 +154,11 @@ struct InFlight {
 struct Worker {
     host: Arc<dyn WorkerHost>,
     config: WorkerConfig,
-    started: Instant,
+    /// On `crate::clock`: meeting time, which a replay runs faster than real.
+    started: tokio::time::Instant,
     scheduler: WindowScheduler,
+    /// Requests started, for the replay trace.
+    requests: u64,
     snapshot: TimelineSnapshot,
     unsaved: Vec<TimelineEntry>,
     /// Requests that failed in a row, for the back-off.
@@ -165,7 +168,7 @@ struct Worker {
 
 impl Worker {
     fn now(&self) -> Duration {
-        self.started.elapsed()
+        crate::clock::now().saturating_duration_since(self.started)
     }
 
     fn set_status(&mut self, status: TimelineStatus, error: Option<String>) {
@@ -282,6 +285,18 @@ impl Worker {
         );
         let cancel = CancellationToken::new();
         let token = cancel.clone();
+        self.requests += 1;
+        let request = self.requests;
+        crate::replay::trace::emit("timeline-request", || {
+            serde_json::json!({
+                "id": request,
+                "phase": "start",
+                "start_ms": window.start_ms,
+                "end_ms": window.end_ms,
+                "words": window.words(),
+                "dropped_segments": window.dropped_segments,
+            })
+        });
         let handle = tokio::spawn(async move {
             let provider = generator.provider().to_string();
             let model = generator.model().to_string();
@@ -298,6 +313,16 @@ impl Worker {
     ) {
         self.in_flight = None;
         self.scheduler.complete();
+        let request = self.requests;
+        crate::replay::trace::emit("timeline-request", || {
+            let outcome = match &outcome {
+                Ok((_, _, _, Ok(generated))) if generated.truncated => "truncated".to_string(),
+                Ok((_, _, _, Ok(_))) => "done".to_string(),
+                Ok((_, _, _, Err(error))) => format!("{:?}", error.kind).to_lowercase(),
+                Err(_) => "panicked".to_string(),
+            };
+            serde_json::json!({ "id": request, "phase": "done", "outcome": outcome })
+        });
         let (window, provider, model, result) = match outcome {
             Ok(outcome) => outcome,
             Err(error) => {
@@ -425,14 +450,17 @@ impl Worker {
     /// the background and drops the reply, and the summary (or anything else
     /// using the sidecar) is never interrupted. The task is detached, never
     /// aborted: aborting could cut a sidecar shutdown or exchange in half.
-    async fn settle_in_flight(&mut self, deadline: Instant) {
+    async fn settle_in_flight(&mut self, deadline: tokio::time::Instant) {
         let Some(InFlight { mut handle, cancel }) = self.in_flight.take() else {
             return;
         };
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        match tokio::time::timeout(remaining, &mut handle).await {
-            Ok(outcome) => self.finish_request(outcome).await,
-            Err(_) => {
+        let settled = tokio::select! {
+            outcome = &mut handle => Some(outcome),
+            _ = crate::clock::sleep_until(deadline) => None,
+        };
+        match settled {
+            Some(outcome) => self.finish_request(outcome).await,
+            None => {
                 info!("Live summary: abandoning the last request at stop");
                 cancel.cancel();
                 drop(handle);
@@ -442,14 +470,14 @@ impl Worker {
     }
 
     async fn finish(&mut self, segments: &mut UnboundedReceiver<Segment>, grace: Duration) {
-        let deadline = Instant::now() + grace;
+        let deadline = crate::clock::now() + grace;
         while let Ok(segment) = segments.try_recv() {
             self.scheduler.push(segment);
         }
         self.settle_in_flight(deadline).await;
         // A provider that just refused us is not asked again for the tail.
         let refused = self.snapshot.status == TimelineStatus::Unavailable;
-        if self.host.enabled() && !refused && Instant::now() < deadline {
+        if self.host.enabled() && !refused && crate::clock::now() < deadline {
             let now = self.now();
             if let Some(window) = self.scheduler.flush(now) {
                 self.start_request(window).await;
@@ -504,16 +532,18 @@ pub async fn run(
         },
         host,
         config,
-        started: Instant::now(),
+        started: crate::clock::now(),
         scheduler: WindowScheduler::with_cadence(Duration::ZERO, config.cadence),
+        requests: 0,
         unsaved: Vec::new(),
         failures: 0,
         in_flight: None,
     };
     worker.host.publish(&worker.snapshot);
 
-    let mut ticker = tokio::time::interval(config.tick);
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // A deadline rather than a fresh sleep per loop, so frequent segments
+    // never starve the tick.
+    let mut next_tick = crate::clock::now();
     loop {
         tokio::select! {
             biased;
@@ -533,7 +563,8 @@ pub async fn run(
                 }
                 None => break,
             },
-            _ = ticker.tick() => {
+            _ = crate::clock::sleep_until(next_tick) => {
+                next_tick = crate::clock::now() + config.tick;
                 if !worker.host.session_alive() {
                     info!("Live summary: recording session ended without a stop signal");
                     break;
