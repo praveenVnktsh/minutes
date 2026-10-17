@@ -96,6 +96,9 @@ interface ConfigContextType {
 
 const ConfigContext = createContext<ConfigContextType | undefined>(undefined);
 
+/** Overrides the configuration for a subtree (the replay viewer). */
+export const ConfigValueProvider = ConfigContext.Provider;
+
 function isProviderWithApiKey(provider: string): provider is keyof ProviderApiKeys {
   return ['claude', 'groq', 'openai', 'openrouter'].includes(provider);
 }

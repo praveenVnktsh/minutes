@@ -1,6 +1,6 @@
 'use client';
 
-import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from 'react';
+import { FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowUp, Copy, Minimize2, RotateCw, Sparkles, Square } from 'lucide-react';
 import { toast } from 'sonner';
 import { Switch } from '@/components/ui/switch';
@@ -10,17 +10,25 @@ import { writeClipboardText } from '@/lib/clipboard';
 import {
   QUICK_ACTIONS,
   cardHeader,
-  copilotApi,
+  copilotApiFor,
   debugLine,
   type CopilotMessage,
   type QuickActionId,
 } from '@/lib/copilot';
 import { buildLiveNotesSummaryContext } from '@/lib/liveNotes';
 import { badge, panel } from '@/lib/theme-classes';
+import { useLiveSource } from '@/lib/liveSource';
 import { noteDocumentId, notePersistenceService, type NoteDocumentTarget } from '@/services/notePersistenceService';
+
+/** Copilot's commands through this subtree's live source. */
+function useCopilotApi() {
+  const source = useLiveSource();
+  return useMemo(() => copilotApiFor(source), [source]);
+}
 
 /** Keeps Copilot's copy of the user's live notes current (debounced). */
 function useNotesForCopilot(target: NoteDocumentTarget | undefined) {
+  const copilotApi = useCopilotApi();
   const targetRef = useRef(target);
   targetRef.current = target;
   const key = target ? noteDocumentId(target) : null;
@@ -44,7 +52,7 @@ function useNotesForCopilot(target: NoteDocumentTarget | undefined) {
       if (timer) clearTimeout(timer);
       unsubscribe();
     };
-  }, [key]);
+  }, [key, copilotApi]);
 }
 
 function copy(text: string) {
@@ -56,6 +64,7 @@ function copy(text: string) {
 const smallButton = 'flex h-7 items-center gap-1 rounded-full px-2.5 text-[11px] text-ink-muted hover:bg-surface-2 hover:text-ink disabled:opacity-40';
 
 function Reply({ message }: { message: CopilotMessage }) {
+  const copilotApi = useCopilotApi();
   const working = message.status === 'pending' || message.status === 'streaming';
   if (message.status === 'error') {
     return (
@@ -112,6 +121,7 @@ function Reply({ message }: { message: CopilotMessage }) {
 }
 
 function SuggestionCard({ message }: { message: CopilotMessage }) {
+  const copilotApi = useCopilotApi();
   const active = message.cardState === 'active';
   return (
     <div className={`rounded-xl border px-3 py-2.5 ${active ? 'border-warning/40 bg-surface-0' : 'border-hairline bg-surface-1 opacity-80'}`}>
@@ -142,6 +152,7 @@ function SuggestionCard({ message }: { message: CopilotMessage }) {
  * Laid out like the AI chat panel it replaces during the meeting.
  */
 export function CopilotPanel({ notesTarget }: { notesTarget?: NoteDocumentTarget }) {
+  const copilotApi = useCopilotApi();
   const snapshot = useCopilot();
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);

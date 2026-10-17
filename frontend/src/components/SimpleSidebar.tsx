@@ -8,6 +8,7 @@ import {
   AudioLines,
   BadgeCheck,
   Bug,
+  Clapperboard,
   MessageSquare,
   Mic,
   Moon,
@@ -24,6 +25,7 @@ import {
 } from 'lucide-react';
 import { useSidebar, type CurrentMeeting } from '@/components/Sidebar/SidebarProvider';
 import { useDebugMode } from '@/hooks/useDebugMode';
+import { useReplaysEnabled } from '@/lib/developerSettings';
 import { setDebugMode } from '@/lib/debugMode';
 import { handleShellActionError, useShell } from '@/contexts/ShellContext';
 import { SendFeedbackDialog } from '@/components/SendFeedbackDialog';
@@ -75,6 +77,7 @@ export default function SimpleSidebar() {
   } = useSidebar();
   const { activeMeetingId } = useMeetingActivity();
   const debugMode = useDebugMode();
+  const replaysEnabled = useReplaysEnabled();
   const [showArchived, setShowArchived] = useState(false);
   const [showFeedback, setShowFeedback] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -222,7 +225,12 @@ export default function SimpleSidebar() {
     icon: Video,
     active: pathname === '/' || Boolean(pathname?.includes('/meeting-details')),
     onClick: () => void navigate('/').catch(catchNavigation),
-  }];
+  }, ...(replaysEnabled ? [{
+    label: 'Replays',
+    icon: Clapperboard,
+    active: Boolean(pathname?.startsWith('/replays')),
+    onClick: () => void navigate('/replays').catch(catchNavigation),
+  }] : [])];
 
   return (
     <aside

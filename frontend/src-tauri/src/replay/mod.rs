@@ -27,6 +27,7 @@
 //! their reports. The viewer is `site/replay/`, which reads the files locally
 //! in the browser.
 
+pub mod commands;
 pub mod events;
 pub mod live_ask;
 pub mod live_copilot;

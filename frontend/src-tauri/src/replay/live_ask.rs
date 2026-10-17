@@ -296,7 +296,9 @@ impl LiveAsker {
         }
         let warm_ms = warm_started.elapsed().as_millis() as u64;
         drop(streamer);
-        // Left while the model loaded: nothing is asked or saved.
+        // Left while the model loaded (or the consumer now refuses, e.g. a
+        // recording started): nothing is asked or saved.
+        send("ping", Value::Null, &mut gone);
         if gone {
             return Ok(());
         }

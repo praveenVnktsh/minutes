@@ -1,33 +1,35 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { listen } from '@tauri-apps/api/event';
+import { useLiveSource } from '@/lib/liveSource';
 import {
   COPILOT_DELTA_EVENT,
   COPILOT_STATE_EVENT,
   acceptCopilotSnapshot,
   applyDelta,
-  copilotApi,
+  copilotApiFor,
   type CopilotDelta,
   type CopilotSnapshot,
 } from '@/lib/copilot';
 
 /**
  * The recording's Copilot: hydrated from the Rust session (which outlives
- * navigation) and kept current by its state and token events.
+ * navigation) and kept current by its state and token events. Both come from
+ * the live source: Tauri in the app, a recorded run in the replay viewer.
  */
 export function useCopilot(): CopilotSnapshot | null {
+  const source = useLiveSource();
   const [snapshot, setSnapshot] = useState<CopilotSnapshot | null>(null);
   useEffect(() => {
     let disposed = false;
     const unlisteners: Array<() => void> = [];
-    void copilotApi.state()
+    void copilotApiFor(source).state()
       .then((current) => {
         if (!disposed && current) setSnapshot((previous) => acceptCopilotSnapshot(previous, current));
       })
       .catch((error) => console.warn('Could not load Copilot:', error));
     const subscribe = <T,>(event: string, handler: (payload: T) => void) => {
-      void listen<T>(event, ({ payload }) => handler(payload))
+      void source.listen<T>(event, ({ payload }) => handler(payload))
         .then((fn) => {
           if (disposed) fn();
           else unlisteners.push(fn);
@@ -44,6 +46,6 @@ export function useCopilot(): CopilotSnapshot | null {
       disposed = true;
       unlisteners.forEach((fn) => fn());
     };
-  }, []);
+  }, [source]);
   return snapshot;
 }
