@@ -213,6 +213,33 @@ pub async fn install(models_dir: &Path, model_name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Written next to the encoder once it has compiled, so a quit between the
+/// unpack and the compile does not leave the compile for a meeting's end.
+const COMPILED_MARKER: &str = ".compiled";
+
+fn is_compiled(models_dir: &Path, model_name: &str) -> bool {
+    is_installed(models_dir, model_name)
+        && encoder_dir(models_dir, model_name)
+            .join(COMPILED_MARKER)
+            .is_file()
+}
+
+fn mark_compiled(models_dir: &Path, model_name: &str) -> Result<()> {
+    std::fs::write(
+        encoder_dir(models_dir, model_name).join(COMPILED_MARKER),
+        b"",
+    )?;
+    Ok(())
+}
+
+async fn wait_until_idle() {
+    while crate::audio::recording_commands::is_recording().await
+        || crate::audio::retranscription::is_retranscription_in_progress()
+    {
+        tokio::time::sleep(Duration::from_secs(60)).await;
+    }
+}
+
 /// Compile the encoder for the Neural Engine by loading it once, so the first
 /// final pass does not pay for it. Core ML caches the compiled model.
 fn precompile(models_dir: &Path, model_name: &str) -> Result<Duration> {
@@ -266,22 +293,22 @@ async fn setup<R: Runtime>(app: &AppHandle<R>) -> Result<()> {
     {
         return Ok(());
     }
-    if !is_installed(&models_dir, &engine.model) {
-        install(&models_dir, &engine.model).await?;
-    } else {
-        // Installed earlier: compiled then too.
+    if is_compiled(&models_dir, &engine.model) {
         return Ok(());
     }
-    // Compile when nothing is recording or transcribing.
-    while crate::audio::recording_commands::is_recording().await
-        || crate::audio::retranscription::is_retranscription_in_progress()
-    {
-        tokio::time::sleep(Duration::from_secs(60)).await;
+    // Download, unpack and compile only while nothing is recording or
+    // transcribing.
+    wait_until_idle().await;
+    if !is_installed(&models_dir, &engine.model) {
+        install(&models_dir, &engine.model).await?;
+        wait_until_idle().await;
     }
     let model = engine.model.clone();
-    let took = tokio::task::spawn_blocking(move || precompile(&models_dir, &model))
+    let dir = models_dir.clone();
+    let took = tokio::task::spawn_blocking(move || precompile(&dir, &model))
         .await
         .map_err(|e| anyhow!("Compile task failed: {e}"))??;
+    mark_compiled(&models_dir, &engine.model)?;
     info!(
         "Core ML encoder for {} compiled in {:.1?}",
         engine.model, took
@@ -293,6 +320,20 @@ async fn setup<R: Runtime>(app: &AppHandle<R>) -> Result<()> {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn an_unpacked_encoder_is_not_compiled_until_marked() {
+        let dir = tempfile::tempdir().unwrap();
+        let model = "large-v3-turbo-q5_0";
+        let enc = encoder_dir(dir.path(), model);
+        std::fs::create_dir_all(enc.join("weights")).unwrap();
+        std::fs::write(enc.join("model.mil"), b"x").unwrap();
+        std::fs::write(enc.join("weights").join("weight.bin"), b"x").unwrap();
+        assert!(is_installed(dir.path(), model));
+        assert!(!is_compiled(dir.path(), model));
+        mark_compiled(dir.path(), model).unwrap();
+        assert!(is_compiled(dir.path(), model));
+    }
 
     #[test]
     fn the_encoder_name_drops_the_quantization_like_whisper_cpp() {

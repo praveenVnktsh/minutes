@@ -163,7 +163,12 @@ async fn queue_final_pass<R: Runtime>(
             )
             .await
             {
+                // Without the durable row the waiting-for-power watcher would
+                // keep finding the old row and queue this meeting again.
                 warn!("Final pass: could not record the queued pass for {meeting_id}: {error}");
+                return Err(format!(
+                    "Could not queue the transcript improvement for this meeting: {error}"
+                ));
             }
             let task = TranscriptionTask {
                 task_id: String::new(),
