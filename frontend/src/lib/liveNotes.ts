@@ -27,7 +27,9 @@ export const LIVE_NOTES_FALLBACK_FOLDER_KEY = 'meetily.liveNotes.currentFolder';
 export function createEmptyLiveNotesDocument(meetingStartedAtMs = Date.now()): LiveNotesDocument {
   return {
     version: 1,
-    meetingStartedAtMs,
+    // Callers pass `Date.now() - duration * 1000` with a fractional
+    // duration; the backend stores whole milliseconds.
+    meetingStartedAtMs: Math.round(meetingStartedAtMs),
     updatedAt: new Date().toISOString(),
     notes: [createLiveNote(0)],
   };
