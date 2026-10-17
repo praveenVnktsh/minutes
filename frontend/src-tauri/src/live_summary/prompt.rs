@@ -39,6 +39,8 @@ pub struct PromptContext<'a> {
     pub glossary: &'a [String],
     /// The tail of the previous window, shown as context only.
     pub carryover: &'a [Segment],
+    /// The window's topic, when the topic step decided it.
+    pub decided_topic: Option<&'a str>,
 }
 
 /// `mm:ss`, or `h:mm:ss` past the hour.
@@ -61,26 +63,32 @@ How to write a note:\n\
 \"Someone\" or \"You\", and do not use verbs like discusses, mentions, explains, notes, describes.\n\
 - Headline style: 6 to 12 words, never more than 14. Facts, names and numbers first. Tidy \
 numbers (\"~40 people\", \"$2M\", \"3 weeks\"). One idea per note.\n\
+- Numbers only from the new transcript's own lines about that subject: never move a figure \
+from one company, team or person to another, and never invent one.\n\
 - Few, dense notes. Usually one note per request; a second only for a separate, substantive \
 fact. Skip greetings, small talk, filler and anything already noted.\n\
 - If nothing new and substantive was said, return {\"entries\":[]}. That is a normal answer.\n\
 \n\
 Kinds:\n\
-- \"action\": one specific person commits to a concrete task (\"I'll send the deck on Friday\"). \
-\"speaker\" is the owner: \"You\" for the person recording, a person's name if it was said, \
-\"Others\" only if no one more specific is known. \"text\" is the task alone, starting with a verb.\n\
+- \"action\": a commitment or follow-up someone takes on. It counts when a person says they \
+will do something (\"I'll send the deck\"), when \"let's\" or \"we should\" is agreed to, when \
+someone offers to do something (\"I can introduce you to the founders\"), or when You accept \
+a request. \"speaker\" is the owner: \"You\" for the person recording, a person's name if it \
+was said, or \"Others\" when the other side commits. \"text\" is the task alone, starting with \
+a verb. Do not miss these.\n\
 - \"decision\": the participants explicitly agree on or decide something.\n\
-- \"point\": everything else, including plans being described, opinions, suggestions and \
-questions. Most notes are points. For points and decisions \"speaker\" is null.\n\
+- \"point\": everything else: facts, plans being described, opinions, suggestions nobody took \
+on, questions. For points and decisions \"speaker\" is null.\n\
 \n\
 Topics:\n\
-- \"topic\" names the main subject of the note in at most 5 words: usually the company, \
-product, project or person being talked about (\"Acme partnership\", \"Launch plan\", \
+- \"topic\" names what is being discussed NOW, in at most 5 words: the company, product, \
+project or person the new transcript is about (\"Acme partnership\", \"Launch plan\", \
 \"Priya's background\"). It is a chapter title, not a summary of the note.\n\
-- If the note is about the same subject as the current topic, copy the current topic exactly. \
-If the subject is a different company, project, person or agenda item, write a new topic: \
-moving from someone's background to the project they work on now, or from one company to \
-another, is a new topic. A topic rarely lasts more than about 5 minutes.\n\
+- Copy the current topic only while the new transcript is still about that same subject. \
+When the subject changes, write a new topic, even in one long conversation. Example: a call \
+that moves from Priya's studies and past jobs, to the data platform she builds now, to a \
+startup someone pitches her is three topics: \"Priya's background\", \"Acme data platform\", \
+\"Globex pitch\". Expect a new topic every 4 to 8 minutes.\n\
 \n\
 Spell names of people, companies and products as in the glossary, when one is given.\n\
 \n\
@@ -94,6 +102,8 @@ Good: {\"kind\":\"point\",\"text\":\"Finance background; previously led pricing 
 Bad: {\"kind\":\"point\",\"text\":\"Speaker has a finance background and talks about previous roles at a bank and why they left\"} (about the speaker, too long)\n\
 Good: {\"kind\":\"decision\",\"text\":\"Launch moves from the 3rd to the 10th\"}\n\
 Good: {\"kind\":\"action\",\"speaker\":\"You\",\"text\":\"send support the launch announcement today\"}\n\
+Good: {\"kind\":\"action\",\"speaker\":\"Others\",\"text\":\"introduce You to the Globex founders\"} (\"I can mention our chat to their founders.\" \"Great, thanks.\")\n\
+Good: {\"kind\":\"action\",\"speaker\":\"You\",\"text\":\"connect with Acme's robotics lead on LinkedIn\"} (\"Find her on LinkedIn.\" \"Sure, I'll reach out.\")\n\
 Bad: {\"kind\":\"action\",\"text\":\"Speaker explains that pricing differs by region\"} (nobody took on a task: a point, and narrated)\n\
 \n\
 Reply with JSON only, no other text:\n\
@@ -106,17 +116,16 @@ Reply with JSON only, no other text:\n\
 pub fn user_prompt(window: &Window, context: &PromptContext<'_>) -> String {
     let mut prompt = String::new();
 
-    if let Some(topic) = context.current_topic.filter(|t| !t.trim().is_empty()) {
+    if let Some(decided) = context.decided_topic.filter(|t| !t.trim().is_empty()) {
+        prompt.push_str(&format!(
+            "Topic of the new transcript: {} (already decided: use it as \"topic\")\n",
+            decided.trim()
+        ));
+    } else if let Some(topic) = context.current_topic.filter(|t| !t.trim().is_empty()) {
         let topic = topic.trim();
         // When the current topic's run of notes started, so the model can
         // tell a chapter that has gone on for long.
-        let since = context
-            .previous
-            .iter()
-            .rev()
-            .take_while(|e| e.topic.as_deref() == Some(topic))
-            .last()
-            .map(|e| e.start_ms);
+        let since = topic_since(context.previous, topic);
         match since {
             // A small model copies the current topic forever. Once it has
             // run long, it is offered as a choice rather than the default,
@@ -194,6 +203,88 @@ pub fn user_prompt(window: &Window, context: &PromptContext<'_>) -> String {
         "\nWrite {count} about the new transcript only, or {{\"entries\":[]}} if nothing new was said. JSON only."
     ));
     prompt
+}
+
+/// When the latest run of notes under `topic` started.
+pub fn topic_since(previous: &[PreviousEntry], topic: &str) -> Option<i64> {
+    previous
+        .iter()
+        .rev()
+        .take_while(|e| e.topic.as_deref() == Some(topic))
+        .last()
+        .map(|e| e.start_ms)
+}
+
+/// Notes under the current topic the topic step shows.
+const TOPIC_STEP_NOTES: usize = 3;
+
+/// The topic step: one small question per window, before the notes, because
+/// a small model asked for notes and a topic together keeps copying the
+/// current topic long after the subject changed.
+pub fn topic_system_prompt() -> &'static str {
+    "You track the topic of a live meeting. A topic is the subject being discussed now: the \
+company, product, project, person or agenda item the conversation is about, named in at most \
+5 words.\n\
+\n\
+You get the current topic, the latest notes under it and the newest transcript. Decide whether \
+the newest transcript is still mainly about the current topic.\n\
+- Same subject, even with new details: {\"same\":true}\n\
+- A different subject: {\"same\":false,\"topic\":\"New topic\"}\n\
+\n\
+Moving from someone's studies and past jobs to the project they work on now is a new topic. \
+Moving from that project to another company is a new topic. A new detail, number or opinion \
+about the same thing is not. Most meetings change topic every 4 to 8 minutes.\n\
+\n\
+Examples:\n\
+Current topic \"Priya's background\"; transcript about the data platform Priya builds at Acme now: \
+{\"same\":false,\"topic\":\"Acme data platform\"}\n\
+Current topic \"Acme data platform\"; transcript about how many engineers the platform team has: \
+{\"same\":true}\n\
+Current topic \"Acme data platform\"; transcript pitching another startup, Globex: \
+{\"same\":false,\"topic\":\"Globex pitch\"}\n\
+\n\
+Reply with JSON only."
+}
+
+/// The topic step's question, or `None` when there is no current topic yet
+/// (the first notes name it).
+pub fn topic_user_prompt(window: &Window, context: &PromptContext<'_>) -> Option<String> {
+    let topic = context
+        .current_topic
+        .map(str::trim)
+        .filter(|t| !t.is_empty())?;
+    let since = topic_since(context.previous, topic);
+    let mut prompt = format!("Current topic: \"{topic}\"");
+    if let Some(since) = since {
+        let minutes = (window.start_ms - since).max(0) / 60_000;
+        prompt.push_str(&format!(" (since {}, {minutes} min)", format_clock(since)));
+    }
+    prompt.push('\n');
+    let under: Vec<&PreviousEntry> = context
+        .previous
+        .iter()
+        .rev()
+        .take_while(|e| e.topic.as_deref() == Some(topic))
+        .take(TOPIC_STEP_NOTES)
+        .collect();
+    if !under.is_empty() {
+        prompt.push_str("Latest notes under it:\n");
+        for entry in under.iter().rev() {
+            prompt.push_str(&format!("- {}\n", entry.text));
+        }
+    }
+    prompt.push_str(&format!(
+        "\nNewest transcript ({} to {}):\n",
+        format_clock(window.start_ms),
+        format_clock(window.end_ms)
+    ));
+    for segment in &window.segments {
+        push_line(&mut prompt, segment);
+    }
+    prompt.push_str(&format!(
+        "\nIs the newest transcript still mainly about \"{topic}\"? JSON only."
+    ));
+    Some(prompt)
 }
 
 fn push_line(prompt: &mut String, segment: &Segment) {
@@ -313,12 +404,16 @@ mod tests {
     #[test]
     fn system_prompt_defines_strict_kinds_and_topics() {
         let prompt = system_prompt();
-        assert!(prompt.contains("one specific person commits to a concrete task"));
+        assert!(prompt.contains("a commitment or follow-up someone takes on"));
+        assert!(prompt.contains("\"Others\" when the other side commits"));
+        assert!(prompt.contains("suggestions nobody took on"));
         assert!(prompt.contains("explicitly agree"));
-        assert!(prompt.contains("Most notes are points"));
-        assert!(prompt.contains("\"topic\" names the main subject of the note in at most 5 words"));
-        assert!(prompt.contains("copy the current topic exactly"));
-        assert!(prompt.contains("usually the company"));
+        assert!(prompt.contains("\"topic\" names what is being discussed NOW"));
+        assert!(prompt.contains("is three topics"));
+        assert!(prompt.contains("Numbers only from the new transcript's own lines"));
+        // Two positive action examples, owned by each side.
+        assert!(prompt.contains("\"speaker\":\"Others\",\"text\":\"introduce You"));
+        assert!(prompt.contains("\"speaker\":\"You\",\"text\":\"connect with"));
         // Good and bad examples, and the bad ones say why.
         assert!(prompt.matches("Good: ").count() >= 2);
         assert!(prompt.matches("Bad: ").count() >= 2);
@@ -377,6 +472,34 @@ mod tests {
         assert!(user_prompt(&late, &context).starts_with(
             "Topic so far: Hiring plan (since 03:00). Name the topic of the new transcript afresh"
         ));
+    }
+
+    #[test]
+    fn the_topic_step_asks_about_the_current_topic() {
+        let previous = previous(10);
+        let mut context = PromptContext {
+            current_topic: Some("Hiring plan"),
+            previous: &previous,
+            ..Default::default()
+        };
+        let mut late = window();
+        late.start_ms = 11 * 60_000;
+        let question = topic_user_prompt(&late, &context).unwrap();
+        assert!(question.starts_with("Current topic: \"Hiring plan\" (since 03:00, 8 min)\n"));
+        // The last three notes under it, oldest first, and the transcript.
+        assert!(question.contains(
+            "Latest notes under it:\n- earlier entry 7\n- earlier entry 8\n- earlier entry 9\n"
+        ));
+        assert!(question.contains("[01:01] Others: We should ship on Friday.\n"));
+        assert!(question.ends_with("still mainly about \"Hiring plan\"? JSON only."));
+        assert!(topic_system_prompt().contains("{\"same\":false,\"topic\":\"New topic\"}"));
+        // The notes prompt then states the decided topic instead.
+        context.decided_topic = Some("Globex pitch");
+        assert!(user_prompt(&late, &context)
+            .starts_with("Topic of the new transcript: Globex pitch (already decided"));
+        // No current topic: no step.
+        context.current_topic = None;
+        assert!(topic_user_prompt(&late, &context).is_none());
     }
 
     #[test]

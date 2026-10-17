@@ -29,17 +29,23 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
+use super::facts::Figures;
 use super::glossary::Glossary;
 use super::llm::{generation_options, MAX_OUTPUT_TOKENS};
+use super::notes::{decide_topic, MAX_NOTE_WORDS};
 use super::notes::{opens_with_speaker, strip_narration, Narration, NoteContext};
-use super::parse::{parse_entries, parse_notes, ParsedEntry};
+use super::parse::{
+    is_repeat, parse_clock_ms, parse_entries, parse_notes, parse_topic_decision, ParsedEntry,
+};
 use super::prompt::{self, format_clock, PromptContext};
 use super::scheduler::{Segment, Speaker, Window, WindowScheduler};
-use super::worker::{NotesSoFar, TimelineEntry};
+use super::worker::{support_text, NotesSoFar, TimelineEntry};
 use crate::summary::llm_client::{generate_summary, LLMProvider};
 
 /// Earlier notes the parser checks new ones against (as the worker does).
-const DEDUPE_HISTORY: usize = 10;
+const DEDUPE_HISTORY: usize = 8;
+/// The topic step's reply is a few tokens; the worker shares the notes cap.
+const TOPIC_STEP_TOKENS: u32 = MAX_OUTPUT_TOKENS;
 /// What the previous prompt was capped at.
 const LEGACY_MAX_OUTPUT_TOKENS: u32 = 150;
 /// A final segment reaches the timeline about this long after its audio ends.
@@ -142,6 +148,10 @@ struct WindowRun {
     /// The topics and kinds the model wrote, before the rules.
     raw_labels: Vec<String>,
     raw_count: usize,
+    /// The notes the model wrote, as written, with the window's decided
+    /// topic (meeting text: the local report only).
+    raw_texts: Vec<String>,
+    decided: Option<String>,
 }
 
 struct RunResult {
@@ -236,6 +246,7 @@ fn build_prompt(
     window: &Window,
     entries: &[TimelineEntry],
     carryover: &[Segment],
+    decided: Option<&str>,
 ) -> (String, String) {
     match variant {
         Variant::Old => {
@@ -258,11 +269,48 @@ fn build_prompt(
                     previous: &notes.previous,
                     glossary: &glossary,
                     carryover,
+                    decided_topic: decided,
                 },
             );
             (prompt::system_prompt().to_string(), user)
         }
     }
+}
+
+/// The new variant's topic step, as the worker runs it: the decided topic,
+/// its latency and its prompt size.
+async fn topic_step(
+    window: &Window,
+    entries: &[TimelineEntry],
+    carryover: &[Segment],
+    model: &Model,
+) -> (Option<String>, Duration, usize) {
+    let notes = NotesSoFar::of(entries);
+    let glossary = notes.glossary.terms();
+    let context = PromptContext {
+        current_topic: notes.current_topic.as_deref(),
+        previous: &notes.previous,
+        glossary: &glossary,
+        carryover,
+        decided_topic: None,
+    };
+    let Some(user) = prompt::topic_user_prompt(window, &context) else {
+        return (None, Duration::ZERO, 0);
+    };
+    let system = prompt::topic_system_prompt();
+    let (result, latency) = model.generate(system, &user, TOPIC_STEP_TOKENS).await;
+    let current = notes.current_topic.as_deref();
+    let decided = result.ok().and_then(|raw| {
+        decide_topic(
+            parse_topic_decision(&raw).as_ref(),
+            current,
+            current.and_then(|topic| prompt::topic_since(&notes.previous, topic)),
+            window.start_ms,
+            &notes.topics,
+            Some(&notes.glossary),
+        )
+    });
+    (decided, latency, system.len() + user.len())
 }
 
 /// The reply as a variant's parser reads it.
@@ -271,6 +319,8 @@ fn parse_reply(
     raw: &str,
     window: &Window,
     entries: &[TimelineEntry],
+    carryover: &[Segment],
+    decided: Option<&str>,
 ) -> Result<Vec<ParsedEntry>, String> {
     let history: Vec<String> = entries
         .iter()
@@ -288,11 +338,14 @@ fn parse_reply(
         ),
         Variant::New => {
             let notes = NotesSoFar::of(entries);
+            let figures = Figures::of(&support_text(carryover, &window.segments));
             let context = NoteContext {
                 current_topic: notes.current_topic.as_deref(),
                 known_topics: &notes.topics,
                 glossary: Some(&notes.glossary),
                 previous_texts: &history,
+                figures: Some(&figures),
+                decided_topic: decided,
             };
             parse_notes(
                 raw,
@@ -321,7 +374,15 @@ async fn run_variant(variant: Variant, segments: &[Segment], model: &Model) -> R
         .unwrap_or_default();
     let mut pending = segments.iter().peekable();
     // A request in flight: its window, when it completes, and its outcome.
-    let mut in_flight: Option<(Window, Duration, Result<String, String>, Duration, usize)> = None;
+    #[allow(clippy::type_complexity)]
+    let mut in_flight: Option<(
+        Window,
+        Duration,
+        Result<String, String>,
+        Duration,
+        usize,
+        Option<String>,
+    )> = None;
     let cap = match variant {
         Variant::Old => LEGACY_MAX_OUTPUT_TOKENS,
         Variant::New => MAX_OUTPUT_TOKENS,
@@ -340,7 +401,7 @@ async fn run_variant(variant: Variant, segments: &[Segment], model: &Model) -> R
             .as_ref()
             .is_some_and(|(_, done_at, ..)| *done_at <= now)
         {
-            let (window, _, result, latency, prompt_chars) = in_flight.take().unwrap();
+            let (window, _, result, latency, prompt_chars, decided) = in_flight.take().unwrap();
             scheduler.complete();
             let mut run = WindowRun {
                 start_ms: window.start_ms,
@@ -353,6 +414,8 @@ async fn run_variant(variant: Variant, segments: &[Segment], model: &Model) -> R
                 raw_narrated: 0,
                 raw_labels: Vec::new(),
                 raw_count: 0,
+                raw_texts: Vec::new(),
+                decided: decided.clone(),
             };
             match result {
                 Err(error) => {
@@ -363,6 +426,18 @@ async fn run_variant(variant: Variant, segments: &[Segment], model: &Model) -> R
                         parse_entries(&raw, window.start_ms, window.end_ms, 10, &[])
                     {
                         run.raw_count = as_written.len();
+                        let figures = Figures::of(&support_text(&carryover, &window.segments));
+                        run.raw_texts = as_written
+                            .iter()
+                            .map(|e| {
+                                let missing = figures.unsupported(&e.text);
+                                if missing.is_empty() {
+                                    e.text.clone()
+                                } else {
+                                    format!("{} [unsupported {missing:?}]", e.text)
+                                }
+                            })
+                            .collect();
                         run.raw_labels = as_written
                             .iter()
                             .map(|e| {
@@ -377,7 +452,14 @@ async fn run_variant(variant: Variant, segments: &[Segment], model: &Model) -> R
                             })
                             .count();
                     }
-                    match parse_reply(variant, &raw, &window, &entries) {
+                    match parse_reply(
+                        variant,
+                        &raw,
+                        &window,
+                        &entries,
+                        &carryover,
+                        decided.as_deref(),
+                    ) {
                         Ok(parsed) => {
                             run.outcome = "ok".into();
                             run.kept = parsed.len();
@@ -428,14 +510,21 @@ async fn run_variant(variant: Variant, segments: &[Segment], model: &Model) -> R
             };
             match window {
                 Some(window) => {
-                    let (system, user) = build_prompt(variant, &window, &entries, &carryover);
+                    let (decided, step_latency, step_chars) = match variant {
+                        Variant::Old => (None, Duration::ZERO, 0),
+                        Variant::New => topic_step(&window, &entries, &carryover, model).await,
+                    };
+                    let (system, user) =
+                        build_prompt(variant, &window, &entries, &carryover, decided.as_deref());
                     let (result, latency) = model.generate(&system, &user, cap).await;
+                    let latency = latency + step_latency;
                     in_flight = Some((
                         window,
                         now + latency,
                         result,
                         latency,
-                        system.len() + user.len(),
+                        system.len() + user.len() + step_chars,
+                        decided,
                     ));
                 }
                 None if finished => break,
@@ -452,7 +541,11 @@ fn word_total(text: &str) -> usize {
 }
 
 /// Aggregate metrics, without meeting text.
-fn metrics(result: &RunResult, duration_ms: i64) -> BTreeMap<&'static str, String> {
+fn metrics(
+    result: &RunResult,
+    duration_ms: i64,
+    segments: &[Segment],
+) -> BTreeMap<&'static str, String> {
     let entries = &result.entries;
     let n = entries.len();
     let minutes = duration_ms as f64 / 60_000.0;
@@ -524,7 +617,173 @@ fn metrics(result: &RunResult, duration_ms: i64) -> BTreeMap<&'static str, Strin
     );
     let failed = result.windows.iter().filter(|w| w.outcome != "ok").count();
     out.insert("m. failed windows", failed.to_string());
+    out.extend(
+        quality(entries, segments)
+            .into_iter()
+            .map(|(k, v, _)| (k, v)),
+    );
     out
+}
+
+/// A note's support for the number check in the metrics, the same for
+/// every variant (a rendered note has no end): the transcript from 90 s
+/// before it to 70 s after (about its window and the context lines before).
+fn support_for(entry: &TimelineEntry, segments: &[Segment]) -> String {
+    let segments: Vec<Segment> = segments
+        .iter()
+        .filter(|s| s.start_ms >= entry.start_ms - 90_000 && s.start_ms <= entry.start_ms + 70_000)
+        .cloned()
+        .collect();
+    support_text(&[], &segments)
+}
+
+/// Note quality, judged the same way for every variant, with the offending
+/// notes (meeting text: printed locally, never in a PR).
+fn quality(
+    entries: &[TimelineEntry],
+    segments: &[Segment],
+) -> Vec<(&'static str, String, Vec<String>)> {
+    let words: Vec<usize> = entries.iter().map(|e| word_total(&e.text)).collect();
+    let long: Vec<String> = entries
+        .iter()
+        .filter(|e| word_total(&e.text) > MAX_NOTE_WORDS)
+        .map(render_line)
+        .collect();
+    let mut repeats = Vec::new();
+    for (index, entry) in entries.iter().enumerate() {
+        let earlier = &entries[index.saturating_sub(DEDUPE_HISTORY)..index];
+        if let Some(other) = earlier.iter().find(|o| is_repeat(&entry.text, &o.text)) {
+            repeats.push(format!("{}  ~  {}", render_line(entry), render_line(other)));
+        }
+    }
+    let unsupported: Vec<String> = entries
+        .iter()
+        .filter_map(|e| {
+            let missing = Figures::of(&support_for(e, segments)).unsupported(&e.text);
+            (!missing.is_empty()).then(|| format!("{}  {missing:?}", render_line(e)))
+        })
+        .collect();
+    let actions: Vec<String> = entries
+        .iter()
+        .filter(|e| e.kind == "action")
+        .map(|e| format!("{} (owner {:?})", render_line(e), e.speaker))
+        .collect();
+    vec![
+        (
+            "n. max words per entry",
+            words.iter().max().copied().unwrap_or(0).to_string(),
+            Vec::new(),
+        ),
+        ("o. entries over 14 words", long.len().to_string(), long),
+        (
+            "p. repeats of the last 8 notes",
+            repeats.len().to_string(),
+            repeats,
+        ),
+        (
+            "q. entries with an unsupported number",
+            unsupported.len().to_string(),
+            unsupported,
+        ),
+        ("r. actions (listed)", actions.len().to_string(), actions),
+    ]
+}
+
+/// Notes back from a report's "All notes" block, in either render format.
+fn parse_rendered(block: &str) -> Vec<TimelineEntry> {
+    let mut entries = Vec::new();
+    let mut topic: Option<String> = None;
+    for line in block.lines() {
+        let line = line.trim_end();
+        if let Some(title) = line.strip_prefix("── ").and_then(|l| l.strip_suffix(" ──")) {
+            topic = Some(title.to_string());
+            continue;
+        }
+        let mut rest = line;
+        let mut kind = "point";
+        for (marker, k) in [("ACTION ", "action"), ("DECISION ", "decision")] {
+            if let Some(after) = rest.strip_prefix(marker) {
+                (rest, kind) = (after, k);
+            }
+        }
+        let Some((clock, text)) = rest.split_once(' ') else {
+            continue;
+        };
+        let Some(start_ms) = parse_clock_ms(clock) else {
+            continue;
+        };
+        let mut text = text.trim_start();
+        // The old render puts the marker after the clock.
+        for (marker, k) in [("ACTION ", "action"), ("DECISION ", "decision")] {
+            if let Some(after) = text.strip_prefix(marker) {
+                (text, kind) = (after, k);
+            }
+        }
+        let (mut text, mut speaker) = match text.rsplit_once(" · ") {
+            Some((t, s)) if s.split_whitespace().count() <= 3 => {
+                (t.to_string(), Some(s.to_string()))
+            }
+            _ => (text.to_string(), None),
+        };
+        if let Some(task) = text.strip_prefix("You — ") {
+            (text, speaker) = (task.to_string(), Some("You".into()));
+        }
+        entries.push(TimelineEntry {
+            id: entries.len().to_string(),
+            start_ms,
+            end_ms: start_ms,
+            kind: kind.into(),
+            text,
+            speaker,
+            provider: String::new(),
+            model: String::new(),
+            created_at: String::new(),
+            topic: topic.clone(),
+        });
+    }
+    entries
+}
+
+/// Rescores the notes of an existing report with the current metrics:
+/// `MEETILY_EVAL_RESCORE` is the report path. Prints a table and, locally,
+/// the notes behind each count.
+#[test]
+#[ignore = "developer tool: needs a report from live_summary_eval"]
+fn live_summary_rescore() {
+    let path =
+        PathBuf::from(std::env::var("MEETILY_EVAL_RESCORE").expect("set MEETILY_EVAL_RESCORE"));
+    let report = std::fs::read_to_string(&path).expect("the report");
+    let segments = load_segments(&path.with_file_name("events.jsonl"), None).expect("events.jsonl");
+    let duration_ms = segments.iter().map(|s| s.end_ms).max().unwrap_or(0);
+    for part in report.split("\n## All notes (").skip(1) {
+        let (name, rest) = part.split_once(")").unwrap();
+        let block = rest.split("```").nth(1).unwrap_or("");
+        let entries = parse_rendered(block);
+        let words: usize = entries.iter().map(|e| word_total(&e.text)).sum();
+        let mut topics: Vec<&str> = Vec::new();
+        for topic in entries.iter().filter_map(|e| e.topic.as_deref()) {
+            if !topics.contains(&topic) {
+                topics.push(topic);
+            }
+        }
+        println!("\n== {name} ({})", path.display());
+        println!("| entries | {} |", entries.len());
+        println!(
+            "| entries per 10 min | {:.1} |",
+            entries.len() as f64 / (duration_ms as f64 / 600_000.0).max(0.01)
+        );
+        println!(
+            "| avg words per entry | {:.1} |",
+            words as f64 / entries.len().max(1) as f64
+        );
+        println!("| topics | {} |", topics.len());
+        for (key, value, notes) in quality(&entries, &segments) {
+            println!("| {} | {value} |", &key[3..]);
+            for note in notes {
+                println!("    - {note}");
+            }
+        }
+    }
 }
 
 /// One note as the panel shows it.
@@ -648,7 +907,7 @@ async fn live_summary_eval() {
         let _ = writeln!(report, "## Metrics\n");
         let tables: Vec<(Variant, BTreeMap<&str, String>)> = results
             .iter()
-            .map(|(v, r)| (*v, metrics(r, duration_ms)))
+            .map(|(v, r)| (*v, metrics(r, duration_ms, &segments)))
             .collect();
         let _ = write!(report, "| metric |");
         for (variant, _) in &tables {
@@ -696,7 +955,7 @@ async fn live_summary_eval() {
             for window in &result.windows {
                 let _ = writeln!(
                     report,
-                    "- {}..{} {} words, {} prompt chars, {:.1}s, {} ({} kept, {} written, {} narrated) {:?}",
+                    "- {}..{} {} words, {} prompt chars, {:.1}s, {} ({} kept, {} written, {} narrated) {:?} topic step: {:?}\n  written: {:?}",
                     format_clock(window.start_ms),
                     format_clock(window.end_ms),
                     window.words,
@@ -706,7 +965,9 @@ async fn live_summary_eval() {
                     window.kept,
                     window.raw_count,
                     window.raw_narrated,
-                    window.raw_labels
+                    window.raw_labels,
+                    window.decided,
+                    window.raw_texts
                 );
             }
         }

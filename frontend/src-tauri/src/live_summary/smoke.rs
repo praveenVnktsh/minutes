@@ -100,6 +100,7 @@ async fn live_summary_smoke() {
                 previous: &notes.previous,
                 glossary: &glossary,
                 carryover: &carryover,
+                decided_topic: None,
             },
         );
         let started = Instant::now();
@@ -141,6 +142,8 @@ async fn live_summary_smoke() {
             known_topics: &notes.topics,
             glossary: Some(&notes.glossary),
             previous_texts: &history,
+            figures: None,
+            decided_topic: None,
         };
         match parse_notes(
             &raw,

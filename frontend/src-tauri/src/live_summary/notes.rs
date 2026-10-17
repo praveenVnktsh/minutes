@@ -17,9 +17,14 @@
 //! - **Topics** are tidied (≤ 5 words, title-case-ish) and a near-duplicate
 //!   of the current or an earlier topic reuses that topic's exact title.
 //! - **Names** are spelled as the glossary's established spelling.
+//! - **Length.** A note is at most `MAX_NOTE_WORDS` words: cut back to its
+//!   leading clauses, or at a clause word, never mid-phrase.
+//! - **Numbers** must appear in the transcript the note was written from
+//!   (`facts.rs`); a note with a figure from elsewhere is dropped.
 
+use super::facts::Figures;
 use super::glossary::Glossary;
-use super::parse::{EntryKind, ParsedEntry};
+use super::parse::{EntryKind, ParsedEntry, TopicDecision};
 
 /// Longest topic title kept, in words.
 pub const MAX_TOPIC_WORDS: usize = 5;
@@ -37,12 +42,20 @@ pub struct NoteContext<'a> {
     pub glossary: Option<&'a Glossary>,
     /// Earlier notes' texts, for the repeat check.
     pub previous_texts: &'a [String],
+    /// The figures of the transcript the notes were written from. `None`
+    /// skips the number check.
+    pub figures: Option<&'a Figures>,
+    /// The window's topic from the topic step (`decide_topic`): every note
+    /// of the window takes it. `None` resolves the model's own topic.
+    pub decided_topic: Option<&'a str>,
 }
 
 /// Applies the rules to one reply's notes in order, so a topic the first
 /// note starts is the current topic for the next.
 pub struct Refiner<'a> {
     glossary: Option<&'a Glossary>,
+    figures: Option<&'a Figures>,
+    decided: Option<String>,
     current: Option<String>,
     /// Most recent first.
     topics: Vec<String>,
@@ -52,6 +65,8 @@ impl<'a> Refiner<'a> {
     pub fn new(context: &NoteContext<'a>) -> Self {
         Self {
             glossary: context.glossary,
+            figures: context.figures,
+            decided: context.decided_topic.map(str::to_string),
             current: context.current_topic.map(str::to_string),
             topics: context.known_topics.to_vec(),
         }
@@ -64,8 +79,14 @@ impl<'a> Refiner<'a> {
             text = glossary.canonicalize(&text);
         }
 
+        if let Some(figures) = self.figures {
+            if !figures.unsupported(&text).is_empty() {
+                return None;
+            }
+        }
+
         if entry.kind == EntryKind::Action {
-            if let Some((owner, task)) = commitment(&text) {
+            if let Some((owner, task)) = commitment(&text).or_else(|| their_commitment(&text)) {
                 entry.speaker = Some(owner);
                 text = task;
             }
@@ -79,7 +100,7 @@ impl<'a> Refiner<'a> {
             }
             Narration::Drop => return None,
         }
-        text = shorten(&text);
+        text = fit(&text);
 
         entry.kind = match entry.kind {
             EntryKind::Action if !is_task(&text, entry.speaker.as_deref()) => EntryKind::Point,
@@ -110,7 +131,10 @@ impl<'a> Refiner<'a> {
                 Some(glossary) => glossary.canonicalize(&topic),
                 None => topic,
             });
-        entry.topic = resolve_topic(proposed, self.current.as_deref(), &self.topics);
+        entry.topic = match &self.decided {
+            Some(decided) => Some(decided.clone()),
+            None => resolve_topic(proposed, self.current.as_deref(), &self.topics),
+        };
         Some(entry)
     }
 
@@ -147,33 +171,94 @@ fn fix_acronyms(text: &str) -> String {
         .join(" ")
 }
 
-/// Notes over this many words are cut back to their first clause.
-pub const LONG_NOTE_WORDS: usize = 16;
-/// A first clause shorter than this is not a note on its own.
+/// Longest note kept, in words (the prompt asks for 6 to 12, never 14).
+pub const MAX_NOTE_WORDS: usize = 14;
+/// A cut note needs at least this many words.
 const MIN_CLAUSE_WORDS: usize = 5;
+/// Words a long note may be cut before: what follows them is a detail.
+const CLAUSE_WORDS: &[&str] = &[
+    "with",
+    "and",
+    "while",
+    "using",
+    "across",
+    "via",
+    "after",
+    "before",
+    "because",
+    "including",
+    "but",
+    "which",
+    "where",
+    "despite",
+    "through",
+    "from",
+    "by",
+    "for",
+    "as",
+    "to",
+];
+/// Words a cut note never ends on.
+const DANGLING: &[&str] = &[
+    "a", "an", "the", "and", "or", "of", "to", "with", "for", "in", "on", "at", "by", "from", "as",
+    "its", "their", "his", "her", "is", "are", "was", "were", "that", "than", "into",
+];
 
-/// A run-on note ("A; B; C" past `LONG_NOTE_WORDS` words) keeps its leading
-/// clauses up to the limit, as long as the first is a note on its own.
-fn shorten(text: &str) -> String {
-    if text.split_whitespace().count() <= LONG_NOTE_WORDS || !text.contains("; ") {
+fn word_count(text: &str) -> usize {
+    text.split_whitespace().count()
+}
+
+/// A note of at most `MAX_NOTE_WORDS` words:
+/// 1. its leading clauses (split at `;`, ` — ` or `,`) that fit;
+/// 2. else the words before the last clause word that leaves at least
+///    `MIN_CLAUSE_WORDS` ("… data processing with tens of thousands of GPUs");
+/// 3. else the first `MAX_NOTE_WORDS` words without a dangling last word.
+fn fit(text: &str) -> String {
+    if word_count(text) <= MAX_NOTE_WORDS {
         return text.to_string();
     }
-    let mut kept = String::new();
-    for clause in text.split("; ") {
-        let candidate = if kept.is_empty() {
-            clause.to_string()
-        } else {
-            format!("{kept}; {clause}")
-        };
-        if !kept.is_empty() && candidate.split_whitespace().count() > LONG_NOTE_WORDS {
-            break;
+    for separator in ["; ", " — ", " – ", ", "] {
+        let mut kept = String::new();
+        for clause in text.split(separator) {
+            let candidate = if kept.is_empty() {
+                clause.to_string()
+            } else {
+                format!("{kept}{separator}{clause}")
+            };
+            if word_count(&candidate) > MAX_NOTE_WORDS {
+                break;
+            }
+            kept = candidate;
         }
-        kept = candidate;
+        if word_count(&kept) >= MIN_CLAUSE_WORDS && word_count(&kept) < word_count(text) {
+            return tidy_cut(&kept);
+        }
     }
-    if kept.split_whitespace().count() < MIN_CLAUSE_WORDS {
-        return text.to_string();
+    let pieces: Vec<&str> = text.split_whitespace().collect();
+    let lower = words(text);
+    let cut = (MIN_CLAUSE_WORDS..=MAX_NOTE_WORDS)
+        .rev()
+        .find(|&i| CLAUSE_WORDS.contains(&lower[i].as_str()))
+        .unwrap_or(MAX_NOTE_WORDS);
+    let mut end = cut;
+    while end > MIN_CLAUSE_WORDS && DANGLING.contains(&lower[end - 1].as_str()) {
+        end -= 1;
     }
-    kept
+    tidy_cut(&pieces[..end].join(" "))
+}
+
+/// A cut note without trailing punctuation or an unclosed parenthesis.
+fn tidy_cut(text: &str) -> String {
+    let mut text = text.trim().to_string();
+    if text.matches('(').count() > text.matches(')').count() {
+        if let Some(open) = text.rfind('(') {
+            text.truncate(open);
+        }
+    }
+    text.trim_end_matches(|c: char| {
+        c == ',' || c == ';' || c == ':' || c == '-' || c == '—' || c.is_whitespace()
+    })
+    .to_string()
 }
 
 fn trim_period(text: &str) -> String {
@@ -265,6 +350,65 @@ fn commitment(text: &str) -> Option<(String, String)> {
     let owner = if subject == "we" { "Others" } else { "You" };
     // "We will" is the group: no single owner, so not "You".
     Some((owner.to_string(), task))
+}
+
+/// Third-person subjects of a commitment by the other side.
+const THEIR_SUBJECTS: &[&str] = &[
+    "the others",
+    "others",
+    "they",
+    "he",
+    "she",
+    "the other side",
+    "the recruiter",
+    "the host",
+];
+
+/// "Others will introduce you to the founders", "Priya offers to send the
+/// deck", "They'll share the notes": the owner (`Others`, or the name) and
+/// the task.
+fn their_commitment(text: &str) -> Option<(String, String)> {
+    let lower = words(text);
+    let contracted_pronoun = matches!(lower.first()?.as_str(), "they'll" | "he'll" | "she'll");
+    let (owner, subject_len) = match narrator_len(&lower, THEIR_SUBJECTS) {
+        _ if contracted_pronoun => ("Others".to_string(), 1),
+        Some(len) => ("Others".to_string(), len),
+        None => {
+            // One or two capitalized words: a name ("Priya", "Priya Shah").
+            let pieces: Vec<&str> = text.split_whitespace().collect();
+            let capitalized = |w: &&&str| w.chars().next().is_some_and(char::is_uppercase);
+            let len = pieces.iter().take(2).take_while(capitalized).count();
+            if len == 0 || FIRST_PERSON.contains(&lower[0].as_str()) {
+                return None;
+            }
+            let name = pieces[..len].join(" ");
+            let name = name
+                .trim_end_matches("'ll")
+                .trim_end_matches("’ll")
+                .to_string();
+            (name, len)
+        }
+    };
+    let first: &String = lower.get(subject_len - 1)?;
+    let contracted = first.ends_with("'ll");
+    let after: Vec<&str> = lower[subject_len..].iter().map(String::as_str).collect();
+    let skip = if contracted {
+        0
+    } else {
+        match after.as_slice() {
+            ["will" | "to", ..] => 1,
+            ["is" | "are", "going", "to", ..] => 3,
+            ["offer" | "offers" | "offered" | "agree" | "agrees" | "agreed" | "promise"
+            | "promises" | "promised" | "plan" | "plans" | "volunteer" | "volunteers"
+            | "volunteered", "to", ..] => 2,
+            _ => return None,
+        }
+    };
+    let task = after_words(text, subject_len + skip).to_string();
+    if word_count(&task) < 2 {
+        return None;
+    }
+    Some((owner, task))
 }
 
 /// First words that start a statement, never a task.
@@ -648,6 +792,49 @@ pub fn continues_topic(proposed: &str, current: &str) -> bool {
 /// The topic a note goes under: the current topic when none is proposed or
 /// the proposal continues it, an earlier topic's exact title when the
 /// proposal is a near-duplicate of one, else the proposal (a new topic).
+/// A topic runs at least this long before the topic step may end it, so
+/// one aside does not start a chapter.
+pub const MIN_TOPIC_MS: i64 = 2 * 60_000;
+
+/// The window's topic from the topic step's answer: the current topic when
+/// the answer is "same", names a near-duplicate of it, or the current topic
+/// is younger than `MIN_TOPIC_MS`; an earlier topic's exact title when the
+/// conversation returns to it; otherwise the new title, tidied. `None` when
+/// there is no answer (the notes call names the topic then).
+///
+/// Unlike a topic the notes call proposes, a sharing word does not make it
+/// a continuation: "Priya's background" → "Priya's Acme work" is the step
+/// saying the subject changed.
+pub fn decide_topic(
+    decision: Option<&TopicDecision>,
+    current: Option<&str>,
+    since_ms: Option<i64>,
+    window_start_ms: i64,
+    known: &[String],
+    glossary: Option<&Glossary>,
+) -> Option<String> {
+    let current = current?;
+    let proposed = match decision? {
+        TopicDecision::Same => return Some(current.to_string()),
+        TopicDecision::New(raw) => raw,
+    };
+    let Some(proposed) = normalize_topic(proposed).map(|t| fix_acronyms(&t)) else {
+        return Some(current.to_string());
+    };
+    let proposed = match glossary {
+        Some(glossary) => glossary.canonicalize(&proposed),
+        None => proposed,
+    };
+    let young = since_ms.is_some_and(|since| window_start_ms - since < MIN_TOPIC_MS);
+    if young || same_topic(&proposed, current) {
+        return Some(current.to_string());
+    }
+    if let Some(earlier) = known.iter().find(|known| same_topic(&proposed, known)) {
+        return Some(earlier.clone());
+    }
+    Some(proposed)
+}
+
 pub fn resolve_topic(
     proposed: Option<String>,
     current: Option<&str>,
@@ -794,23 +981,112 @@ mod tests {
     }
 
     #[test]
-    fn run_on_notes_keep_their_leading_clauses() {
+    fn long_notes_are_cut_to_fourteen_words_at_a_clause() {
         let long = "Team grew from ~40 to nearly 100 people; works across the full stack from hardware to data; hiring more";
-        assert_eq!(shorten(long), "Team grew from ~40 to nearly 100 people");
+        assert_eq!(fit(long), "Team grew from ~40 to nearly 100 people");
         let two = "Ten people run ~10 PB a day; own hardware stack; customers overseas and an office opening soon";
+        assert_eq!(fit(two), "Ten people run ~10 PB a day; own hardware stack");
+        // At a clause word when there are no separators.
         assert_eq!(
-            shorten(two),
-            "Ten people run ~10 PB a day; own hardware stack"
+            fit("ML infrastructure team handles ten petabytes of daily data processing with tens of thousands of GPUs"),
+            "ML infrastructure team handles ten petabytes of daily data processing"
         );
-        // Short notes, notes without clauses and too-short first clauses stay.
+        let tiny = "Yes; the budget for the new office in Austin was approved by finance after a long review";
         assert_eq!(
-            shorten("Budget fine; hiring paused"),
+            fit(tiny),
+            "Yes; the budget for the new office in Austin was approved by finance"
+        );
+        // Never more than 14 words, never ending on a dangling word.
+        let no_clause = "word ".repeat(20);
+        assert_eq!(word_count(&fit(&no_clause)), MAX_NOTE_WORDS);
+        assert_eq!(
+            fit("Priya leads the effort of rebuilding the onboarding flow of the app of the year of the decade"),
+            "Priya leads the effort of rebuilding the onboarding flow of the app"
+        );
+        // Short notes stay.
+        assert_eq!(
+            fit("Budget fine; hiring paused"),
             "Budget fine; hiring paused"
         );
-        let no_clause = "word ".repeat(20);
-        assert_eq!(shorten(&no_clause), no_clause);
-        let tiny = "Yes; the budget for the new office in Austin was approved by finance after a long review";
-        assert_eq!(shorten(tiny), tiny);
+        let refined = refine(note(EntryKind::Point, &"word ".repeat(30), None, None)).unwrap();
+        assert!(word_count(&refined.text) <= MAX_NOTE_WORDS);
+    }
+
+    #[test]
+    fn commitments_by_the_other_side_or_a_named_person_are_kept() {
+        let cases = [
+            (
+                "Others will introduce You to the Mecca AI founders",
+                "Others",
+                "introduce You to the Mecca AI founders",
+            ),
+            (
+                "They'll share the deck after the call",
+                "Others",
+                "share the deck after the call",
+            ),
+            (
+                "The recruiter offers to mention the chat to the founders",
+                "Others",
+                "mention the chat to the founders",
+            ),
+            (
+                "Priya agreed to send the pricing model",
+                "Priya",
+                "Priya — send the pricing model",
+            ),
+        ];
+        for (input, owner, text) in cases {
+            let refined = refine(note(EntryKind::Action, input, None, None)).unwrap();
+            assert_eq!(refined.kind, EntryKind::Action, "{input}");
+            assert_eq!(refined.speaker.as_deref(), Some(owner), "{input}");
+            assert_eq!(refined.text, text, "{input}");
+        }
+        // The two the prompt shows as good examples survive as written.
+        for (owner, task) in [
+            ("You", "connect with the Mecca AI founders"),
+            ("You", "connect with the robotics lead on LinkedIn"),
+        ] {
+            let refined = refine(note(EntryKind::Action, task, Some(owner), None)).unwrap();
+            assert_eq!(
+                (refined.kind, refined.text.as_str()),
+                (EntryKind::Action, task)
+            );
+        }
+        // Narration stays a point, as do suggestions nobody took on.
+        for narrated in [
+            "Others suggest connecting with the founders",
+            "Others discuss reaching out to founders",
+        ] {
+            let refined = refine(note(EntryKind::Action, narrated, Some("Others"), None)).unwrap();
+            assert_eq!(refined.kind, EntryKind::Point, "{narrated}");
+        }
+    }
+
+    #[test]
+    fn a_note_with_a_figure_not_in_its_transcript_is_dropped() {
+        let figures = Figures::of("they have about seventy people and ten petabytes a day");
+        let context = NoteContext {
+            figures: Some(&figures),
+            ..Default::default()
+        };
+        let refiner = Refiner::new(&context);
+        assert!(refiner
+            .refine(note(
+                EntryKind::Point,
+                "70 people handle 10 PB a day",
+                None,
+                None
+            ))
+            .is_some());
+        assert!(refiner
+            .refine(note(
+                EntryKind::Point,
+                "70 people run 4,000 GPUs",
+                None,
+                None
+            ))
+            .is_none());
     }
 
     #[test]
@@ -1039,6 +1315,70 @@ mod tests {
             .refine(note(EntryKind::Point, "Dates confirmed", None, None))
             .unwrap();
         assert_eq!(third.topic.as_deref(), Some("Pricing Tiers"));
+    }
+
+    #[test]
+    fn the_topic_step_decides_the_window_topic() {
+        let known = vec!["Priya's Background".to_string(), "Launch Plan".to_string()];
+        let decide = |decision: TopicDecision, since: i64| {
+            decide_topic(
+                Some(&decision),
+                Some("Priya's Background"),
+                Some(since),
+                10 * 60_000,
+                &known,
+                None,
+            )
+        };
+        let new = |t: &str| TopicDecision::New(t.to_string());
+        assert_eq!(
+            decide(TopicDecision::Same, 0).as_deref(),
+            Some("Priya's Background")
+        );
+        // A sharing word is still a new subject when the step says so.
+        assert_eq!(
+            decide(new("Priya's Acme work"), 0).as_deref(),
+            Some("Priya's Acme Work")
+        );
+        // A near-duplicate of the current title, or a young topic, stays.
+        assert_eq!(
+            decide(new("priya background"), 0).as_deref(),
+            Some("Priya's Background")
+        );
+        assert_eq!(
+            decide(new("Acme data platform"), 9 * 60_000).as_deref(),
+            Some("Priya's Background")
+        );
+        // Returning to an earlier topic reuses its title.
+        assert_eq!(
+            decide(new("the launch plan"), 0).as_deref(),
+            Some("Launch Plan")
+        );
+        // No answer, or no current topic: the notes call decides.
+        assert_eq!(
+            decide_topic(None, Some("Launch Plan"), None, 0, &known, None),
+            None
+        );
+        assert_eq!(
+            decide_topic(Some(&TopicDecision::Same), None, None, 0, &known, None),
+            None
+        );
+
+        // Every note of the window takes the decided topic.
+        let context = NoteContext {
+            current_topic: Some("Priya's Background"),
+            decided_topic: Some("Acme Data Platform"),
+            ..Default::default()
+        };
+        let refined = Refiner::new(&context)
+            .refine(note(
+                EntryKind::Point,
+                "Platform ingests ~10 TB a day",
+                None,
+                Some("Priya's background"),
+            ))
+            .unwrap();
+        assert_eq!(refined.topic.as_deref(), Some("Acme Data Platform"));
     }
 
     #[test]

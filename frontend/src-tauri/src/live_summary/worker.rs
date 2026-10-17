@@ -14,10 +14,11 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use super::facts::Figures;
 use super::glossary::Glossary;
 use super::llm::{FailureKind, GenerateError, Generated, Generator};
-use super::notes::NoteContext;
-use super::parse::{parse_notes, ParsedEntry};
+use super::notes::{decide_topic, NoteContext};
+use super::parse::{parse_notes, parse_topic_decision, ParsedEntry};
 use super::prompt::{self, PreviousEntry, PromptContext};
 use super::scheduler::{Segment, Window, WindowScheduler, CADENCE};
 use crate::database::repositories::timeline::TimelineEntryRow;
@@ -27,7 +28,7 @@ pub const TICK: Duration = Duration::from_secs(2);
 /// After the recording stops, how long the last request may still run.
 pub const STOP_GRACE: Duration = Duration::from_secs(15);
 /// Earlier entries the parser checks new ones against for repeats.
-const DEDUPE_HISTORY: usize = 10;
+const DEDUPE_HISTORY: usize = 8;
 /// How soon a window Copilot pre-empted is tried again.
 pub const PREEMPTED_RETRY: Duration = Duration::from_secs(10);
 /// Longest back-off after repeated failures, and the wait after a provider
@@ -185,7 +186,48 @@ pub fn backoff_delay(cadence: Duration, failures: u32, max: Duration) -> Duratio
 /// The notice for a provider that refused the request.
 pub const REFUSED_NOTICE: &str = "The summary provider refused the request (check its API key, quota or rate limit). Live summary will try again in a few minutes.";
 
-type RequestOutcome = (Window, String, String, Result<Generated, GenerateError>);
+/// The window, provider, model, the notes reply, and the topic the topic
+/// step decided for the window (if it answered).
+type RequestOutcome = (
+    Window,
+    String,
+    String,
+    Result<Generated, GenerateError>,
+    Option<String>,
+);
+
+/// The topic step (`prompt::topic_user_prompt`): the window's topic, or
+/// `None` when there is no current topic yet or the step gave no usable
+/// answer, so the notes call names the topic itself.
+pub async fn decide_window_topic(
+    generator: &dyn Generator,
+    window: &Window,
+    context: &PromptContext<'_>,
+    notes: &NotesSoFar,
+    cancel: &CancellationToken,
+) -> Option<String> {
+    let user = prompt::topic_user_prompt(window, context)?;
+    let reply = match generator
+        .generate(prompt::topic_system_prompt(), &user, cancel)
+        .await
+    {
+        Ok(reply) if !reply.truncated => reply.text,
+        Ok(_) => return None,
+        Err(error) => {
+            log::debug!("Live summary topic step failed: {error}");
+            return None;
+        }
+    };
+    let current = notes.current_topic.as_deref();
+    decide_topic(
+        parse_topic_decision(&reply).as_ref(),
+        current,
+        current.and_then(|topic| prompt::topic_since(&notes.previous, topic)),
+        window.start_ms,
+        &notes.topics,
+        Some(&notes.glossary),
+    )
+}
 
 struct InFlight {
     handle: JoinHandle<RequestOutcome>,
@@ -307,17 +349,7 @@ impl Worker {
             );
         }
         let notes = NotesSoFar::of(&self.snapshot.entries);
-        let glossary = notes.glossary.terms();
-        let system = prompt::system_prompt().to_string();
-        let user = prompt::user_prompt(
-            &window,
-            &PromptContext {
-                current_topic: notes.current_topic.as_deref(),
-                previous: &notes.previous,
-                glossary: &glossary,
-                carryover: &self.carryover,
-            },
-        );
+        let carryover = self.carryover.clone();
         perf_debug!(
             "Live summary request: {} words, {}..{} ms",
             window.words(),
@@ -329,8 +361,27 @@ impl Worker {
         let handle = tokio::spawn(async move {
             let provider = generator.provider().to_string();
             let model = generator.model().to_string();
-            let result = generator.generate(&system, &user, &token).await;
-            (window, provider, model, result)
+            let glossary = notes.glossary.terms();
+            let context = PromptContext {
+                current_topic: notes.current_topic.as_deref(),
+                previous: &notes.previous,
+                glossary: &glossary,
+                carryover: &carryover,
+                decided_topic: None,
+            };
+            let decided =
+                decide_window_topic(generator.as_ref(), &window, &context, &notes, &token).await;
+            let user = prompt::user_prompt(
+                &window,
+                &PromptContext {
+                    decided_topic: decided.as_deref(),
+                    ..context
+                },
+            );
+            let result = generator
+                .generate(prompt::system_prompt(), &user, &token)
+                .await;
+            (window, provider, model, result, decided)
         });
         self.in_flight = Some(InFlight { handle, cancel });
         self.set_status(TimelineStatus::Generating, None);
@@ -342,7 +393,7 @@ impl Worker {
     ) {
         self.in_flight = None;
         self.scheduler.complete();
-        let (window, provider, model, result) = match outcome {
+        let (window, provider, model, result, decided) = match outcome {
             Ok(outcome) => outcome,
             Err(error) => {
                 warn!("Live summary request task failed: {error}");
@@ -393,11 +444,15 @@ impl Worker {
             .map(|e| e.text.clone())
             .collect();
         let notes = NotesSoFar::of(&self.snapshot.entries);
+        // A note's figures must come from what it was written from.
+        let figures = Figures::of(&support_text(&self.carryover, &window.segments));
         let context = NoteContext {
             current_topic: notes.current_topic.as_deref(),
             known_topics: &notes.topics,
             glossary: Some(&notes.glossary),
             previous_texts: &history,
+            figures: Some(&figures),
+            decided_topic: decided.as_deref(),
         };
         match parse_notes(
             &raw,
@@ -526,6 +581,16 @@ impl Worker {
         self.snapshot.error = None;
         self.host.publish(&self.snapshot);
     }
+}
+
+/// The transcript a window's notes may draw on: the context lines and the window.
+pub fn support_text(carryover: &[Segment], segments: &[Segment]) -> String {
+    carryover
+        .iter()
+        .chain(segments)
+        .map(|s| s.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn short_error(message: &str) -> String {
@@ -668,6 +733,9 @@ mod tests {
         fail_kind: FailureKind,
         hang: bool,
         prompts: Mutex<Vec<String>>,
+        /// The topic step's questions and its answer; not counted as calls.
+        topic_prompts: Mutex<Vec<String>>,
+        topic_answer: Mutex<String>,
     }
 
     impl FakeGenerator {
@@ -681,6 +749,8 @@ mod tests {
                 fail_kind: FailureKind::Transient,
                 hang: false,
                 prompts: Mutex::new(Vec::new()),
+                topic_prompts: Mutex::new(Vec::new()),
+                topic_answer: Mutex::new(r#"{"same":true}"#.into()),
             }
         }
     }
@@ -695,10 +765,17 @@ mod tests {
         }
         async fn generate(
             &self,
-            _: &str,
+            system: &str,
             user: &str,
             cancel: &CancellationToken,
         ) -> std::result::Result<Generated, GenerateError> {
+            if system == prompt::topic_system_prompt() {
+                self.topic_prompts.lock().unwrap().push(user.to_string());
+                return Ok(Generated {
+                    text: self.topic_answer.lock().unwrap().clone(),
+                    truncated: false,
+                });
+            }
             let call = self.calls.fetch_add(1, Ordering::SeqCst);
             self.prompts.lock().unwrap().push(user.to_string());
             let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
@@ -714,13 +791,19 @@ mod tests {
                         message: "model offline".into(),
                     })
                 } else {
-                    // Distinct text per call, so the dedupe keeps every entry.
-                    let topic = [
-                        "budget", "hiring", "launch", "pricing", "roadmap", "support",
+                    // Distinct text per call, so the dedupe keeps every entry
+                    // (no figures: the transcript has none).
+                    let text = [
+                        "Budget for Acme Robotics approved by finance",
+                        "Hiring freeze lifted for the support team",
+                        "Launch slips by a week after design review",
+                        "Pricing tiers stay unchanged through the summer",
+                        "Roadmap adds offline sync before the beta",
+                        "Support hours extend into weekends",
                     ][call % 6];
                     Ok(Generated {
                         text: format!(
-                            r#"{{"entries":[{{"kind":"decision","text":"Agreed on the {topic} plan with Acme Robotics, call {call}","speaker":"Others","topic":"launch plan"}}]}}"#
+                            r#"{{"entries":[{{"kind":"decision","text":"{text}","speaker":"Others","topic":"launch plan"}}]}}"#
                         ),
                         truncated: false,
                     })
@@ -804,7 +887,13 @@ mod tests {
         let prompts = generator.prompts.lock().unwrap();
         assert!(prompts.len() >= 2);
         assert!(!prompts[0].contains("Current topic"));
-        assert!(prompts[1].contains("Current topic: Launch Plan (since 00:00)\n"));
+        // The topic step asked about the current topic and kept it.
+        let topic_prompts = generator.topic_prompts.lock().unwrap();
+        assert!(
+            topic_prompts[0].starts_with("Current topic: \"Launch Plan\" (since 00:00, 1 min)\n")
+        );
+        assert!(topic_prompts[0].contains("Latest notes under it:\n- "));
+        assert!(prompts[1].contains("Topic of the new transcript: Launch Plan (already decided"));
         assert!(prompts[1].contains("Glossary (use these spellings): Acme Robotics"));
         assert!(prompts[1].contains("Earlier transcript (context only, already covered):\n[00:00]"));
         assert!(prompts[1].contains(
@@ -816,6 +905,29 @@ mod tests {
             .all(|e| e.topic.as_deref() == Some("Launch Plan") && e.speaker.is_none()));
         let persisted = host.persisted.lock().unwrap();
         assert_eq!(persisted[0].topic.as_deref(), Some("Launch Plan"));
+    }
+
+    #[tokio::test]
+    async fn the_topic_step_starts_a_new_topic_when_the_subject_changes() {
+        let generator = Arc::new(FakeGenerator::new(Duration::ZERO));
+        *generator.topic_answer.lock().unwrap() = r#"{"same":false,"topic":"Globex pitch"}"#.into();
+        let host = host_with(generator.clone());
+        let (tx, rx) = unbounded_channel();
+        let finish = CancellationToken::new();
+        let task = tokio::spawn(run(host.clone(), "s".into(), rx, finish.clone(), config()));
+        tx.send(speech(0)).unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Past the shortest topic, so the step may end it.
+        tx.send(speech(180)).unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        finish.cancel();
+        let snapshot = task.await.unwrap();
+        let topics: Vec<_> = snapshot
+            .entries
+            .iter()
+            .map(|e| e.topic.as_deref())
+            .collect();
+        assert_eq!(topics, vec![Some("Launch Plan"), Some("Globex Pitch")]);
     }
 
     #[tokio::test]

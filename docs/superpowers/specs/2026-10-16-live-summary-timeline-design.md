@@ -103,20 +103,32 @@ never who said it, and sit under topics.
   everyone else) and the model is told never to mention them in a note.
   - Headline style, 6–12 words and never more than 14; facts, names and numbers first; tidy
     numbers. Usually one note per window; `{"entries":[]}` is a normal answer.
-  - `action`: one specific person commits to a concrete task. `speaker` is the owner (`You`, a
-    name, or `Others` only if no one more specific is known) and `text` is the task alone.
-    `decision`: an explicit agreement. Everything else is a `point`; points and decisions have
+  - Numbers only from the new transcript's own lines about that subject, never moved from one
+    company or person to another.
+  - `action`: a commitment or follow-up someone takes on: "I'll …", an agreed "let's / we
+    should …", an offer ("I can introduce you…"), or a request You accept. `speaker` is the
+    owner (`You`, a name, or `Others` when the other side commits) and `text` is the task
+    alone. `decision`: an explicit agreement. Everything else (facts, plans described,
+    suggestions nobody took on, questions) is a `point`; points and decisions have
     `speaker: null`.
-  - `topic`: the main subject in at most 5 words (a company, product, project or person), a
-    chapter title. Copy the current topic while the subject is the same; a new company,
-    project, person or agenda item is a new topic.
-  - Short good/bad examples (synthetic, no meeting content).
+  - `topic`: what is being discussed now, in at most 5 words (a company, product, project or
+    person). A worked example: background → current work → another company is three topics.
+  - Short good/bad examples (synthetic, no meeting content), including two positive actions,
+    one owned by each side.
 
   Output: `{"entries":[{"start":"mm:ss","end":"mm:ss","topic":"…","kind":"point","text":"…","speaker":null}]}`.
+- **Topic step.** Before the notes call, when there is a current topic, one small call asks
+  whether the window is still mainly about it (`prompt::topic_user_prompt`: the topic, since
+  when, its last 3 notes and the window's transcript). The answer is `{"same":true}` or
+  `{"same":false,"topic":"…"}`; `notes::decide_topic` keeps the current topic for "same", a
+  near-duplicate title, or a topic younger than 2 minutes, and reuses an earlier title when
+  the conversation returns to it. Asked for notes and a topic together, the small model kept
+  copying the current topic for 7+ minutes after the subject changed. It costs about 1.5–2 s
+  per window. No usable answer (or no current topic) leaves the topic to the notes call.
 - **User prompt.**
-  - `Current topic: <title> (since mm:ss)`. Once the topic has run over 5 minutes it is offered
-    as a choice ("Topic so far: …, name the topic afresh") rather than the default, because a
-    small model otherwise copies it forever.
+  - `Topic of the new transcript: <title> (already decided …)` when the topic step answered;
+    otherwise `Current topic: <title> (since mm:ss)`, offered as a choice once it has run over
+    5 minutes.
   - `Glossary (use these spellings): …`: up to 20 names from earlier notes (`glossary.rs`).
   - The last 8 notes, grouped under their topics, under "Notes so far (do not repeat)".
   - The previous window's last 30 s (at most 90 words), under "Earlier transcript (context
@@ -141,20 +153,29 @@ of `notes.rs`; `parse_entries` is the reply as written (kept for the A/B tool).
   - Narration ("Others discuss…", "The speaker notes that…", "Speaker holds…") is rewritten to
     its content, or dropped when too little is left or it describes the person ("Others are
     excited…"). A narrated note is never an action or a decision.
-  - "You'll send the deck" becomes owner `You`, task "send the deck". An action without an
-    owner, or whose text is a statement ("The team…", "Goal: …"), becomes a point. A named
-    owner missing from the text is put in front ("Priya — build the model").
+  - "You'll send the deck" becomes owner `You`, task "send the deck"; "Others will introduce
+    you…", "They'll share…", "Priya agreed to send…" become owner `Others` or `Priya`. An
+    action without an owner, or whose text is a statement ("The team…", "Goal: …"), becomes a
+    point, as does narration ("Others suggest…"). A named owner missing from the text is put
+    in front ("Priya — build the model").
   - A decision phrased as a question becomes a point. Points and decisions drop `speaker`.
-  - Run-on notes over 16 words keep their leading `;` clauses. "Ai"/"Ml"/"Av"/"Gpu" become
-    acronyms.
+  - Notes are at most 14 words: cut to their leading clauses (`;`, ` — `, `,`), else before
+    the last clause word ("with", "while", "using"…), else at 14 words without a dangling last
+    word. "Ai"/"Ml"/"Av"/"Gpu" become acronyms.
+  - **Numbers** (`facts.rs`): a note whose figures are not in its window or the context lines
+    before it is dropped. Spelled numbers ("three and a half", "two point uh seven",
+    "seventy two") and tidied ones ("~70", "$2M", "3.5") match; magnitude words
+    ("thousands") need the same word or a figure that large.
+  - With a topic step answer, every note of the window takes the decided topic.
   - Names that are close variants of an established glossary spelling (seen twice, more
     often than the variant) are rewritten to it.
   - Topics are tidied (≤ 5 words, title-case-ish). A proposal that is a near-duplicate of the
     current topic, or shares a specific word with it, reuses the current title; one that is a
     near-duplicate of an earlier topic reuses that title. No topic means the current one.
 - **Text.** It is trimmed and capped at 200 characters. Empty text is dropped, as is a
-  near-duplicate of a recent entry (normalised, case-insensitive), judged on the refined
-  text. At most the requested number of entries is kept.
+  near-duplicate of one of the last 8 entries, judged on the refined text: word overlap of
+  0.8, or (notes only) a rewording that shares at least 4 content words, 40% of the shorter
+  note's and 30% of both notes' together. At most the requested number of entries is kept.
 - **Errors.** Output with no usable JSON is a `ParseError`. The worker logs it, skips the
   window, and sets the status to failed. The next window retries.
 
@@ -164,7 +185,9 @@ of `notes.rs`; `parse_entries` is the reply as written (kept for the A/B tool).
 the scheduler, the old and the new prompt and parser on a simulated clock with the real
 built-in model, and writes `live-summary-ab.md` into the replay folder. That report quotes
 meeting content: it stays on the machine and is never committed. The usage is in the file's
-header.
+header. Its metrics include max words, notes over 14 words, repeats of the last 8 notes and
+notes with a number not in their transcript, judged the same way for every variant;
+`live_summary_rescore` recomputes them for an existing report's notes.
 
 ## Model call
 

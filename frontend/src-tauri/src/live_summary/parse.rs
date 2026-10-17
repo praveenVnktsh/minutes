@@ -171,9 +171,12 @@ fn parse_with(
         };
         let words = word_set(&entry.text);
         if words.is_empty()
-            || seen
-                .iter()
-                .any(|other| overlap(&words, other) >= DUPLICATE_OVERLAP)
+            || seen.iter().any(|other| {
+                overlap(&words, other) >= DUPLICATE_OVERLAP
+                    // Rewordings count as repeats for the notetaker only, so
+                    // the A/B baseline stays as it was.
+                    || (context.is_some() && shares_content(&words, other))
+            })
         {
             continue;
         }
@@ -184,6 +187,34 @@ fn parse_with(
         entries.push(entry);
     }
     Ok(entries)
+}
+
+/// The topic step's answer.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TopicDecision {
+    Same,
+    New(String),
+}
+
+/// `{"same":true}` or `{"same":false,"topic":"…"}`; `None` for anything
+/// else (the notes call then names the topic itself).
+pub fn parse_topic_decision(raw: &str) -> Option<TopicDecision> {
+    let cleaned = strip_fences(&strip_think(raw));
+    let value = reply_json_value(&cleaned).or_else(|| {
+        let start = cleaned.find('{')?;
+        let end = balanced_end(cleaned.as_bytes(), start)?;
+        serde_json::from_str(&cleaned[start..=end]).ok()
+    })?;
+    let same = match &value["same"] {
+        Value::Bool(same) => *same,
+        Value::String(text) => matches!(text.trim().to_lowercase().as_str(), "true" | "yes"),
+        _ => return None,
+    };
+    if same {
+        return Some(TopicDecision::Same);
+    }
+    let topic = value["topic"].as_str()?.trim();
+    (!topic.is_empty()).then(|| TopicDecision::New(topic.to_string()))
 }
 
 /// Remove `<think>…</think>` blocks. An unclosed `<think>` (the model ran out
@@ -480,6 +511,52 @@ fn word_set(text: &str) -> HashSet<String> {
         .collect()
 }
 
+/// Words that carry no content for the repeat check.
+const STOPWORDS: &[&str] = &[
+    "the", "and", "for", "with", "from", "that", "this", "are", "was", "were", "has", "have",
+    "had", "not", "but", "its", "into", "than", "then", "over", "about", "also", "very", "more",
+    "most", "now", "their", "they", "them", "will", "can", "all", "any", "out", "who", "what",
+    "our", "your", "you", "his", "her", "she", "been", "being", "is", "of", "to", "in", "on", "at",
+    "by", "as", "or", "an", "a", "it", "be", "vs", "via", "per",
+];
+/// A repeat shares at least this many content words with an earlier note…
+const REPEAT_MIN_SHARED: usize = 4;
+/// …and at least this share of the shorter note's content words…
+const REPEAT_SHARE: f64 = 0.4;
+/// …and of both notes' content words together.
+const REPEAT_JACCARD: f64 = 0.3;
+
+/// Content words, crudely stemmed ("bets" → "bet"), numbers kept.
+fn content_words(words: &HashSet<String>) -> HashSet<String> {
+    words
+        .iter()
+        .filter(|w| !STOPWORDS.contains(&w.as_str()))
+        .filter(|w| w.len() >= 3 || w.chars().all(|c| c.is_ascii_digit()))
+        .map(|w| match w.strip_suffix('s') {
+            Some(stem) if stem.len() >= 3 && !w.ends_with("ss") => stem.to_string(),
+            _ => w.clone(),
+        })
+        .collect()
+}
+
+/// Whether two notes say the same thing in other words: they share
+/// `REPEAT_MIN_SHARED` content words, `REPEAT_SHARE` of the shorter one's.
+fn shares_content(a: &HashSet<String>, b: &HashSet<String>) -> bool {
+    let (a, b) = (content_words(a), content_words(b));
+    let shared = a.intersection(&b).count();
+    let shorter = a.len().min(b.len()).max(1);
+    let union = a.union(&b).count().max(1);
+    shared >= REPEAT_MIN_SHARED
+        && shared as f64 / shorter as f64 >= REPEAT_SHARE
+        && shared as f64 / union as f64 >= REPEAT_JACCARD
+}
+
+/// Whether `text` repeats `other` (the parser's repeat check).
+pub fn is_repeat(text: &str, other: &str) -> bool {
+    let (a, b) = (word_set(text), word_set(other));
+    overlap(&a, &b) >= DUPLICATE_OVERLAP || shares_content(&a, &b)
+}
+
 fn overlap(a: &HashSet<String>, b: &HashSet<String>) -> f64 {
     if a.is_empty() || b.is_empty() {
         return 0.0;
@@ -643,6 +720,57 @@ mod tests {
         .unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].text, "New hire starts Monday");
+    }
+
+    #[test]
+    fn topic_decisions_are_read_leniently() {
+        assert_eq!(
+            parse_topic_decision(r#"{"same":true}"#),
+            Some(TopicDecision::Same)
+        );
+        assert_eq!(
+            parse_topic_decision(
+                "<think>hm</think>```json\n{\"same\":false,\"topic\":\"Globex pitch\"}\n```"
+            ),
+            Some(TopicDecision::New("Globex pitch".into()))
+        );
+        assert_eq!(
+            parse_topic_decision(r#"Sure: {"same":"yes"}"#),
+            Some(TopicDecision::Same)
+        );
+        // A new topic without a title, or no answer at all, is no decision.
+        assert_eq!(parse_topic_decision(r#"{"same":false}"#), None);
+        assert_eq!(parse_topic_decision(r#"{"entries":[]}"#), None);
+        assert_eq!(parse_topic_decision("same"), None);
+    }
+
+    #[test]
+    fn rewordings_of_a_recent_note_are_repeats() {
+        assert!(is_repeat(
+            "Moonshot bets risk taking away from core business revenue and cash generation",
+            "Moonshot bets risk core revenue; startup vs scale priorities differ",
+        ));
+        // Same subject, different facts: not repeats.
+        for (a, b) in [
+            (
+                "Team grew from 30 to 40 people and is now approaching 100",
+                "Team grows by ten people every week",
+            ),
+            (
+                "Acme raised a Series B from Sequoia with 70 employees",
+                "Sequoia partners want founders in their network to meet Acme",
+            ),
+            (
+                "Founders found through networking and vouching rather than resumes",
+                "Founders succeed by hard work, not keywords or resumes",
+            ),
+            (
+                "Intersection of software and hardware is a key investment thesis for Acme",
+                "Acme investments shifted from SaaS to tangible products like chips, robotics and software for hardware firms",
+            ),
+        ] {
+            assert!(!is_repeat(a, b), "{a} / {b}");
+        }
     }
 
     #[test]
