@@ -567,6 +567,7 @@ impl SummaryService {
         custom_prompt: String,
         template_id: String,
         summary_language: Option<String>,
+        regenerate: bool,
     ) {
         let start_time = Instant::now();
         info!(
@@ -701,6 +702,33 @@ impl SummaryService {
             }),
         };
 
+        // Meetings with live notes: the sections written during the meeting,
+        // the last topic and the title on the live notes model. No pass over
+        // the whole transcript.
+        let from_live_notes = crate::summary::live_enhanced::notes_from_live_notes(
+            &app,
+            &pool,
+            &meeting_id,
+            &text,
+            &custom_prompt,
+            summary_language
+                .as_deref()
+                .or(detected_summary_language.as_deref()),
+            regenerate,
+            &cancellation_token,
+        )
+        .await;
+        let from_live_notes = match from_live_notes {
+            Ok(notes) => notes,
+            Err(_) if cancellation_token.is_cancelled() => None,
+            Err(error) => {
+                warn!(
+                    "Enhanced notes from live notes failed ({error}); using the whole transcript"
+                );
+                None
+            }
+        };
+
         let client = reqwest::Client::new();
         let backend = ProviderBackend {
             client: &client,
@@ -712,25 +740,39 @@ impl SummaryService {
             app_data_dir: app_data_dir.as_ref(),
             cancellation_token: Some(&cancellation_token),
         };
-        let result = generate_meeting_summary(
-            &backend,
-            &model_name,
-            &text,
-            &custom_prompt,
-            &effective_notes_prompt,
-            context_budget,
-            &GenerationOptions {
-                max_tokens: custom_openai_max_tokens,
-                temperature: custom_openai_temperature,
-                top_p: custom_openai_top_p,
-                num_ctx: None,
-                ..Default::default()
-            },
-            summary_language.as_deref(),
-            detected_summary_language.as_deref(),
-            cached_english.as_deref(),
-        )
-        .await;
+        let result = match from_live_notes {
+            Some(notes) => Ok(crate::summary::processor::GeneratedMeetingSummary {
+                final_markdown: notes.markdown.clone(),
+                english_markdown: notes.markdown,
+                successful_chunk_count: notes.calls as i64,
+                reasoning_stripped: false,
+                normalization_fallback: false,
+            }),
+            None if cancellation_token.is_cancelled() => {
+                Err("Summary generation was cancelled".to_string())
+            }
+            None => {
+                generate_meeting_summary(
+                    &backend,
+                    &model_name,
+                    &text,
+                    &custom_prompt,
+                    &effective_notes_prompt,
+                    context_budget,
+                    &GenerationOptions {
+                        max_tokens: custom_openai_max_tokens,
+                        temperature: custom_openai_temperature,
+                        top_p: custom_openai_top_p,
+                        num_ctx: None,
+                        ..Default::default()
+                    },
+                    summary_language.as_deref(),
+                    detected_summary_language.as_deref(),
+                    cached_english.as_deref(),
+                )
+                .await
+            }
+        };
 
         let duration = start_time.elapsed().as_secs_f64();
 

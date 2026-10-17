@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef, forwardRef, useImperativeHandle } from 'react';
+import { useState, useEffect, useCallback, useRef, forwardRef, useImperativeHandle, type MouseEvent } from 'react';
 import dynamic from 'next/dynamic';
 import { Summary, SummaryDataResponse, SummaryFormat, BlockNoteBlock } from '@/types';
 import { AISummary } from './index';
@@ -10,6 +10,8 @@ import { BlockNoteView } from '@blocknote/shadcn';
 import { blocksToMarkdownSafely } from '@/lib/blocknote-markdown';
 import { toast } from 'sonner';
 import { storedSummaryMarkdown } from '@/lib/meetingExport';
+import { jumpToSeconds } from '@/lib/copilot';
+import { citationSecondsAt, linkSummaryCitations, unlinkSummaryCitations } from '@/lib/summaryCitations';
 import "@blocknote/shadcn/style.css";
 
 // Dynamically import BlockNote Editor to avoid SSR issues
@@ -67,6 +69,16 @@ function detectSummaryFormat(data: any): { format: SummaryFormat; data: any } {
   }
 
   return { format: 'legacy', data: null };
+}
+
+/** A click on a `[MM:SS]` link scrolls the transcript there instead of
+ * placing the caret or following the link. */
+function jumpOnCitationClick(event: MouseEvent) {
+  const seconds = citationSecondsAt(event.target);
+  if (seconds === null) return;
+  event.preventDefault();
+  event.stopPropagation();
+  jumpToSeconds(seconds);
 }
 
 function blankEditorDocument(): Block[] {
@@ -148,7 +160,7 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
       const loadMarkdown = async () => {
         try {
           console.log('📝 Parsing markdown to BlockNote blocks...');
-          const blocks = await editor.tryParseMarkdownToBlocks(data.markdown);
+          const blocks = await editor.tryParseMarkdownToBlocks(linkSummaryCitations(data.markdown));
           if (
             cancelled
             || documentGenerationRef.current !== generation
@@ -217,7 +229,7 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
       };
 
       if (markdownResult.markdown !== undefined) {
-        saveData.markdown = markdownResult.markdown;
+        saveData.markdown = unlinkSummaryCitations(markdownResult.markdown);
       }
       if (markdownResult.ok && markdownResult.markdown?.trim().length === 0) {
         saveData.markdown = '';
@@ -296,7 +308,8 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
       if (!result.ok || result.markdown === undefined) {
         return { ok: false, error: new Error('Could not convert the current enhanced notes to Markdown') };
       }
-      return { ok: true, markdown: result.markdown, empty: result.markdown.trim().length === 0 };
+      const markdown = unlinkSummaryCitations(result.markdown);
+      return { ok: true, markdown, empty: markdown.trim().length === 0 };
     },
     getMarkdown: async () => {
       if (renderFormat === 'markdown' && !hasCurrentDocument) return typeof data?.markdown === 'string' ? data.markdown : '';
@@ -308,7 +321,7 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
       if (renderFormat === 'legacy') return storedSummaryMarkdown(summaryData as Summary);
       const result = await blocksToMarkdownSafely(editor, blocks, { source: 'BlockNoteSummaryView.getMarkdown' });
       if (!result.ok || result.markdown === undefined) throw new Error('Could not convert the current enhanced notes to Markdown');
-      return result.markdown;
+      return unlinkSummaryCitations(result.markdown);
     },
     getCurrentBlocks: () => (renderFormat === 'markdown' ? currentBlocks : hasCurrentDocument
       ? currentBlocks
@@ -336,7 +349,7 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
     console.log('🎨 Rendering BLOCKNOTE format (direct)');
     return (
       <div className="flex flex-col w-full">
-        <div className="w-full">
+        <div className="w-full" onClickCapture={jumpOnCitationClick}>
           <Editor
             key={renderDocumentKey}
             initialContent={structuredBlocks?.length ? structuredBlocks : blankEditorDocument()}
@@ -356,7 +369,7 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
     console.log('🎨 Rendering MARKDOWN format (parsed to BlockNote)');
     return (
       <div className="flex flex-col w-full">
-        <div className="w-full">
+        <div className="w-full" onClickCapture={jumpOnCitationClick}>
           <BlockNoteView
             editor={editor}
             editable={true}

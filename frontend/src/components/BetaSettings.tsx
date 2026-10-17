@@ -13,7 +13,7 @@ export function BetaSettings() {
   const { betaFeatures, toggleBetaFeature } = useConfig();
 
   // Define feature order for display (allows custom ordering)
-  const featureOrder: BetaFeatureKey[] = ['importAndRetranscribe', 'liveTranscription', 'micEchoCancellation'];
+  const featureOrder: BetaFeatureKey[] = ['importAndRetranscribe', 'liveTranscription', 'micEchoCancellation', 'liveNotesInRawNotes'];
 
   return (
     <div className="space-y-6">

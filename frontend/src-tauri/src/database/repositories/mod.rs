@@ -1,3 +1,4 @@
+pub mod enhanced_sections;
 pub mod meeting;
 pub mod setting;
 pub mod summary;
