@@ -163,13 +163,25 @@ pub const SECTION_MAX_OUTPUT_TOKENS: u32 = 448;
 /// live notes, or is written again at stop).
 pub const SECTION_TIMEOUT: Duration = Duration::from_secs(90);
 
+fn section_timeout() -> Duration {
+    // Developer evaluations on a loaded machine may allow longer.
+    #[cfg(test)]
+    if let Some(seconds) = std::env::var("MEETILY_SECTION_TIMEOUT_S")
+        .ok()
+        .and_then(|s| s.parse().ok())
+    {
+        return Duration::from_secs(seconds);
+    }
+    SECTION_TIMEOUT
+}
+
 /// The generation settings of a section call: the live notes' (low
 /// temperature, fixed seed, background priority), with a longer answer.
 pub(crate) fn section_generation_options() -> GenerationOptions {
     GenerationOptions {
         max_tokens: Some(SECTION_MAX_OUTPUT_TOKENS),
         output_cap: Some(SECTION_MAX_OUTPUT_TOKENS),
-        timeout: Some(SECTION_TIMEOUT),
+        timeout: Some(section_timeout()),
         ..generation_options()
     }
 }
