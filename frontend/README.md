@@ -13,18 +13,12 @@ A modern desktop application for recording, transcribing, and analyzing meetings
 
 ## Prerequisites
 
-### For macOS:
+Minutes is Mac-only: Apple Silicon, macOS 13 or later.
+
 - Node.js (v18 or later)
 - Rust (latest stable)
 - pnpm (v9.15.9)
 - [Xcode Command Line Tools](https://developer.apple.com/download/all/?q=xcode)
-
-### For Windows:
-- Node.js (v18 or later)
-- Rust (latest stable)
-- pnpm (v9.15.9)
-- Visual Studio Build Tools with C++ development tools
-- Windows 10 or later
 
 
 ## Project Structure
@@ -40,8 +34,6 @@ A modern desktop application for recording, transcribing, and analyzing meetings
 ## Installation
 
 Use `pnpm install --frozen-lockfile` to install the committed dependency set. When intentionally changing dependencies, update and commit `pnpm-lock.yaml`; frozen installation fails when it is out of sync.
-
-### For macOS:
 
 1. Install prerequisites:
    ```bash
@@ -73,28 +65,7 @@ Use `pnpm install --frozen-lockfile` to install the committed dependency set. Wh
    pnpm install --frozen-lockfile
    ```
 
-### For Windows:
-
-1. Install prerequisites:
-   - Install [Node.js](https://nodejs.org/) (v18 or later)
-   - Install [Rust](https://www.rust-lang.org/tools/install)
-   - Install pnpm: `npm install -g pnpm@9.15.9`
-   - Install [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) with C++ development tools
-
-2. Clone the repository and navigate to the frontend directory:
-   ```cmd
-   git clone https://github.com/praveenvnktsh/minutes.git
-   cd minutes/frontend
-   ```
-
-3. Install dependencies:
-   ```cmd
-   pnpm install --frozen-lockfile
-   ```
-
 ## Running the App
-
-### For macOS:
 
 Use the provided script to run the app in development mode:
 ```bash
@@ -109,18 +80,6 @@ To build a production version:
 You can specify the log level (info, debug, trace):
 ```bash
 ./clean_run.sh debug
-```
-
-### For Windows:
-
-Use the provided script to run the app in development mode:
-```cmd
-clean_run_windows.bat
-```
-
-To build a production version:
-```cmd
-clean_build_windows.bat
 ```
 
 You can also use the package scripts directly:
@@ -153,17 +112,11 @@ For build and acceleration details, see:
 
 ## Troubleshooting
 
-### Common Issues on macOS
 - If you encounter permission issues with scripts, make them executable:
   ```bash
   chmod +x clean_run.sh clean_build.sh
   ```
-- For microphone access issues, ensure the app has microphone permissions in System Preferences
-
-### Common Issues on Windows
-- If you encounter build errors, ensure Visual Studio Build Tools are properly installed
-- For audio capture issues, check Windows privacy settings for microphone access
-- If the app fails to start, try running Command Prompt as administrator
+- For microphone access issues, ensure the app has microphone permissions in System Settings
 
 ## Contributing
 

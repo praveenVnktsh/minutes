@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Meetily** is a privacy-first AI meeting assistant that captures, transcribes, and summarizes meetings entirely on local infrastructure. The supported application is the Tauri desktop app with a Rust core.
 
+**Mac-only**: Minutes runs on Apple Silicon Macs with macOS 13+. Windows and Linux support has been removed; the Rust crate refuses to compile for other targets. Do not add Windows/Linux code paths, `cfg(target_os = ...)` branches for them, or non-Apple GPU backends.
+
 1. **Frontend**: Tauri-based desktop application (Rust + Next.js + TypeScript)
 2. **Rust Backend**: Tauri commands, audio capture, transcription, storage, and summarization orchestration
 3. **Legacy Backend Archive**: the old Python/FastAPI backend has been removed from the repo and is preserved at the git tag `archive/python-backend`
@@ -24,14 +26,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **Location**: `/frontend`
 
 ```bash
-# macOS Development
 ./clean_run.sh              # Clean build and run with info logging
 ./clean_run.sh debug        # Run with debug logging
 ./clean_build.sh            # Production build
-
-# Windows Development
-clean_run_windows.bat       # Clean build and run
-clean_build_windows.bat     # Production build
+bash scripts/build-local-macos.sh   # Local unsigned .app bundle with Metal (pnpm tauri:build:local:mac)
 
 # Manual Commands
 pnpm install                # Install dependencies
@@ -39,11 +37,9 @@ pnpm run dev                # Next.js dev server (port 3118)
 pnpm run tauri:dev          # Full Tauri development mode
 pnpm run tauri:build        # Production build
 
-# GPU-Specific Builds (for testing acceleration)
-pnpm run tauri:dev:metal    # macOS Metal GPU
-pnpm run tauri:dev:cuda     # NVIDIA CUDA
-pnpm run tauri:dev:vulkan   # AMD/Intel Vulkan
-pnpm run tauri:dev:cpu      # CPU-only (no GPU)
+# Explicit GPU feature builds (Metal + CoreML are already on by default)
+pnpm run tauri:dev:metal    # Metal GPU
+pnpm run tauri:dev:coreml   # CoreML
 ```
 
 ### Service Endpoints
@@ -99,10 +95,8 @@ audio/
 │   ├── microphone.rs          # default_input_device
 │   ├── speakers.rs            # default_output_device
 │   ├── configuration.rs       # AudioDevice types, parsing
-│   └── platform/              # Platform-specific implementations
-│       ├── windows.rs         # WASAPI logic (~200 lines)
-│       ├── macos.rs           # ScreenCaptureKit logic
-│       └── linux.rs           # ALSA/PulseAudio logic
+│   └── platform/              # macOS device enumeration
+│       └── macos.rs           # ScreenCaptureKit logic
 ├── capture/                   # Audio stream capture
 │   ├── microphone.rs          # Microphone capture stream
 │   ├── system.rs              # System audio capture stream
@@ -114,7 +108,7 @@ audio/
 ```
 
 **When working on audio features**:
-- Device detection issues → `devices/discovery.rs` or `devices/platform/{windows,macos,linux}.rs`
+- Device detection issues → `devices/discovery.rs` or `devices/platform/macos.rs`
 - Microphone/speaker problems → `devices/microphone.rs` or `devices/speakers.rs`
 - Audio capture issues → `capture/microphone.rs` or `capture/system.rs`
 - Mixing/processing problems → `pipeline.rs`
@@ -166,21 +160,16 @@ await listen<TranscriptUpdate>('transcript-update', (event) => {
 
 **Model Storage Locations**:
 - **Development**: `frontend/models/`
-- **Production (macOS)**: `~/Library/Application Support/Meetily/models/`
-- **Production (Windows)**: `%APPDATA%\Meetily\models\`
+- **Production**: `~/Library/Application Support/Meetily/models/`
 
 **Model Loading** (frontend/src-tauri/src/whisper_engine/whisper_engine.rs):
 ```rust
 pub async fn load_model(&self, model_name: &str) -> Result<()> {
-    // Automatically detects GPU capabilities (Metal/CUDA/Vulkan)
-    // Falls back to CPU if GPU unavailable
+    // Uses Metal + CoreML on Apple Silicon
 }
 ```
 
-**GPU Acceleration**:
-- **macOS**: Metal + CoreML (automatically enabled)
-- **Windows/Linux**: CUDA (NVIDIA), Vulkan (AMD/Intel), or CPU
-- Configure via Cargo features: `--features cuda`, `--features vulkan`
+**GPU Acceleration**: Metal + CoreML, always enabled (whisper-rs is declared with both features for macOS). The llama-helper sidecar is built with `--features metal`.
 
 ## Critical Development Patterns
 
@@ -233,14 +222,6 @@ macro_rules! perf_debug {
 
 ## Common Development Tasks
 
-### Adding a New Audio Device Platform
-
-1. Create platform file: `audio/devices/platform/{platform_name}.rs`
-2. Implement device enumeration for the platform
-3. Add platform-specific configuration in `audio/devices/configuration.rs`
-4. Update `audio/devices/platform/mod.rs` to export new platform functions
-5. Test with `cargo check` and platform-specific device tests
-
 ### Adding a New Tauri Command
 
 1. Define command in `src/lib.rs`:
@@ -275,7 +256,7 @@ Key components:
 RUST_LOG=app_lib::audio=debug ./clean_run.sh
 
 # Monitor audio metrics in real-time
-# Check Developer Console in the app (Cmd+Shift+I on macOS)
+# Check Developer Console in the app (Cmd+Shift+I)
 ```
 
 ### Tauri Backend Development
@@ -288,15 +269,11 @@ Current app behavior should be implemented in the Rust/Tauri core. Add new front
 
 **Enable Rust Logging**:
 ```bash
-# macOS
 RUST_LOG=debug ./clean_run.sh
-
-# Windows (PowerShell)
-$env:RUST_LOG="debug"; ./clean_run_windows.bat
 ```
 
 **Developer Tools**:
-- Open DevTools: `Cmd+Shift+I` (macOS) or `Ctrl+Shift+I` (Windows)
+- Open DevTools: `Cmd+Shift+I`
 - Console Toggle: Built into app UI (console icon)
 - View Rust logs: Check terminal output
 
@@ -310,24 +287,12 @@ $env:RUST_LOG="debug"; ./clean_run_windows.bat
 
 **Monitor via Developer Console**: The app includes real-time metrics display when recording.
 
-## Platform-Specific Notes
+## Platform Notes (macOS, Apple Silicon only)
 
-### macOS
 - **Audio Capture**: Uses ScreenCaptureKit for system audio (macOS 13+)
 - **GPU**: Metal + CoreML automatically enabled
 - **Permissions**: Requires microphone + screen recording permissions
 - **System Audio**: Requires virtual audio device (BlackHole) for system capture
-
-### Windows
-- **Audio Capture**: Uses WASAPI (Windows Audio Session API)
-- **GPU**: CUDA (NVIDIA) or Vulkan (AMD/Intel) via Cargo features
-- **Build Tools**: Requires Visual Studio Build Tools with C++ workload
-- **System Audio**: Uses WASAPI loopback for system capture
-
-### Linux
-- **Audio Capture**: ALSA/PulseAudio
-- **GPU**: CUDA (NVIDIA) or Vulkan via Cargo features
-- **Dependencies**: Requires cmake, llvm, libomp
 
 ## Performance Optimization Guidelines
 
@@ -353,16 +318,13 @@ $env:RUST_LOG="debug"; ./clean_run_windows.bat
 
 1. **Audio Chunk Size**: Pipeline expects consistent 48kHz sample rate. Resampling happens at capture time.
 
-2. **Platform Audio Quirks**:
-   - macOS: ScreenCaptureKit requires macOS 13+, needs screen recording permission
-   - Windows: WASAPI exclusive mode can conflict with other apps
-   - System audio requires virtual device (BlackHole on macOS, WASAPI loopback on Windows)
+2. **Platform Audio Quirks**: ScreenCaptureKit requires macOS 13+ and screen recording permission.
 
 3. **Whisper Model Loading**: Models are loaded once and cached. Changing models requires app restart or manual unload/reload.
 
 4. **No Separate Backend Dependency**: Meeting persistence, transcription, and LLM features are handled by the Tauri app. Do not reintroduce a Python/FastAPI backend as a supported requirement.
 
-5. **File Paths**: Use Tauri's path APIs (`downloadDir`, etc.) for cross-platform compatibility. Never hardcode paths.
+5. **File Paths**: Use Tauri's path APIs (`downloadDir`, `appDataDir`, etc.). Never hardcode paths.
 
 6. **Audio Permissions**: Request permissions early. macOS requires both microphone AND screen recording for system audio.
 
