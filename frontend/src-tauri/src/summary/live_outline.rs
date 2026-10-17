@@ -14,7 +14,6 @@
 //! - `## Decisions` from the decision notes;
 //! - `## Action items` from the action notes, `Owner — task`, kept only when
 //!   a transcript line at the note's time shows someone taking it on;
-//! - `## Open questions` from what the section calls reported, if any.
 //!
 //! Every bullet ends with a `[mm:ss]` link to the transcript.
 //!
@@ -58,9 +57,10 @@ const EVIDENCE_SLACK_MS: i64 = 15_000;
 
 static CLOCK_PREFIX: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^\[(\d{1,3}:\d{2}(?::\d{2})?)\]").unwrap());
-/// `[12:34]`, `[1:02:03]`, `(12:34)`, and ranges `[12:34-13:00]`.
+/// `[12:34]`, `[1:02:03]`, `(12:34)`, ranges `[12:34-13:00]` and lists
+/// `[12:34, 12:51]`.
 static LINK: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"[\[(](\d{1,3}:\d{2}(?::\d{2})?)(?:\s*[-–—]\s*\d{1,3}:\d{2}(?::\d{2})?)?[\])]")
+    Regex::new(r"[\[(](\d{1,3}:\d{2}(?::\d{2})?)(?:\s*[-–—,;]\s*\d{1,3}:\d{2}(?::\d{2})?)*[\])]")
         .unwrap()
 });
 static FOLLOW_UP: Lazy<Regex> = Lazy::new(|| {
@@ -505,15 +505,11 @@ Write at most 4 bullets (`- `), the most important first:
 - Start from the live notes: correct and complete them from the transcript. Never repeat a point or the user's own notes.
 - End every bullet with the [mm:ss] of the transcript line it comes from.
 - Say what was said, not who said it. Never write "You", "Others", "they", "the speaker" or a person's name as the one who said or did something, unless that line itself names them doing it.
-- Only what the transcript says. No heading, no introduction.
-
-If a question was asked and left unanswered, add after the bullets:
-Question: the question [mm:ss]
+- Only what the transcript says. No heading, no introduction, no action items (they are listed separately).
 
 Example (format only):
 - Office move booked for 3 June, budget capped at $4,000 [02:10]
-- Window desks still undecided between design and sales [03:05]
-Question: Who gets the window desks? [03:05]"#
+- Window desks still undecided between design and sales [03:05]"#
 }
 
 fn note_line(note: &LiveNote) -> String {
@@ -696,10 +692,17 @@ pub fn with_link(text: &str, ms: Option<i64>) -> String {
     }
 }
 
+static ACTION_BULLET: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)^(action|decision)( item)?s?\b\s*(:|is to|to|-|—)").unwrap());
+
 /// A bullet as the notes keep it: narration of who spoke taken out (or the
 /// bullet dropped when nothing is left).
 fn clean_bullet(text: &str) -> Option<String> {
     let text = text.trim().trim_matches('*').trim();
+    // "Action is to …", "Action: …": the action items list has those.
+    if ACTION_BULLET.is_match(text) {
+        return None;
+    }
     match strip_narration(text) {
         Narration::Clean => Some(text.to_string()),
         Narration::Rewritten(content) => Some(content),
@@ -869,7 +872,11 @@ pub fn action_items(notes: &[LiveNote], transcript: &[TranscriptLine]) -> Vec<Fo
             owner: Some(evidenced_owner(note, evidence)),
             ms: Some(evidence.ms),
         };
-        if !items.iter().any(|other| is_repeat(&item.text, &other.text)) {
+        // Two notes backed by the same line are one commitment.
+        if !items
+            .iter()
+            .any(|other| other.ms == item.ms || is_repeat(&item.text, &other.text))
+        {
             items.push(item);
         }
     }
@@ -973,14 +980,10 @@ fn owner_label(owner: Option<&str>) -> String {
         .to_string()
 }
 
-/// "Also discussed", "Decisions", "Action items" and "Open questions", as
-/// Markdown (empty ones left out).
-pub fn tail_markdown(
-    also: &[String],
-    decisions: &[FollowUp],
-    actions: &[FollowUp],
-    questions: &[String],
-) -> String {
+/// "Also discussed", "Decisions" and "Action items", as Markdown (empty
+/// ones left out). There is no "Open questions": in the evaluation the
+/// small model reported questions the meeting had answered.
+pub fn tail_markdown(also: &[String], decisions: &[FollowUp], actions: &[FollowUp]) -> String {
     let mut out = String::new();
     if !also.is_empty() {
         let _ = write!(out, "## {ALSO_DISCUSSED}\n\n{}\n\n", also.join("\n"));
@@ -1004,30 +1007,7 @@ pub fn tail_markdown(
         }
         out.push('\n');
     }
-    if !questions.is_empty() {
-        let _ = write!(out, "## Open questions\n\n{}\n\n", questions.join("\n"));
-    }
     out.trim_end().to_string()
-}
-
-/// The open questions the sections reported, repeats dropped.
-pub fn open_questions(written: &[WrittenSection]) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for line in written
-        .iter()
-        .flat_map(|s| s.questions.lines())
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-    {
-        let bare = LINK.replace_all(line, "").to_string();
-        if !out
-            .iter()
-            .any(|other| is_repeat(&bare, &LINK.replace_all(other, "")))
-        {
-            out.push(format!("- {line}"));
-        }
-    }
-    out
 }
 
 /// The finished notes: the title, the topics, then the tail.
@@ -1048,12 +1028,7 @@ pub fn assemble(
             section.body.trim_end()
         );
     }
-    let tail = tail_markdown(
-        &also,
-        &decisions(notes),
-        &action_items(notes, transcript),
-        &open_questions(written),
-    );
+    let tail = tail_markdown(&also, &decisions(notes), &action_items(notes, transcript));
     if !tail.is_empty() {
         out.push('\n');
         out.push_str(&tail);
@@ -1075,7 +1050,7 @@ pub struct LiveSection {
 
 /// The Enhanced notes as they stand during the meeting: the written topics,
 /// the closed topics still being written and the topic under way (the last
-/// run), then the tail (small topics, decisions, actions, questions so far).
+/// run), then the tail (small topics, decisions and actions so far).
 pub fn live_view(
     runs: &[TopicRun],
     written: &[WrittenSection],
@@ -1128,12 +1103,7 @@ pub fn live_view(
             }),
         }
     }
-    let tail = tail_markdown(
-        &also,
-        &decisions(notes),
-        &action_items(notes, transcript),
-        &open_questions(written),
-    );
+    let tail = tail_markdown(&also, &decisions(notes), &action_items(notes, transcript));
     (sections, tail)
 }
 
@@ -1326,7 +1296,7 @@ mod tests {
             ms: None,
             text: "Two engineers hiring soon".into(),
         };
-        let raw = "Here are the notes:\n## Pricing\n- Annual plan at $40 per seat [01:01]\n  - Discount for 3 years\n- Seat count unknown (45:00)\n- Others discussed the annual plan pricing in detail [01:00-01:30]\n- Hiring two engineers soon\n- Fifth bullet is one too many here [02:00]\n- Sixth\nAction: You — send the deck [02:00]\nQuestion: Who owns the migration? [02:50]";
+        let raw = "Here are the notes:\n## Pricing\n- Annual plan at $40 per seat [01:01]\n  - Discount for 3 years\n- Seat count unknown (45:00)\n- Action is to send the deck [02:00]\n- Others discussed the annual plan pricing in detail [01:00-01:30]\n- Hiring two engineers soon\n- Fifth bullet is one too many here [02:00, 02:10]\n- Sixth\nAction: You — send the deck [02:00]\nQuestion: Who owns the migration? [02:50]";
         let reply = parse_section_reply(raw, (0, 180_000), &lines, &[&user]);
         assert_eq!(
             reply.bullets,
@@ -1362,6 +1332,8 @@ mod tests {
             note(7.0, "action", "think about pricing", Some("A")),
             note(9.0, "action", "sign the contract", Some("A")),
             note(3.1, "action", "send the deck", Some("A")),
+            // Another wording of the same commitment (the same line backs it).
+            note(3.2, "action", "share slides tonight", Some("A")),
         ];
         let items = action_items(&notes, &lines);
         assert_eq!(
@@ -1382,7 +1354,7 @@ mod tests {
     }
 
     #[test]
-    fn notes_assemble_topics_then_also_discussed_decisions_actions_and_questions() {
+    fn notes_assemble_topics_then_also_discussed_decisions_and_actions() {
         let notes = vec![
             note(0.2, "point", "Hello and introductions", Some("Intro")),
             note(1.0, "point", "Pricing at $40 per seat", Some("Pricing")),
@@ -1405,7 +1377,7 @@ mod tests {
         let markdown = assemble("Pricing Call", &runs, &written, &notes, &lines);
         assert_eq!(
             markdown,
-            "# Pricing Call\n\n## Pricing\n\n- $40 per seat, annual first [01:00]\n- Seat minimum is ten [08:00]\n\n## Also discussed\n\n- Hello and introductions [00:12]\n- Hiring is paused [06:00]\n\n## Decisions\n\n- Annual plan ships first [01:30]\n\n## Action items\n\n- You — send the deck [04:00]\n\n## Open questions\n\n- Monthly price later? [02:00]\n"
+            "# Pricing Call\n\n## Pricing\n\n- $40 per seat, annual first [01:00]\n- Seat minimum is ten [08:00]\n\n## Also discussed\n\n- Hello and introductions [00:12]\n- Hiring is paused [06:00]\n\n## Decisions\n\n- Annual plan ships first [01:30]\n\n## Action items\n\n- You — send the deck [04:00]\n"
         );
     }
 

@@ -33,8 +33,9 @@ model; its transcript and notes parsing, links, follow-up evidence and fallbacks
   flight, at most 45 s), writes only what is missing (normally the last topic), asks for a
   title, and puts the rest together without a model: "Also discussed", "Decisions" (the
   decision notes), "Action items" (`Owner — task`, kept only when a transcript line at the
-  note's time shows someone taking it on; the owner is who said that line) and "Open
-  questions" (reported by the section calls). No pass over the whole transcript.
+  note's time shows someone taking it on; the owner is who said that line; two notes
+  backed by the same line are one item). No pass over the whole transcript. There is no "Open
+  questions": in the evaluation E2B listed questions the meeting had answered.
 - **The final transcript pass.** When it takes over, the stop no longer waits for it: notes
   built from live notes start at once (`has_live_enhanced_notes`). When the pass finishes,
   nothing is regenerated; Re-enhance writes every section again from the improved transcript.
