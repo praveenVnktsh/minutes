@@ -48,17 +48,65 @@ const NON_MEETING_AUDIO_PATTERNS: RegExp[] = [
   /^minutes$/i,
   /^meetily$/i,
   /coreaudio/i,
+  // Dictation and voice tools that open the mic for a few seconds at a time.
+  /superwhisper/i,
+  /wispr flow/i,
+  /macwhisper/i,
+  /voice control/i,
+  /dictation/i,
+  /voice memos/i,
+  /^siri$/i,
+  /^claude$/i,
+  /^chatgpt$/i,
 ];
 
+/** Lowercase, trim, drop a trailing `.app` and collapse whitespace (matches the Rust detector). */
+export function normalizeAppName(name: string): string {
+  return name.trim().toLowerCase().replace(/\.app$/, '').split(/\s+/).filter(Boolean).join(' ');
+}
+
+/** Short names users type for known apps, beyond their display names. */
+const KNOWN_APP_ALIASES: Record<string, string> = {
+  teams: 'Microsoft Teams',
+  zoom: 'Zoom',
+  slack: 'Slack Huddle',
+  meet: 'Google Meet',
+  webex: 'Cisco Webex',
+  chime: 'Amazon Chime',
+};
+
+/** The known app a typed name refers to: its exact display name or an alias. */
+function knownAppNamed(entry: string): string | undefined {
+  const display = MEETING_APP_PATTERNS.find(({ name }) => normalizeAppName(name) === entry)?.name;
+  return display ?? KNOWN_APP_ALIASES[entry];
+}
+
+function isIgnored(processName: string, ignored: string[]): boolean {
+  const normalized = normalizeAppName(processName);
+  const known = MEETING_APP_PATTERNS.find(({ patterns }) => patterns.some((pattern) => pattern.test(processName)));
+  return ignored.some((entry) => {
+    const target = normalizeAppName(entry);
+    if (target === '') return false;
+    if (target === normalized) return true;
+    const named = knownAppNamed(target);
+    return named !== undefined && known?.name === named;
+  });
+}
+
+/**
+ * Mirrors detect_meeting_app in src-tauri/src/meeting_detection.rs, which is
+ * what actually drives the tray and prompt.
+ */
 export function detectMeetingApp(
   processNames: string[],
-  options: { allowUnknown?: boolean } = {},
+  options: { allowUnknown?: boolean; ignored?: string[] } = {},
 ): DetectedMeetingApp | null {
   let generic: DetectedMeetingApp | null = null;
 
   for (const processName of processNames) {
     const trimmedName = processName.trim();
     if (!trimmedName) continue;
+    if (options.ignored && isIgnored(trimmedName, options.ignored)) continue;
 
     const match = MEETING_APP_PATTERNS.find(({ patterns }) =>
       patterns.some((pattern) => pattern.test(trimmedName))

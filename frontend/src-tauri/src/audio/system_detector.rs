@@ -7,7 +7,8 @@ use cidre::{core_audio as ca, os};
 /// Event types for system audio detection
 #[derive(Debug, Clone)]
 pub enum SystemAudioEvent {
-    SystemAudioStarted(Vec<String>), // List of apps using system audio
+    /// Apps capturing the microphone (name plus bundle id when known).
+    SystemAudioStarted(Vec<crate::meeting_detection::AudioApp>),
     SystemAudioStopped,
 }
 
@@ -375,10 +376,12 @@ impl MacOSSystemAudioDetector {
 #[cfg(target_os = "macos")]
 /// Apps currently capturing the microphone. Mic capture is the signal that the
 /// user is actually in a call, unlike output audio (music, video, etc.).
-fn list_microphone_using_apps() -> Vec<String> {
+fn list_microphone_using_apps() -> Vec<crate::meeting_detection::AudioApp> {
+    use crate::meeting_detection::AudioApp;
+
     match ca::System::processes() {
         Ok(processes) => {
-            let mut apps = Vec::new();
+            let mut apps: Vec<AudioApp> = Vec::new();
             for process in processes {
                 if process.is_running_input().unwrap_or(false) {
                     if let Ok(pid) = process.pid() {
@@ -391,8 +394,9 @@ fn list_microphone_using_apps() -> Vec<String> {
                                 .localized_name()
                                 .map(|s| s.to_string())
                                 .unwrap_or_else(|| format!("Process {}", pid));
-                            if !apps.contains(&name) {
-                                apps.push(name);
+                            let bundle_id = running_app.bundle_id().map(|id| id.to_string());
+                            if !apps.iter().any(|app| app.name == name) {
+                                apps.push(AudioApp { name, bundle_id });
                             }
                         }
                     }
@@ -402,7 +406,7 @@ fn list_microphone_using_apps() -> Vec<String> {
             // Browsers hide which tab is open, so probe for a Meet URL among the
             // browsers that are actually capturing the mic.
             if browser_capturing_mic_has_google_meet(&apps) {
-                apps.push("Google Meet".to_string());
+                apps.push(AudioApp::named("Google Meet"));
             }
             apps
         }
@@ -426,13 +430,13 @@ fn responsible_pid(pid: i32) -> i32 {
 }
 
 #[cfg(target_os = "macos")]
-fn browser_capturing_mic_has_google_meet(capturing: &[String]) -> bool {
+fn browser_capturing_mic_has_google_meet(capturing: &[crate::meeting_detection::AudioApp]) -> bool {
     const BROWSERS: [&str; 3] = ["Google Chrome", "Microsoft Edge", "Safari"];
 
     BROWSERS.iter().any(|application_name| {
         capturing
             .iter()
-            .any(|app| app.eq_ignore_ascii_case(application_name))
+            .any(|app| app.name.eq_ignore_ascii_case(application_name))
             && browser_has_google_meet_tab(application_name)
     })
 }

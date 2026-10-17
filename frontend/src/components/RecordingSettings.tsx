@@ -9,6 +9,7 @@ import { useRecordingState } from '@/contexts/RecordingStateContext';
 import { useConfig } from '@/contexts/ConfigContext';
 import { SaveFeedback, StatusFeedback, type SaveFeedbackState } from '@/components/ui/status-feedback';
 import { SetupCheckPanel } from '@/components/SetupCheckPanel';
+import { MeetingDetectionIgnoreList } from '@/components/MeetingDetectionIgnoreList';
 import {
   CHANNEL_OUTCOMES,
   MODEL_CHECK_OUTCOMES,
@@ -389,7 +390,7 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
         <div className="flex-1 pr-4">
           <div className="font-medium">Meeting Detection Prompt</div>
           <div className="text-sm text-ink-muted">
-            Ask before recording when sustained audio is detected from a supported meeting app
+            Ask before recording when a meeting app starts using the microphone
           </div>
         </div>
         <Switch
@@ -399,6 +400,8 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
           disabled={saving}
         />
       </div>
+
+      <MeetingDetectionIgnoreList />
 
       <div className="flex items-center justify-between p-4 border rounded-lg">
         <div className="flex-1 pr-4">
