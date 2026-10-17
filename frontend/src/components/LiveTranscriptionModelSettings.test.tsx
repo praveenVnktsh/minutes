@@ -9,6 +9,7 @@ function settings(downloaded: boolean, downloading = false): LiveTranscriptionSe
   return {
     liveModel: 'nemotron-streaming',
     autoFinalPass: true,
+    liveEngine: 'auto',
     liveModelStatus: {
       modelId: 'nemotron',
       downloaded,

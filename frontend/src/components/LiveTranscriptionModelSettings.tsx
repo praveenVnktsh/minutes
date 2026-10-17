@@ -15,13 +15,17 @@ import {
 import { TranscriptModelCard, type TranscriptModelStatus } from '@/components/TranscriptModelCard';
 import { BYTES_PER_MIB } from '@/lib/download-display';
 import {
+  LIVE_ENGINE_OPTIONS,
   LIVE_MODEL_DISPLAY_NAME,
   LIVE_MODEL_DOWNLOAD_PROGRESS_EVENT,
   liveTranscriptionApi,
+  type LiveEngineChoice,
   type LiveModelChoice,
   type LiveModelDownloadProgressEvent,
   type LiveTranscriptionSettings,
+  type LiveTranscriptionSettingsChange,
 } from '@/lib/liveTranscriptionModels';
+import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion';
 
 /** Card status for the live model from settings plus the latest progress event. */
 export function liveModelCardStatus(
@@ -68,7 +72,7 @@ export function LiveTranscriptionModelSettings() {
     };
   }, [refresh]);
 
-  const save = useCallback(async (changes: { liveModel?: LiveModelChoice; autoFinalPass?: boolean }) => {
+  const save = useCallback(async (changes: LiveTranscriptionSettingsChange) => {
     const previous = settings;
     if (previous) setSettings({ ...previous, ...changes });
     setSaving(true);
@@ -190,6 +194,39 @@ export function LiveTranscriptionModelSettings() {
           onCheckedChange={(checked) => void save({ autoFinalPass: checked })}
         />
       </div>
+
+      {liveModel === 'nemotron-streaming' && (
+        <Accordion type="single" collapsible>
+          <AccordionItem value="advanced" className="border-b-0">
+            <AccordionTrigger className="py-2 text-sm font-medium text-ink-muted">Advanced</AccordionTrigger>
+            <AccordionContent>
+              <Label className="mb-1 block text-sm font-medium text-ink">Live transcription engine</Label>
+              <p className="mx-1 mb-2 text-xs text-ink-muted">
+                Where the live model runs. Auto uses the Neural Engine, which keeps the CPU and GPU
+                free with the same accuracy.
+              </p>
+              <div className="mx-1">
+                <Select
+                  value={settings?.liveEngine ?? 'auto'}
+                  disabled={!settings || saving}
+                  onValueChange={(value) => void save({ liveEngine: value as LiveEngineChoice })}
+                >
+                  <SelectTrigger aria-label="Live transcription engine" className="focus:ring-2 focus:ring-focus">
+                    <SelectValue placeholder="Auto" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {LIVE_ENGINE_OPTIONS.map((option) => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </AccordionContent>
+          </AccordionItem>
+        </Accordion>
+      )}
     </div>
   );
 }

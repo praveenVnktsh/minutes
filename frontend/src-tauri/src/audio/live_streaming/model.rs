@@ -1,9 +1,17 @@
 //! The Nemotron Speech Streaming 0.6B live model: where it lives, whether it
 //! is downloaded, and how to download it.
 //!
-//! Source: the sherpa-onnx export by the sherpa-onnx author (int8, 560 ms
-//! chunks) of `nvidia/nemotron-speech-streaming-en-0.6b`, pinned to one
-//! revision so every file always matches its size and SHA-256 below.
+//! It comes in two bundles of the same network
+//! (`nvidia/nemotron-speech-streaming-en-0.6b`), each pinned to one revision so
+//! every file always matches its size and SHA-256 below:
+//! - [`SHERPA`]: the sherpa-onnx export by the sherpa-onnx author (int8,
+//!   560 ms chunks), run on the CPU;
+//! - [`COREML`]: the Core ML export by FluidInference (int8 encoder, the same
+//!   560 ms chunks), run on the GPU or Neural Engine by `nemotron-helper`.
+//!
+//! "The live model" in the UI is the bundle the engine setting needs
+//! ([`needed_bundle`]); the other one is only used as a fallback when it is
+//! already on disk.
 //!
 //! Not to be confused with the Nemotron-3 *diarization* model (Sortformer) in
 //! `audio/sortformer`, which is a different network for speaker labels.
@@ -18,14 +26,8 @@ use log::{info, warn};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
-/// Identifier shown in settings and recorded as model provenance.
-pub const MODEL_ID: &str = "nemotron-speech-streaming-en-0.6b-560ms-int8";
-/// Folder under `app_data_dir/models`.
-const MODEL_DIR: &str = "nemotron-streaming";
-const REPO: &str =
-    "csukuangfj2/sherpa-onnx-nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25";
-/// Pinned Hugging Face revision of [`REPO`].
-pub const REVISION: &str = "52056fdc070914a48dcd68b31b44d6a6f5b85902";
+use crate::audio::transcription_settings::LiveEngineChoice;
+
 /// Event carrying download progress to the frontend.
 pub const DOWNLOAD_PROGRESS_EVENT: &str = "live-model-download-progress";
 
@@ -35,61 +37,177 @@ pub struct ModelFile {
     pub sha256: &'static str,
 }
 
+/// One downloadable set of model files.
+pub struct Bundle {
+    /// Identifier shown in settings and recorded as model provenance.
+    pub id: &'static str,
+    /// Folder under `app_data_dir/models`.
+    pub dir: &'static str,
+    pub repo: &'static str,
+    /// Pinned Hugging Face revision of `repo`.
+    pub revision: &'static str,
+    /// Folder of the repo the files are in, if not its root.
+    pub subdir: Option<&'static str>,
+    pub files: &'static [ModelFile],
+}
+
 pub const ENCODER: &str = "encoder.int8.onnx";
 pub const DECODER: &str = "decoder.int8.onnx";
 pub const JOINER: &str = "joiner.int8.onnx";
 pub const TOKENS: &str = "tokens.txt";
 
-/// Every file the recognizer needs, at [`REVISION`].
-pub const FILES: [ModelFile; 4] = [
-    ModelFile {
-        name: TOKENS,
-        bytes: 8_952,
-        sha256: "dc0b4584ab2e4ddbf888425c076c61b736e7356a015250db7d307e6f1a8188ff",
-    },
-    ModelFile {
-        name: DECODER,
-        bytes: 7_257_753,
-        sha256: "0be9702c2f427a2b6bb241d298e0d3836a558de1f5b9fd3018f1cce6e2b3fa98",
-    },
-    ModelFile {
-        name: JOINER,
-        bytes: 1_735_862,
-        sha256: "a35eac38a22ebceb04d230ed7afe0d68f446ba6914a036b97f14fece95967e23",
-    },
-    ModelFile {
-        name: ENCODER,
-        bytes: 652_916_849,
-        sha256: "7d932213491ad355c6e5576705dc3494731a52af87d7a1b954559340147909d8",
-    },
-];
+pub const SHERPA: Bundle = Bundle {
+    id: "nemotron-speech-streaming-en-0.6b-560ms-int8",
+    dir: "nemotron-streaming",
+    repo: "csukuangfj2/sherpa-onnx-nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25",
+    revision: "52056fdc070914a48dcd68b31b44d6a6f5b85902",
+    subdir: None,
+    files: &[
+        ModelFile {
+            name: TOKENS,
+            bytes: 8_952,
+            sha256: "dc0b4584ab2e4ddbf888425c076c61b736e7356a015250db7d307e6f1a8188ff",
+        },
+        ModelFile {
+            name: DECODER,
+            bytes: 7_257_753,
+            sha256: "0be9702c2f427a2b6bb241d298e0d3836a558de1f5b9fd3018f1cce6e2b3fa98",
+        },
+        ModelFile {
+            name: JOINER,
+            bytes: 1_735_862,
+            sha256: "a35eac38a22ebceb04d230ed7afe0d68f446ba6914a036b97f14fece95967e23",
+        },
+        ModelFile {
+            name: ENCODER,
+            bytes: 652_916_849,
+            sha256: "7d932213491ad355c6e5576705dc3494731a52af87d7a1b954559340147909d8",
+        },
+    ],
+};
 
-pub fn total_bytes() -> u64 {
-    FILES.iter().map(|file| file.bytes).sum()
-}
+pub const COREML: Bundle = Bundle {
+    id: "nemotron-speech-streaming-en-0.6b-560ms-coreml-int8",
+    dir: "nemotron-streaming-coreml",
+    repo: "FluidInference/nemotron-speech-streaming-en-0.6b-coreml",
+    revision: "e673531caa6d25ab7baf5a8c14c9b99ba1551838",
+    // The repo holds several chunk sizes; the app uses the 560 ms one, the
+    // same chunking as `SHERPA`. File names are relative to that folder.
+    subdir: Some("nemotron_coreml_560ms"),
+    files: &[
+        ModelFile {
+            name: "metadata.json",
+            bytes: 438,
+            sha256: "e8d93e5afa1e5c87257f6e31a5c336058eeba7d6cacd36ba80fbf9758c3916dc",
+        },
+        ModelFile {
+            name: "tokenizer.json",
+            bytes: 18_374,
+            sha256: "a87b5b8a0e0a989fa7db3121f279ce6af70e337feb55ab553b8d0658db70b9d3",
+        },
+        ModelFile {
+            name: "decoder_joint.mlmodelc/analytics/coremldata.bin",
+            bytes: 243,
+            sha256: "d46ecf790a728d91b8962ec62e597980e288e66c775e45429bf734b54c658ffc",
+        },
+        ModelFile {
+            name: "decoder_joint.mlmodelc/coremldata.bin",
+            bytes: 514,
+            sha256: "d9a7f7cfece967a69dca59b3fc3cc7d1ecff93ad2815ac3ba6b47e057db22172",
+        },
+        ModelFile {
+            name: "decoder_joint.mlmodelc/model.mil",
+            bytes: 17_146,
+            sha256: "517bb31cf87eb8aa80adaa8c3fee2df0fd7d7dd0c8791e615c5023886c39d572",
+        },
+        ModelFile {
+            name: "decoder_joint.mlmodelc/weights/weight.bin",
+            bytes: 17_876_866,
+            sha256: "96cac67a1352e45a2418284779dbd5efe5865159b7b92f328247e5ed31485f52",
+        },
+        ModelFile {
+            name: "encoder/encoder_int8.mlmodelc/analytics/coremldata.bin",
+            bytes: 243,
+            sha256: "ef51dbab5c6ce310ce1a537538a4df6b88f13ad5c45c0acaddca055503896daa",
+        },
+        ModelFile {
+            name: "encoder/encoder_int8.mlmodelc/coremldata.bin",
+            bytes: 608,
+            sha256: "864a357ae2eb7d6b38ced73d5f23c908096a256516afa498c6730778767ec404",
+        },
+        ModelFile {
+            name: "encoder/encoder_int8.mlmodelc/model.mil",
+            bytes: 968_920,
+            sha256: "4b903ee4f401d81add07d1252192a486bd07154174818902f03bca38b2f293f6",
+        },
+        ModelFile {
+            name: "encoder/encoder_int8.mlmodelc/weights/weight.bin",
+            bytes: 589_057_600,
+            sha256: "8ced31411f7903eaec52de85e94c7847228f3e44028d8f0040800e5603943a40",
+        },
+    ],
+};
 
-pub fn file_url(name: &str) -> String {
-    format!("https://huggingface.co/{REPO}/resolve/{REVISION}/{name}")
-}
+impl Bundle {
+    pub fn total_bytes(&self) -> u64 {
+        self.files.iter().map(|file| file.bytes).sum()
+    }
 
-pub fn model_dir<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf> {
-    Ok(app.path().app_data_dir()?.join("models").join(MODEL_DIR))
-}
+    pub fn file_url(&self, name: &str) -> String {
+        let path = match self.subdir {
+            Some(subdir) => format!("{subdir}/{name}"),
+            None => name.to_string(),
+        };
+        format!(
+            "https://huggingface.co/{}/resolve/{}/{path}",
+            self.repo, self.revision
+        )
+    }
 
-/// A file only reaches its final name after its hash was verified, so a file
-/// of the expected size is trusted without re-hashing 650 MB on every start.
-pub fn is_downloaded_in(dir: &Path) -> bool {
-    FILES.iter().all(|file| {
-        std::fs::metadata(dir.join(file.name))
-            .map(|metadata| metadata.len() == file.bytes)
+    /// A file only reaches its final name after its hash was verified, so a
+    /// file of the expected size is trusted without re-hashing on every start.
+    pub fn is_downloaded_in(&self, dir: &Path) -> bool {
+        self.files.iter().all(|file| {
+            std::fs::metadata(dir.join(file.name))
+                .map(|metadata| metadata.len() == file.bytes)
+                .unwrap_or(false)
+        })
+    }
+
+    pub fn dir<R: Runtime>(&self, app: &AppHandle<R>) -> Result<PathBuf> {
+        Ok(app.path().app_data_dir()?.join("models").join(self.dir))
+    }
+
+    pub fn is_downloaded<R: Runtime>(&self, app: &AppHandle<R>) -> bool {
+        self.dir(app)
+            .map(|dir| self.is_downloaded_in(&dir))
             .unwrap_or(false)
-    })
+    }
 }
 
+/// The bundle an engine choice runs: the sherpa export for the CPU, the Core
+/// ML one otherwise.
+pub fn bundle_for(choice: LiveEngineChoice) -> &'static Bundle {
+    match choice {
+        LiveEngineChoice::Cpu => &SHERPA,
+        _ => &COREML,
+    }
+}
+
+pub fn needed_bundle<R: Runtime>(app: &AppHandle<R>) -> &'static Bundle {
+    bundle_for(crate::audio::transcription_settings::load_settings(app).live_engine)
+}
+
+/// Whether the live model for the current engine setting is on disk.
 pub fn is_downloaded<R: Runtime>(app: &AppHandle<R>) -> bool {
-    model_dir(app)
-        .map(|dir| is_downloaded_in(&dir))
-        .unwrap_or(false)
+    needed_bundle(app).is_downloaded(app)
+}
+
+/// Whether some live engine can run: the needed bundle, or the other one as a
+/// fallback while the needed one is still downloading.
+pub fn is_usable<R: Runtime>(app: &AppHandle<R>) -> bool {
+    SHERPA.is_downloaded(app)
+        || (COREML.is_downloaded(app) && super::native::resolve_helper().is_some())
 }
 
 static DOWNLOADING: AtomicBool = AtomicBool::new(false);
@@ -121,10 +239,14 @@ fn emit<R: Runtime>(app: &AppHandle<R>, event: DownloadProgressEvent) {
     }
 }
 
-fn terminal_event(status: &'static str, error: Option<String>) -> DownloadProgressEvent {
-    let total = total_bytes() as f64 / MB;
+fn terminal_event(
+    bundle: &'static Bundle,
+    status: &'static str,
+    error: Option<String>,
+) -> DownloadProgressEvent {
+    let total = bundle.total_bytes() as f64 / MB;
     DownloadProgressEvent {
-        model_name: MODEL_ID,
+        model_name: bundle.id,
         progress: if status == "completed" { 100 } else { 0 },
         downloaded_mb: if status == "completed" { total } else { 0.0 },
         total_mb: total,
@@ -141,17 +263,17 @@ pub fn overall_bytes(done_bytes: u64, file_bytes: u64, percent: u32) -> u64 {
     done_bytes + file_bytes * u64::from(percent.min(100)) / 100
 }
 
-async fn download_all<R: Runtime>(app: &AppHandle<R>) -> Result<()> {
-    let dir = model_dir(app)?;
+async fn download_all<R: Runtime>(app: &AppHandle<R>, bundle: &'static Bundle) -> Result<()> {
+    let dir = bundle.dir(app)?;
     tokio::fs::create_dir_all(&dir).await?;
     let client = reqwest::Client::builder()
         .connect_timeout(crate::audio::diarization::DOWNLOAD_CONNECT_TIMEOUT)
         .build()?;
-    let total = total_bytes();
+    let total = bundle.total_bytes();
     let mut done: u64 = 0;
     let mut eta = crate::download_eta::DownloadEta::new();
 
-    for file in FILES.iter() {
+    for file in bundle.files.iter() {
         let destination = dir.join(file.name);
         if std::fs::metadata(&destination)
             .map(|m| m.len() == file.bytes)
@@ -159,6 +281,9 @@ async fn download_all<R: Runtime>(app: &AppHandle<R>) -> Result<()> {
         {
             done += file.bytes;
             continue;
+        }
+        if let Some(parent) = destination.parent() {
+            tokio::fs::create_dir_all(parent).await?;
         }
         let _ = tokio::fs::remove_file(&destination).await;
         info!(
@@ -168,7 +293,7 @@ async fn download_all<R: Runtime>(app: &AppHandle<R>) -> Result<()> {
         let done_before = done;
         crate::audio::diarization::download_verified(
             &client,
-            &file_url(file.name),
+            &bundle.file_url(file.name),
             &destination,
             file.bytes,
             file.sha256,
@@ -178,7 +303,7 @@ async fn download_all<R: Runtime>(app: &AppHandle<R>) -> Result<()> {
                 emit(
                     app,
                     DownloadProgressEvent {
-                        model_name: MODEL_ID,
+                        model_name: bundle.id,
                         progress: (downloaded * 100 / total.max(1)) as u32,
                         downloaded_mb: downloaded as f64 / MB,
                         total_mb: total as f64 / MB,
@@ -197,11 +322,14 @@ async fn download_all<R: Runtime>(app: &AppHandle<R>) -> Result<()> {
     Ok(())
 }
 
-/// Download the model and wait for it. Emits progress; a second caller while a
-/// download runs gets an error instead of a duplicate download.
+/// Download the live model the engine setting needs and wait for it. Emits
+/// progress; a second caller while a download runs gets an error instead of
+/// a duplicate download. A Core ML download is then compiled for the device
+/// in the background, so the first recording starts quickly.
 pub async fn download<R: Runtime>(app: &AppHandle<R>) -> Result<()> {
-    if is_downloaded(app) {
-        emit(app, terminal_event("completed", None));
+    let bundle = needed_bundle(app);
+    if bundle.is_downloaded(app) {
+        emit(app, terminal_event(bundle, "completed", None));
         return Ok(());
     }
     if DOWNLOADING.swap(true, Ordering::SeqCst) {
@@ -210,7 +338,7 @@ pub async fn download<R: Runtime>(app: &AppHandle<R>) -> Result<()> {
     let task_app = app.clone();
     let (sender, receiver) = tokio::sync::oneshot::channel();
     let handle = tauri::async_runtime::spawn(async move {
-        let result = download_all(&task_app).await;
+        let result = download_all(&task_app, bundle).await;
         let _ = sender.send(result);
     });
     *DOWNLOAD_TASK.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
@@ -228,24 +356,30 @@ pub async fn download<R: Runtime>(app: &AppHandle<R>) -> Result<()> {
 
     match &result {
         Ok(()) => {
-            info!("Live model downloaded and verified");
-            emit(app, terminal_event("completed", None));
+            info!("Live model {} downloaded and verified", bundle.id);
+            emit(app, terminal_event(bundle, "completed", None));
+            if std::ptr::eq(bundle, &COREML) {
+                super::engine::spawn_prepare(app.clone());
+            }
         }
         Err(error) if error.to_string() == "cancelled" => {
-            remove_partials(app);
-            emit(app, terminal_event("cancelled", None));
+            remove_partials(app, bundle);
+            emit(app, terminal_event(bundle, "cancelled", None));
         }
         Err(error) => {
             warn!("Live model download failed: {error:#}");
-            emit(app, terminal_event("error", Some(format!("{error:#}"))));
+            emit(
+                app,
+                terminal_event(bundle, "error", Some(format!("{error:#}"))),
+            );
         }
     }
     result
 }
 
-fn remove_partials<R: Runtime>(app: &AppHandle<R>) {
-    if let Ok(dir) = model_dir(app) {
-        for file in FILES.iter() {
+fn remove_partials<R: Runtime>(app: &AppHandle<R>, bundle: &Bundle) {
+    if let Ok(dir) = bundle.dir(app) {
+        for file in bundle.files.iter() {
             let _ = std::fs::remove_file(dir.join(file.name).with_extension("part"));
         }
     }
@@ -266,12 +400,14 @@ pub fn cancel_download() -> bool {
     }
 }
 
-/// Delete the downloaded model.
+/// Delete the downloaded live model (both bundles).
 pub fn delete<R: Runtime>(app: &AppHandle<R>) -> Result<()> {
     super::engine::unload();
-    let dir = model_dir(app)?;
-    if dir.exists() {
-        std::fs::remove_dir_all(&dir)?;
+    for bundle in [&SHERPA, &COREML] {
+        let dir = bundle.dir(app)?;
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir)?;
+        }
     }
     Ok(())
 }
@@ -282,35 +418,61 @@ mod tests {
 
     #[test]
     fn urls_are_pinned_to_the_revision() {
-        let url = file_url(ENCODER);
-        assert!(url.contains(REVISION), "{url}");
-        assert!(url.ends_with("/encoder.int8.onnx"));
-        assert!(!url.contains("/main/"));
+        for bundle in [&SHERPA, &COREML] {
+            let url = bundle.file_url(bundle.files[0].name);
+            assert!(url.contains(bundle.revision), "{url}");
+            assert!(!url.contains("/main/"));
+        }
+        assert!(SHERPA.file_url(ENCODER).ends_with("/encoder.int8.onnx"));
+        assert!(COREML
+            .file_url("encoder/encoder_int8.mlmodelc/weights/weight.bin")
+            .ends_with("/resolve/e673531caa6d25ab7baf5a8c14c9b99ba1551838/nemotron_coreml_560ms/encoder/encoder_int8.mlmodelc/weights/weight.bin"));
     }
 
     #[test]
     fn every_file_has_a_sha256_and_size() {
-        for file in FILES.iter() {
-            assert_eq!(file.sha256.len(), 64, "{}", file.name);
-            assert!(file.bytes > 0);
+        for bundle in [&SHERPA, &COREML] {
+            for file in bundle.files.iter() {
+                assert_eq!(file.sha256.len(), 64, "{}", file.name);
+                assert!(file.sha256.chars().all(|c| c.is_ascii_hexdigit()));
+                assert!(file.bytes > 0);
+            }
+            assert!(bundle.total_bytes() > 550 * 1024 * 1024);
         }
-        assert!(total_bytes() > 600 * 1024 * 1024);
+    }
+
+    #[test]
+    fn the_cpu_runs_the_sherpa_bundle_and_everything_else_core_ml() {
+        assert!(std::ptr::eq(bundle_for(LiveEngineChoice::Cpu), &SHERPA));
+        for choice in [
+            LiveEngineChoice::Auto,
+            LiveEngineChoice::Gpu,
+            LiveEngineChoice::NeuralEngine,
+        ] {
+            assert!(std::ptr::eq(bundle_for(choice), &COREML));
+        }
     }
 
     #[test]
     fn readiness_requires_every_file_at_its_exact_size() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(!is_downloaded_in(dir.path()));
-        for file in FILES.iter() {
-            let f = std::fs::File::create(dir.path().join(file.name)).unwrap();
-            f.set_len(file.bytes).unwrap();
+        for bundle in [&SHERPA, &COREML] {
+            let dir = tempfile::tempdir().unwrap();
+            assert!(!bundle.is_downloaded_in(dir.path()));
+            for file in bundle.files.iter() {
+                let path = dir.path().join(file.name);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::File::create(&path)
+                    .unwrap()
+                    .set_len(file.bytes)
+                    .unwrap();
+            }
+            assert!(bundle.is_downloaded_in(dir.path()));
+            std::fs::File::create(dir.path().join(bundle.files[0].name))
+                .unwrap()
+                .set_len(1)
+                .unwrap();
+            assert!(!bundle.is_downloaded_in(dir.path()));
         }
-        assert!(is_downloaded_in(dir.path()));
-        std::fs::File::create(dir.path().join(ENCODER))
-            .unwrap()
-            .set_len(10)
-            .unwrap();
-        assert!(!is_downloaded_in(dir.path()));
     }
 
     #[test]

@@ -276,7 +276,12 @@ mod imp {
             let mut events = Vec::new();
             let mut warned_backlog = false;
             let mut cancelled = false;
-            info!("🚀 Streaming live transcription started (Nemotron)");
+            let mut engine = engine;
+            let mut live_text_off = false;
+            info!(
+                "🚀 Streaming live transcription started (Nemotron on {})",
+                engine.device()
+            );
 
             loop {
                 let first = match next_chunk(&runtime, &mut receiver, &cancel) {
@@ -293,6 +298,9 @@ mod imp {
                 let mut batch = vec![first];
                 while let Ok(chunk) = receiver.try_recv() {
                     batch.push(chunk);
+                }
+                if live_text_off {
+                    continue;
                 }
 
                 let backlog = backlog_seconds(&batch);
@@ -345,8 +353,33 @@ mod imp {
                     cancelled = true;
                     break;
                 }
-                if let Some(transcriber) = transcriber.as_mut() {
-                    transcriber.decode(&mut events);
+                if let Some(current) = transcriber.as_mut() {
+                    current.decode(&mut events);
+                    if let Some(failure) = current.failure().map(str::to_string) {
+                        // The Core ML helper died or hung. Keep what it
+                        // decoded and carry on on the CPU if that model is
+                        // there; the final pass covers any gap either way.
+                        current.commit_decoded(&mut events);
+                        let sample_rate = current.sample_rate();
+                        transcriber = None;
+                        engine = match fallback_engine(&app, &engine) {
+                            Some(cpu) => {
+                                notify_engine_failure(&app, &failure, true);
+                                cpu
+                            }
+                            None => {
+                                notify_engine_failure(&app, &failure, false);
+                                engine
+                            }
+                        };
+                        if engine.backend == crate::audio::live_streaming::engine::Backend::Sherpa {
+                            transcriber =
+                                Some(StreamingTranscriber::new(engine.clone(), sample_rate));
+                        } else {
+                            // No fallback: drain without live text.
+                            live_text_off = true;
+                        }
+                    }
                 }
                 emit_events(&app, &mut deduper, offset, &mut events);
                 super::DECODE_BUSY_US.fetch_add(
@@ -378,6 +411,42 @@ mod imp {
             super::LAST_BACKLOG_MS.store(0, std::sync::atomic::Ordering::Relaxed);
             info!("✅ Streaming live transcription finished");
         })
+    }
+
+    /// The CPU engine to continue on after the Core ML helper failed, if the
+    /// failed engine was not already the CPU one and its model is on disk.
+    fn fallback_engine<R: Runtime>(
+        app: &AppHandle<R>,
+        failed: &Arc<StreamingEngine>,
+    ) -> Option<Arc<StreamingEngine>> {
+        if failed.backend == crate::audio::live_streaming::engine::Backend::Sherpa {
+            return None;
+        }
+        match crate::audio::live_streaming::engine::load_cpu_fallback(app) {
+            Ok(engine) => Some(engine),
+            Err(error) => {
+                warn!("No CPU fallback for live transcription: {error:#}");
+                None
+            }
+        }
+    }
+
+    fn notify_engine_failure<R: Runtime>(app: &AppHandle<R>, failure: &str, recovered: bool) {
+        let message = if recovered {
+            "Live transcription on the GPU/Neural Engine stopped, so it continues on the CPU."
+        } else {
+            "Live transcription stopped. The final transcript after the meeting will include everything."
+        };
+        warn!("{message} ({failure})");
+        let _ = app.emit(
+            "transcription-error",
+            serde_json::json!({
+                "error": failure,
+                "userMessage": message,
+                "actionable": false,
+                "phase": "active"
+            }),
+        );
     }
 
     fn first_rate(batch: &[AudioChunk]) -> u32 {

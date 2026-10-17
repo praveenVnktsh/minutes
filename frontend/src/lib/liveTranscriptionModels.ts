@@ -11,11 +11,28 @@ export interface LiveModelStatus {
   sizeBytes: number;
 }
 
+/** Where the streaming live model runs (Settings → Advanced). */
+export type LiveEngineChoice = 'auto' | 'gpu' | 'neural-engine' | 'cpu';
+
+export const LIVE_ENGINE_OPTIONS: { value: LiveEngineChoice; label: string }[] = [
+  { value: 'auto', label: 'Auto (Neural Engine)' },
+  { value: 'gpu', label: 'GPU' },
+  { value: 'neural-engine', label: 'Neural Engine' },
+  { value: 'cpu', label: 'CPU' },
+];
+
 export interface LiveTranscriptionSettings {
   liveModel: LiveModelChoice;
   autoFinalPass: boolean;
+  liveEngine: LiveEngineChoice;
   liveModelStatus: LiveModelStatus;
 }
+
+export type LiveTranscriptionSettingsChange = {
+  liveModel?: LiveModelChoice;
+  autoFinalPass?: boolean;
+  liveEngine?: LiveEngineChoice;
+};
 
 /** `live-model-download-progress` payload. */
 export interface LiveModelDownloadProgressEvent {
@@ -34,7 +51,7 @@ export const LIVE_MODEL_DISPLAY_NAME = 'Nemotron Streaming 0.6B';
 
 export const liveTranscriptionApi = {
   getSettings: () => invoke<LiveTranscriptionSettings>('get_live_transcription_settings'),
-  setSettings: (changes: { liveModel?: LiveModelChoice; autoFinalPass?: boolean }) =>
+  setSettings: (changes: LiveTranscriptionSettingsChange) =>
     invoke<LiveTranscriptionSettings>('set_live_transcription_settings', changes),
   download: () => invoke<void>('live_model_download'),
   cancelDownload: () => invoke<boolean>('live_model_cancel_download'),

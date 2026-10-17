@@ -116,6 +116,7 @@
     ],
     "externalBin": [
       "binaries/llama-helper",
+      "binaries/nemotron-helper",
       "binaries/ffmpeg"
     ],
     "macOS": {
