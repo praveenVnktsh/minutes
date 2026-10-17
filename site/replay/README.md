@@ -1,5 +1,14 @@
 # Replay viewer
 
+> **The primary viewer is now in the app.** Turn on Settings → Developer →
+> Replays and open **Replays** in the sidebar: runs play back through the app's
+> real recording workspace (live transcript, live summary, Copilot, record
+> pill), with the same timeline, audio and live Copilot as this page. See
+> `docs/superpowers/specs/2026-10-16-in-app-replay-design.md`. This static page
+> keeps working for sharing a viewer without the app, and its `parser.js` is
+> the reference the app's reducer (`frontend/src/lib/replay/reducer.ts`) is
+> tested against.
+
 A static page that plays back a pipeline replay: the recording screen (live
 transcript dock, live summary, Copilot panel, record pill) at any moment, and a
 multi-lane timeline of the whole run.
