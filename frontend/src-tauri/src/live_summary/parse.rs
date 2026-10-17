@@ -7,6 +7,7 @@ use serde_json::Value;
 use std::collections::HashSet;
 use std::fmt;
 
+use super::facts::Figures;
 use super::notes::{NoteContext, Refiner};
 
 /// Longest entry text kept, in characters.
@@ -135,7 +136,22 @@ fn parse_with(
     context: Option<&NoteContext<'_>>,
 ) -> Result<Vec<ParsedEntry>, ParseError> {
     let cleaned = strip_fences(&strip_think(raw));
-    let value = reply_json_value(&cleaned).or_else(|| reply_json_value(&repair_brackets(&cleaned)));
+    // The reply as written and with its brackets repaired: the one with more
+    // entries wins, so `[{a},{"text":"b"]}` keeps b rather than stopping at
+    // the first object that happens to parse.
+    let direct = reply_json_value(&cleaned);
+    let repaired = reply_json_value(&repair_brackets(&cleaned));
+    let count = |value: &Option<Value>| {
+        value
+            .clone()
+            .and_then(entry_items)
+            .map_or(0, |items| items.len())
+    };
+    let value = if count(&repaired) > count(&direct) {
+        repaired
+    } else {
+        direct.or(repaired)
+    };
     let items = match value {
         Some(value) => entry_items(value).ok_or(ParseError::UnexpectedShape)?,
         None => {
@@ -154,6 +170,7 @@ fn parse_with(
     let window_end_ms = window_end_ms.max(window_start_ms);
     let mut refiner = context.map(Refiner::new);
     let mut seen: Vec<HashSet<String>> = previous_texts.iter().map(|t| word_set(t)).collect();
+    let mut seen_texts: Vec<String> = previous_texts.to_vec();
     let mut entries = Vec::new();
     for item in items {
         if entries.len() >= max_entries {
@@ -170,20 +187,22 @@ fn parse_with(
             None => entry,
         };
         let words = word_set(&entry.text);
-        if words.is_empty()
-            || seen.iter().any(|other| {
-                overlap(&words, other) >= DUPLICATE_OVERLAP
-                    // Rewordings count as repeats for the notetaker only, so
-                    // the A/B baseline stays as it was.
-                    || (context.is_some() && shares_content(&words, other))
-            })
-        {
+        let repeated = if context.is_some() {
+            // The notetaker: rewordings are repeats, changed facts are not.
+            seen_texts.iter().any(|other| is_repeat(&entry.text, other))
+        } else {
+            // The A/B baseline stays as it was.
+            seen.iter()
+                .any(|other| overlap(&words, other) >= DUPLICATE_OVERLAP)
+        };
+        if words.is_empty() || repeated {
             continue;
         }
         if let Some(refiner) = refiner.as_mut() {
             refiner.accept(&entry);
         }
         seen.push(words);
+        seen_texts.push(entry.text.clone());
         entries.push(entry);
     }
     Ok(entries)
@@ -551,10 +570,73 @@ fn shares_content(a: &HashSet<String>, b: &HashSet<String>) -> bool {
         && shared as f64 / union as f64 >= REPEAT_JACCARD
 }
 
-/// Whether `text` repeats `other` (the parser's repeat check).
+/// Whether `text` repeats `other` (the notetaker's repeat check): the same
+/// words, or a rewording that shares most content words. Notes whose figures
+/// differ ("May 10" → "May 24") or where only one is negated ("will ship" →
+/// "will not ship") say something new, however alike they read.
 pub fn is_repeat(text: &str, other: &str) -> bool {
     let (a, b) = (word_set(text), word_set(other));
-    overlap(&a, &b) >= DUPLICATE_OVERLAP || shares_content(&a, &b)
+    let alike = overlap(&a, &b) >= DUPLICATE_OVERLAP || shares_content(&a, &b);
+    alike && !figures_differ(text, other) && negated(text) == negated(other)
+}
+
+/// Words and endings that negate a note.
+const NEGATIONS: &[&str] = &[
+    "not",
+    "no",
+    "never",
+    "none",
+    "nobody",
+    "nothing",
+    "neither",
+    "nor",
+    "without",
+    "cannot",
+    "won't",
+    "can't",
+    "don't",
+    "doesn't",
+    "didn't",
+    "isn't",
+    "aren't",
+    "wasn't",
+    "weren't",
+    "shouldn't",
+    "wouldn't",
+    "couldn't",
+    "hasn't",
+    "haven't",
+    "hadn't",
+    "cancelled",
+    "canceled",
+    "dropped",
+    "scrapped",
+];
+
+/// Whether a note is negated ("not", "won't", "no longer", "never"…).
+fn negated(text: &str) -> bool {
+    text.split_whitespace()
+        .map(|w| {
+            w.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'' && c != '’')
+                .replace('’', "'")
+                .to_lowercase()
+        })
+        .any(|w| NEGATIONS.contains(&w.as_str()) || w.ends_with("n't"))
+}
+
+/// Whether two notes state different figures: one has a value the other
+/// does not.
+fn figures_differ(a: &str, b: &str) -> bool {
+    let (a, b) = (Figures::of(a), Figures::of(b));
+    let missing = |from: &Figures, other: &Figures| {
+        from.values().iter().any(|v| {
+            !other
+                .values()
+                .iter()
+                .any(|w| (v - w).abs() < 1e-6 * v.abs().max(1.0))
+        })
+    };
+    missing(&a, &b) || missing(&b, &a)
 }
 
 fn overlap(a: &HashSet<String>, b: &HashSet<String>) -> f64 {
@@ -742,6 +824,71 @@ mod tests {
         assert_eq!(parse_topic_decision(r#"{"same":false}"#), None);
         assert_eq!(parse_topic_decision(r#"{"entries":[]}"#), None);
         assert_eq!(parse_topic_decision("same"), None);
+    }
+
+    #[test]
+    fn changed_figures_and_negations_are_not_repeats() {
+        let cases = [
+            (
+                "Launch set for May 10 after the design review",
+                "Launch set for May 24 after the design review",
+            ),
+            ("Launch set for May 10", "Launch slips to May 24"),
+            (
+                "We will ship the offline sync feature in the beta",
+                "We will not ship the offline sync feature in the beta",
+            ),
+            (
+                "Acme will renew the enterprise contract this quarter",
+                "Acme won't renew the enterprise contract this quarter",
+            ),
+            (
+                "Pricing tiers still include the free plan for students",
+                "Pricing tiers no longer include the free plan for students",
+            ),
+            (
+                "Team of 40 engineers across hardware and software",
+                "Team of 100 engineers across hardware and software",
+            ),
+        ];
+        for (earlier, later) in cases {
+            assert!(!is_repeat(later, earlier), "{earlier} / {later}");
+        }
+        // Through the parser: the changed decision is kept.
+        let raw = r#"{"entries":[{"kind":"decision","text":"Launch set for May 24 after the design review"}]}"#;
+        let previous = vec!["Launch set for May 10 after the design review".to_string()];
+        let context = NoteContext {
+            previous_texts: &previous,
+            ..Default::default()
+        };
+        let kept = parse_notes(raw, START, END, 2, &context).unwrap();
+        assert_eq!(kept.len(), 1);
+        // The same words again are still a repeat.
+        let previous = vec!["Launch set for May 24 after the design review".to_string()];
+        let context = NoteContext {
+            previous_texts: &previous,
+            ..Default::default()
+        };
+        assert!(parse_notes(raw, START, END, 2, &context)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn repaired_replies_keep_every_entry() {
+        for raw in [
+            r#"[{"kind":"point","text":"Budget approved by finance"},{"kind":"point","text":"Hiring paused until spring"]}"#,
+            r#"{"entries":[{"kind":"point","text":"Budget approved by finance"},{"kind":"point","text":"Hiring paused until spring"]}"#,
+            r#"{"entries":[{"kind":"point","text":"Budget approved by finance"},{"kind":"point","text":"Hiring paused until spring"}"#,
+        ] {
+            let entries = parse(raw).unwrap();
+            let texts: Vec<&str> = entries.iter().map(|e| e.text.as_str()).collect();
+            assert_eq!(
+                texts,
+                ["Budget approved by finance", "Hiring paused until spring"],
+                "{raw}"
+            );
+        }
     }
 
     #[test]

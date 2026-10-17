@@ -695,9 +695,26 @@
     else if (t && t.status === 'unavailable') notice = `<p class="notice ${t.error ? 'warning' : 'neutral'}">${esc(t.error || 'Live summary needs a summary model. Choose one in Settings → Summary.')}</p>`;
     else if (t && t.status === 'disabled') notice = '<p class="notice neutral">Live summary is off. Turn it on in Settings → Summary.</p>';
     const marker = (kind) => (kind === 'decision' ? badge('success', 'Decision') : kind === 'action' ? badge('info', 'Action') : '');
-    const list = entries.length
-      ? `<ol>${entries.map((e, k) => `<li class="${grew && k === entries.length - 1 ? 'fresh' : ''}"><span class="ls-time"><button type="button" data-seconds="${num(Math.floor(Number(e.start_ms) / 1000), '0')}" class="cite-plain">${esc(R.clock(e.start_ms))}</button></span><span class="ls-text">${marker(e.kind)}${esc(e.text)}${e.speaker ? `<span class="ls-speaker">· ${esc(e.speaker)}</span>` : ''}</span></li>`).join('')}</ol>`
-      : '';
+    // As the app shows them: grouped under topic headers (a new section when
+    // the topic changes); an entry without a topic stays in the section
+    // before it. Only entries made before topics show their speaker; an
+    // action the user owns reads "You — task".
+    const row = (e, k) => {
+      const owned = e.kind === 'action' && e.speaker === 'You' && !/^you\b/i.test(String(e.text));
+      const text = owned ? `You — ${e.text}` : e.text;
+      const legacy = e.topic == null && e.speaker && !owned;
+      return `<li class="${grew && k === entries.length - 1 ? 'fresh' : ''}"><span class="ls-time"><button type="button" data-seconds="${num(Math.floor(Number(e.start_ms) / 1000), '0')}" class="cite-plain">${esc(R.clock(e.start_ms))}</button></span><span class="ls-text">${marker(e.kind)}${esc(text)}${legacy ? `<span class="ls-speaker">· ${esc(e.speaker)}</span>` : ''}</span></li>`;
+    };
+    const sections = [];
+    entries.forEach((e, k) => {
+      const topic = typeof e.topic === 'string' && e.topic.trim() ? e.topic.trim() : null;
+      const last = sections[sections.length - 1];
+      if (last && (topic === null || topic === last.topic)) last.rows.push(row(e, k));
+      else sections.push({ topic, rows: [row(e, k)] });
+    });
+    const list = sections
+      .map((s) => `${s.topic ? `<p class="ls-topic">${esc(s.topic)}</p>` : ''}<ol>${s.rows.join('')}</ol>`)
+      .join('');
     const listening = live && (!t || (t.status !== 'disabled' && t.status !== 'unavailable'));
     const tail = listening
       ? `<p class="ls-listening"><i class="${t && t.status === 'generating' ? 'pulse' : ''}"></i>${t && t.status === 'generating' ? 'Summarizing the last minute…' : entries.length === 0 ? 'Listening… key points will appear here every minute or so.' : 'Listening…'}</p>`

@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { listen } from '@tauri-apps/api/event';
+import { useLiveSource } from '@/lib/liveSource';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 import {
   LIVE_TIMELINE_UPDATE_EVENT,
@@ -15,6 +15,7 @@ import { TimelineEntryRow, TimelineSections } from './LiveSummaryPanel';
 /** A meeting's stored live summary entries. Reloads when the recording's
  * worker stores its last entry after the page opened. */
 export function useMeetingTimeline(meetingId: string | undefined): StoredTimelineEntry[] {
+  const source = useLiveSource();
   const [entries, setEntries] = useState<StoredTimelineEntry[]>([]);
   const load = useCallback(async () => {
     if (!meetingId) return;
@@ -31,7 +32,7 @@ export function useMeetingTimeline(meetingId: string | undefined): StoredTimelin
     if (!meetingId) return undefined;
     let disposed = false;
     let unlisten: (() => void) | undefined;
-    void listen<TimelineSnapshot>(LIVE_TIMELINE_UPDATE_EVENT, ({ payload }) => {
+    void source.listen<TimelineSnapshot>(LIVE_TIMELINE_UPDATE_EVENT, ({ payload }) => {
       if (payload.meeting_id === meetingId) void load();
     }).then((fn) => {
       if (disposed) fn();
@@ -41,7 +42,7 @@ export function useMeetingTimeline(meetingId: string | undefined): StoredTimelin
       disposed = true;
       unlisten?.();
     };
-  }, [load, meetingId]);
+  }, [load, meetingId, source]);
 
   return entries;
 }

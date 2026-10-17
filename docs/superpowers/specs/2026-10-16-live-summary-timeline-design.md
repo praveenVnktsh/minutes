@@ -117,14 +117,23 @@ never who said it, and sit under topics.
     one owned by each side.
 
   Output: `{"entries":[{"start":"mm:ss","end":"mm:ss","topic":"…","kind":"point","text":"…","speaker":null}]}`.
-- **Topic step.** Before the notes call, when there is a current topic, one small call asks
-  whether the window is still mainly about it (`prompt::topic_user_prompt`: the topic, since
-  when, its last 3 notes and the window's transcript). The answer is `{"same":true}` or
-  `{"same":false,"topic":"…"}`; `notes::decide_topic` keeps the current topic for "same", a
-  near-duplicate title, or a topic younger than 2 minutes, and reuses an earlier title when
-  the conversation returns to it. Asked for notes and a topic together, the small model kept
-  copying the current topic for 7+ minutes after the subject changed. It costs about 1.5–2 s
-  per window. No usable answer (or no current topic) leaves the topic to the notes call.
+- **Topic step** (local models only: built-in, Ollama). Before the notes call, one small call
+  asks whether the window is still mainly about the current topic
+  (`prompt::topic_user_prompt`: the topic, since when, its last 3 notes and the window's
+  transcript). The answer is `{"same":true}` or `{"same":false,"topic":"…"}`;
+  `notes::decide_topic` keeps the current topic for "same", a near-duplicate title or one
+  sharing two specific words ("Sequoia Investment Thesis" / "Sequoia's Investment Strategy"),
+  and reuses an earlier title when the conversation returns to it. Asked for notes and a topic
+  together, the 4B model kept copying the current topic for 7+ minutes after the subject
+  changed.
+  - Not asked while the current topic is younger than 3 minutes, nor for the tail window at
+    stop, nor when there is no topic yet: the notes call names the topic then. Cloud
+    providers never get it, so a window stays one request there.
+  - Its own timeout is 15 s; with the notes call it shares one 60 s budget per window.
+  - A failed step (pre-empted, refused, timed out) fails the window, which goes through the
+    usual retry and back-off; the notes call is not made. An unreadable answer leaves the
+    topic to the notes call.
+  - Traced as `timeline-request` with id `<n>-topic`, next to the window's own request.
 - **User prompt.**
   - `Topic of the new transcript: <title> (already decided …)` when the topic step answered;
     otherwise `Current topic: <title> (since mm:ss)`, offered as a choice once it has run over
@@ -142,8 +151,9 @@ of `notes.rs`; `parse_entries` is the reply as written (kept for the A/B tool).
 
 - Strips `<think>…</think>` (and an unclosed `<think>` up to the first `{`) and code fences.
 - Accepts `{"entries":[…]}`, a bare array, or a single object.
-- Repairs mismatched brackets (a dropped `}` before `]`). If the JSON is truncated, it
-  salvages every complete `{…}` object that has a `text`.
+- Repairs mismatched brackets (a dropped `}` before `]`); the reading with more entries wins
+  over the reply as written, so a repair never stops at the first object. If the JSON is
+  truncated, it salvages every complete `{…}` object that has a `text`.
 - **Times.** Times may be `"mm:ss"`, `"h:mm:ss"` or seconds. They are clamped into the
   window. A missing or invalid time falls back to the window's bounds, and `end` is never
   before `start`.
@@ -161,11 +171,15 @@ of `notes.rs`; `parse_entries` is the reply as written (kept for the A/B tool).
   - A decision phrased as a question becomes a point. Points and decisions drop `speaker`.
   - Notes are at most 14 words: cut to their leading clauses (`;`, ` — `, `,`), else before
     the last clause word ("with", "while", "using"…), else at 14 words without a dangling last
-    word. "Ai"/"Ml"/"Av"/"Gpu" become acronyms.
-  - **Numbers** (`facts.rs`): a note whose figures are not in its window or the context lines
-    before it is dropped. Spelled numbers ("three and a half", "two point uh seven",
-    "seventy two") and tidied ones ("~70", "$2M", "3.5") match; magnitude words
-    ("thousands") need the same word or a figure that large.
+    word. A "from X to Y" range is never cut inside. "Ai"/"Ml"/"Av"/"Gpu" become acronyms.
+  - **Numbers** (`facts.rs`): a figure not in the note's window or the context lines before
+    it is taken out: its clause when the note has several, else the figure and the words that
+    only qualify it ("about", "$", "percent", a month and its "on"). A note left with fewer
+    than 4 words is dropped. Spoken compounds ("a hundred and fifty thousand", "two thousand
+    five hundred"), ordinals ("twenty fourth"), years ("twenty twenty seven"), decimals ("two
+    point uh seven") and scale suffixes ("10K", "$5M") match; clock times, versions ("v2.1")
+    and names with digits ("Q3") are not checked; magnitude words ("thousands") need the same
+    word or a figure that large.
   - With a topic step answer, every note of the window takes the decided topic.
   - Names that are close variants of an established glossary spelling (seen twice, more
     often than the variant) are rewritten to it.
@@ -175,7 +189,9 @@ of `notes.rs`; `parse_entries` is the reply as written (kept for the A/B tool).
 - **Text.** It is trimmed and capped at 200 characters. Empty text is dropped, as is a
   near-duplicate of one of the last 8 entries, judged on the refined text: word overlap of
   0.8, or (notes only) a rewording that shares at least 4 content words, 40% of the shorter
-  note's and 30% of both notes' together. At most the requested number of entries is kept.
+  note's and 30% of both notes' together. Notes whose figures differ ("May 10" → "May 24") or
+  where only one is negated ("will ship" → "will not ship") are never repeats. At most the
+  requested number of entries is kept.
 - **Errors.** Output with no usable JSON is a `ParseError`. The worker logs it, skips the
   window, and sets the status to failed. The next window retries.
 
@@ -268,7 +284,9 @@ ALTER TABLE meeting_timeline_entries ADD COLUMN topic TEXT;
   - It shows a time-stamped list grouped under topic headers (a thin `hairline` rule and the
     title; `groupByTopic` starts a section when the topic changes). Decisions use the
     `badge.success` recipe and actions use `badge.info`. The speaker is never shown, except
-    an action the user owns, which reads "You — task".
+    an action the user owns, which reads "You — task", and entries made before topics, which
+    keep their "· speaker" label. The panel and the chapters read through `useLiveSource`, so
+    the in-app replay shows the same headers; `site/replay` groups the same way.
   - A subtle "Listening…" tail shows while the session is active.
   - When the status is `failed`, a non-blocking `panel.warning` notice reads "Live summary
     paused". It clears on the next success.

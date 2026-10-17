@@ -110,6 +110,16 @@ export function groupByTopic<T extends TimelineEntry>(entries: T[]): TimelineSec
   return sections;
 }
 
+/** The speaker label an entry made before topics keeps ("· Others",
+ * "· Priya"), as it was shown when it was written. Entries with a topic
+ * never show one: their notes state what was said, not who said it. */
+export function legacySpeakerLabel(entry: Pick<TimelineEntry, 'kind' | 'text' | 'speaker' | 'topic'>): string | null {
+  if (entry.topic != null || !entry.speaker?.trim()) return null;
+  // Already shown as the owner: "You — task".
+  if (entryDisplayText(entry) !== entry.text) return null;
+  return entry.speaker.trim();
+}
+
 /** The text an entry shows: an action the user owns reads "You — task".
  * Other speakers are never shown; the note states what was said. */
 export function entryDisplayText(entry: Pick<TimelineEntry, 'kind' | 'text' | 'speaker'>): string {

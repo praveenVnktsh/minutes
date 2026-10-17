@@ -11,6 +11,7 @@ import {
   formatTimelineTime,
   groupByTopic,
   kindMarker,
+  legacySpeakerLabel,
   currentLiveTimeline,
   statusNotice,
   type TimelineEntry,
@@ -46,6 +47,7 @@ export function useLiveTimeline(): TimelineSnapshot | null {
 
 export function TimelineEntryRow({ entry }: { entry: TimelineEntry }) {
   const marker = kindMarker(entry.kind);
+  const speaker = legacySpeakerLabel(entry);
   return (
     <>
       <span className="w-11 shrink-0 pt-px font-mono text-[11px] tabular-nums text-ink-subtle">
@@ -58,6 +60,7 @@ export function TimelineEntryRow({ entry }: { entry: TimelineEntry }) {
           </span>
         )}
         {entryDisplayText(entry)}
+        {speaker && <span className="ml-1.5 text-[11px] text-ink-subtle">· {speaker}</span>}
       </span>
     </>
   );

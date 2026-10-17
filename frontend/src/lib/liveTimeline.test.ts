@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   acceptSnapshot,
   entryDisplayText,
+  legacySpeakerLabel,
   formatTimelineTime,
   groupByTopic,
   kindMarker,
@@ -60,6 +61,19 @@ describe('entryDisplayText', () => {
     expect(entryDisplayText({ kind: 'point', speaker: 'You', text: 'Budget is fine' })).toBe('Budget is fine');
     // Older entries already name the user.
     expect(entryDisplayText({ kind: 'action', speaker: 'You', text: 'You suggest a call' })).toBe('You suggest a call');
+  });
+});
+
+describe('legacySpeakerLabel', () => {
+  test('entries made before topics keep their speaker label; topic entries never show one', () => {
+    // Before topics: no `topic` field at all.
+    expect(legacySpeakerLabel({ kind: 'point', speaker: 'Others', text: 'Others discuss pricing' })).toBe('Others');
+    expect(legacySpeakerLabel({ kind: 'action', speaker: 'Priya', text: 'Send the deck' })).toBe('Priya');
+    expect(legacySpeakerLabel({ kind: 'point', speaker: null, text: 'Budget is fine' })).toBeNull();
+    // The owner is already in the text.
+    expect(legacySpeakerLabel({ kind: 'action', speaker: 'You', text: 'send the deck' })).toBeNull();
+    // With a topic: never.
+    expect(legacySpeakerLabel({ kind: 'action', speaker: 'Others', text: 'introduce You to the founders', topic: 'Acme' })).toBeNull();
   });
 });
 

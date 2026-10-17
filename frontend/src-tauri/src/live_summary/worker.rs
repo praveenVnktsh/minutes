@@ -16,8 +16,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::facts::Figures;
 use super::glossary::Glossary;
-use super::llm::{FailureKind, GenerateError, Generated, Generator};
-use super::notes::{decide_topic, NoteContext};
+use super::llm::{FailureKind, GenerateError, Generated, Generator, REQUEST_TIMEOUT};
+use super::notes::{decide_topic, NoteContext, MIN_TOPIC_MS};
 use super::parse::{parse_notes, parse_topic_decision, ParsedEntry};
 use super::prompt::{self, PreviousEntry, PromptContext};
 use super::scheduler::{Segment, Window, WindowScheduler, CADENCE};
@@ -161,6 +161,10 @@ pub struct WorkerConfig {
     pub max_backoff: Duration,
     pub final_persist_window: Duration,
     pub final_persist_retry: Duration,
+    /// The topic step's own timeout (`TOPIC_STEP_TIMEOUT`).
+    pub topic_timeout: Duration,
+    /// The topic step and the notes call together (`WINDOW_BUDGET`).
+    pub window_budget: Duration,
 }
 
 impl Default for WorkerConfig {
@@ -172,6 +176,8 @@ impl Default for WorkerConfig {
             max_backoff: MAX_BACKOFF,
             final_persist_window: FINAL_PERSIST_WINDOW,
             final_persist_retry: FINAL_PERSIST_RETRY,
+            topic_timeout: TOPIC_STEP_TIMEOUT,
+            window_budget: WINDOW_BUDGET,
         }
     }
 }
@@ -196,37 +202,106 @@ type RequestOutcome = (
     Option<String>,
 );
 
-/// The topic step (`prompt::topic_user_prompt`): the window's topic, or
-/// `None` when there is no current topic yet or the step gave no usable
-/// answer, so the notes call names the topic itself.
+/// The topic step answers within this, or the window fails and is retried
+/// with the usual back-off: a model that cannot answer a one-line question
+/// in time will not write the notes in time either.
+pub const TOPIC_STEP_TIMEOUT: Duration = Duration::from_secs(15);
+/// One window's requests together (the topic step and the notes) take at
+/// most this, so two long timeouts never run back to back.
+pub const WINDOW_BUDGET: Duration = REQUEST_TIMEOUT;
+
+/// Providers that get the separate topic step: local models, where a small
+/// model asked for notes and a topic together keeps copying the current
+/// topic. A cloud model names the topic in its notes call, so each window
+/// stays one request there.
+pub fn uses_topic_step(provider: &str) -> bool {
+    matches!(
+        provider,
+        "builtin-ai" | "local-llama" | "localllama" | "ollama"
+    )
+}
+
+/// The topic step (`prompt::topic_user_prompt`): the window's topic.
+///
+/// - `Ok(None)`: no step (a cloud provider, no current topic yet, the tail
+///   window at stop) or no usable answer: the notes call names the topic.
+/// - `Ok(None)` without a request, too, while the current topic is younger
+///   than `MIN_TOPIC_MS`: the step does not end it, but the notes call may
+///   still name a clearly different subject (and keeps it otherwise).
+/// - `Err`: the step failed (pre-empted, refused, timed out): the whole
+///   window fails and goes through the worker's retry and back-off.
+///
+/// Traced as a `timeline-request` with id `<n>-topic`.
+#[allow(clippy::too_many_arguments)]
 pub async fn decide_window_topic(
     generator: &dyn Generator,
     window: &Window,
     context: &PromptContext<'_>,
     notes: &NotesSoFar,
     cancel: &CancellationToken,
-) -> Option<String> {
-    let user = prompt::topic_user_prompt(window, context)?;
-    let reply = match generator
-        .generate(prompt::topic_system_prompt(), &user, cancel)
-        .await
-    {
-        Ok(reply) if !reply.truncated => reply.text,
-        Ok(_) => return None,
-        Err(error) => {
-            log::debug!("Live summary topic step failed: {error}");
-            return None;
+    timeout: Duration,
+    request: u64,
+) -> Result<Option<String>, GenerateError> {
+    if !uses_topic_step(generator.provider()) {
+        return Ok(None);
+    }
+    let Some(current) = notes.current_topic.as_deref() else {
+        return Ok(None);
+    };
+    let since = prompt::topic_since(&notes.previous, current);
+    if since.is_some_and(|since| window.start_ms - since < MIN_TOPIC_MS) {
+        return Ok(None);
+    }
+    let Some(user) = prompt::topic_user_prompt(window, context) else {
+        return Ok(None);
+    };
+    let id = format!("{request}-topic");
+    crate::replay::trace::emit(
+        "timeline-request",
+        || serde_json::json!({ "id": id, "phase": "start", "kind": "topic", "start_ms": window.start_ms, "end_ms": window.end_ms }),
+    );
+    let step = cancel.child_token();
+    let reply = tokio::select! {
+        reply = generator.generate(prompt::topic_system_prompt(), &user, &step) => reply,
+        _ = crate::clock::sleep(timeout) => {
+            step.cancel();
+            Err(GenerateError::transient("the topic step timed out"))
         }
     };
-    let current = notes.current_topic.as_deref();
-    decide_topic(
-        parse_topic_decision(&reply).as_ref(),
-        current,
-        current.and_then(|topic| prompt::topic_since(&notes.previous, topic)),
-        window.start_ms,
-        &notes.topics,
-        Some(&notes.glossary),
-    )
+    let decided = match &reply {
+        Ok(reply) if !reply.truncated => decide_topic(
+            parse_topic_decision(&reply.text).as_ref(),
+            Some(current),
+            since,
+            window.start_ms,
+            &notes.topics,
+            Some(&notes.glossary),
+        ),
+        _ => None,
+    };
+    crate::replay::trace::emit("timeline-request", || {
+        let outcome = match &reply {
+            Ok(reply) if reply.truncated => "truncated".to_string(),
+            Ok(_) if decided.is_none() => "unreadable".to_string(),
+            Ok(_) => "done".to_string(),
+            Err(error) => format!("{:?}", error.kind).to_lowercase(),
+        };
+        serde_json::json!({
+            "id": id,
+            "phase": "done",
+            "kind": "topic",
+            "outcome": outcome,
+            "topic": decided,
+            "new_topic": decided.as_deref().is_some_and(|d| d != current),
+        })
+    });
+    match reply {
+        Ok(_) => Ok(decided),
+        Err(error) => {
+            log::debug!("Live summary topic step failed: {error}");
+            Err(error)
+        }
+    }
 }
 
 struct InFlight {
@@ -334,7 +409,7 @@ impl Worker {
         }
     }
 
-    async fn start_request(&mut self, window: Window) {
+    async fn start_request(&mut self, window: Window, final_window: bool) {
         let generator = match self.host.generator().await {
             Ok(generator) => generator,
             Err(error) => {
@@ -373,6 +448,7 @@ impl Worker {
                 "dropped_segments": window.dropped_segments,
             })
         });
+        let (budget, topic_timeout) = (self.config.window_budget, self.config.topic_timeout);
         let handle = tokio::spawn(async move {
             let provider = generator.provider().to_string();
             let model = generator.model().to_string();
@@ -384,8 +460,26 @@ impl Worker {
                 carryover: &carryover,
                 decided_topic: None,
             };
-            let decided =
-                decide_window_topic(generator.as_ref(), &window, &context, &notes, &token).await;
+            let deadline = crate::clock::now() + budget;
+            let decided = if final_window {
+                // The tail window at stop: one request, within the grace.
+                Ok(None)
+            } else {
+                decide_window_topic(
+                    generator.as_ref(),
+                    &window,
+                    &context,
+                    &notes,
+                    &token,
+                    topic_timeout.min(budget),
+                    request,
+                )
+                .await
+            };
+            let decided = match decided {
+                Ok(decided) => decided,
+                Err(error) => return (window, provider, model, Err(error), None),
+            };
             let user = prompt::user_prompt(
                 &window,
                 &PromptContext {
@@ -393,9 +487,14 @@ impl Worker {
                     ..context
                 },
             );
-            let result = generator
-                .generate(prompt::system_prompt(), &user, &token)
-                .await;
+            let notes_call = token.child_token();
+            let result = tokio::select! {
+                result = generator.generate(prompt::system_prompt(), &user, &notes_call) => result,
+                _ = crate::clock::sleep_until(deadline) => {
+                    notes_call.cancel();
+                    Err(GenerateError::transient("the window ran out of time"))
+                }
+            };
             (window, provider, model, result, decided)
         });
         self.in_flight = Some(InFlight { handle, cancel });
@@ -547,7 +646,7 @@ impl Worker {
         }
         let now = self.now();
         if let Some(window) = self.scheduler.poll(now, self.host.is_paused()) {
-            self.start_request(window).await;
+            self.start_request(window, false).await;
         }
     }
 
@@ -588,7 +687,7 @@ impl Worker {
         if self.host.enabled() && !refused && crate::clock::now() < deadline {
             let now = self.now();
             if let Some(window) = self.scheduler.flush(now) {
-                self.start_request(window).await;
+                self.start_request(window, true).await;
                 self.settle_in_flight(deadline).await;
             }
         }
@@ -767,6 +866,10 @@ mod tests {
         /// The topic step's questions and its answer; not counted as calls.
         topic_prompts: Mutex<Vec<String>>,
         topic_answer: Mutex<String>,
+        /// The topic step fails this way (once), or never answers.
+        topic_fail: Mutex<Option<GenerateError>>,
+        topic_hang: bool,
+        provider: &'static str,
     }
 
     impl FakeGenerator {
@@ -782,6 +885,9 @@ mod tests {
                 prompts: Mutex::new(Vec::new()),
                 topic_prompts: Mutex::new(Vec::new()),
                 topic_answer: Mutex::new(r#"{"same":true}"#.into()),
+                topic_fail: Mutex::new(None),
+                topic_hang: false,
+                provider: "builtin-ai",
             }
         }
     }
@@ -789,7 +895,7 @@ mod tests {
     #[async_trait]
     impl Generator for FakeGenerator {
         fn provider(&self) -> &str {
-            "builtin-ai"
+            self.provider
         }
         fn model(&self) -> &str {
             "fake"
@@ -802,6 +908,13 @@ mod tests {
         ) -> std::result::Result<Generated, GenerateError> {
             if system == prompt::topic_system_prompt() {
                 self.topic_prompts.lock().unwrap().push(user.to_string());
+                if self.topic_hang {
+                    cancel.cancelled().await;
+                    return Err(GenerateError::transient("cancelled"));
+                }
+                if let Some(error) = self.topic_fail.lock().unwrap().take() {
+                    return Err(error);
+                }
                 return Ok(Generated {
                     text: self.topic_answer.lock().unwrap().clone(),
                     truncated: false,
@@ -854,6 +967,8 @@ mod tests {
             max_backoff: Duration::from_millis(40),
             final_persist_window: Duration::from_millis(100),
             final_persist_retry: Duration::from_millis(10),
+            topic_timeout: Duration::from_secs(5),
+            window_budget: Duration::from_secs(10),
         }
     }
 
@@ -918,13 +1033,10 @@ mod tests {
         let prompts = generator.prompts.lock().unwrap();
         assert!(prompts.len() >= 2);
         assert!(!prompts[0].contains("Current topic"));
-        // The topic step asked about the current topic and kept it.
-        let topic_prompts = generator.topic_prompts.lock().unwrap();
-        assert!(
-            topic_prompts[0].starts_with("Current topic: \"Launch Plan\" (since 00:00, 1 min)\n")
-        );
-        assert!(topic_prompts[0].contains("Latest notes under it:\n- "));
-        assert!(prompts[1].contains("Topic of the new transcript: Launch Plan (already decided"));
+        // The current topic is a minute old: the topic step is not asked,
+        // and the notes call sees the current topic to keep.
+        assert!(generator.topic_prompts.lock().unwrap().is_empty());
+        assert!(prompts[1].contains("Current topic: Launch Plan (since 00:00)\n"));
         assert!(prompts[1].contains("Glossary (use these spellings): Acme Robotics"));
         assert!(prompts[1].contains("Earlier transcript (context only, already covered):\n[00:00]"));
         assert!(prompts[1].contains(
@@ -959,6 +1071,140 @@ mod tests {
             .map(|e| e.topic.as_deref())
             .collect();
         assert_eq!(topics, vec![Some("Launch Plan"), Some("Globex Pitch")]);
+        let topic_prompts = generator.topic_prompts.lock().unwrap();
+        assert!(
+            topic_prompts[0].starts_with("Current topic: \"Launch Plan\" (since 00:00, 3 min)\n")
+        );
+        assert!(topic_prompts[0].contains("Latest notes under it:\n- "));
+    }
+
+    /// Two windows: the first names the topic, the second (past the
+    /// shortest topic) asks the topic step.
+    async fn two_windows(generator: Arc<FakeGenerator>) -> (TimelineSnapshot, Arc<FakeHost>) {
+        let host = host_with(generator);
+        let (tx, rx) = unbounded_channel();
+        let finish = CancellationToken::new();
+        let task = tokio::spawn(run(host.clone(), "s".into(), rx, finish.clone(), config()));
+        tx.send(speech(0)).unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        tx.send(speech(180)).unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        finish.cancel();
+        (task.await.unwrap(), host)
+    }
+
+    #[tokio::test]
+    async fn a_failed_topic_step_fails_the_window_and_it_is_retried() {
+        for kind in [FailureKind::Preempted, FailureKind::Transient] {
+            let generator = Arc::new(FakeGenerator::new(Duration::ZERO));
+            *generator.topic_fail.lock().unwrap() = Some(GenerateError {
+                kind,
+                message: "busy".into(),
+            });
+            let (snapshot, host) = two_windows(generator.clone()).await;
+            // The step was asked again after the failure, and the window's
+            // notes were written by the retry (not by a notes call that went
+            // ahead without a topic).
+            assert!(
+                generator.topic_prompts.lock().unwrap().len() >= 2,
+                "{kind:?}"
+            );
+            assert_eq!(snapshot.entries.len(), 2, "{kind:?}");
+            let statuses: Vec<_> = host
+                .published
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|s| s.status)
+                .collect();
+            if kind == FailureKind::Transient {
+                assert!(statuses.contains(&TimelineStatus::Failed));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_topic_step_backs_off_like_a_refused_request() {
+        let generator = Arc::new(FakeGenerator::new(Duration::ZERO));
+        *generator.topic_fail.lock().unwrap() = Some(GenerateError {
+            kind: FailureKind::Unavailable,
+            message: "status 429".into(),
+        });
+        let (_, host) = two_windows(generator.clone()).await;
+        let statuses: Vec<_> = host
+            .published
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|s| s.status)
+            .collect();
+        assert!(statuses.contains(&TimelineStatus::Unavailable));
+        // The refused attempt made no notes call: the first window and the
+        // retry after the back-off are the only two.
+        assert_eq!(generator.calls.load(Ordering::SeqCst), 2);
+        assert!(generator.topic_prompts.lock().unwrap().len() >= 2);
+    }
+
+    #[tokio::test]
+    async fn a_hung_topic_step_times_out_on_its_own_short_timeout() {
+        let mut generator = FakeGenerator::new(Duration::ZERO);
+        generator.topic_hang = true;
+        let generator = Arc::new(generator);
+        let host = host_with(generator.clone());
+        let (tx, rx) = unbounded_channel();
+        let finish = CancellationToken::new();
+        let mut config = config();
+        config.topic_timeout = Duration::from_millis(30);
+        let task = tokio::spawn(run(host.clone(), "s".into(), rx, finish.clone(), config));
+        tx.send(speech(0)).unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        tx.send(speech(180)).unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        finish.cancel();
+        task.await.unwrap();
+        let statuses: Vec<_> = host
+            .published
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|s| s.status)
+            .collect();
+        assert!(statuses.contains(&TimelineStatus::Failed));
+        assert!(host.published.lock().unwrap().iter().any(|s| s
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("topic step timed out"))));
+    }
+
+    #[tokio::test]
+    async fn cloud_providers_make_one_request_per_window() {
+        let mut generator = FakeGenerator::new(Duration::ZERO);
+        generator.provider = "openai";
+        let generator = Arc::new(generator);
+        let (snapshot, _) = two_windows(generator.clone()).await;
+        assert!(generator.topic_prompts.lock().unwrap().is_empty());
+        assert_eq!(
+            generator.calls.load(Ordering::SeqCst),
+            snapshot.entries.len()
+        );
+        assert!(uses_topic_step("builtin-ai") && !uses_topic_step("claude"));
+    }
+
+    #[tokio::test]
+    async fn the_tail_window_at_stop_skips_the_topic_step() {
+        let generator = Arc::new(FakeGenerator::new(Duration::ZERO));
+        let host = host_with(generator.clone());
+        let (tx, rx) = unbounded_channel();
+        let finish = CancellationToken::new();
+        let task = tokio::spawn(run(host.clone(), "s".into(), rx, finish.clone(), config()));
+        tx.send(speech(0)).unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Speech that only the stop's flush picks up.
+        tx.send(speech(240)).unwrap();
+        finish.cancel();
+        let snapshot = task.await.unwrap();
+        assert_eq!(snapshot.entries.len(), 2);
+        assert!(generator.topic_prompts.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

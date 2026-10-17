@@ -220,6 +220,38 @@ for (const what of ['numbers', 'strings']) {
   });
 }
 
+/** The sample with topics on its live summary entries, as the worker now
+ * writes them: the first half under one topic, the rest under another. */
+function topicEvents(first, second) {
+  const text = fs.readFileSync(path.join(DIR, 'sample-events.jsonl'), 'utf8');
+  return text.split('\n').filter((l) => l.trim()).map((line) => {
+    const r = JSON.parse(line);
+    if (r.name === 'live-timeline-update' && Array.isArray(r.payload.entries)) {
+      r.payload.entries = r.payload.entries.map((e, k) => ({ ...e, speaker: 'Others', topic: k < 2 ? first : second }));
+    }
+    return JSON.stringify(r);
+  }).join('\n');
+}
+
+test('live summary entries with topics render under topic headers, without speakers', async () => {
+  const { written, viewer } = run({ events: topicEvents('Launch Plan', 'Pricing'), served: false });
+  await settle(viewer);
+  const panel = written.filter((h) => h.includes('ls-text')).pop();
+  assert.ok(panel, 'the live summary rendered');
+  const launch = panel.indexOf('<p class="ls-topic">Launch Plan</p>');
+  const pricing = panel.indexOf('<p class="ls-topic">Pricing</p>');
+  assert.ok(launch >= 0 && pricing > launch, `topic headers in order in: ${panel.slice(0, 400)}`);
+  assert.equal(panel.match(/class="ls-topic"/g).length, 2);
+  assert.ok(!panel.includes('ls-speaker'), 'no speaker on topic entries');
+});
+
+test('hostile topics render as text', async () => {
+  const { written, viewer } = run({ events: topicEvents(EVIL, `x${EVIL}`), served: false });
+  await settle(viewer);
+  assert.ok(written.some((h) => h.includes('class="ls-topic"')), 'topic headers rendered');
+  assertClean(written);
+});
+
 test('the page runs no inline script, so the served CSP needs no unsafe-inline', () => {
   const html = fs.readFileSync(path.join(DIR, 'index.html'), 'utf8');
   const scripts = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)];

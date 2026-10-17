@@ -24,6 +24,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -32,14 +33,15 @@ use tokio_util::sync::CancellationToken;
 use super::facts::Figures;
 use super::glossary::Glossary;
 use super::llm::{generation_options, MAX_OUTPUT_TOKENS};
-use super::notes::{decide_topic, MAX_NOTE_WORDS};
+use super::llm::{GenerateError, Generated, Generator};
+use super::notes::MAX_NOTE_WORDS;
 use super::notes::{opens_with_speaker, strip_narration, Narration, NoteContext};
-use super::parse::{
-    is_repeat, parse_clock_ms, parse_entries, parse_notes, parse_topic_decision, ParsedEntry,
-};
+use super::parse::{is_repeat, parse_clock_ms, parse_entries, parse_notes, ParsedEntry};
 use super::prompt::{self, format_clock, PromptContext};
 use super::scheduler::{Segment, Speaker, Window, WindowScheduler};
-use super::worker::{support_text, NotesSoFar, TimelineEntry};
+use super::worker::{
+    decide_window_topic, support_text, NotesSoFar, TimelineEntry, TOPIC_STEP_TIMEOUT,
+};
 use crate::summary::llm_client::{generate_summary, LLMProvider};
 
 /// Earlier notes the parser checks new ones against (as the worker does).
@@ -157,6 +159,8 @@ struct WindowRun {
 struct RunResult {
     entries: Vec<TimelineEntry>,
     windows: Vec<WindowRun>,
+    /// Model requests made: notes calls and topic steps.
+    requests: usize,
 }
 
 /// Final live transcript segments of a replay run, on audio time.
@@ -203,6 +207,8 @@ struct Model {
     app_data: PathBuf,
     name: String,
     client: reqwest::Client,
+    /// Topic step requests made, for the request rate.
+    topic_calls: AtomicUsize,
 }
 
 impl Model {
@@ -284,7 +290,7 @@ async fn topic_step(
     entries: &[TimelineEntry],
     carryover: &[Segment],
     model: &Model,
-) -> (Option<String>, Duration, usize) {
+) -> (Result<Option<String>, String>, Duration, usize) {
     let notes = NotesSoFar::of(entries);
     let glossary = notes.glossary.terms();
     let context = PromptContext {
@@ -294,23 +300,66 @@ async fn topic_step(
         carryover,
         decided_topic: None,
     };
-    let Some(user) = prompt::topic_user_prompt(window, &context) else {
-        return (None, Duration::ZERO, 0);
-    };
-    let system = prompt::topic_system_prompt();
-    let (result, latency) = model.generate(system, &user, TOPIC_STEP_TOKENS).await;
-    let current = notes.current_topic.as_deref();
-    let decided = result.ok().and_then(|raw| {
-        decide_topic(
-            parse_topic_decision(&raw).as_ref(),
-            current,
-            current.and_then(|topic| prompt::topic_since(&notes.previous, topic)),
-            window.start_ms,
-            &notes.topics,
-            Some(&notes.glossary),
-        )
-    });
-    (decided, latency, system.len() + user.len())
+    let chars = prompt::topic_user_prompt(window, &context)
+        .map_or(0, |user| prompt::topic_system_prompt().len() + user.len());
+    let asked = model.topic_calls.load(Ordering::SeqCst);
+    let started = Instant::now();
+    // The worker's own step: skipped while the topic is young, its timeout.
+    let decided = decide_window_topic(
+        model,
+        window,
+        &context,
+        &notes,
+        &CancellationToken::new(),
+        TOPIC_STEP_TIMEOUT,
+        0,
+    )
+    .await
+    .map_err(|e| e.to_string());
+    let was_asked = model.topic_calls.load(Ordering::SeqCst) > asked;
+    (
+        decided,
+        if was_asked {
+            started.elapsed()
+        } else {
+            Duration::ZERO
+        },
+        if was_asked { chars } else { 0 },
+    )
+}
+
+/// The eval's model as the worker sees it, so the topic step runs the
+/// worker's code.
+#[async_trait::async_trait]
+impl Generator for Model {
+    fn provider(&self) -> &str {
+        "builtin-ai"
+    }
+    fn model(&self) -> &str {
+        &self.name
+    }
+    async fn generate(
+        &self,
+        system: &str,
+        user: &str,
+        _cancel: &CancellationToken,
+    ) -> Result<Generated, GenerateError> {
+        if system == prompt::topic_system_prompt() {
+            self.topic_calls.fetch_add(1, Ordering::SeqCst);
+        }
+        let (result, _) = Model::generate(self, system, user, TOPIC_STEP_TOKENS).await;
+        match result {
+            Ok(text) => Ok(Generated {
+                text,
+                truncated: false,
+            }),
+            Err(error) if error == "truncated" => Ok(Generated {
+                text: String::new(),
+                truncated: true,
+            }),
+            Err(error) => Err(GenerateError::from_provider_error(error)),
+        }
+    }
 }
 
 /// The reply as a variant's parser reads it.
@@ -363,6 +412,7 @@ fn parse_reply(
 /// arrive at their audio end time, a request occupies the model for its real
 /// latency, and text arriving meanwhile merges into the next window.
 async fn run_variant(variant: Variant, segments: &[Segment], model: &Model) -> RunResult {
+    let topic_calls_before = model.topic_calls.load(Ordering::SeqCst);
     let mut scheduler = WindowScheduler::new(Duration::ZERO);
     let mut entries: Vec<TimelineEntry> = Vec::new();
     let mut carryover: Vec<Segment> = Vec::new();
@@ -510,13 +560,18 @@ async fn run_variant(variant: Variant, segments: &[Segment], model: &Model) -> R
             };
             match window {
                 Some(window) => {
-                    let (decided, step_latency, step_chars) = match variant {
-                        Variant::Old => (None, Duration::ZERO, 0),
+                    let (step, step_latency, step_chars) = match variant {
+                        Variant::Old => (Ok(None), Duration::ZERO, 0),
                         Variant::New => topic_step(&window, &entries, &carryover, model).await,
                     };
+                    let decided = step.clone().ok().flatten();
                     let (system, user) =
                         build_prompt(variant, &window, &entries, &carryover, decided.as_deref());
-                    let (result, latency) = model.generate(&system, &user, cap).await;
+                    let (result, latency) = match step {
+                        // A failed step fails the window, as in the worker.
+                        Err(error) => (Err(format!("topic step: {error}")), Duration::ZERO),
+                        Ok(_) => model.generate(&system, &user, cap).await,
+                    };
                     let latency = latency + step_latency;
                     in_flight = Some((
                         window,
@@ -533,7 +588,12 @@ async fn run_variant(variant: Variant, segments: &[Segment], model: &Model) -> R
         }
         now += step;
     }
-    RunResult { entries, windows }
+    let requests = windows.len() + model.topic_calls.load(Ordering::SeqCst) - topic_calls_before;
+    RunResult {
+        entries,
+        windows,
+        requests,
+    }
 }
 
 fn word_total(text: &str) -> usize {
@@ -617,6 +677,10 @@ fn metrics(
     );
     let failed = result.windows.iter().filter(|w| w.outcome != "ok").count();
     out.insert("m. failed windows", failed.to_string());
+    out.insert(
+        "m2 requests per hour",
+        format!("{:.0}", result.requests as f64 / (minutes / 60.0).max(0.01)),
+    );
     out.extend(
         quality(entries, segments)
             .into_iter()
@@ -876,6 +940,7 @@ async fn live_summary_eval() {
             }),
         name: std::env::var("MEETILY_SMOKE_MODEL").unwrap_or_else(|_| "qwen3.5:4b".into()),
         client: reqwest::Client::new(),
+        topic_calls: AtomicUsize::new(0),
     };
 
     for dir in replays.split(';').map(str::trim).filter(|d| !d.is_empty()) {

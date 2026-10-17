@@ -20,7 +20,9 @@
 //! - **Length.** A note is at most `MAX_NOTE_WORDS` words: cut back to its
 //!   leading clauses, or at a clause word, never mid-phrase.
 //! - **Numbers** must appear in the transcript the note was written from
-//!   (`facts.rs`); a note with a figure from elsewhere is dropped.
+//!   (`facts.rs`). A figure from elsewhere is taken out of the note (its
+//!   clause, or the figure and the words that only qualify it); a note left
+//!   with too little is dropped.
 
 use super::facts::Figures;
 use super::glossary::Glossary;
@@ -80,8 +82,10 @@ impl<'a> Refiner<'a> {
         }
 
         if let Some(figures) = self.figures {
-            if !figures.unsupported(&text).is_empty() {
-                return None;
+            let unsupported = figures.unsupported_pieces(&text);
+            if !unsupported.is_empty() {
+                let pieces: Vec<usize> = unsupported.iter().map(|(piece, _)| *piece).collect();
+                text = strip_figures(&text, &pieces)?;
             }
         }
 
@@ -196,7 +200,6 @@ const CLAUSE_WORDS: &[&str] = &[
     "by",
     "for",
     "as",
-    "to",
 ];
 /// Words a cut note never ends on.
 const DANGLING: &[&str] = &[
@@ -236,11 +239,30 @@ fn fit(text: &str) -> String {
     }
     let pieces: Vec<&str> = text.split_whitespace().collect();
     let lower = words(text);
+    // "from X to Y" is one range: never cut inside it.
+    let range_from = |i: usize| {
+        lower[i] == "from"
+            && lower[i + 1..lower.len().min(i + 6)]
+                .iter()
+                .any(|w| w == "to")
+    };
     let cut = (MIN_CLAUSE_WORDS..=MAX_NOTE_WORDS)
         .rev()
-        .find(|&i| CLAUSE_WORDS.contains(&lower[i].as_str()))
+        .find(|&i| CLAUSE_WORDS.contains(&lower[i].as_str()) && !range_from(i))
         .unwrap_or(MAX_NOTE_WORDS);
     let mut end = cut;
+    // A cut that leaves "from X" without its "to Y" goes back before "from".
+    if let Some(open) = (end.saturating_sub(6)..end).find(|&i| {
+        range_from(i)
+            && lower[i + 1..]
+                .iter()
+                .position(|w| w == "to")
+                .is_some_and(|to| i + 1 + to + 1 >= end)
+    }) {
+        if open >= MIN_CLAUSE_WORDS {
+            end = open;
+        }
+    }
     while end > MIN_CLAUSE_WORDS && DANGLING.contains(&lower[end - 1].as_str()) {
         end -= 1;
     }
@@ -350,6 +372,171 @@ fn commitment(text: &str) -> Option<(String, String)> {
     let owner = if subject == "we" { "Others" } else { "You" };
     // "We will" is the group: no single owner, so not "You".
     Some((owner.to_string(), task))
+}
+
+/// A note left with fewer words than this after its unsupported figures are
+/// taken out is dropped.
+const MIN_STRIPPED_WORDS: usize = 4;
+/// Words that only qualify the figure after them ("about 40", "$ 5M").
+const APPROXIMATORS: &[&str] = &[
+    "~",
+    "$",
+    "about",
+    "around",
+    "roughly",
+    "nearly",
+    "almost",
+    "over",
+    "under",
+    "some",
+    "approx",
+    "approximately",
+    "just",
+    "only",
+    "up",
+    "than",
+    "more",
+    "less",
+];
+/// Words that only qualify the figure before them ("40 percent").
+const FIGURE_UNITS: &[&str] = &["percent", "%", "x"];
+/// Prepositions that only lead to the figure after them ("on May 24").
+const DATE_PREPOSITIONS: &[&str] = &["on", "by", "at", "until", "before", "after", "since"];
+const MONTHS: &[&str] = &[
+    "jan",
+    "january",
+    "feb",
+    "february",
+    "mar",
+    "march",
+    "apr",
+    "april",
+    "may",
+    "jun",
+    "june",
+    "jul",
+    "july",
+    "aug",
+    "august",
+    "sep",
+    "sept",
+    "september",
+    "oct",
+    "october",
+    "nov",
+    "november",
+    "dec",
+    "december",
+];
+
+/// `text` without the whitespace pieces at `unsupported` (figures the
+/// transcript does not support), or `None` when too little is left.
+///
+/// 1. When the note has clauses (`;`, ` — `, `,`), the clauses holding an
+///    unsupported figure go: "70 people; 4,000 GPUs" → "70 people".
+/// 2. Otherwise the figure goes with the words that only qualify it ("about",
+///    "$", "percent", a month before a day): "Raised about $5M from Acme" →
+///    "Raised from Acme". "from to" left behind becomes "to".
+fn strip_figures(text: &str, unsupported: &[usize]) -> Option<String> {
+    let pieces: Vec<&str> = text.split_whitespace().collect();
+    let bad = |index: usize| unsupported.contains(&index);
+
+    // 1. By clause.
+    let mut clauses: Vec<Vec<usize>> = vec![Vec::new()];
+    for (index, piece) in pieces.iter().enumerate() {
+        if *piece == "—" || *piece == "–" {
+            clauses.push(Vec::new());
+            continue;
+        }
+        clauses.last_mut().unwrap().push(index);
+        if piece.ends_with([';', ',']) {
+            clauses.push(Vec::new());
+        }
+    }
+    clauses.retain(|clause| !clause.is_empty());
+    if clauses.len() > 1 {
+        let kept: Vec<&Vec<usize>> = clauses
+            .iter()
+            .filter(|clause| !clause.iter().any(|&i| bad(i)))
+            .collect();
+        let words: usize = kept.iter().map(|clause| clause.len()).sum();
+        if !kept.is_empty() && kept.len() < clauses.len() && words >= MIN_STRIPPED_WORDS {
+            let joined = kept
+                .iter()
+                .map(|clause| {
+                    clause
+                        .iter()
+                        .map(|&i| pieces[i])
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            return Some(tidy_cut(&joined));
+        }
+    }
+
+    // 2. The figure and its qualifiers.
+    let lower: Vec<String> = pieces
+        .iter()
+        .map(|p| {
+            p.trim_matches(|c: char| !c.is_alphanumeric() && c != '~' && c != '$' && c != '%')
+                .to_lowercase()
+        })
+        .collect();
+    let mut drop = vec![false; pieces.len()];
+    for &index in unsupported {
+        if index >= pieces.len() {
+            continue;
+        }
+        drop[index] = true;
+        let mut before = index;
+        while before > 0 && APPROXIMATORS.contains(&lower[before - 1].as_str()) {
+            before -= 1;
+            drop[before] = true;
+        }
+        if before > 0 && MONTHS.contains(&lower[before - 1].as_str()) {
+            before -= 1;
+            drop[before] = true;
+        }
+        // "Launch on May 24 for…": the preposition that led to the date.
+        if before > 0 && DATE_PREPOSITIONS.contains(&lower[before - 1].as_str()) {
+            drop[before - 1] = true;
+        }
+        if lower
+            .get(index + 1)
+            .is_some_and(|w| FIGURE_UNITS.contains(&w.as_str()))
+        {
+            drop[index + 1] = true;
+        }
+    }
+    let mut kept: Vec<&str> = Vec::new();
+    for (index, piece) in pieces.iter().enumerate() {
+        if drop[index] {
+            continue;
+        }
+        kept.push(piece);
+    }
+    // "grew from to 40" → "grew to 40".
+    let mut cleaned: Vec<&str> = Vec::new();
+    for (index, piece) in kept.iter().enumerate() {
+        let next = kept.get(index + 1).map(|p| p.to_lowercase());
+        if piece.eq_ignore_ascii_case("from") && next.as_deref() == Some("to") {
+            continue;
+        }
+        cleaned.push(piece);
+    }
+    let mut words: Vec<&str> = cleaned;
+    while words
+        .last()
+        .is_some_and(|w| DANGLING.contains(&w.trim_end_matches([',', ';']).to_lowercase().as_str()))
+    {
+        words.pop();
+    }
+    if words.len() < MIN_STRIPPED_WORDS {
+        return None;
+    }
+    Some(capitalize_first(&tidy_cut(&words.join(" "))))
 }
 
 /// Third-person subjects of a commitment by the other side.
@@ -789,12 +976,24 @@ pub fn continues_topic(proposed: &str, current: &str) -> bool {
     })
 }
 
-/// The topic a note goes under: the current topic when none is proposed or
-/// the proposal continues it, an earlier topic's exact title when the
-/// proposal is a near-duplicate of one, else the proposal (a new topic).
-/// A topic runs at least this long before the topic step may end it, so
-/// one aside does not start a chapter.
-pub const MIN_TOPIC_MS: i64 = 2 * 60_000;
+/// A topic runs at least this long before the topic step may end it (the
+/// worker does not ask before then), so one aside does not start a chapter.
+pub const MIN_TOPIC_MS: i64 = 3 * 60_000;
+
+/// Whether two titles share at least two specific words ("Sequoia
+/// Investment Thesis" and "Sequoia's Investment Strategy and Partners"):
+/// the same chapter, worded twice.
+fn shares_two_specific_words(a: &str, b: &str) -> bool {
+    let b_words = topic_words(b);
+    let mut shared: Vec<String> = topic_words(a)
+        .into_iter()
+        .filter(|w| w.len() > 1 && !GENERIC_TOPIC_WORDS.contains(&w.as_str()))
+        .filter(|w| b_words.contains(w))
+        .collect();
+    shared.sort();
+    shared.dedup();
+    shared.len() >= 2
+}
 
 /// The window's topic from the topic step's answer: the current topic when
 /// the answer is "same", names a near-duplicate of it, or the current topic
@@ -802,9 +1001,9 @@ pub const MIN_TOPIC_MS: i64 = 2 * 60_000;
 /// conversation returns to it; otherwise the new title, tidied. `None` when
 /// there is no answer (the notes call names the topic then).
 ///
-/// Unlike a topic the notes call proposes, a sharing word does not make it
+/// Unlike a topic the notes call proposes, one sharing word does not make it
 /// a continuation: "Priya's background" → "Priya's Acme work" is the step
-/// saying the subject changed.
+/// saying the subject changed. Two do: that is the same chapter reworded.
 pub fn decide_topic(
     decision: Option<&TopicDecision>,
     current: Option<&str>,
@@ -826,7 +1025,7 @@ pub fn decide_topic(
         None => proposed,
     };
     let young = since_ms.is_some_and(|since| window_start_ms - since < MIN_TOPIC_MS);
-    if young || same_topic(&proposed, current) {
+    if young || same_topic(&proposed, current) || shares_two_specific_words(&proposed, current) {
         return Some(current.to_string());
     }
     if let Some(earlier) = known.iter().find(|known| same_topic(&proposed, known)) {
@@ -991,6 +1190,15 @@ mod tests {
             fit("ML infrastructure team handles ten petabytes of daily data processing with tens of thousands of GPUs"),
             "ML infrastructure team handles ten petabytes of daily data processing"
         );
+        // A range is never cut at its "to", nor left open after "from".
+        assert_eq!(
+            fit("Team headcount at the Austin office grew quickly over the year from 30 to 40 people"),
+            "Team headcount at the Austin office grew quickly over the year"
+        );
+        assert_eq!(
+            fit("Revenue for the enterprise tier rose sharply from $2M to $5M after the pricing change"),
+            "Revenue for the enterprise tier rose sharply from $2M to $5M"
+        );
         let tiny = "Yes; the budget for the new office in Austin was approved by finance after a long review";
         assert_eq!(
             fit(tiny),
@@ -1064,29 +1272,53 @@ mod tests {
     }
 
     #[test]
-    fn a_note_with_a_figure_not_in_its_transcript_is_dropped() {
-        let figures = Figures::of("they have about seventy people and ten petabytes a day");
+    fn an_unsupported_figure_is_taken_out_of_the_note() {
+        let figures = Figures::of(
+            "they have about seventy people and ten petabytes a day; the raise was big",
+        );
         let context = NoteContext {
             figures: Some(&figures),
             ..Default::default()
         };
         let refiner = Refiner::new(&context);
-        assert!(refiner
-            .refine(note(
-                EntryKind::Point,
+        let text = |input: &str| {
+            refiner
+                .refine(note(EntryKind::Point, input, None, None))
+                .map(|entry| entry.text)
+        };
+        let cases: &[(&str, Option<&str>)] = &[
+            // Supported: unchanged.
+            (
                 "70 people handle 10 PB a day",
-                None,
-                None
-            ))
-            .is_some());
-        assert!(refiner
-            .refine(note(
-                EntryKind::Point,
-                "70 people run 4,000 GPUs",
-                None,
-                None
-            ))
-            .is_none());
+                Some("70 people handle 10 PB a day"),
+            ),
+            // The clause with the figure goes.
+            (
+                "70 people handle 10 PB a day; 4,000 GPUs in use",
+                Some("70 people handle 10 PB a day"),
+            ),
+            // The figure and its qualifiers go.
+            (
+                "Raised about $5M from Acme and Globex",
+                Some("Raised from Acme and Globex"),
+            ),
+            ("Team of 70 runs 4,000 GPUs", Some("Team of 70 runs GPUs")),
+            (
+                "Usage up 40 percent among 70 people",
+                Some("Usage among 70 people"),
+            ),
+            (
+                "Launch on May 24 for the 70 people",
+                Some("Launch for the 70 people"),
+            ),
+            ("Grew from 30 to 70 people", Some("Grew to 70 people")),
+            // Little more than the figure: dropped.
+            ("4,000 GPUs", None),
+            ("About 4,000 GPUs in total", None),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(text(input).as_deref(), *expected, "{input}");
+        }
     }
 
     #[test]
@@ -1349,6 +1581,16 @@ mod tests {
             decide(new("Acme data platform"), 9 * 60_000).as_deref(),
             Some("Priya's Background")
         );
+        // The same chapter reworded keeps its title.
+        let sequoia = decide_topic(
+            Some(&new("Sequoia's Investment Strategy and Partners")),
+            Some("Sequoia Investment Thesis"),
+            Some(0),
+            10 * 60_000,
+            &known,
+            None,
+        );
+        assert_eq!(sequoia.as_deref(), Some("Sequoia Investment Thesis"));
         // Returning to an earlier topic reuses its title.
         assert_eq!(
             decide(new("the launch plan"), 0).as_deref(),

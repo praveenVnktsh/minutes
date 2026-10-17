@@ -117,6 +117,18 @@ describe('TimelineChapters', () => {
     expect(jumps).toEqual([91]);
   });
 
+  test('entries made before topics keep their speaker label', async () => {
+    stored = [
+      entry('a', 65_000, 'point', 'Sync bug is the last blocker'),
+      { ...entry('b', 91_000, 'point', 'Free tier held back a month'), topic: 'Pricing' },
+    ];
+    await act(async () => { renderer = create(<TimelineChapters meetingId="meeting-1" />); });
+    await flush();
+    const rendered = text();
+    expect(rendered).toContain('Sync bug is the last blocker· Others');
+    expect(rendered).not.toContain('Free tier held back a month· Others');
+  });
+
   test('groups chapters under topic headers and still jumps by entry', async () => {
     stored = [
       { ...entry('a', 65_000, 'point', 'Sync bug is the last blocker'), topic: 'Launch Plan' },
