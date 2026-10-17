@@ -3,12 +3,18 @@
 /** The small built-in model live notes run on while recording (models.rs `LIVE_NOTES_MODEL`). */
 export const LIVE_NOTES_MODEL = 'gemma4:e2b';
 
-/** Live notes on the summary model (the default), or on the live notes model. */
+/**
+ * Live notes on the summary model, or on the live notes model (the default once downloaded on
+ * Macs with 16 GB or more).
+ */
 export type LiveNotesModelChoice = 'summary' | typeof LIVE_NOTES_MODEL;
 
 /** `get_live_notes_settings` (live_summary/model_choice.rs). */
 export interface LiveNotesSettings {
+  /** The model live notes use now, the default resolved. */
   model: LiveNotesModelChoice;
+  /** The user picked `model`; otherwise it is the default. */
+  explicit: boolean;
   live_notes_model: string;
   /** An 8 GB Mac: live notes stay on the summary model while recording. */
   low_memory: boolean;

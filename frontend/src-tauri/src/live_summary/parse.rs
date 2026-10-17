@@ -210,26 +210,99 @@ fn compact_items(text: &str) -> Option<Compact> {
     None
 }
 
-/// One `mm:ss|kind|owner|note` line.
+/// One note line: `mm:ss|kind|note`, with the owner before the task for an
+/// action (`mm:ss|action|owner|task`). An owner column on a point or a
+/// decision (`mm:ss|point|-|note`) is accepted and dropped. Without a time
+/// (`kind|…`) the note is placed by its words ([`align_start`]).
 fn compact_note(line: &str) -> Option<Value> {
-    let mut fields = line.splitn(4, '|');
-    let start = fields.next()?.trim();
-    let kind = fields.next()?.trim();
-    let owner = fields.next()?.trim();
-    let note = fields.next()?.trim();
-    if parse_clock_ms(start).is_none() || note.is_empty() {
+    let first = line.split('|').next()?.trim();
+    let timed = parse_clock_ms(first).is_some();
+    if !timed && !is_kind_field(first) {
+        return None;
+    }
+    let mut rest = line;
+    let start = if timed {
+        let (start, after) = rest.split_once('|')?;
+        rest = after;
+        start.trim()
+    } else {
+        ""
+    };
+    let (kind, after) = rest.split_once('|')?;
+    let kind = kind.trim();
+    let mut note = after.trim();
+    let mut owner = "";
+    if kind.eq_ignore_ascii_case("action") {
+        if let Some((field, after)) = note.split_once('|') {
+            owner = field.trim();
+            note = after.trim();
+        }
+    }
+    // Owner columns on a point, and the transcript's speaker label a small
+    // model sometimes adds as a column (`04:12|point|-|Others|…`): not the
+    // note's first word. An action's owner in the wrong column is its owner.
+    while let Some((field, after)) = note.split_once('|') {
+        let field = field.trim();
+        if !is_owner_field(field) {
+            break;
+        }
+        if matches!(owner, "" | "-") && kind.eq_ignore_ascii_case("action") {
+            owner = field;
+        }
+        note = after.trim();
+    }
+    if note.is_empty() || is_owner_field(note) {
         return None;
     }
     let owner = match owner {
         "" | "-" | "none" | "null" => Value::Null,
         owner => Value::String(owner.to_string()),
     };
-    Some(serde_json::json!({
-        "start": start,
+    let mut item = serde_json::json!({
         "kind": kind,
         "speaker": owner,
         "text": note,
-    }))
+    });
+    if timed {
+        item["start"] = Value::String(start.to_string());
+    }
+    Some(item)
+}
+
+/// A compact line's kind field.
+fn is_kind_field(field: &str) -> bool {
+    matches!(
+        field.to_ascii_lowercase().as_str(),
+        "point" | "decision" | "action"
+    )
+}
+
+/// Where a note written without a time starts: the transcript segment that
+/// shares the most content words with it (the earliest on a tie), or `None`
+/// when no segment shares any.
+pub fn align_start(text: &str, segments: &[super::scheduler::Segment]) -> Option<i64> {
+    let note = content_words(&word_set(text));
+    if note.is_empty() {
+        return None;
+    }
+    let mut best: Option<(usize, i64)> = None;
+    for segment in segments {
+        let shared = content_words(&word_set(&segment.text))
+            .intersection(&note)
+            .count();
+        if shared > 0 && best.is_none_or(|(most, _)| shared > most) {
+            best = Some((shared, segment.start_ms));
+        }
+    }
+    best.map(|(_, start_ms)| start_ms)
+}
+
+/// A field that can only be an owner or a transcript label, never a note.
+fn is_owner_field(field: &str) -> bool {
+    matches!(
+        field.to_ascii_lowercase().as_str(),
+        "" | "-" | "you" | "others" | "none" | "null" | "speaker"
+    )
 }
 
 /// The title after `topic:`, if `line` is a topic line.
@@ -309,9 +382,16 @@ fn refine_items(
         if entries.len() >= max_entries {
             break;
         }
-        let Some(entry) = entry_from(&item, window_start_ms, window_end_ms) else {
+        let Some(mut entry) = entry_from(&item, window_start_ms, window_end_ms) else {
             continue;
         };
+        if item.get("start").is_none() {
+            if let Some(start_ms) =
+                context.and_then(|context| align_start(&entry.text, context.segments))
+            {
+                entry.start_ms = start_ms.clamp(window_start_ms, window_end_ms);
+            }
+        }
         let entry = match refiner.as_mut() {
             Some(refiner) => match refiner.refine(entry) {
                 Some(entry) => entry,
@@ -829,6 +909,44 @@ mod tests {
         let entries = parse("01:20|action|You|send the deck|pricing to finance").unwrap();
         assert_eq!(entries[0].text, "send the deck|pricing to finance");
         assert_eq!(entries[0].speaker.as_deref(), Some("You"));
+    }
+
+    #[test]
+    fn a_speaker_label_written_as_an_extra_field_is_not_the_note() {
+        let raw = "topic: same\n\
+                   01:10|point|-|Others|Hiring paused until spring\n\
+                   01:20|action|-|You|send the deck to finance\n\
+                   01:30|action|Others|Others|introduce You to the founders\n";
+        let entries = parse(raw).unwrap();
+        let texts: Vec<&str> = entries.iter().map(|e| e.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            [
+                "Hiring paused until spring",
+                "send the deck to finance",
+                "introduce You to the founders"
+            ]
+        );
+        assert_eq!(entries[0].speaker, None);
+        // An action's owner in the wrong column is still its owner.
+        assert_eq!(entries[1].speaker.as_deref(), Some("You"));
+        assert_eq!(entries[2].speaker.as_deref(), Some("Others"));
+        let entries = parse("01:40|point|-|-|Budget doubles to $2M").unwrap();
+        assert_eq!(entries[0].text, "Budget doubles to $2M");
+        // A pipe later in the note is kept.
+        let entries = parse("01:10|point|-|Plan A|Plan B stay open").unwrap();
+        assert_eq!(entries[0].text, "Plan A|Plan B stay open");
+    }
+
+    #[test]
+    fn a_placeholder_topic_is_no_topic() {
+        for title in ["none yet", "None Yet", "unknown", "TBD"] {
+            assert_eq!(
+                crate::live_summary::notes::normalize_topic(title),
+                None,
+                "{title}"
+            );
+        }
     }
 
     #[test]

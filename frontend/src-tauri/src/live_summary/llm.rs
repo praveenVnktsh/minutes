@@ -127,6 +127,20 @@ pub trait Generator: Send + Sync {
         user_prompt: &str,
         cancel: &CancellationToken,
     ) -> Result<Generated, GenerateError>;
+
+    /// The notes call: [`Generator::generate`] for an answer of at most
+    /// `max_lines` lines (the compact answer's topic line and the notes the
+    /// window keeps). A model that can stop there does, rather than write
+    /// notes the parser would drop; the default ignores the limit.
+    async fn generate_notes(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+        _max_lines: usize,
+        cancel: &CancellationToken,
+    ) -> Result<Generated, GenerateError> {
+        self.generate(system_prompt, user_prompt, cancel).await
+    }
 }
 
 /// The summary model setting, resolved for live summary calls.
@@ -149,12 +163,17 @@ pub fn is_builtin(provider: &str) -> bool {
 }
 
 /// The user's choice of model for live notes (`liveNotesModel` in the app
-/// store). Absent means the summary model: nothing changes for anyone who
-/// has not opted in.
+/// store). Absent means no explicit choice: the default, which is the live
+/// notes model once it is downloaded on a Mac with 16 GB or more.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LiveNotesChoice {
+    /// Never chosen: the live notes model when it is on disk and the Mac
+    /// has `DEFAULT_MIN_MEMORY_BYTES`, the summary model otherwise.
     #[default]
+    Default,
+    /// "Same as summary model", picked explicitly.
     SummaryModel,
+    /// The live notes model, picked explicitly (or by onboarding's opt-in).
     LiveNotesModel,
 }
 
@@ -164,14 +183,17 @@ impl LiveNotesChoice {
     pub fn from_stored(value: Option<&str>) -> Self {
         match value {
             Some(crate::summary::summary_engine::models::LIVE_NOTES_MODEL) => Self::LiveNotesModel,
-            _ => Self::SummaryModel,
+            Some(Self::SUMMARY) => Self::SummaryModel,
+            _ => Self::Default,
         }
     }
 
-    pub fn as_str(self) -> &'static str {
+    /// The stored value; `None` for no explicit choice.
+    pub fn stored(self) -> Option<&'static str> {
         match self {
-            Self::SummaryModel => Self::SUMMARY,
-            Self::LiveNotesModel => crate::summary::summary_engine::models::LIVE_NOTES_MODEL,
+            Self::Default => None,
+            Self::SummaryModel => Some(Self::SUMMARY),
+            Self::LiveNotesModel => Some(crate::summary::summary_engine::models::LIVE_NOTES_MODEL),
         }
     }
 }
@@ -180,31 +202,59 @@ impl LiveNotesChoice {
 /// recording: live notes stay on the summary model's helper.
 pub const LOW_MEMORY_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
+/// From this much memory the live notes model is the default once it is
+/// downloaded (and onboarding offers its download ticked).
+pub const DEFAULT_MIN_MEMORY_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+
 /// Whether `total_memory` is a low-memory machine (unknown counts as not).
 pub fn is_low_memory(total_memory: Option<u64>) -> bool {
     total_memory.is_some_and(|bytes| bytes <= LOW_MEMORY_BYTES)
 }
 
+/// Whether the live notes model is the default on this Mac (unknown memory
+/// counts as not: the default never risks two resident models).
+pub fn live_notes_model_by_default(total_memory: Option<u64>) -> bool {
+    total_memory.is_some_and(|bytes| bytes >= DEFAULT_MIN_MEMORY_BYTES)
+}
+
+/// Whether live notes run on the live notes model rather than the summary
+/// model, once that model is on disk: an explicit choice wins (the live notes
+/// model still never on an 8 GB Mac); without one, the default by memory.
+pub fn prefers_live_notes_model(choice: LiveNotesChoice, total_memory: Option<u64>) -> bool {
+    match choice {
+        LiveNotesChoice::SummaryModel => false,
+        LiveNotesChoice::LiveNotesModel => !is_low_memory(total_memory),
+        LiveNotesChoice::Default => live_notes_model_by_default(total_memory),
+    }
+}
+
+/// Whether the live notes model's file is in `models_dir`.
+pub fn live_notes_model_downloaded(models_dir: &std::path::Path) -> bool {
+    use crate::summary::summary_engine::models::{get_model_by_name, LIVE_NOTES_MODEL};
+    get_model_by_name(LIVE_NOTES_MODEL)
+        .is_some_and(|model| models_dir.join(model.gguf_file).is_file())
+}
+
 /// The built-in live notes model and whether it runs on its own helper, or
 /// `None` for the summary model's usual path:
 /// - the summary model is the live notes model: it, on the one helper;
-/// - the user chose the live notes model, its file is downloaded and the Mac
-///   has more than 8 GB: it, on its own helper (no reloads against Copilot);
-/// - otherwise (not chosen, not downloaded, or 8 GB): the summary model,
-///   exactly as before the live notes model existed.
+/// - the live notes model is downloaded and preferred
+///   ([`prefers_live_notes_model`]): it, on its own helper (no reloads
+///   against Copilot);
+/// - otherwise (not downloaded, "Same as summary model" picked, an 8 GB Mac,
+///   or under 16 GB without an explicit choice): the summary model, exactly
+///   as before the live notes model existed.
 pub fn live_notes_model(
     models_dir: &std::path::Path,
     summary_model: &str,
     choice: LiveNotesChoice,
-    low_memory: bool,
+    total_memory: Option<u64>,
 ) -> Option<(String, bool)> {
-    use crate::summary::summary_engine::models::{get_model_by_name, LIVE_NOTES_MODEL};
+    use crate::summary::summary_engine::models::LIVE_NOTES_MODEL;
     if summary_model == LIVE_NOTES_MODEL {
         return Some((LIVE_NOTES_MODEL.to_string(), false));
     }
-    let downloaded = get_model_by_name(LIVE_NOTES_MODEL)
-        .is_some_and(|model| models_dir.join(model.gguf_file).is_file());
-    (choice == LiveNotesChoice::LiveNotesModel && downloaded && !low_memory)
+    (prefers_live_notes_model(choice, total_memory) && live_notes_model_downloaded(models_dir))
         .then(|| (LIVE_NOTES_MODEL.to_string(), true))
 }
 
@@ -241,7 +291,7 @@ impl SummaryModelGenerator {
                     &models_dir,
                     &config.model_name,
                     choice,
-                    is_low_memory(crate::summary::summary_engine::client::total_memory_bytes()),
+                    crate::summary::summary_engine::client::total_memory_bytes(),
                 )
             })
             .flatten();
@@ -275,6 +325,49 @@ impl Generator for SummaryModelGenerator {
         user_prompt: &str,
         cancel: &CancellationToken,
     ) -> Result<Generated, GenerateError> {
+        self.generate_with_limit(system_prompt, user_prompt, None, cancel)
+            .await
+    }
+
+    async fn generate_notes(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+        max_lines: usize,
+        cancel: &CancellationToken,
+    ) -> Result<Generated, GenerateError> {
+        self.generate_with_limit(
+            system_prompt,
+            user_prompt,
+            u32::try_from(max_lines).ok(),
+            cancel,
+        )
+        .await
+    }
+}
+
+/// The line limit only applies to the live notes model's compact one-note-
+/// per-line answer. Other built-in models answer in JSON, which may span many
+/// lines, so cutting them off after a few lines would lose notes.
+fn line_limit_for(model: &str, max_lines: Option<u32>) -> Option<u32> {
+    use crate::summary::summary_engine::models::LIVE_NOTES_MODEL;
+    if model == LIVE_NOTES_MODEL {
+        max_lines
+    } else {
+        None
+    }
+}
+
+impl SummaryModelGenerator {
+    /// The call, with a line limit on the live notes model's compact answer
+    /// (other models and providers write JSON: no limit).
+    async fn generate_with_limit(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+        max_lines: Option<u32>,
+        cancel: &CancellationToken,
+    ) -> Result<Generated, GenerateError> {
         if let (Some((model, own_helper)), Some(app_data_dir)) =
             (&self.builtin, self.app_data_dir.as_ref())
         {
@@ -286,6 +379,7 @@ impl Generator for SummaryModelGenerator {
             // its own (no unreadable window in the benchmark), and checking
             // every token against a grammar made generation 10-25 % slower.
             let grammar = None;
+            let max_lines = line_limit_for(model, max_lines);
             return generate_live_notes(
                 app_data_dir,
                 LiveNotesRequest {
@@ -293,6 +387,7 @@ impl Generator for SummaryModelGenerator {
                     system_prompt,
                     user_prompt,
                     grammar,
+                    max_lines,
                     own_helper: *own_helper,
                     options: BuiltinGenerateOptions {
                         max_tokens: options.max_tokens,
@@ -336,67 +431,112 @@ impl Generator for SummaryModelGenerator {
 }
 
 #[cfg(test)]
+mod line_limit_tests {
+    use super::line_limit_for;
+    use crate::summary::summary_engine::models::LIVE_NOTES_MODEL;
+
+    #[test]
+    fn only_the_compact_live_notes_model_stops_early() {
+        assert_eq!(line_limit_for(LIVE_NOTES_MODEL, Some(4)), Some(4));
+        assert_eq!(line_limit_for("qwen3.5:4b", Some(4)), None);
+        assert_eq!(line_limit_for("gemma3:1b", Some(4)), None);
+        assert_eq!(line_limit_for(LIVE_NOTES_MODEL, None), None);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
+    const GB: u64 = 1024 * 1024 * 1024;
+
     #[test]
-    fn live_notes_use_their_model_only_once_chosen_and_downloaded() {
+    fn live_notes_use_their_model_by_default_once_downloaded_on_16_gb() {
         use crate::summary::summary_engine::models::{get_model_by_name, LIVE_NOTES_MODEL};
-        use LiveNotesChoice::{LiveNotesModel, SummaryModel};
+        use LiveNotesChoice::{Default, LiveNotesModel, SummaryModel};
         let dir = tempfile::tempdir().unwrap();
         let e2b = || Some((LIVE_NOTES_MODEL.to_string(), true));
-        // Chosen but not downloaded: the summary model's usual path.
-        assert_eq!(
-            live_notes_model(dir.path(), "qwen3.5:4b", LiveNotesModel, false),
-            None
-        );
+        let (gb8, gb16, gb24) = (Some(8 * GB), Some(16 * GB), Some(24 * GB));
+        // Not downloaded: the summary model's usual path, whatever the choice.
+        for choice in [Default, SummaryModel, LiveNotesModel] {
+            assert_eq!(
+                live_notes_model(dir.path(), "qwen3.5:4b", choice, gb24),
+                None
+            );
+        }
         let file = get_model_by_name(LIVE_NOTES_MODEL).unwrap().gguf_file;
         std::fs::write(dir.path().join(file), b"GGUF").unwrap();
-        // Downloaded but not chosen: existing users are unaffected.
+        // Downloaded, no explicit choice: the live notes model from 16 GB.
         assert_eq!(
-            live_notes_model(dir.path(), "qwen3.5:4b", SummaryModel, false),
+            live_notes_model(dir.path(), "qwen3.5:4b", Default, gb16),
+            e2b()
+        );
+        assert_eq!(
+            live_notes_model(dir.path(), "qwen3.5:4b", Default, gb24),
+            e2b()
+        );
+        assert_eq!(
+            live_notes_model(dir.path(), "qwen3.5:4b", Default, gb8),
             None
         );
         assert_eq!(
-            live_notes_model(dir.path(), "qwen3.5:4b", LiveNotesModel, false),
+            live_notes_model(dir.path(), "qwen3.5:4b", Default, None),
+            None
+        );
+        // "Same as summary model" picked explicitly: kept.
+        assert_eq!(
+            live_notes_model(dir.path(), "qwen3.5:4b", SummaryModel, gb24),
+            None
+        );
+        // Picked explicitly: used above 8 GB.
+        assert_eq!(
+            live_notes_model(dir.path(), "qwen3.5:4b", LiveNotesModel, Some(12 * GB)),
             e2b()
         );
         // 8 GB Macs never keep two models resident while recording.
         assert_eq!(
-            live_notes_model(dir.path(), "qwen3.5:4b", LiveNotesModel, true),
+            live_notes_model(dir.path(), "qwen3.5:4b", LiveNotesModel, gb8),
             None
         );
         // Already the summary model: one helper serves both.
-        for choice in [SummaryModel, LiveNotesModel] {
+        for choice in [Default, SummaryModel, LiveNotesModel] {
             assert_eq!(
-                live_notes_model(dir.path(), LIVE_NOTES_MODEL, choice, true),
+                live_notes_model(dir.path(), LIVE_NOTES_MODEL, choice, gb8),
                 Some((LIVE_NOTES_MODEL.to_string(), false))
             );
         }
     }
 
     #[test]
-    fn the_live_notes_choice_defaults_to_the_summary_model() {
+    fn no_stored_choice_is_the_default_and_an_explicit_one_round_trips() {
         use crate::summary::summary_engine::models::LIVE_NOTES_MODEL;
+        // Existing users never wrote the key unless they picked: they get the default.
+        assert_eq!(LiveNotesChoice::from_stored(None), LiveNotesChoice::Default);
         assert_eq!(
-            LiveNotesChoice::from_stored(None),
-            LiveNotesChoice::SummaryModel
+            LiveNotesChoice::from_stored(Some("bogus")),
+            LiveNotesChoice::Default
         );
         assert_eq!(
             LiveNotesChoice::from_stored(Some("summary")),
             LiveNotesChoice::SummaryModel
         );
         assert_eq!(
-            LiveNotesChoice::from_stored(Some("bogus")),
-            LiveNotesChoice::SummaryModel
-        );
-        assert_eq!(
             LiveNotesChoice::from_stored(Some(LIVE_NOTES_MODEL)),
             LiveNotesChoice::LiveNotesModel
         );
-        assert!(is_low_memory(Some(8 * 1024 * 1024 * 1024)));
-        assert!(!is_low_memory(Some(16 * 1024 * 1024 * 1024)));
+        for choice in [
+            LiveNotesChoice::Default,
+            LiveNotesChoice::SummaryModel,
+            LiveNotesChoice::LiveNotesModel,
+        ] {
+            assert_eq!(LiveNotesChoice::from_stored(choice.stored()), choice);
+        }
+        assert!(is_low_memory(Some(8 * GB)));
+        assert!(!is_low_memory(Some(16 * GB)));
         assert!(!is_low_memory(None));
+        assert!(live_notes_model_by_default(Some(16 * GB)));
+        assert!(!live_notes_model_by_default(Some(8 * GB)));
+        assert!(!live_notes_model_by_default(None));
     }
 
     use crate::summary::llm_client::LLMProvider;

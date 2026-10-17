@@ -28,7 +28,8 @@ const CHOICES: { value: LiveNotesModelChoice; label: string }[] = [
 /**
  * Settings → Summary → Live notes model: which built-in model writes the live notes, and the
  * download of the small live notes model. Nothing downloads until the Download button is
- * pressed; until then (and on 8 GB Macs) live notes use the summary model.
+ * pressed; until then (and on 8 GB Macs) live notes use the summary model. Once it is on disk
+ * it is the default on Macs with 16 GB or more, unless "Same as summary model" was picked.
  */
 export function LiveNotesModelSettings() {
   const { modelConfig } = useConfig();
@@ -87,9 +88,18 @@ export function LiveNotesModelSettings() {
     },
   });
 
+  const refreshSettings = useCallback(async () => {
+    try {
+      setSettings(await liveNotesApi.getSettings());
+    } catch (error) {
+      console.warn('Could not load the live notes settings:', error);
+    }
+  }, []);
+
+  // Removing the file is not a choice: without it live notes fall back to the summary model,
+  // and a later download makes Gemma the default again unless "Same as summary model" was picked.
   const remove = async () => {
     try {
-      if (settings?.model === LIVE_NOTES_MODEL) await choose('summary');
       await BuiltInAIAPI.deleteModel(LIVE_NOTES_MODEL);
       toast.success('Live notes model removed');
     } catch (error) {
@@ -98,6 +108,7 @@ export function LiveNotesModelSettings() {
       });
     } finally {
       void refreshModel();
+      void refreshSettings();
     }
   };
 
@@ -120,6 +131,9 @@ export function LiveNotesModelSettings() {
       <p id="live-notes-model-description" className="mb-4 text-sm text-ink-muted">
         The built-in model that writes live notes while you record. Gemma 4 E2B is a small
         model made for them: faster and lighter on the GPU, at a {sizeLabel || 'one-time'} download.
+        {settings?.opt_in_by_default
+          ? ' Once downloaded, live notes use it unless you pick "Same as summary model".'
+          : ''}
       </p>
 
       <SegmentedControl

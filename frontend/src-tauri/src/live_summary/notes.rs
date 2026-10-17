@@ -64,6 +64,9 @@ pub struct NoteContext<'a> {
     /// decisions under [`MIN_ACTION_WORDS`] or pointing at nothing ("do
     /// that"). Set for the compact prompt, whose small model writes them.
     pub drop_fragments: bool,
+    /// The window's transcript: a note written without a time starts at the
+    /// segment it shares the most words with.
+    pub segments: &'a [super::scheduler::Segment],
 }
 
 /// Applies the rules to one reply's notes in order, so a topic the first
@@ -909,7 +912,18 @@ pub fn normalize_topic(raw: &str) -> Option<String> {
     let text = text.trim_end_matches(['.', ':', ';', ',', '!', '?', '-', '—']);
     if matches!(
         text.to_lowercase().as_str(),
-        "" | "null" | "none" | "n/a" | "general" | "misc" | "other" | "topic" | "..."
+        "" | "null"
+            | "none"
+            | "none yet"
+            | "not yet"
+            | "unknown"
+            | "tbd"
+            | "n/a"
+            | "general"
+            | "misc"
+            | "other"
+            | "topic"
+            | "..."
     ) {
         return None;
     }

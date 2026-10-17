@@ -80,6 +80,10 @@ enum Request {
         n_ubatch: Option<u32>,
         /// GBNF grammar the output must follow (root rule `root`).
         grammar: Option<String>,
+        /// Stop once the output has this many complete non-empty lines (a
+        /// live notes answer: its topic line and the notes the app keeps),
+        /// instead of generating lines the app would drop.
+        max_lines: Option<u32>,
     },
     /// Counts the tokens `text` produces with the loaded model's tokenizer,
     /// using exactly the tokenization `generate` applies to a prompt.
@@ -413,6 +417,7 @@ struct GenerateParams {
     threads: i32,
     context: ContextOptions,
     grammar: Option<String>,
+    max_lines: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1030,6 +1035,14 @@ fn run_sampling(
         if should_stop {
             break;
         }
+        if params
+            .max_lines
+            .is_some_and(|max| complete_lines(&output) >= max as usize)
+        {
+            eprintln!("✓ Line limit reached (generated {} chars)", output.len());
+            output.truncate(output.trim_end().len());
+            break;
+        }
 
         let safe_end = safe_emit_end(&output, &params.stop_tokens);
         if safe_end > emitted {
@@ -1055,6 +1068,14 @@ fn run_sampling(
         completion_tokens: u32::try_from(n_cur - n_prompt_tokens).unwrap_or(0),
         first_token_at,
     })
+}
+
+/// Complete (newline-terminated) lines of `output` with text on them.
+fn complete_lines(output: &str) -> usize {
+    match output.rsplit_once('\n') {
+        Some((done, _)) => done.lines().filter(|line| !line.trim().is_empty()).count(),
+        None => 0,
+    }
 }
 
 /// Samples one token that `grammar` allows, the way llama.cpp's common
@@ -1211,6 +1232,7 @@ fn main() -> Result<()> {
                 kv_cache_type,
                 n_ubatch,
                 grammar,
+                max_lines,
             }) => {
                 let max_tokens = max_tokens.unwrap_or(512);
                 let context_size = context_size.unwrap_or(2048);
@@ -1262,6 +1284,7 @@ fn main() -> Result<()> {
                         n_ubatch,
                     },
                     grammar,
+                    max_lines: max_lines.filter(|n| *n > 0),
                 };
                 let mut sink = StdoutSink {
                     id: params.id,

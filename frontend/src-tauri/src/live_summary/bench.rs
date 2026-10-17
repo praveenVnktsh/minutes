@@ -114,6 +114,18 @@ pub struct BenchConfig {
     /// Window cadence in seconds (production: `scheduler::CADENCE`).
     #[serde(default)]
     pub cadence_s: Option<u64>,
+    /// A system prompt file to try instead of the shipped one.
+    #[serde(default)]
+    pub system_file: Option<PathBuf>,
+    /// A closing instruction to try instead of the user prompt's last line
+    /// (`{count}` is replaced by "up to N notes").
+    #[serde(default)]
+    pub closing: Option<String>,
+    /// Notes a normal window may return (production: `ENTRIES_PER_WINDOW`,
+    /// plus `COMPACT_EXTRA_NOTES` for the compact prompt); a merged window
+    /// gets one more.
+    #[serde(default)]
+    pub max_entries: Option<usize>,
 }
 
 fn default_context() -> u32 {
@@ -382,8 +394,12 @@ impl BenchModel {
         user: &str,
         max_tokens: u32,
         grammar: Option<&str>,
+        max_lines: Option<usize>,
     ) -> Result<Generated, GenerateError> {
-        let request = self.request(system, user, max_tokens, grammar);
+        let mut request = self.request(system, user, max_tokens, grammar);
+        if let Some(max_lines) = max_lines {
+            request["max_lines"] = json!(max_lines);
+        }
         let started = Instant::now();
         let mut guard = self.helper.lock().await;
         let helper = guard.as_mut().expect("helper running");
@@ -436,7 +452,7 @@ impl Generator for BenchModel {
     ) -> Result<Generated, GenerateError> {
         // Only the topic step reaches here (the notes call goes through `call`).
         self.topic_calls.fetch_add(1, Ordering::SeqCst);
-        self.call("topic", system, user, MAX_OUTPUT_TOKENS, None)
+        self.call("topic", system, user, MAX_OUTPUT_TOKENS, None, None)
             .await
     }
 }
@@ -476,8 +492,8 @@ fn notes_prompts(
     config: &BenchConfig,
     window: &Window,
     context: &PromptContext<'_>,
-) -> (&'static str, String) {
-    if config.compact() {
+) -> (String, String) {
+    let (system, mut user) = if config.compact() {
         (
             prompt::compact_system_prompt(),
             prompt::compact_user_prompt(window, context),
@@ -487,7 +503,19 @@ fn notes_prompts(
             prompt::system_prompt(),
             prompt::user_prompt(window, context),
         )
+    };
+    let system = match &config.system_file {
+        Some(path) => std::fs::read_to_string(path).expect("system_file"),
+        None => system.to_string(),
+    };
+    if let Some(closing) = &config.closing {
+        if let Some(cut) = user.rfind("\n\n") {
+            user.truncate(cut + 2);
+            let count = format!("up to {} notes", window.max_entries);
+            user.push_str(&closing.replace("{count}", &count));
+        }
     }
+    (system, user)
 }
 
 /// Replays the segments through the worker's loop on a simulated clock.
@@ -595,6 +623,7 @@ pub async fn run_config(
                         figures: Some(&figures),
                         decided_topic: decided.as_deref(),
                         drop_fragments: config.compact(),
+                        segments: &window.segments,
                     };
                     match parse_notes(
                         &raw,
@@ -655,7 +684,16 @@ pub async fn run_config(
                 scheduler.poll(now, false)
             };
             match window {
-                Some(window) => {
+                Some(mut window) => {
+                    // As the worker: the compact prompt's extra note, unless
+                    // the config sets its own count.
+                    match config.max_entries {
+                        Some(n) => window.max_entries = n + usize::from(window.max_entries > 2),
+                        None if config.compact() => {
+                            window.max_entries += prompt::COMPACT_EXTRA_NOTES
+                        }
+                        None => {}
+                    }
                     let started = Instant::now();
                     let notes = NotesSoFar::of(&entries);
                     let glossary = notes.glossary.terms();
@@ -690,7 +728,14 @@ pub async fn run_config(
                             let (system, user) = notes_prompts(config, &window, &context);
                             (
                                 model
-                                    .call("notes", system, &user, max_tokens, grammar)
+                                    .call(
+                                        "notes",
+                                        &system,
+                                        &user,
+                                        max_tokens,
+                                        grammar,
+                                        config.compact().then_some(1 + window.max_entries),
+                                    )
                                     .await,
                                 decided,
                             )
@@ -1088,7 +1133,7 @@ async fn live_notes_bench() {
             let (system, user) = notes_prompts(&config, &window, &context);
             let load_started = Instant::now();
             model
-                .call("warmup", system, &user, 1, None)
+                .call("warmup", &system, &user, 1, None, None)
                 .await
                 .expect("warmup");
             let load_s = load_started.elapsed().as_secs_f64();
@@ -1206,6 +1251,67 @@ fn live_notes_rescore() {
     }
 }
 
+/// Agreement between saved runs, to separate a config's quality from run to
+/// run noise: each candidate label (`MEETILY_BENCH_CANDS`) is scored against
+/// each reference label (`MEETILY_BENCH_REFS`) on every replay, and the mean,
+/// min and max coverage and precision are printed. A label in both lists is
+/// not scored against itself. Aggregates only.
+#[test]
+#[ignore = "developer tool: needs saved bench runs"]
+fn live_notes_noise() {
+    let replays = std::env::var("MEETILY_EVAL_REPLAYS").expect("set MEETILY_EVAL_REPLAYS");
+    let refs = std::env::var("MEETILY_BENCH_REFS").expect("set MEETILY_BENCH_REFS");
+    let cands = std::env::var("MEETILY_BENCH_CANDS").expect("set MEETILY_BENCH_CANDS");
+    let load = |dir: &Path, label: &str| -> Option<BenchRun> {
+        let text = std::fs::read_to_string(dir.join(format!("bench/{label}.json"))).ok()?;
+        serde_json::from_str(&text).ok()
+    };
+    let stats = |values: &[f64]| {
+        let mean = values.iter().sum::<f64>() / values.len().max(1) as f64;
+        let min = values.iter().copied().fold(f64::INFINITY, f64::min);
+        let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        format!("{mean:.2} [{min:.2}–{max:.2}] n={}", values.len())
+    };
+    for dir in replays.split(';').map(str::trim).filter(|d| !d.is_empty()) {
+        let dir = PathBuf::from(dir);
+        let segments = load_segments(&dir.join("events.jsonl"), None).expect("events.jsonl");
+        let name = dir
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        println!("\n== {name}");
+        let (mut all_cov, mut all_prec) = (Vec::new(), Vec::new());
+        for cand in cands.split(',').map(str::trim) {
+            let Some(c) = load(&dir, cand) else { continue };
+            let (mut cov, mut prec) = (Vec::new(), Vec::new());
+            for reference in refs.split(',').map(str::trim).filter(|r| *r != cand) {
+                let Some(r) = load(&dir, reference) else {
+                    continue;
+                };
+                let (coverage, precision, _) = agreement(&c.entries, &r.entries, &segments);
+                println!(
+                    "| {cand} vs {reference} | coverage {coverage:.2} | precision {precision:.2} |"
+                );
+                cov.push(coverage);
+                prec.push(precision);
+            }
+            println!(
+                "| {cand} | coverage {} | precision {} |",
+                stats(&cov),
+                stats(&prec)
+            );
+            all_cov.extend(cov);
+            all_prec.extend(prec);
+        }
+        println!(
+            "| ALL | coverage {} | precision {} |",
+            stats(&all_cov),
+            stats(&all_prec)
+        );
+    }
+}
+
 /// 16 kHz mono PCM16 WAV samples.
 fn read_wav_16k(path: &Path) -> Vec<f32> {
     let bytes = std::fs::read(path).unwrap();
@@ -1309,7 +1415,7 @@ async fn live_notes_rtf() {
         let context = PromptContext::default();
         let (system, user) = notes_prompts(&config, &windows[0], &context);
         model
-            .call("warmup", system, &user, 1, None)
+            .call("warmup", &system, &user, 1, None, None)
             .await
             .expect("warmup");
         let stop = Arc::new(AtomicBool::new(false));
@@ -1322,7 +1428,7 @@ async fn live_notes_rtf() {
                     let window = &windows[i % windows.len()];
                     let (system, user) = notes_prompts(&config, window, &PromptContext::default());
                     let _ = model
-                        .call("notes", system, &user, max_tokens, grammar)
+                        .call("notes", &system, &user, max_tokens, grammar, None)
                         .await;
                     i += 1;
                 }

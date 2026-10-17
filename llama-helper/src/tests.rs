@@ -321,6 +321,21 @@ fn context_options_and_grammar_parse_from_a_request() {
 }
 
 #[test]
+fn the_line_limit_counts_complete_lines_with_text() {
+    assert_eq!(complete_lines(""), 0);
+    assert_eq!(complete_lines("topic: same"), 0);
+    assert_eq!(complete_lines("topic: same\n"), 1);
+    assert_eq!(complete_lines("topic: same\n\n04:12|point|-|Budget"), 1);
+    assert_eq!(complete_lines("topic: same\n\n04:12|point|-|Budget\n"), 2);
+    let request: Request =
+        serde_json::from_str(r#"{"type":"generate","prompt":"p","max_lines":4}"#).unwrap();
+    let Request::Generate { max_lines, .. } = request else {
+        panic!("expected generate request");
+    };
+    assert_eq!(max_lines, Some(4));
+}
+
+#[test]
 fn kv_cache_types_parse_and_unknown_ones_are_ignored() {
     assert_eq!(KvType::parse("F16"), Some(KvType::F16));
     assert_eq!(KvType::parse(" q4_0 "), Some(KvType::Q4_0));
