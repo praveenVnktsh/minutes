@@ -8,13 +8,16 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use llama_cpp_2::context::params::LlamaContextParams;
+use llama_cpp_2::context::params::{KvCacheType, LlamaContextParams};
 use llama_cpp_2::context::session::LlamaStateSeqFlags;
 use llama_cpp_2::context::LlamaContext;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
-use llama_cpp_2::model::{AddBos, LlamaModel};
+use llama_cpp_2::model::LlamaModel;
+use llama_cpp_2::sampling::LlamaSampler;
+use llama_cpp_2::token::data::LlamaTokenData;
+use llama_cpp_2::token::data_array::LlamaTokenDataArray;
 use llama_cpp_2::token::LlamaToken;
 use serde::{Deserialize, Serialize};
 
@@ -68,6 +71,15 @@ enum Request {
         /// CPU threads for this request. The app lowers it while a recording
         /// runs, so live transcription (on the CPU) keeps up.
         n_threads: Option<i32>,
+        /// Flash attention: `None` lets llama.cpp decide (on for Metal).
+        flash_attn: Option<bool>,
+        /// KV cache element type: "f16" (default), "q8_0" or "q4_0".
+        /// Quantized V needs flash attention.
+        kv_cache_type: Option<String>,
+        /// Physical batch size for prompt evaluation (llama.cpp default 512).
+        n_ubatch: Option<u32>,
+        /// GBNF grammar the output must follow (root rule `root`).
+        grammar: Option<String>,
     },
     /// Counts the tokens `text` produces with the loaded model's tokenizer,
     /// using exactly the tokenization `generate` applies to a prompt.
@@ -332,6 +344,62 @@ impl SamplingConfig {
     }
 }
 
+/// How a context is built, beyond its size and threads. Part of the cached
+/// context's key: a request with other options gets a new context.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ContextOptions {
+    flash_attn: Option<bool>,
+    kv_cache_type: Option<KvType>,
+    n_ubatch: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KvType {
+    F16,
+    Q8_0,
+    Q4_0,
+}
+
+impl KvType {
+    fn parse(name: &str) -> Option<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "f16" => Some(Self::F16),
+            "q8_0" | "q8" => Some(Self::Q8_0),
+            "q4_0" | "q4" => Some(Self::Q4_0),
+            _ => None,
+        }
+    }
+
+    fn cache_type(self) -> KvCacheType {
+        match self {
+            Self::F16 => KvCacheType::F16,
+            Self::Q8_0 => KvCacheType::Q8_0,
+            Self::Q4_0 => KvCacheType::Q4_0,
+        }
+    }
+}
+
+impl ContextOptions {
+    fn apply(self, mut params: LlamaContextParams) -> LlamaContextParams {
+        if let Some(enabled) = self.flash_attn {
+            params = params.with_flash_attention_policy(if enabled {
+                llama_cpp_sys_2::LLAMA_FLASH_ATTN_TYPE_ENABLED
+            } else {
+                llama_cpp_sys_2::LLAMA_FLASH_ATTN_TYPE_DISABLED
+            });
+        }
+        if let Some(kv) = self.kv_cache_type {
+            params = params
+                .with_type_k(kv.cache_type())
+                .with_type_v(kv.cache_type());
+        }
+        if let Some(n_ubatch) = self.n_ubatch.filter(|n| *n > 0) {
+            params = params.with_n_ubatch(n_ubatch);
+        }
+        params
+    }
+}
+
 /// One generation's parameters.
 struct GenerateParams {
     prompt: String,
@@ -343,6 +411,8 @@ struct GenerateParams {
     /// Set for `cache_prompt` requests.
     cache: Option<CacheParams>,
     threads: i32,
+    context: ContextOptions,
+    grammar: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -420,7 +490,7 @@ struct ModelState {
     // Field order is drop order: the cached context borrows the model, so it
     // must go first.
     /// Persistent context for `cache_prompt` requests, with its n_ctx and threads.
-    cache_ctx: Option<((u32, i32), LlamaContext<'static>)>,
+    cache_ctx: Option<((u32, i32, ContextOptions), LlamaContext<'static>)>,
     /// Saved prefix states, most recently used first (at most `max_checkpoints`).
     checkpoints: Vec<Checkpoint>,
     max_checkpoints: usize,
@@ -516,14 +586,14 @@ impl ModelState {
         Ok(())
     }
 
-    /// Tokenizes `text` exactly as `generate` tokenizes a prompt. `AddBos::Always`
+    /// Tokenizes `text` exactly as `generate` tokenizes a prompt. `add_special`
     /// maps to llama.cpp's `add_special`, which only prepends BOS when the GGUF's
     /// `add_bos_token` says so (Gemma: yes, Qwen: no), so templates never double it.
     fn tokenize(&self, text: &str) -> Result<Vec<LlamaToken>> {
         let model = self.model.as_deref().context("Model not loaded")?;
-        model
-            .str_to_token(text, AddBos::Always)
-            .with_context(|| "failed to tokenize prompt")
+        // `add_special` only prepends BOS when the GGUF's `add_bos_token`
+        // says so; `parse_special` reads the template's control tokens.
+        Ok(model.vocab().tokenize(text.as_bytes(), true, true))
     }
 
     /// The loaded model with the lifetime the cached context needs.
@@ -567,6 +637,7 @@ impl ModelState {
             .with_n_batch(self.context_size)
             .with_n_threads(threads)
             .with_n_threads_batch(thread_count());
+        let ctx_params = params.context.apply(ctx_params);
 
         let mut ctx = model
             .new_context(&self.backend, ctx_params)
@@ -633,8 +704,9 @@ impl ModelState {
         let model = self.model_static()?;
 
         let threads = params.threads;
+        let key = (n_ctx, threads, params.context);
         let mut ctx = match self.cache_ctx.take() {
-            Some((key, ctx)) if key == (n_ctx, threads) => ctx,
+            Some((cached, ctx)) if cached == key => ctx,
             _ => {
                 let ctx_params = LlamaContextParams::default()
                     .with_n_ctx(Some(NonZeroU32::new(n_ctx).context("Invalid ctx size")?))
@@ -644,6 +716,7 @@ impl ModelState {
                     // part of it runs on the CPU, and two threads made a cold
                     // prompt ten times slower.
                     .with_n_threads_batch(thread_count());
+                let ctx_params = params.context.apply(ctx_params);
                 model
                     .new_context(&self.backend, ctx_params)
                     .context("unable to create the cached llama_context")?
@@ -692,7 +765,7 @@ impl ModelState {
             }
         }
         if sink.is_cancelled() {
-            self.cache_ctx = Some(((n_ctx, threads), ctx));
+            self.cache_ctx = Some((key, ctx));
             return Ok(cancelled_output(tokens.len(), reused));
         }
         decode_range(&mut ctx, &mut batch, &tokens, position, tokens.len(), true)?;
@@ -714,7 +787,7 @@ impl ModelState {
             sink,
             start_time,
         );
-        self.cache_ctx = Some(((n_ctx, threads), ctx));
+        self.cache_ctx = Some((key, ctx));
         let output = output?;
         self.update_activity();
         Ok(finish_output(
@@ -857,8 +930,6 @@ fn run_sampling(
     sink: &mut dyn GenerationSink,
     start_time: Instant,
 ) -> Result<SampledOutput> {
-    use llama_cpp_2::sampling::LlamaSampler;
-
     let sampling = params.sampling;
     let max_tokens = params.max_tokens;
     let seed = params.seed;
@@ -877,6 +948,7 @@ fn run_sampling(
         if sampling.uses_penalties() {
             LlamaSampler::chain_simple([
                 LlamaSampler::penalties(
+                    model.vocab().n_tokens(),
                     sampling.penalty_last_n,
                     sampling.repeat_penalty,
                     sampling.frequency_penalty,
@@ -890,6 +962,7 @@ fn run_sampling(
     } else if sampling.uses_penalties() {
         LlamaSampler::chain_simple([
             LlamaSampler::penalties(
+                model.vocab().n_tokens(),
                 sampling.penalty_last_n,
                 sampling.repeat_penalty,
                 sampling.frequency_penalty,
@@ -908,6 +981,12 @@ fn run_sampling(
             LlamaSampler::dist(seed),
         ])
     };
+    let mut grammar = match params.grammar.as_deref().filter(|g| !g.trim().is_empty()) {
+        Some(grammar) => {
+            Some(LlamaSampler::grammar(model, grammar, "root").context("invalid grammar")?)
+        }
+        None => None,
+    };
     let mut sampler = pin!(sampler);
     let mut finish_reason = FinishReason::Stop;
 
@@ -924,13 +1003,19 @@ fn run_sampling(
             break;
         }
 
-        let token = sampler.as_mut().sample(ctx, batch.n_tokens() - 1);
-        sampler.as_mut().accept(token);
+        let index = batch.n_tokens() - 1;
+        let token = match grammar.as_mut() {
+            // `sample` also accepts the token into every sampler of the chain
+            // (llama_sampler_sample does): accepting it again counted each
+            // token twice in the repeat penalty.
+            None => sampler.as_mut().sample(ctx, index),
+            Some(grammar) => sample_with_grammar(ctx, index, &mut sampler, grammar)?,
+        };
         if first_token_at.is_none() {
             first_token_at = Some(start_time.elapsed());
         }
 
-        if model.is_eog_token(token) {
+        if model.vocab().is_eog(token) {
             eprintln!(
                 "✓ End-of-generation token reached (generated {} chars)",
                 output.len()
@@ -938,18 +1023,7 @@ fn run_sampling(
             break;
         }
 
-        let output_bytes = match model.token_to_piece_bytes(token, 32, true, None) {
-            Err(llama_cpp_2::TokenToStringError::InsufficientBufferSpace(size)) => {
-                let required_size: usize = size
-                    .checked_neg()
-                    .context("Invalid token piece buffer size")?
-                    .try_into()
-                    .context("Invalid token piece buffer size")?;
-                model.token_to_piece_bytes(token, required_size, true, None)
-            }
-            result => result,
-        }
-        .context("Failed to convert token to bytes")?;
+        let output_bytes = model.vocab().token_to_piece(token, true, None);
 
         let mut token_text = String::with_capacity(32);
         let _ = decoder.decode_to_string(&output_bytes, &mut token_text, false);
@@ -998,6 +1072,36 @@ fn run_sampling(
         completion_tokens: u32::try_from(n_cur - n_prompt_tokens).unwrap_or(0),
         first_token_at,
     })
+}
+
+/// Samples one token that `grammar` allows, the way llama.cpp's common
+/// sampler does: sample freely, and only when the grammar rejects that token
+/// run the grammar over the whole vocabulary (slow on 250k-token vocabularies)
+/// and sample again. Accepts the token into both samplers.
+fn sample_with_grammar(
+    ctx: &LlamaContext<'_>,
+    index: i32,
+    sampler: &mut LlamaSampler,
+    grammar: &mut LlamaSampler,
+) -> Result<LlamaToken> {
+    let mut candidates = ctx.token_data_array_ith(index);
+    candidates.apply_sampler(sampler);
+    let mut token = candidates
+        .selected_token()
+        .context("the sampler selected no token")?;
+    let mut single = LlamaTokenDataArray::new(vec![LlamaTokenData::new(token, 1.0, 0.0)], false);
+    single.apply_sampler(grammar);
+    if !single.data[0].logit().is_finite() {
+        let mut candidates = ctx.token_data_array_ith(index);
+        candidates.apply_sampler(grammar);
+        candidates.apply_sampler(sampler);
+        token = candidates
+            .selected_token()
+            .context("the grammar allows no token")?;
+    }
+    grammar.accept(token);
+    sampler.accept(token);
+    Ok(token)
 }
 
 // ============================================================================
@@ -1120,6 +1224,10 @@ fn main() -> Result<()> {
                 cache_anchor_chars,
                 cache_context_size,
                 n_threads,
+                flash_attn,
+                kv_cache_type,
+                n_ubatch,
+                grammar,
             }) => {
                 let max_tokens = max_tokens.unwrap_or(512);
                 let context_size = context_size.unwrap_or(2048);
@@ -1165,6 +1273,12 @@ fn main() -> Result<()> {
                     threads: n_threads
                         .filter(|n| *n > 0)
                         .map_or_else(thread_count, |n| n.min(thread_count())),
+                    context: ContextOptions {
+                        flash_attn,
+                        kv_cache_type: kv_cache_type.as_deref().and_then(KvType::parse),
+                        n_ubatch,
+                    },
+                    grammar,
                 };
                 let mut sink = StdoutSink {
                     id: params.id,

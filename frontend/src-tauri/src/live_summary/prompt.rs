@@ -336,6 +336,131 @@ pub fn carryover_segments(segments: &[Segment], before_ms: i64) -> Vec<Segment> 
     kept
 }
 
+/// Earlier notes the compact prompt shows.
+pub const COMPACT_PREVIOUS_NOTES: usize = 5;
+
+/// The compact notetaker prompt: the same rules as [`system_prompt`] in a
+/// third of the tokens, and a plain-text answer instead of JSON, so a small
+/// model spends its few output tokens on the notes: a topic line (`same`, or
+/// the new topic, which folds the topic step into the notes call) and one
+/// `mm:ss|kind|owner|note` line per note. [`compact_grammar`] can enforce it.
+pub fn compact_system_prompt() -> &'static str {
+    "You take live meeting notes. You get the newest transcript and write short notes about what was said.\n\
+\n\
+Answer in this format and nothing else:\n\
+topic: same\n\
+mm:ss|kind|owner|note\n\
+\n\
+- First line: \"topic: same\" while the new transcript is still about the current topic, even with \
+new details. When the subject changed, \"topic: \" and the new topic in at most 5 words: the \
+company, product, project or person now discussed. Moving from someone's background to the \
+project they work on now, or from that project to another company, is a new topic.\n\
+- Then one line per note. kind: point, decision or action.\n\
+- action: someone commits to do something: \"I'll send the deck\", an agreed \"let's\", an offer \
+(\"I can introduce you to the founders\"), or a request You accept. owner: You, Others or the \
+person's name. note: the task, starting with a verb.\n\
+- decision: the participants explicitly agree on something. point: everything else (facts, \
+plans described, opinions, questions). owner is - for points and decisions.\n\
+- note: headline style, 6 to 12 words, never more than 14. Facts, names and numbers first. \
+Say WHAT was said, never who said it: no \"Others\", \"Speaker\", \"They\", no \"discusses\" or \"mentions\".\n\
+- Numbers only as said in the new transcript, never moved between companies or people.\n\
+- Usually one note; a second only for a separate substantive fact. Skip small talk and \
+anything already noted. If nothing new was said, write \"none\" after the topic line.\n\
+\n\
+Transcript labels: You is the person recording, Others is everyone else. Never put them in a note.\n\
+\n\
+Example:\n\
+topic: Launch plan\n\
+04:12|point|-|Offline sync bug is the last blocker; fix needs ~3 days\n\
+04:40|action|You|send support the launch announcement today"
+}
+
+/// The compact user turn: topic, glossary, the last notes in the answer
+/// format, the previous window's tail and the window's transcript.
+pub fn compact_user_prompt(window: &Window, context: &PromptContext<'_>) -> String {
+    let mut prompt = String::new();
+    // The topic step's answer, when it ran: the model writes "topic: same".
+    let decided = context.decided_topic.filter(|t| !t.trim().is_empty());
+    match decided.or(context.current_topic.filter(|t| !t.trim().is_empty())) {
+        Some(topic) if decided.is_some() => {
+            prompt.push_str(&format!("Current topic: {} (decided)\n", topic.trim()))
+        }
+        Some(topic) => {
+            let topic = topic.trim();
+            match topic_since(context.previous, topic) {
+                Some(since) if window.start_ms - since > LONG_TOPIC_MS => prompt.push_str(&format!(
+                    "Current topic: {topic} (since {}, a long time: is the subject still the same?)\n",
+                    format_clock(since)
+                )),
+                Some(since) => prompt.push_str(&format!(
+                    "Current topic: {topic} (since {})\n",
+                    format_clock(since)
+                )),
+                None => prompt.push_str(&format!("Current topic: {topic}\n")),
+            }
+        }
+        None => prompt.push_str("Current topic: none yet (name it)\n"),
+    }
+    if !context.glossary.is_empty() {
+        prompt.push_str(&format!("Spellings: {}\n", context.glossary.join(", ")));
+    }
+    let previous = context.previous;
+    let recent = &previous[previous.len().saturating_sub(COMPACT_PREVIOUS_NOTES)..];
+    if !recent.is_empty() {
+        prompt.push_str("Notes so far (do not repeat):\n");
+        let mut shown: Option<&str> = None;
+        for entry in recent {
+            if let Some(topic) = entry.topic.as_deref().filter(|t| Some(*t) != shown) {
+                prompt.push_str(&format!("topic: {topic}\n"));
+                shown = Some(topic);
+            }
+            prompt.push_str(&format!(
+                "{}|{}|-|{}\n",
+                format_clock(entry.start_ms),
+                entry.kind,
+                entry.text
+            ));
+        }
+    }
+    let carryover = carryover_segments(context.carryover, window.start_ms);
+    if !carryover.is_empty() {
+        prompt.push_str("Earlier transcript (already covered):\n");
+        for segment in &carryover {
+            push_line(&mut prompt, segment);
+        }
+    }
+    prompt.push_str(&format!(
+        "New transcript ({} to {}):\n",
+        format_clock(window.start_ms),
+        format_clock(window.end_ms)
+    ));
+    for segment in &window.segments {
+        push_line(&mut prompt, segment);
+    }
+    let count = if window.max_entries <= 1 {
+        "at most 1 note".to_string()
+    } else {
+        format!("up to {} notes (usually one)", window.max_entries)
+    };
+    prompt.push_str(&format!(
+        "\nThe topic line, then {count} about the new transcript, or none."
+    ));
+    prompt
+}
+
+/// GBNF for the compact answer: the topic line, then `none` or one to
+/// three note lines.
+pub fn compact_grammar() -> &'static str {
+    r#"root ::= "topic: " topic "\n" ("none" | line line? line?)
+topic ::= [^|\n]{1,60}
+line ::= clock "|" kind "|" owner "|" note "\n"
+clock ::= ([0-9] ":")? [0-9] [0-9]? ":" [0-9] [0-9]
+kind ::= "point" | "decision" | "action"
+owner ::= "-" | [A-Z] [A-Za-z.' -]{0,30}
+note ::= [^|\n]{3,200}
+"#
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -377,6 +502,56 @@ mod tests {
                 topic: Some(if i < 3 { "Budget" } else { "Hiring plan" }.into()),
             })
             .collect()
+    }
+
+    #[test]
+    fn compact_prompt_keeps_the_rules_in_far_fewer_words() {
+        let compact = compact_system_prompt();
+        assert!(compact.len() * 2 < system_prompt().len());
+        assert!(compact.contains("topic: same\nmm:ss|kind|owner|note"));
+        assert!(compact.contains("never who said it"));
+        assert!(compact.contains("never more than 14"));
+        assert!(compact.contains("write \"none\" after the topic line"));
+        assert!(compact.contains("|action|You|"));
+    }
+
+    #[test]
+    fn compact_user_prompt_shows_notes_in_the_answer_format() {
+        let previous = previous(7);
+        let glossary = vec!["Acme".to_string()];
+        let user = compact_user_prompt(
+            &window(),
+            &PromptContext {
+                current_topic: Some("Hiring plan"),
+                previous: &previous,
+                glossary: &glossary,
+                carryover: &[],
+                decided_topic: None,
+            },
+        );
+        assert!(user.contains("Current topic: Hiring plan (since 03:00)"));
+        assert!(user.contains("Spellings: Acme"));
+        assert!(user.contains("topic: Hiring plan\n03:00|point|-|earlier entry 3"));
+        assert!(user.contains("06:00|point|-|earlier entry 6"));
+        assert!(
+            !user.contains("earlier entry 1"),
+            "only the last {COMPACT_PREVIOUS_NOTES}"
+        );
+        assert!(user.contains("[01:01] Others: We should ship on Friday."));
+        assert!(user.ends_with(
+            "The topic line, then up to 2 notes (usually one) about the new transcript, or none."
+        ));
+        let first = compact_user_prompt(&window(), &PromptContext::default());
+        assert!(first.starts_with("Current topic: none yet (name it)\n"));
+    }
+
+    #[test]
+    fn compact_grammar_allows_none_or_up_to_three_lines() {
+        let grammar = compact_grammar();
+        assert!(
+            grammar.starts_with("root ::= \"topic: \" topic \"\\n\" (\"none\" | line line? line?)")
+        );
+        assert!(grammar.contains("kind ::= \"point\" | \"decision\" | \"action\""));
     }
 
     #[test]

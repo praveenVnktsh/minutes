@@ -33,6 +33,16 @@ pub const MAX_TOPIC_WORDS: usize = 5;
 /// A rewritten note needs at least this many words to stay.
 const MIN_REWRITTEN_WORDS: usize = 3;
 
+/// With [`NoteContext::drop_fragments`], points shorter than this say
+/// nothing on their own and are dropped.
+pub const MIN_NOTE_WORDS: usize = 3;
+/// Actions and decisions are short by nature ("Email Sarah", "Budget
+/// approved"): two words are enough.
+pub const MIN_ACTION_WORDS: usize = 2;
+
+/// Last words that leave a two-word note pointing at nothing ("do that").
+const VAGUE_OBJECTS: &[&str] = &["that", "this", "it", "them", "so", "one", "those", "these"];
+
 /// What the rules need besides the note itself.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NoteContext<'a> {
@@ -50,6 +60,10 @@ pub struct NoteContext<'a> {
     /// The window's topic from the topic step (`decide_topic`): every note
     /// of the window takes it. `None` resolves the model's own topic.
     pub decided_topic: Option<&'a str>,
+    /// Drop fragments: points under [`MIN_NOTE_WORDS`] words, actions and
+    /// decisions under [`MIN_ACTION_WORDS`] or pointing at nothing ("do
+    /// that"). Set for the compact prompt, whose small model writes them.
+    pub drop_fragments: bool,
 }
 
 /// Applies the rules to one reply's notes in order, so a topic the first
@@ -61,6 +75,7 @@ pub struct Refiner<'a> {
     current: Option<String>,
     /// Most recent first.
     topics: Vec<String>,
+    drop_fragments: bool,
 }
 
 impl<'a> Refiner<'a> {
@@ -71,6 +86,7 @@ impl<'a> Refiner<'a> {
             decided: context.decided_topic.map(str::to_string),
             current: context.current_topic.map(str::to_string),
             topics: context.known_topics.to_vec(),
+            drop_fragments: context.drop_fragments,
         }
     }
 
@@ -105,6 +121,11 @@ impl<'a> Refiner<'a> {
             Narration::Drop => return None,
         }
         text = fit(&text);
+        // Judged by the kind the model gave: an ownerless "Email Sarah" is
+        // still a short action, not a vague point.
+        if self.drop_fragments && is_fragment(&text, entry.kind) {
+            return None;
+        }
 
         entry.kind = match entry.kind {
             EntryKind::Action if !is_task(&text, entry.speaker.as_deref()) => EntryKind::Point,
@@ -206,6 +227,23 @@ const DANGLING: &[&str] = &[
     "a", "an", "the", "and", "or", "of", "to", "with", "for", "in", "on", "at", "by", "from", "as",
     "its", "their", "his", "her", "is", "are", "was", "were", "that", "than", "into",
 ];
+
+/// "do that", "agreed": nothing a reader can use. Actions and decisions
+/// keep two words ("Email Sarah", "Budget approved") unless the second
+/// points at nothing.
+fn is_fragment(text: &str, kind: EntryKind) -> bool {
+    let count = word_count(text);
+    match kind {
+        EntryKind::Action | EntryKind::Decision => {
+            count < MIN_ACTION_WORDS
+                || count < MIN_NOTE_WORDS
+                    && words(text)
+                        .last()
+                        .is_some_and(|last| VAGUE_OBJECTS.contains(&last.as_str()))
+        }
+        _ => count < MIN_NOTE_WORDS,
+    }
+}
 
 fn word_count(text: &str) -> usize {
     text.split_whitespace().count()

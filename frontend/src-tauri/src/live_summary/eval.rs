@@ -164,7 +164,7 @@ struct RunResult {
 }
 
 /// Final live transcript segments of a replay run, on audio time.
-fn load_segments(events: &Path, until_ms: Option<i64>) -> anyhow::Result<Vec<Segment>> {
+pub(super) fn load_segments(events: &Path, until_ms: Option<i64>) -> anyhow::Result<Vec<Segment>> {
     let text = std::fs::read_to_string(events)?;
     let mut segments = Vec::new();
     for line in text.lines() {
@@ -395,6 +395,7 @@ fn parse_reply(
                 previous_texts: &history,
                 figures: Some(&figures),
                 decided_topic: decided,
+                drop_fragments: false,
             };
             parse_notes(
                 raw,
@@ -703,7 +704,7 @@ fn support_for(entry: &TimelineEntry, segments: &[Segment]) -> String {
 
 /// Note quality, judged the same way for every variant, with the offending
 /// notes (meeting text: printed locally, never in a PR).
-fn quality(
+pub(super) fn quality(
     entries: &[TimelineEntry],
     segments: &[Segment],
 ) -> Vec<(&'static str, String, Vec<String>)> {

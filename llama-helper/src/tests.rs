@@ -282,3 +282,77 @@ fn small_machines_keep_one_checkpoint_and_a_smaller_cached_context() {
     );
     assert_eq!(cache_limits(None), (MAX_CHECKPOINTS, None));
 }
+
+#[test]
+fn context_options_and_grammar_parse_from_a_request() {
+    let request: Request = serde_json::from_str(
+        r#"{"type":"generate","prompt":"p","flash_attn":true,"kv_cache_type":"q8_0","n_ubatch":1024,"grammar":"root ::= \"none\""}"#,
+    )
+    .unwrap();
+    let Request::Generate {
+        flash_attn,
+        kv_cache_type,
+        n_ubatch,
+        grammar,
+        ..
+    } = request
+    else {
+        panic!("expected generate request");
+    };
+    assert_eq!(flash_attn, Some(true));
+    assert_eq!(
+        kv_cache_type.as_deref().and_then(KvType::parse),
+        Some(KvType::Q8_0)
+    );
+    assert_eq!(n_ubatch, Some(1024));
+    assert_eq!(grammar.as_deref(), Some("root ::= \"none\""));
+    // Older apps send none of them: llama.cpp's defaults.
+    let request: Request = serde_json::from_str(r#"{"type":"generate","prompt":"p"}"#).unwrap();
+    let Request::Generate {
+        flash_attn,
+        kv_cache_type,
+        grammar,
+        ..
+    } = request
+    else {
+        panic!("expected generate request");
+    };
+    assert_eq!((flash_attn, kv_cache_type, grammar), (None, None, None));
+}
+
+#[test]
+fn kv_cache_types_parse_and_unknown_ones_are_ignored() {
+    assert_eq!(KvType::parse("F16"), Some(KvType::F16));
+    assert_eq!(KvType::parse(" q4_0 "), Some(KvType::Q4_0));
+    assert_eq!(KvType::parse("q5_1"), None);
+    // Different options never share a cached context.
+    let base = ContextOptions::default();
+    let quantized = ContextOptions {
+        kv_cache_type: Some(KvType::Q8_0),
+        ..base
+    };
+    assert_ne!(base, quantized);
+}
+
+#[test]
+fn metal_offloads_every_layer_only_within_the_memory_budget() {
+    const GB16: f32 = 16.0 * 0.6;
+    const GB8: f32 = 8.0 * 0.6;
+    // Qwen 3.5 4B (2.55 GB) and Gemma 4 E2B (2.9 GB) on 16 GB: all on Metal.
+    assert_eq!(
+        gpu::metal_gpu_layers(2.55, GB16, 32_768, 33),
+        gpu::ALL_LAYERS
+    );
+    assert_eq!(
+        gpu::metal_gpu_layers(2.9, GB16, 32_768, 33),
+        gpu::ALL_LAYERS
+    );
+    // Qwen 3.5 2B (1.2 GB) still fits on 8 GB.
+    assert_eq!(gpu::metal_gpu_layers(1.2, GB8, 32_768, 28), gpu::ALL_LAYERS);
+    // The 4B on 8 GB is over the budget: the sizing logic's partial offload.
+    let layers = gpu::metal_gpu_layers(2.55, GB8, 32_768, 33);
+    assert!(layers < 33, "{layers}");
+    assert_eq!(layers, gpu::layers_that_fit(2.55, 33, GB8, 32_768));
+    // An unreadable file never gets every layer.
+    assert_eq!(gpu::metal_gpu_layers(0.0, GB16, 32_768, 33), 0);
+}

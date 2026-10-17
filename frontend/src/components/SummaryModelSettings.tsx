@@ -2,6 +2,7 @@
 
 import { ModelConfigForm } from '@/components/settings/ModelConfigForm';
 import { LiveSummarySettings } from '@/components/LiveSummarySettings';
+import { LiveNotesModelSettings } from '@/components/LiveNotesModelSettings';
 import { CopilotSettings } from '@/components/CopilotSettings';
 import { SummaryLanguageSettings } from '@/components/SummaryLanguageSettings';
 import { SummaryPromptSettings } from '@/components/SummaryPromptSettings';
@@ -35,6 +36,8 @@ export function SummaryModelSettings({ refetchTrigger: _refetchTrigger }: Summar
       </div>
 
       <LiveSummarySettings />
+
+      <LiveNotesModelSettings />
 
       <CopilotSettings />
 

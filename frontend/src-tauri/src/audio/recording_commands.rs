@@ -1890,6 +1890,11 @@ async fn stop_recording_session<R: Runtime>(
     // Set recording flag to false
     info!("🔍 Setting IS_RECORDING to false");
     IS_RECORDING.store(false, Ordering::SeqCst);
+    // A live notes helper restart deferred by a settings change made while
+    // recording.
+    tauri::async_runtime::spawn(
+        crate::summary::summary_engine::client::apply_deferred_live_notes_restart(),
+    );
     let capture_error = crate::meeting_activity::recording_identity()
         .filter(|recording| recording.session_id == session_id)
         .and_then(|recording| recording.error);

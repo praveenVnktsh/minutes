@@ -11,12 +11,15 @@
 pub mod facts;
 pub mod glossary;
 pub mod llm;
+pub mod model_choice;
 pub mod notes;
 pub mod parse;
 pub mod prompt;
 pub mod scheduler;
 pub mod worker;
 
+#[cfg(test)]
+mod bench;
 #[cfg(test)]
 mod eval;
 #[cfg(test)]
@@ -143,9 +146,12 @@ impl<R: Runtime> WorkerHost for AppHost<R> {
 
     async fn generator(&self) -> Result<Arc<dyn Generator>> {
         let pool = self.pool()?;
-        let generator =
-            SummaryModelGenerator::from_settings(&pool, self.app.path().app_data_dir().ok())
-                .await?;
+        let generator = SummaryModelGenerator::from_settings(
+            &pool,
+            self.app.path().app_data_dir().ok(),
+            model_choice::choice(&self.app),
+        )
+        .await?;
         Ok(Arc::new(generator))
     }
 

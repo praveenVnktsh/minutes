@@ -144,6 +144,7 @@ async fn live_summary_smoke() {
             previous_texts: &history,
             figures: None,
             decided_topic: None,
+            drop_fragments: false,
         };
         match parse_notes(
             &raw,

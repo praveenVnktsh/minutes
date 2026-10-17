@@ -821,7 +821,13 @@ pub fn run() {
                 )
                 .await
                 {
-                    Ok(_) => log::info!("ModelManager initialized successfully at startup"),
+                    Ok(_) => {
+                        log::info!("ModelManager initialized successfully at startup");
+                        // An onboarding opt-in the last run left waiting.
+                        live_summary::model_choice::resume_pending_download(
+                            &app_handle_for_model_manager,
+                        );
+                    }
                     Err(e) => {
                         log::warn!("Failed to initialize ModelManager at startup: {}", e);
                         log::warn!("ModelManager will be lazy-initialized on first use");
@@ -1016,6 +1022,9 @@ pub fn run() {
             live_summary::list_meeting_timeline_entries,
             live_summary::get_live_summary_settings,
             live_summary::set_live_summary_settings,
+            live_summary::model_choice::get_live_notes_settings,
+            live_summary::model_choice::set_live_notes_model,
+            live_summary::model_choice::request_live_notes_download_after_setup,
             copilot::copilot_get_state,
             replay::commands::get_replays_enabled,
             replay::commands::set_replays_enabled,
