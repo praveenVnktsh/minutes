@@ -29,7 +29,7 @@ pnpm lint
 step "frontend tests"
 pnpm test
 step "replay viewer tests"
-node --test ../site/replay/parser.test.js
+node --test ../site/replay/parser.test.js ../site/replay/app.test.js
 # Also produces frontend/out, which the Rust app embeds at compile time
 # (tauri.conf.json's frontendDist), so it must come before the Rust build.
 step "build frontend"
@@ -50,5 +50,12 @@ cp "$target_dir/debug/llama-helper" "frontend/src-tauri/binaries/llama-helper-${
 
 step "rust tests"
 cargo test -p meetily
+
+# The replay harness's server (replay::serve) is only compiled with the
+# developer feature, so release builds carry no HTTP server: its tests and the
+# replay example are checked here.
+step "replay harness tests (dev-replay)"
+cargo test -p meetily --features dev-replay --lib replay::
+cargo check -p meetily --features dev-replay --example replay
 
 printf '\nPR Check passed.\n'

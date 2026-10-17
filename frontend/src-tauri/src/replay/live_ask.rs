@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use super::live_copilot::inputs_at;
-use super::serve::Ask;
+use super::runs::Ask;
 use crate::copilot::context::TimelineItem;
 use crate::copilot::core::{ChatRow, Core, CoreConfig, Delta, Host, MessageStatus, Snapshot};
 use crate::copilot::stream::Streamer;
@@ -247,6 +247,10 @@ impl LiveAsker {
             }),
             &mut gone,
         );
+        // Left as the context was sent: no model is resolved or warmed.
+        if gone {
+            return Ok(());
+        }
 
         let sandbox = dir.join("sandbox");
         let pool = match self.pool(&sandbox).await {
@@ -292,6 +296,12 @@ impl LiveAsker {
         }
         let warm_ms = warm_started.elapsed().as_millis() as u64;
         drop(streamer);
+        // Left while the model loaded (or the consumer now refuses, e.g. a
+        // recording started): nothing is asked or saved.
+        send("ping", Value::Null, &mut gone);
+        if gone {
+            return Ok(());
+        }
 
         let core = Core::new(format!("replay-live-{run}"), host, live_config());
         for line in inputs.lines.iter().cloned() {
@@ -414,7 +424,7 @@ impl LiveAsker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::replay::serve::parse_ask;
+    use crate::replay::runs::parse_ask;
 
     fn run_without_sandbox() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
@@ -464,5 +474,30 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(calls, 1, "nothing is sent after the consumer is gone");
+    }
+
+    #[tokio::test]
+    async fn an_ask_left_at_its_context_opens_no_model() {
+        let dir = run_without_sandbox();
+        let sandbox = dir.path().join("sandbox");
+        std::fs::create_dir(&sandbox).unwrap();
+        // An empty file is an empty SQLite database.
+        std::fs::write(sandbox.join("meeting_minutes.sqlite"), b"").unwrap();
+        let asker = LiveAsker::new();
+        let ask = parse_ask(br#"{"audio_ms":5000,"kind":"ask","text":"What?"}"#).unwrap();
+        let mut seen = Vec::new();
+        asker
+            .ask("r", dir.path(), ask, |event, _| {
+                seen.push(event.to_string());
+                event != "context"
+            })
+            .await
+            .unwrap();
+        assert_eq!(seen, ["ping", "context"]);
+        assert!(
+            asker.pools.lock().await.is_empty(),
+            "the sandbox (and so the model) was never opened"
+        );
+        assert!(!dir.path().join("interactive.jsonl").exists());
     }
 }

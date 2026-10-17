@@ -531,7 +531,7 @@ export function summarize(records: ReplayRecord[]): RunSummary {
     if (r.type !== 'debug') continue;
     if (r.name === 'detector') detector.push({ i: r.i, tMs: r.t_ms, audioMs: r.audio_ms, step: p.step || p.counter, decision: p.decision, lineMs: p.line_ms, id: p.decision_id });
     if (r.name === 'sidecar') sidecar.push({ i: r.i, tMs: r.t_ms, audioMs: r.audio_ms, what: p.phase || p.what, id: p.id, priority: p.priority, detail: p.message || (p.waited_ms != null ? `waited ${p.waited_ms} ms` : p.busy_ms != null ? `${p.busy_ms} ms` : p.by != null ? `by ${p.by}` : '') });
-    if (r.name === 'copilot-request' && p.phase === 'done') requests.push({ i: r.i, tMs: r.t_ms, audioMs: r.audio_ms, ...p });
+    if (r.name === 'copilot-request' && p.phase === 'done') requests.push({ ...p, i: r.i, tMs: r.t_ms, audioMs: r.audio_ms });
   }
   const names = [...new Set(records.map((r) => r.name))].sort();
   return { meta, endMs: last.t_ms, endAudioMs: last.audio_ms, detector, sidecar, requests, names };

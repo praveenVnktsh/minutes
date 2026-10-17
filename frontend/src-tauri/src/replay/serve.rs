@@ -1,5 +1,6 @@
 //! `replay serve`: the replay viewer, the local runs and a live Copilot, over
-//! HTTP on 127.0.0.1 only.
+//! HTTP on 127.0.0.1 only. A developer tool: built with the `dev-replay`
+//! feature only, so release builds carry no server and no copy of the viewer.
 //!
 //! - `/replay/…` serves the viewer (embedded from `site/replay` at build time).
 //! - `GET /api/runs` lists the runs under the replays folder, newest first.
@@ -25,16 +26,15 @@ use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
-use serde::Deserialize;
 use serde_json::{json, Value};
 
 pub use super::live_ask::live_config;
 use super::live_ask::LiveAsker;
 pub use super::live_copilot::Cutoff;
-use crate::copilot::prompt::QuickAction;
+pub use super::runs::{list_runs, parse_ask, run_audio, run_dir, valid_run_name, Ask, AskBody};
 
 pub const DEFAULT_PORT: u16 = 7357;
 
@@ -43,6 +43,11 @@ const ASSETS: &[(&str, &str, &str)] = &[
         "index.html",
         "text/html; charset=utf-8",
         include_str!("../../../../site/replay/index.html"),
+    ),
+    (
+        "boot.js",
+        "text/javascript; charset=utf-8",
+        include_str!("../../../../site/replay/boot.js"),
     ),
     (
         "app.js",
@@ -79,32 +84,10 @@ const FONTS: &[(&str, &[u8])] = &[
 
 /// The most a POST body may be.
 const MAX_BODY: usize = 64 * 1024;
-/// The longest question accepted.
-const MAX_QUESTION_CHARS: usize = 2_000;
 
 // ---------------------------------------------------------------------------
 // Paths and hosts
 // ---------------------------------------------------------------------------
-
-/// A run folder name: what the recorder makes (`20261016-162607-m35`).
-pub fn valid_run_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= 128
-        && !name.starts_with('.')
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
-}
-
-/// The folder of run `name`, only if it is a directory directly under `root`.
-pub fn run_dir(root: &Path, name: &str) -> Option<PathBuf> {
-    if !valid_run_name(name) {
-        return None;
-    }
-    let root = root.canonicalize().ok()?;
-    let dir = root.join(name).canonicalize().ok()?;
-    (dir.parent() == Some(root.as_path()) && dir.is_dir()).then_some(dir)
-}
 
 /// Whether the `Host` header names this server (loopback, this port).
 pub fn allowed_host(host: Option<&str>, port: u16) -> bool {
@@ -150,11 +133,30 @@ struct Request {
     body: Vec<u8>,
 }
 
+/// The longest request or header line read.
+const MAX_LINE: usize = 8 * 1024;
+/// The most all header lines together may be.
+const MAX_HEADERS: usize = 16 * 1024;
+
+/// One request or header line, refused once it passes `MAX_LINE` bytes
+/// without a newline (so one endless line cannot fill memory).
+fn read_line_capped(reader: &mut impl BufRead, line: &mut String) -> Result<usize> {
+    let read = Read::take(&mut *reader, MAX_LINE as u64 + 1).read_line(line)?;
+    if read > MAX_LINE {
+        return Err(anyhow!("header line too long"));
+    }
+    Ok(read)
+}
+
 fn read_request(stream: &TcpStream) -> Result<Request> {
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     let mut reader = BufReader::new(stream.try_clone()?);
+    read_request_from(&mut reader)
+}
+
+fn read_request_from(reader: &mut impl BufRead) -> Result<Request> {
     let mut first = String::new();
-    reader.read_line(&mut first)?;
+    read_line_capped(reader, &mut first)?;
     let mut parts = first.split_whitespace();
     let mut request = Request {
         method: parts.next().unwrap_or_default().to_string(),
@@ -165,12 +167,12 @@ fn read_request(stream: &TcpStream) -> Result<Request> {
     let mut total = first.len();
     loop {
         let mut line = String::new();
-        let read = reader.read_line(&mut line)?;
+        let read = read_line_capped(reader, &mut line)?;
         total += read;
         if read == 0 || line == "\r\n" || line == "\n" {
             break;
         }
-        if total > 16 * 1024 {
+        if total > MAX_HEADERS {
             return Err(anyhow!("headers too large"));
         }
         if let Some((name, value)) = line.split_once(':') {
@@ -203,7 +205,7 @@ fn respond(stream: &mut TcpStream, status: &str, content_type: &str, body: &[u8]
         stream,
         "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\
          Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n\
-         Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'\r\n\
+         Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'\r\n\
          Connection: close\r\n\r\n",
         body.len()
     )?;
@@ -258,98 +260,6 @@ fn send_event(stream: &mut TcpStream, event: &str, data: &Value) -> std::io::Res
 // ---------------------------------------------------------------------------
 // Runs
 // ---------------------------------------------------------------------------
-
-fn first_line(path: &Path) -> Option<Value> {
-    let file = std::fs::File::open(path).ok()?;
-    let mut line = String::new();
-    // The header is in the first few records (after an activity update).
-    let mut reader = BufReader::new(file);
-    for _ in 0..8 {
-        line.clear();
-        reader.read_line(&mut line).ok()?;
-        let record: Value = serde_json::from_str(&line).ok()?;
-        if record["name"] == "run-start" {
-            return Some(record);
-        }
-    }
-    None
-}
-
-/// The meeting folder's name: the recording is linked in the sandbox.
-fn recording_name(dir: &Path) -> Option<String> {
-    let meeting = dir.join("sandbox").join("meeting");
-    std::fs::read_dir(meeting)
-        .ok()?
-        .flatten()
-        .find_map(|entry| std::fs::read_link(entry.path()).ok())
-        .and_then(|target| {
-            target
-                .parent()
-                .and_then(|p| p.file_name())
-                .map(|n| n.to_string_lossy().to_string())
-        })
-}
-
-/// One run's entry in `/api/runs`.
-fn run_summary(dir: &Path) -> Option<Value> {
-    let name = dir.file_name()?.to_str()?.to_string();
-    let events = dir.join("events.jsonl");
-    let meta = events.metadata().ok()?;
-    let header = first_line(&events)
-        .map(|r| r["payload"].clone())
-        .unwrap_or(Value::Null);
-    let report: Option<Value> = std::fs::read_to_string(dir.join("report.json"))
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok());
-    let fresh = meta
-        .modified()
-        .ok()
-        .and_then(|m| SystemTime::now().duration_since(m).ok())
-        .is_some_and(|age| age < Duration::from_secs(60));
-    let status = if report.is_some() {
-        "done"
-    } else if fresh {
-        "running"
-    } else {
-        "incomplete"
-    };
-    let count = |status: &str| {
-        report
-            .as_ref()
-            .and_then(|r| r["criteria"].as_array())
-            .map(|c| c.iter().filter(|c| c["status"] == status).count())
-    };
-    let interactive = std::fs::read_to_string(dir.join("interactive.jsonl"))
-        .map(|t| t.lines().filter(|l| !l.trim().is_empty()).count())
-        .unwrap_or(0);
-    Some(json!({
-        "name": name,
-        "status": status,
-        "recording": recording_name(dir),
-        "audio_name": header["audio_name"],
-        "duration_s": header["duration_s"],
-        "realtime": header["realtime"],
-        "started_at": header["started_at"],
-        "events_bytes": meta.len(),
-        "passed": count("pass"),
-        "failed": count("fail"),
-        "interactive": interactive,
-    }))
-}
-
-/// The runs under `root`, newest first: what `GET /api/runs` answers.
-pub fn list_runs(root: &Path) -> Value {
-    let mut runs: Vec<Value> = std::fs::read_dir(root)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-        .filter(|e| e.file_name().to_str().is_some_and(valid_run_name))
-        .filter_map(|e| run_summary(&e.path()))
-        .collect();
-    runs.sort_by(|a, b| b["name"].as_str().cmp(&a["name"].as_str()));
-    json!({ "runs": runs })
-}
 
 fn is_end_record(line: &str) -> bool {
     line.contains("\"type\":\"meta\"")
@@ -415,46 +325,6 @@ fn query_number(query: &str, key: &str) -> usize {
 // ---------------------------------------------------------------------------
 // The recording
 // ---------------------------------------------------------------------------
-
-/// Audio files a run may link, and their types.
-const AUDIO_TYPES: &[(&str, &str)] = &[
-    ("mp4", "audio/mp4"),
-    ("m4a", "audio/mp4"),
-    ("wav", "audio/wav"),
-    ("mp3", "audio/mpeg"),
-    ("webm", "audio/webm"),
-    ("ogg", "audio/ogg"),
-];
-
-/// The recording a run replayed: the `audio.<ext>` the recorder linked into
-/// its sandbox's meeting folder, and nothing else. `Err` names the missing
-/// file when the link no longer resolves.
-pub fn run_audio(dir: &Path) -> Result<(PathBuf, &'static str), String> {
-    let meeting = dir.join("sandbox").join("meeting");
-    let entries =
-        std::fs::read_dir(&meeting).map_err(|_| "This run has no linked recording".to_string())?;
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        let Some(ext) = name.strip_prefix("audio.") else {
-            continue;
-        };
-        let Some((_, kind)) = AUDIO_TYPES
-            .iter()
-            .find(|(e, _)| e.eq_ignore_ascii_case(ext))
-        else {
-            continue;
-        };
-        let link = entry.path();
-        return match link.canonicalize() {
-            Ok(file) if file.is_file() => Ok((file, kind)),
-            _ => Err(format!(
-                "The recording is not on this machine any more: {}",
-                std::fs::read_link(&link).unwrap_or(link).display()
-            )),
-        };
-    }
-    Err("This run has no linked recording".to_string())
-}
 
 /// A `Range` header against a body of `len` bytes: `Ok(None)` for the whole
 /// body (no header, or one this server does not honour, such as several
@@ -552,71 +422,6 @@ fn serve_audio(stream: &mut TcpStream, dir: &Path, range: Option<&str>) -> Resul
 // ---------------------------------------------------------------------------
 // Live Copilot
 // ---------------------------------------------------------------------------
-
-/// `POST /api/runs/<run>/copilot`.
-#[derive(Debug, Deserialize)]
-pub struct AskBody {
-    /// Meeting time of the cursor.
-    pub audio_ms: u64,
-    /// The cursor as a record count (exact); `audio_ms` alone otherwise.
-    #[serde(default)]
-    pub seq: Option<u64>,
-    /// `ask` (a question) or `action` (a quick action).
-    pub kind: String,
-    #[serde(default)]
-    pub text: Option<String>,
-    #[serde(default)]
-    pub action: Option<String>,
-}
-
-/// A checked ask: the quick action or the question.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Ask {
-    pub cutoff: Cutoff,
-    pub action: Option<QuickAction>,
-    pub question: Option<String>,
-}
-
-pub fn parse_ask(body: &[u8]) -> Result<Ask, String> {
-    let body: AskBody =
-        serde_json::from_slice(body).map_err(|e| format!("Bad request body: {e}"))?;
-    let cutoff = Cutoff {
-        audio_ms: body.audio_ms,
-        seq: body.seq,
-    };
-    match body.kind.as_str() {
-        "ask" => {
-            let text = body.text.unwrap_or_default().trim().to_string();
-            if text.is_empty() {
-                return Err("Type a question first".into());
-            }
-            if text.chars().count() > MAX_QUESTION_CHARS {
-                return Err(format!(
-                    "Questions are limited to {MAX_QUESTION_CHARS} characters"
-                ));
-            }
-            Ok(Ask {
-                cutoff,
-                action: None,
-                question: Some(text),
-            })
-        }
-        "action" => {
-            let action = body
-                .action
-                .as_deref()
-                .and_then(QuickAction::parse)
-                .filter(|a| *a != QuickAction::Shorter)
-                .ok_or("Unknown quick action")?;
-            Ok(Ask {
-                cutoff,
-                action: Some(action),
-                question: None,
-            })
-        }
-        _ => Err("kind must be \"ask\" or \"action\"".into()),
-    }
-}
 
 /// State shared by the server's connections for live Copilot asks.
 struct Live {
@@ -819,28 +624,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn run_names_and_folders_stay_inside_the_root() {
-        let root = tempfile::tempdir().unwrap();
-        std::fs::create_dir(root.path().join("20261016-162607-m35")).unwrap();
-        std::fs::write(root.path().join("file.txt"), "x").unwrap();
-        assert!(run_dir(root.path(), "20261016-162607-m35").is_some());
-        for bad in [
-            "", "..", "../etc", "a/b", ".hidden", "file.txt", "missing", "%2e%2e", "..%2f",
-        ] {
-            assert!(run_dir(root.path(), bad).is_none(), "{bad}");
-        }
-        let outside = tempfile::tempdir().unwrap();
-        #[cfg(unix)]
-        {
-            std::os::unix::fs::symlink(outside.path(), root.path().join("link")).unwrap();
-            assert!(
-                run_dir(root.path(), "link").is_none(),
-                "a symlink out of the root"
-            );
-        }
-    }
-
-    #[test]
     fn only_this_server_s_host_is_answered() {
         assert!(allowed_host(Some("127.0.0.1:7357"), 7357));
         assert!(allowed_host(Some("localhost:7357"), 7357));
@@ -914,36 +697,30 @@ mod tests {
     }
 
     #[test]
-    fn runs_are_listed_with_their_status() {
-        let root = tempfile::tempdir().unwrap();
-        let done = root.path().join("20261016-100000-a");
-        std::fs::create_dir(&done).unwrap();
-        std::fs::write(
-            done.join("events.jsonl"),
-            "{\"seq\":0,\"t_ms\":0,\"audio_ms\":0,\"type\":\"event\",\"name\":\"meeting-activity-updated\",\"payload\":{}}\n\
-             {\"seq\":1,\"t_ms\":0,\"audio_ms\":0,\"type\":\"meta\",\"name\":\"run-start\",\"payload\":{\"audio_name\":\"audio.mp4\",\"duration_s\":60}}\n",
-        )
-        .unwrap();
-        std::fs::write(
-            done.join("report.json"),
-            "{\"criteria\":[{\"status\":\"pass\"},{\"status\":\"fail\"},{\"status\":\"pass\"}]}",
-        )
-        .unwrap();
-        std::fs::write(done.join("interactive.jsonl"), "{}\n{}\n").unwrap();
-        let running = root.path().join("20261016-110000-b");
-        std::fs::create_dir(&running).unwrap();
-        std::fs::write(running.join("events.jsonl"), "").unwrap();
-        std::fs::create_dir(root.path().join("no-events")).unwrap();
-        let list = list_runs(root.path());
-        let runs = list["runs"].as_array().unwrap();
-        assert_eq!(runs.len(), 2);
-        assert_eq!(runs[0]["name"], "20261016-110000-b");
-        assert_eq!(runs[0]["status"], "running");
-        assert_eq!(runs[1]["status"], "done");
-        assert_eq!(runs[1]["passed"], 2);
-        assert_eq!(runs[1]["failed"], 1);
-        assert_eq!(runs[1]["duration_s"], 60);
-        assert_eq!(runs[1]["interactive"], 2);
+    fn header_lines_are_capped() {
+        let ok = format!(
+            "GET /api/runs HTTP/1.1\r\nHost: 127.0.0.1:1\r\nX: {}\r\n\r\n",
+            "a".repeat(100)
+        );
+        let request = read_request_from(&mut ok.as_bytes()).unwrap();
+        assert_eq!(request.path, "/api/runs");
+        assert_eq!(request.host.as_deref(), Some("127.0.0.1:1"));
+        // One endless header line is refused once it passes the cap, before
+        // the rest of it is read.
+        let endless = std::io::Read::chain(
+            &b"GET / HTTP/1.1\r\nX: "[..],
+            std::io::repeat(b'a').take(10 * 1024 * 1024),
+        );
+        let mut reader = BufReader::new(endless);
+        assert!(read_request_from(&mut reader).is_err());
+        let long_first = format!("GET /{} HTTP/1.1\r\n\r\n", "a".repeat(MAX_LINE));
+        assert!(read_request_from(&mut long_first.as_bytes()).is_err());
+        // Many short lines still hit the total.
+        let many = format!(
+            "GET / HTTP/1.1\r\n{}\r\n",
+            "X: aaaaaaaaaaaaaaaa\r\n".repeat(2000)
+        );
+        assert!(read_request_from(&mut many.as_bytes()).is_err());
     }
 
     #[test]
@@ -973,33 +750,6 @@ mod tests {
         let frame = sse_frame(Some("delta"), &data);
         assert_eq!(frame.matches("data: ").count(), 1);
         assert!(frame.ends_with("\n\n"));
-    }
-
-    #[test]
-    fn asks_are_checked() {
-        let ask = parse_ask(br#"{"audio_ms":720000,"seq":3000,"kind":"ask","text":"  What are they asking me for?  "}"#).unwrap();
-        assert_eq!(
-            ask.question.as_deref(),
-            Some("What are they asking me for?")
-        );
-        assert_eq!(
-            ask.cutoff,
-            Cutoff {
-                audio_ms: 720_000,
-                seq: Some(3000)
-            }
-        );
-        let action = parse_ask(br#"{"audio_ms":1,"kind":"action","action":"catch_up"}"#).unwrap();
-        assert_eq!(action.action, Some(QuickAction::CatchUp));
-        assert!(parse_ask(br#"{"audio_ms":1,"kind":"ask","text":"  "}"#).is_err());
-        assert!(parse_ask(br#"{"audio_ms":1,"kind":"action","action":"shorter"}"#).is_err());
-        assert!(parse_ask(br#"{"audio_ms":1,"kind":"action","action":"nope"}"#).is_err());
-        assert!(parse_ask(br#"{"audio_ms":1,"kind":"other"}"#).is_err());
-        let long = format!(
-            r#"{{"audio_ms":1,"kind":"ask","text":"{}"}}"#,
-            "a".repeat(2_001)
-        );
-        assert!(parse_ask(long.as_bytes()).is_err());
     }
 
     #[test]
