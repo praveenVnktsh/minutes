@@ -337,34 +337,6 @@ fn run_summary(dir: &Path) -> Option<Value> {
     }))
 }
 
-/// The recording a run was fed: the media file (usually a link to the real
-/// recording) in its sandbox's meeting folder, resolved to the real file.
-pub fn recording_file(dir: &Path) -> Option<PathBuf> {
-    const MEDIA: &[&str] = &[
-        "mp4", "m4a", "wav", "mp3", "aac", "flac", "ogg", "opus", "webm", "mov", "mkv", "caf",
-    ];
-    let meeting = dir.join("sandbox").join("meeting");
-    let mut entries: Vec<PathBuf> = std::fs::read_dir(meeting)
-        .ok()?
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.extension()
-                .and_then(|e| e.to_str())
-                .is_some_and(|e| MEDIA.contains(&e.to_ascii_lowercase().as_str()))
-        })
-        .collect();
-    // `audio.*` first, then by name, so the choice is stable.
-    entries.sort_by_key(|p| {
-        let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
-        (stem != "audio", p.clone())
-    });
-    entries
-        .into_iter()
-        .filter_map(|p| p.canonicalize().ok())
-        .find(|p| p.is_file())
-}
-
 /// The runs under `root`, newest first: what `GET /api/runs` answers.
 pub fn list_runs(root: &Path) -> Value {
     let mut runs: Vec<Value> = std::fs::read_dir(root)

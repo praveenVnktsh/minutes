@@ -68,7 +68,9 @@ pub fn read_run_file(root: &Path, run: &str, file: &str) -> Result<Vec<u8>> {
 
 /// The real file of the run's recording, if it has one.
 pub fn audio_for(root: &Path, run: &str) -> Result<Option<PathBuf>> {
-    Ok(serve::recording_file(&run_folder(root, run)?))
+    Ok(serve::run_audio(&run_folder(root, run)?)
+        .ok()
+        .map(|(path, _)| path))
 }
 
 #[tauri::command]

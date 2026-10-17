@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { createRequire } from 'node:module';
 import { AUDIO_MAX_RATE, DEFAULT_SPEED, SPEEDS, audioIsClock, audioPlan, needsResync, nextCursor } from './transport';
 
 const plan = (over: Partial<Parameters<typeof audioPlan>[0]> = {}) =>
@@ -26,10 +27,14 @@ describe('replay transport', () => {
     expect(needsResync(10.3, 10_000)).toBe(true);
   });
 
-  test('at 1× the recording is the clock, never moving the cursor back', () => {
-    expect(audioIsClock(plan(), 1, false)).toBe(true);
-    expect(audioIsClock(plan({ speed: 2 }), 2, false)).toBe(false);
-    expect(audioIsClock(plan(), 1, true)).toBe(false);
+  test('while it plays (up to 4×) the recording is the clock, never moving the cursor back', () => {
+    const ready = { paused: false, seeking: false, readyState: 4 };
+    expect(audioIsClock(plan(), ready)).toBe(true);
+    expect(audioIsClock(plan({ speed: 4 }), ready)).toBe(true);
+    expect(audioIsClock(plan({ speed: 16 }), ready)).toBe(false);
+    expect(audioIsClock(plan(), { ...ready, paused: true })).toBe(false);
+    expect(audioIsClock(plan(), { ...ready, seeking: true })).toBe(false);
+    expect(audioIsClock(plan(), { ...ready, readyState: 1 })).toBe(false);
     expect(nextCursor({ cursorMs: 5000, dtMs: 16, speed: 1, endMs: 60_000, audioSeconds: 5.5 })).toEqual({ cursorMs: 5500, ended: false });
     expect(nextCursor({ cursorMs: 5000, dtMs: 16, speed: 1, endMs: 60_000, audioSeconds: 4.9 })).toEqual({ cursorMs: 5000, ended: false });
   });
@@ -38,5 +43,21 @@ describe('replay transport', () => {
     expect(nextCursor({ cursorMs: 0, dtMs: 16, speed: 16, endMs: 60_000 })).toEqual({ cursorMs: 256, ended: false });
     expect(nextCursor({ cursorMs: 0, dtMs: 5000, speed: 2, endMs: 60_000 })).toEqual({ cursorMs: 200, ended: false });
     expect(nextCursor({ cursorMs: 59_990, dtMs: 16, speed: 1024, endMs: 60_000 })).toEqual({ cursorMs: 60_000, ended: true });
+  });
+});
+
+describe('the audio rules match site/replay/parser.js', () => {
+  test('audioPlan and needsResync agree on every combination', () => {
+    const site = createRequire(import.meta.url)('../../../../site/replay/parser.js');
+    for (const available of [true, false])
+      for (const axis of ['audio', 'wall'] as const)
+        for (const speed of [1, 2, 4, 16, 1024])
+          for (const playing of [true, false])
+            for (const cursorMs of [0, 59_999, 60_000]) {
+              const args = { available, axis, speed, playing, cursorMs, durationMs: 60_000 };
+              expect(audioPlan(args)).toEqual(site.audioPlan(args));
+            }
+    for (const [s, ms] of [[10, 10_250], [10, 10_251], [0, 0]]) expect(needsResync(s, ms)).toBe(site.needsResync(s, ms));
+    expect(AUDIO_MAX_RATE).toBe(site.AUDIO_MAX_RATE);
   });
 });

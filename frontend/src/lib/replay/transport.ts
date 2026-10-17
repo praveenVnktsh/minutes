@@ -55,10 +55,13 @@ export function needsResync(audioSeconds: number, cursorMs: number, limitMs = AU
   return Math.abs(audioSeconds * 1000 - cursorMs) > limitMs;
 }
 
-/** Whether the recording is the clock: playing at 1×, where following it
- * avoids any drift between what is heard and what is shown. */
-export function audioIsClock(plan: AudioPlan, speed: number, audioPaused: boolean): boolean {
-  return plan.play && speed === 1 && !audioPaused;
+/** Whether the recording is the clock: while it plays (up to 4×) the cursor
+ * follows it, so what is heard and what is shown never drift apart. */
+export function audioIsClock(
+  plan: AudioPlan,
+  audio: { paused: boolean; seeking: boolean; readyState: number },
+): boolean {
+  return plan.play && !audio.paused && !audio.seeking && audio.readyState >= 2;
 }
 
 /**

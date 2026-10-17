@@ -198,7 +198,7 @@ export class ReplayPlayer {
     }
     const plan = this.plan();
     const audio = this.audio;
-    const clocked = audio && audioIsClock(plan, this.state.speed, audio.paused);
+    const clocked = audio && audioIsClock(plan, audio);
     const step = nextCursor({
       cursorMs: this.cursorMs,
       dtMs: dt,
@@ -295,8 +295,8 @@ export class ReplayPlayer {
     }
     const rate = audioRateFor(plan);
     if (audio.playbackRate !== rate) audio.playbackRate = rate;
-    // At 1× the recording is the clock; otherwise follow the cursor.
-    const clocked = audioIsClock(plan, this.state.speed, audio.paused);
+    // While it plays the recording is the clock; otherwise follow the cursor.
+    const clocked = audioIsClock(plan, audio);
     if ((force || !clocked) && needsResync(audio.currentTime, cursor)) audio.currentTime = cursor / 1000;
     if (audio.paused) void audio.play().catch(() => this.set({ audioReason: 'unavailable' }));
   }
