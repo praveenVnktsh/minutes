@@ -177,13 +177,35 @@
 
   /** Snapshots every SNAPSHOT_EVERY records, for fast exact seeking. */
   function buildIndex(records, every = SNAPSHOT_EVERY) {
-    const snapshots = [{ n: 0, state: initialState() }];
-    const running = initialState();
-    for (let i = 0; i < records.length; i += 1) {
-      reduce(running, records[i]);
-      if ((i + 1) % every === 0) snapshots.push({ n: i + 1, state: clone(running) });
+    const index = { records: [], snapshots: [{ n: 0, state: initialState() }], every, running: initialState() };
+    extendIndex(index, records);
+    return index;
+  }
+
+  /** Appends records (a live run's new lines) to an index. They must not be
+   * older than what it holds. */
+  function extendIndex(index, more) {
+    for (const record of more) {
+      record.i = index.records.length;
+      index.records.push(record);
+      reduce(index.running, record);
+      if (index.records.length % index.every === 0) {
+        index.snapshots.push({ n: index.records.length, state: clone(index.running) });
+      }
     }
-    return { records, snapshots, every };
+    return index;
+  }
+
+  /** One events.jsonl line, as parseJsonl reads it (null for a blank line). */
+  function parseLine(line) {
+    const text = String(line).trim();
+    if (!text) return null;
+    const record = JSON.parse(text);
+    record.t_ms = Number(record.t_ms) || 0;
+    record.audio_ms = Number(record.audio_ms) || 0;
+    record.type = record.type || 'event';
+    record.payload = record.payload ?? null;
+    return record;
   }
 
   /** The state after the first `n` records. `from` (a state this function
@@ -446,6 +468,8 @@
     reduce,
     fold,
     buildIndex,
+    extendIndex,
+    parseLine,
     stateAt,
     countAtTime,
     countAtAudio,

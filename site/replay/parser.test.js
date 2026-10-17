@@ -77,6 +77,21 @@ test('seeking anywhere, in any order, equals the fold from the start', () => {
   assert.deepEqual(JSON.parse(JSON.stringify(again)), JSON.parse(JSON.stringify(R.fold(records, 8))));
 });
 
+test('a live run appended in pieces folds like the whole file', () => {
+  const whole = R.parseJsonl(body);
+  const lines = body.split('\n');
+  const index = R.buildIndex([], 4);
+  R.extendIndex(index, lines.slice(0, 7).map(R.parseLine).filter(Boolean));
+  const midway = R.stateAt(index, index.records.length);
+  assert.deepEqual(JSON.parse(JSON.stringify(midway)), JSON.parse(JSON.stringify(R.fold(whole, 7))));
+  R.extendIndex(index, lines.slice(7).map(R.parseLine).filter(Boolean));
+  assert.equal(index.records.length, whole.length);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(R.stateAt(index, whole.length, midway))),
+    JSON.parse(JSON.stringify(R.fold(whole, whole.length))),
+  );
+});
+
 test('meeting-time and wall-time lookups', () => {
   const records = R.parseJsonl(body);
   assert.equal(R.countAtTime(records, 999), 8);

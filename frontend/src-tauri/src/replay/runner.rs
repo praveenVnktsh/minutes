@@ -161,6 +161,23 @@ static LOG_RECORDER: OnceLock<Arc<Recorder>> = OnceLock::new();
 
 struct ReplayLogger {
     file: Mutex<BufWriter<File>>,
+    /// The last warning recorded as an event, and how many repeats of it
+    /// were folded since (a warning a hot loop repeats would flood the log).
+    last_warning: Mutex<(String, u64, u64)>,
+}
+
+/// Repeats of one warning within this long become a single event.
+const WARNING_REPEAT_MS: u64 = 5_000;
+
+/// The part of a warning that identifies it: its target and wording without
+/// numbers.
+fn warning_key(target: &str, message: &str) -> String {
+    let words: String = message
+        .chars()
+        .filter(|c| !c.is_ascii_digit())
+        .take(60)
+        .collect();
+    format!("{target}|{words}")
 }
 
 /// What a log line says about llama-helper, for the sidecar lane.
@@ -217,12 +234,25 @@ impl log::Log for ReplayLogger {
             );
         }
         if record.level() <= log::Level::Warn {
+            let key = warning_key(record.target(), &message);
+            let now = recorder.t_ms();
+            let repeats = {
+                let mut last = self.last_warning.lock().unwrap_or_else(|e| e.into_inner());
+                if last.0 == key && now.saturating_sub(last.1) < WARNING_REPEAT_MS {
+                    last.2 += 1;
+                    return;
+                }
+                let repeats = last.2;
+                *last = (key, now, 0);
+                repeats
+            };
             recorder.debug(
                 debug::LOG,
                 json!({
                     "level": record.level().to_string(),
                     "target": record.target(),
                     "message": truncate(&message, 300),
+                    "folded_repeats_of_previous": repeats,
                 }),
             );
         }
@@ -919,6 +949,7 @@ pub fn run(options: Options) -> Result<PathBuf> {
     }
     let logger = ReplayLogger {
         file: Mutex::new(BufWriter::new(File::create(out_dir.join("app.log"))?)),
+        last_warning: Mutex::new((String::new(), 0, 0)),
     };
     if log::set_boxed_logger(Box::new(logger)).is_ok() {
         log::set_max_level(log::LevelFilter::Info);
