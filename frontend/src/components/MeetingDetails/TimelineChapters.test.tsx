@@ -137,6 +137,13 @@ describe('LiveSummaryPanel', () => {
     expect(text()).toContain('Listening…');
   });
 
+  test('copied rows keep spaces between the marker, the text and the speaker', async () => {
+    current = { session_id: 's', meeting_id: 'meeting-1', status: 'listening', error: null, entries: [entry('a', 5_000, 'action', 'Ravi adds sync tests.')] };
+    await act(async () => { renderer = create(<LiveSummaryPanel active />); });
+    await flush();
+    expect(text()).toContain('Action Ravi adds sync tests. · Others');
+  });
+
   test('a failure shows a non-blocking paused notice that clears on the next update', async () => {
     await act(async () => { renderer = create(<LiveSummaryPanel active />); });
     await flush();

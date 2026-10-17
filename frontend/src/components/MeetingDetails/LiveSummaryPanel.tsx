@@ -50,12 +50,14 @@ export function TimelineEntryRow({ entry }: { entry: TimelineEntry }) {
       </span>
       <span className="min-w-0 flex-1 text-sm leading-snug text-ink">
         {marker && (
-          <span className={`mr-1.5 inline-block rounded px-1.5 py-px text-[10px] font-semibold uppercase tracking-[0.04em] ${badge[marker.tone]}`}>
-            {marker.label}
-          </span>
+          <>
+            <span className={`mr-0.5 inline-block rounded px-1.5 py-px text-[10px] font-semibold uppercase tracking-[0.04em] ${badge[marker.tone]}`}>
+              {marker.label}
+            </span>{' '}
+          </>
         )}
         {entry.text}
-        {entry.speaker && <span className="ml-1.5 text-[11px] text-ink-subtle">· {entry.speaker}</span>}
+        {entry.speaker && <>{' '}<span className="ml-0.5 text-[11px] text-ink-subtle">· {entry.speaker}</span></>}
       </span>
     </>
   );
