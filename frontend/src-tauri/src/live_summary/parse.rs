@@ -7,6 +7,9 @@ use serde_json::Value;
 use std::collections::HashSet;
 use std::fmt;
 
+use super::facts::Figures;
+use super::notes::{NoteContext, Refiner};
+
 /// Longest entry text kept, in characters.
 pub const MAX_TEXT_CHARS: usize = 200;
 /// Longest free-form speaker label kept, in characters.
@@ -55,6 +58,9 @@ pub struct ParsedEntry {
     pub kind: EntryKind,
     pub text: String,
     pub speaker: Option<String>,
+    /// The section the note belongs to, as the model named it (refined by
+    /// `parse_notes`).
+    pub topic: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -80,6 +86,9 @@ impl std::error::Error for ParseError {}
 /// Times are clamped into the window, entries repeating `previous_texts` (or
 /// each other) are dropped, and at most `max_entries` are kept. An explicit
 /// empty list is a valid "nothing new" answer.
+///
+/// This is the reply as the model wrote it; `parse_notes` also applies the
+/// notetaker rules (topics, no narration, strict kinds, names).
 pub fn parse_entries(
     raw: &str,
     window_start_ms: i64,
@@ -87,8 +96,63 @@ pub fn parse_entries(
     max_entries: usize,
     previous_texts: &[String],
 ) -> Result<Vec<ParsedEntry>, ParseError> {
+    parse_with(
+        raw,
+        window_start_ms,
+        window_end_ms,
+        max_entries,
+        previous_texts,
+        None,
+    )
+}
+
+/// Like `parse_entries`, with the notetaker rules of `notes::Refiner`:
+/// topics resolved against the current one, narration rewritten or dropped,
+/// actions and decisions held to their definitions, names spelled as in the
+/// glossary. Repeats are judged on the refined text.
+pub fn parse_notes(
+    raw: &str,
+    window_start_ms: i64,
+    window_end_ms: i64,
+    max_entries: usize,
+    context: &NoteContext<'_>,
+) -> Result<Vec<ParsedEntry>, ParseError> {
+    parse_with(
+        raw,
+        window_start_ms,
+        window_end_ms,
+        max_entries,
+        context.previous_texts,
+        Some(context),
+    )
+}
+
+fn parse_with(
+    raw: &str,
+    window_start_ms: i64,
+    window_end_ms: i64,
+    max_entries: usize,
+    previous_texts: &[String],
+    context: Option<&NoteContext<'_>>,
+) -> Result<Vec<ParsedEntry>, ParseError> {
     let cleaned = strip_fences(&strip_think(raw));
-    let items = match reply_json_value(&cleaned) {
+    // The reply as written and with its brackets repaired: the one with more
+    // entries wins, so `[{a},{"text":"b"]}` keeps b rather than stopping at
+    // the first object that happens to parse.
+    let direct = reply_json_value(&cleaned);
+    let repaired = reply_json_value(&repair_brackets(&cleaned));
+    let count = |value: &Option<Value>| {
+        value
+            .clone()
+            .and_then(entry_items)
+            .map_or(0, |items| items.len())
+    };
+    let value = if count(&repaired) > count(&direct) {
+        repaired
+    } else {
+        direct.or(repaired)
+    };
+    let items = match value {
         Some(value) => entry_items(value).ok_or(ParseError::UnexpectedShape)?,
         None => {
             let salvaged = salvage_objects(&cleaned);
@@ -104,7 +168,9 @@ pub fn parse_entries(
     };
 
     let window_end_ms = window_end_ms.max(window_start_ms);
+    let mut refiner = context.map(Refiner::new);
     let mut seen: Vec<HashSet<String>> = previous_texts.iter().map(|t| word_set(t)).collect();
+    let mut seen_texts: Vec<String> = previous_texts.to_vec();
     let mut entries = Vec::new();
     for item in items {
         if entries.len() >= max_entries {
@@ -113,18 +179,61 @@ pub fn parse_entries(
         let Some(entry) = entry_from(&item, window_start_ms, window_end_ms) else {
             continue;
         };
+        let entry = match refiner.as_mut() {
+            Some(refiner) => match refiner.refine(entry) {
+                Some(entry) => entry,
+                None => continue,
+            },
+            None => entry,
+        };
         let words = word_set(&entry.text);
-        if words.is_empty()
-            || seen
-                .iter()
+        let repeated = if context.is_some() {
+            // The notetaker: rewordings are repeats, changed facts are not.
+            seen_texts.iter().any(|other| is_repeat(&entry.text, other))
+        } else {
+            // The A/B baseline stays as it was.
+            seen.iter()
                 .any(|other| overlap(&words, other) >= DUPLICATE_OVERLAP)
-        {
+        };
+        if words.is_empty() || repeated {
             continue;
         }
+        if let Some(refiner) = refiner.as_mut() {
+            refiner.accept(&entry);
+        }
         seen.push(words);
+        seen_texts.push(entry.text.clone());
         entries.push(entry);
     }
     Ok(entries)
+}
+
+/// The topic step's answer.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TopicDecision {
+    Same,
+    New(String),
+}
+
+/// `{"same":true}` or `{"same":false,"topic":"…"}`; `None` for anything
+/// else (the notes call then names the topic itself).
+pub fn parse_topic_decision(raw: &str) -> Option<TopicDecision> {
+    let cleaned = strip_fences(&strip_think(raw));
+    let value = reply_json_value(&cleaned).or_else(|| {
+        let start = cleaned.find('{')?;
+        let end = balanced_end(cleaned.as_bytes(), start)?;
+        serde_json::from_str(&cleaned[start..=end]).ok()
+    })?;
+    let same = match &value["same"] {
+        Value::Bool(same) => *same,
+        Value::String(text) => matches!(text.trim().to_lowercase().as_str(), "true" | "yes"),
+        _ => return None,
+    };
+    if same {
+        return Some(TopicDecision::Same);
+    }
+    let topic = value["topic"].as_str()?.trim();
+    (!topic.is_empty()).then(|| TopicDecision::New(topic.to_string()))
 }
 
 /// Remove `<think>…</think>` blocks. An unclosed `<think>` (the model ran out
@@ -235,6 +344,52 @@ fn salvage_objects(text: &str) -> Vec<Value> {
     found
 }
 
+/// `text` with mismatched closing brackets fixed, string-aware: small models
+/// write `{"entries":[{"text":"…"]}`, dropping the object's `}`. A `]` that
+/// meets an open `{` closes it first; a `}` that meets an open `[` closes
+/// the array first. Brackets still open at the end are closed.
+fn repair_brackets(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 4);
+    let mut open: Vec<char> = Vec::new();
+    let mut in_string = false;
+    let mut escaped = false;
+    for c in text.chars() {
+        if in_string {
+            out.push(c);
+            match c {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '{' | '[' => open.push(c),
+            '}' | ']' => {
+                let wanted = if c == '}' { '{' } else { '[' };
+                while let Some(&top) = open.last() {
+                    if top == wanted {
+                        break;
+                    }
+                    out.push(if top == '{' { '}' } else { ']' });
+                    open.pop();
+                }
+                open.pop();
+            }
+            _ => {}
+        }
+        out.push(c);
+    }
+    if !in_string {
+        while let Some(top) = open.pop() {
+            out.push(if top == '{' { '}' } else { ']' });
+        }
+    }
+    out
+}
+
 /// Index of the `}` closing the `{` at `start`, string-aware.
 fn balanced_end(bytes: &[u8], start: usize) -> Option<usize> {
     let mut depth = 0usize;
@@ -294,6 +449,11 @@ fn entry_from(item: &Value, window_start_ms: i64, window_end_ms: i64) -> Option<
         kind,
         text,
         speaker: item.get("speaker").and_then(speaker_label),
+        topic: ["topic", "section", "chapter"]
+            .iter()
+            .find_map(|key| item.get(*key).and_then(Value::as_str))
+            .map(|topic| topic.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|topic| !topic.is_empty()),
     })
 }
 
@@ -370,6 +530,115 @@ fn word_set(text: &str) -> HashSet<String> {
         .collect()
 }
 
+/// Words that carry no content for the repeat check.
+const STOPWORDS: &[&str] = &[
+    "the", "and", "for", "with", "from", "that", "this", "are", "was", "were", "has", "have",
+    "had", "not", "but", "its", "into", "than", "then", "over", "about", "also", "very", "more",
+    "most", "now", "their", "they", "them", "will", "can", "all", "any", "out", "who", "what",
+    "our", "your", "you", "his", "her", "she", "been", "being", "is", "of", "to", "in", "on", "at",
+    "by", "as", "or", "an", "a", "it", "be", "vs", "via", "per",
+];
+/// A repeat shares at least this many content words with an earlier note…
+const REPEAT_MIN_SHARED: usize = 4;
+/// …and at least this share of the shorter note's content words…
+const REPEAT_SHARE: f64 = 0.4;
+/// …and of both notes' content words together.
+const REPEAT_JACCARD: f64 = 0.3;
+
+/// Content words, crudely stemmed ("bets" → "bet"), numbers kept.
+fn content_words(words: &HashSet<String>) -> HashSet<String> {
+    words
+        .iter()
+        .filter(|w| !STOPWORDS.contains(&w.as_str()))
+        .filter(|w| w.len() >= 3 || w.chars().all(|c| c.is_ascii_digit()))
+        .map(|w| match w.strip_suffix('s') {
+            Some(stem) if stem.len() >= 3 && !w.ends_with("ss") => stem.to_string(),
+            _ => w.clone(),
+        })
+        .collect()
+}
+
+/// Whether two notes say the same thing in other words: they share
+/// `REPEAT_MIN_SHARED` content words, `REPEAT_SHARE` of the shorter one's.
+fn shares_content(a: &HashSet<String>, b: &HashSet<String>) -> bool {
+    let (a, b) = (content_words(a), content_words(b));
+    let shared = a.intersection(&b).count();
+    let shorter = a.len().min(b.len()).max(1);
+    let union = a.union(&b).count().max(1);
+    shared >= REPEAT_MIN_SHARED
+        && shared as f64 / shorter as f64 >= REPEAT_SHARE
+        && shared as f64 / union as f64 >= REPEAT_JACCARD
+}
+
+/// Whether `text` repeats `other` (the notetaker's repeat check): the same
+/// words, or a rewording that shares most content words. Notes whose figures
+/// differ ("May 10" → "May 24") or where only one is negated ("will ship" →
+/// "will not ship") say something new, however alike they read.
+pub fn is_repeat(text: &str, other: &str) -> bool {
+    let (a, b) = (word_set(text), word_set(other));
+    let alike = overlap(&a, &b) >= DUPLICATE_OVERLAP || shares_content(&a, &b);
+    alike && !figures_differ(text, other) && negated(text) == negated(other)
+}
+
+/// Words and endings that negate a note.
+const NEGATIONS: &[&str] = &[
+    "not",
+    "no",
+    "never",
+    "none",
+    "nobody",
+    "nothing",
+    "neither",
+    "nor",
+    "without",
+    "cannot",
+    "won't",
+    "can't",
+    "don't",
+    "doesn't",
+    "didn't",
+    "isn't",
+    "aren't",
+    "wasn't",
+    "weren't",
+    "shouldn't",
+    "wouldn't",
+    "couldn't",
+    "hasn't",
+    "haven't",
+    "hadn't",
+    "cancelled",
+    "canceled",
+    "dropped",
+    "scrapped",
+];
+
+/// Whether a note is negated ("not", "won't", "no longer", "never"…).
+fn negated(text: &str) -> bool {
+    text.split_whitespace()
+        .map(|w| {
+            w.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'' && c != '’')
+                .replace('’', "'")
+                .to_lowercase()
+        })
+        .any(|w| NEGATIONS.contains(&w.as_str()) || w.ends_with("n't"))
+}
+
+/// Whether two notes state different figures: one has a value the other
+/// does not.
+fn figures_differ(a: &str, b: &str) -> bool {
+    let (a, b) = (Figures::of(a), Figures::of(b));
+    let missing = |from: &Figures, other: &Figures| {
+        from.values().iter().any(|v| {
+            !other
+                .values()
+                .iter()
+                .any(|w| (v - w).abs() < 1e-6 * v.abs().max(1.0))
+        })
+    };
+    missing(&a, &b) || missing(&b, &a)
+}
+
 fn overlap(a: &HashSet<String>, b: &HashSet<String>) -> f64 {
     if a.is_empty() || b.is_empty() {
         return 0.0;
@@ -403,6 +672,7 @@ mod tests {
                 kind: EntryKind::Decision,
                 text: "Ship on Friday".into(),
                 speaker: Some("Others".into()),
+                topic: None,
             }]
         );
     }
@@ -465,6 +735,20 @@ mod tests {
     }
 
     #[test]
+    fn an_object_missing_its_closing_brace_is_repaired() {
+        let raw = r#"{"entries":[{"start":"01:05","kind":"point","text":"Budget is fine","topic":"Budget"]}"#;
+        let entries = parse(raw).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].text, "Budget is fine");
+        assert_eq!(entries[0].topic.as_deref(), Some("Budget"));
+        // Brackets inside strings are left alone.
+        assert_eq!(
+            repair_brackets(r#"{"a":[{"t":"x ] y"]}"#),
+            r#"{"a":[{"t":"x ] y"}]}"#
+        );
+    }
+
+    #[test]
     fn garbage_is_an_error() {
         assert_eq!(parse("I could not find anything."), Err(ParseError::NoJson));
         assert_eq!(parse(""), Err(ParseError::NoJson));
@@ -518,6 +802,122 @@ mod tests {
         .unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].text, "New hire starts Monday");
+    }
+
+    #[test]
+    fn topic_decisions_are_read_leniently() {
+        assert_eq!(
+            parse_topic_decision(r#"{"same":true}"#),
+            Some(TopicDecision::Same)
+        );
+        assert_eq!(
+            parse_topic_decision(
+                "<think>hm</think>```json\n{\"same\":false,\"topic\":\"Globex pitch\"}\n```"
+            ),
+            Some(TopicDecision::New("Globex pitch".into()))
+        );
+        assert_eq!(
+            parse_topic_decision(r#"Sure: {"same":"yes"}"#),
+            Some(TopicDecision::Same)
+        );
+        // A new topic without a title, or no answer at all, is no decision.
+        assert_eq!(parse_topic_decision(r#"{"same":false}"#), None);
+        assert_eq!(parse_topic_decision(r#"{"entries":[]}"#), None);
+        assert_eq!(parse_topic_decision("same"), None);
+    }
+
+    #[test]
+    fn changed_figures_and_negations_are_not_repeats() {
+        let cases = [
+            (
+                "Launch set for May 10 after the design review",
+                "Launch set for May 24 after the design review",
+            ),
+            ("Launch set for May 10", "Launch slips to May 24"),
+            (
+                "We will ship the offline sync feature in the beta",
+                "We will not ship the offline sync feature in the beta",
+            ),
+            (
+                "Acme will renew the enterprise contract this quarter",
+                "Acme won't renew the enterprise contract this quarter",
+            ),
+            (
+                "Pricing tiers still include the free plan for students",
+                "Pricing tiers no longer include the free plan for students",
+            ),
+            (
+                "Team of 40 engineers across hardware and software",
+                "Team of 100 engineers across hardware and software",
+            ),
+        ];
+        for (earlier, later) in cases {
+            assert!(!is_repeat(later, earlier), "{earlier} / {later}");
+        }
+        // Through the parser: the changed decision is kept.
+        let raw = r#"{"entries":[{"kind":"decision","text":"Launch set for May 24 after the design review"}]}"#;
+        let previous = vec!["Launch set for May 10 after the design review".to_string()];
+        let context = NoteContext {
+            previous_texts: &previous,
+            ..Default::default()
+        };
+        let kept = parse_notes(raw, START, END, 2, &context).unwrap();
+        assert_eq!(kept.len(), 1);
+        // The same words again are still a repeat.
+        let previous = vec!["Launch set for May 24 after the design review".to_string()];
+        let context = NoteContext {
+            previous_texts: &previous,
+            ..Default::default()
+        };
+        assert!(parse_notes(raw, START, END, 2, &context)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn repaired_replies_keep_every_entry() {
+        for raw in [
+            r#"[{"kind":"point","text":"Budget approved by finance"},{"kind":"point","text":"Hiring paused until spring"]}"#,
+            r#"{"entries":[{"kind":"point","text":"Budget approved by finance"},{"kind":"point","text":"Hiring paused until spring"]}"#,
+            r#"{"entries":[{"kind":"point","text":"Budget approved by finance"},{"kind":"point","text":"Hiring paused until spring"}"#,
+        ] {
+            let entries = parse(raw).unwrap();
+            let texts: Vec<&str> = entries.iter().map(|e| e.text.as_str()).collect();
+            assert_eq!(
+                texts,
+                ["Budget approved by finance", "Hiring paused until spring"],
+                "{raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn rewordings_of_a_recent_note_are_repeats() {
+        assert!(is_repeat(
+            "Moonshot bets risk taking away from core business revenue and cash generation",
+            "Moonshot bets risk core revenue; startup vs scale priorities differ",
+        ));
+        // Same subject, different facts: not repeats.
+        for (a, b) in [
+            (
+                "Team grew from 30 to 40 people and is now approaching 100",
+                "Team grows by ten people every week",
+            ),
+            (
+                "Acme raised a Series B from Sequoia with 70 employees",
+                "Sequoia partners want founders in their network to meet Acme",
+            ),
+            (
+                "Founders found through networking and vouching rather than resumes",
+                "Founders succeed by hard work, not keywords or resumes",
+            ),
+            (
+                "Intersection of software and hardware is a key investment thesis for Acme",
+                "Acme investments shifted from SaaS to tangible products like chips, robotics and software for hardware firms",
+            ),
+        ] {
+            assert!(!is_repeat(a, b), "{a} / {b}");
+        }
     }
 
     #[test]

@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { listen } from '@tauri-apps/api/event';
+import { useLiveSource } from '@/lib/liveSource';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 import {
   LIVE_TIMELINE_UPDATE_EVENT,
@@ -10,11 +10,12 @@ import {
   type StoredTimelineEntry,
   type TimelineSnapshot,
 } from '@/lib/liveTimeline';
-import { TimelineEntryRow } from './LiveSummaryPanel';
+import { TimelineEntryRow, TimelineSections } from './LiveSummaryPanel';
 
 /** A meeting's stored live summary entries. Reloads when the recording's
  * worker stores its last entry after the page opened. */
 export function useMeetingTimeline(meetingId: string | undefined): StoredTimelineEntry[] {
+  const source = useLiveSource();
   const [entries, setEntries] = useState<StoredTimelineEntry[]>([]);
   const load = useCallback(async () => {
     if (!meetingId) return;
@@ -31,7 +32,7 @@ export function useMeetingTimeline(meetingId: string | undefined): StoredTimelin
     if (!meetingId) return undefined;
     let disposed = false;
     let unlisten: (() => void) | undefined;
-    void listen<TimelineSnapshot>(LIVE_TIMELINE_UPDATE_EVENT, ({ payload }) => {
+    void source.listen<TimelineSnapshot>(LIVE_TIMELINE_UPDATE_EVENT, ({ payload }) => {
       if (payload.meeting_id === meetingId) void load();
     }).then((fn) => {
       if (disposed) fn();
@@ -41,7 +42,7 @@ export function useMeetingTimeline(meetingId: string | undefined): StoredTimelin
       disposed = true;
       unlisten?.();
     };
-  }, [load, meetingId]);
+  }, [load, meetingId, source]);
 
   return entries;
 }
@@ -66,9 +67,11 @@ export function TimelineChapters({ meetingId }: { meetingId: string | undefined 
         <span className="font-normal normal-case tracking-normal text-ink-subtle">({entries.length})</span>
       </button>
       {open && (
-        <ol className="mt-1.5 max-h-48 space-y-0.5 overflow-y-auto">
-          {entries.map((entry) => (
-            <li key={entry.id}>
+        <div className="mt-1.5 max-h-48 overflow-y-auto">
+          <TimelineSections
+            entries={entries}
+            listClassName="space-y-0.5"
+            renderEntry={(entry) => (
               <button
                 type="button"
                 onClick={() => jumpToTime(entry.start_ms)}
@@ -77,9 +80,9 @@ export function TimelineChapters({ meetingId }: { meetingId: string | undefined 
               >
                 <TimelineEntryRow entry={entry} />
               </button>
-            </li>
-          ))}
-        </ol>
+            )}
+          />
+        </div>
       )}
     </section>
   );

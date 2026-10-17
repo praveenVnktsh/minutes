@@ -45,6 +45,31 @@ function expected(n: number) {
 
 const lastWith = (name: string) => records.findLastIndex((r) => r.name === name) + 1;
 
+const topicRecords = parseJsonl([
+  { seq: 0, t_ms: 0, audio_ms: 0, type: 'meta', name: 'run-start', payload: { schema_version: 1 } },
+  {
+    seq: 1, t_ms: 10, audio_ms: 64_000, type: 'event', name: 'live-timeline-update',
+    payload: {
+      session_id: 's', meeting_id: 'm', status: 'listening', error: null,
+      entries: [
+        { id: 'a', start_ms: 5_000, end_ms: 9_000, kind: 'point', text: 'Sync bug is the last blocker', speaker: null, provider: 'p', model: 'm', created_at: '', topic: 'Launch Plan' },
+        { id: 'b', start_ms: 62_000, end_ms: 70_000, kind: 'point', text: 'Free tier held back', speaker: null, provider: 'p', model: 'm', created_at: '', topic: 'Pricing' },
+      ],
+    },
+  },
+].map((r) => JSON.stringify(r)).join('\n'));
+
+describe('ReplaySource with topics', () => {
+  test('the live summary it serves and sends keeps each entry\'s topic', async () => {
+    const source = new ReplaySource(buildIndex(topicRecords, 50), backend());
+    source.seek(topicRecords.length);
+    const read = await source.invoke<TimelineSnapshot | null>('get_live_timeline');
+    expect(read?.entries.map((e) => e.topic)).toEqual(['Launch Plan', 'Pricing']);
+    const seen = await mount(source);
+    expect(seen.timeline?.entries.map((e) => e.topic)).toEqual(['Launch Plan', 'Pricing']);
+  });
+});
+
 describe('ReplaySource', () => {
   test('a listener mounted mid-run is hydrated to the cursor', async () => {
     const source = new ReplaySource(buildIndex(records, 50), backend());

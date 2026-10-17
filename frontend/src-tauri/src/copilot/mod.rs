@@ -171,8 +171,12 @@ impl<R: Runtime> Host for AppHost<R> {
             .into_iter()
             .map(|entry| TimelineItem {
                 start_ms: entry.start_ms,
+                // An action's text is the task alone; its owner is the speaker.
+                text: match entry.speaker.as_deref() {
+                    Some("You") if entry.kind == "action" => format!("You — {}", entry.text),
+                    _ => entry.text,
+                },
                 kind: entry.kind,
-                text: entry.text,
             })
             .collect()
     }

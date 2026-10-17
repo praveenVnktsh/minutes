@@ -52,6 +52,38 @@ describe('the replay reducer matches site/replay/parser.js', () => {
   });
 });
 
+/** A short run whose live summary entries carry topics, with a topic step
+ * traced next to its window's request. */
+const topicRun = [
+  { seq: 0, t_ms: 0, audio_ms: 0, type: 'meta', name: 'run-start', payload: { schema_version: 1 } },
+  { seq: 1, t_ms: 10, audio_ms: 60_000, type: 'debug', name: 'timeline-request', payload: { id: 2, phase: 'start', start_ms: 60_000, end_ms: 120_000 } },
+  { seq: 2, t_ms: 11, audio_ms: 60_000, type: 'debug', name: 'timeline-request', payload: { id: '2-topic', phase: 'start', kind: 'topic' } },
+  { seq: 3, t_ms: 900, audio_ms: 61_000, type: 'debug', name: 'timeline-request', payload: { id: '2-topic', phase: 'done', kind: 'topic', outcome: 'done', topic: 'Pricing', new_topic: true } },
+  { seq: 4, t_ms: 4000, audio_ms: 64_000, type: 'debug', name: 'timeline-request', payload: { id: 2, phase: 'done', outcome: 'done' } },
+  {
+    seq: 5, t_ms: 4001, audio_ms: 64_000, type: 'event', name: 'live-timeline-update',
+    payload: {
+      session_id: 's', meeting_id: 'm', status: 'listening', error: null,
+      entries: [
+        { id: 'a', start_ms: 5_000, end_ms: 9_000, kind: 'point', text: 'Sync bug is the last blocker', speaker: null, provider: 'builtin-ai', model: 'm', created_at: '', topic: 'Launch Plan' },
+        { id: 'b', start_ms: 62_000, end_ms: 70_000, kind: 'action', text: 'introduce You to the founders', speaker: 'Others', provider: 'builtin-ai', model: 'm', created_at: '', topic: 'Pricing' },
+      ],
+    },
+  },
+].map((r) => JSON.stringify(r)).join('\n');
+
+describe('topics in a replay', () => {
+  test('the reducer and site/replay keep every entry\'s topic, and trace the topic step', () => {
+    const ours = R.parseJsonl(topicRun);
+    const state = R.fold(ours, ours.length);
+    expect(state.timeline.entries.map((e: any) => e.topic)).toEqual(['Launch Plan', 'Pricing']);
+    expect(plain(state)).toEqual(plain(site.fold(site.parseJsonl(topicRun), ours.length)));
+    const labels = R.buildLanes(ours).lanes['timeline-request'].map((l: any) => l.label);
+    expect(labels).toContain('summary window 2-topic: done');
+    expect(labels).toContain('summary window 2: done');
+  });
+});
+
 describe('seeking is exact in both directions', () => {
   const records = R.parseJsonl(sample);
   const index = R.buildIndex(records, 37);

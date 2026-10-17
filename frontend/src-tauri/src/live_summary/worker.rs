@@ -14,9 +14,12 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use super::llm::{FailureKind, GenerateError, Generated, Generator};
-use super::parse::{parse_entries, ParsedEntry};
-use super::prompt::{self, PreviousEntry};
+use super::facts::Figures;
+use super::glossary::Glossary;
+use super::llm::{FailureKind, GenerateError, Generated, Generator, REQUEST_TIMEOUT};
+use super::notes::{decide_topic, NoteContext, MIN_TOPIC_MS};
+use super::parse::{parse_notes, parse_topic_decision, ParsedEntry};
+use super::prompt::{self, PreviousEntry, PromptContext};
 use super::scheduler::{Segment, Window, WindowScheduler, CADENCE};
 use crate::database::repositories::timeline::TimelineEntryRow;
 
@@ -25,7 +28,7 @@ pub const TICK: Duration = Duration::from_secs(2);
 /// After the recording stops, how long the last request may still run.
 pub const STOP_GRACE: Duration = Duration::from_secs(15);
 /// Earlier entries the parser checks new ones against for repeats.
-const DEDUPE_HISTORY: usize = 10;
+const DEDUPE_HISTORY: usize = 8;
 /// How soon a window Copilot pre-empted is tried again.
 pub const PREEMPTED_RETRY: Duration = Duration::from_secs(10);
 /// Longest back-off after repeated failures, and the wait after a provider
@@ -64,6 +67,10 @@ pub struct TimelineEntry {
     pub provider: String,
     pub model: String,
     pub created_at: String,
+    /// The section the note sits under. Absent on notes made before topics
+    /// existed, so readers must treat it as optional.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub topic: Option<String>,
 }
 
 impl TimelineEntry {
@@ -79,6 +86,41 @@ impl TimelineEntry {
             provider: self.provider.clone(),
             model: self.model.clone(),
             created_at: self.created_at.clone(),
+            topic: self.topic.clone(),
+        }
+    }
+}
+
+/// What the next prompt and parse know from the notes so far: the current
+/// topic, earlier topics (most recent first), earlier notes, and the names.
+pub struct NotesSoFar {
+    pub current_topic: Option<String>,
+    pub topics: Vec<String>,
+    pub previous: Vec<PreviousEntry>,
+    pub glossary: Glossary,
+}
+
+impl NotesSoFar {
+    pub fn of(entries: &[TimelineEntry]) -> Self {
+        let mut topics: Vec<String> = Vec::new();
+        for topic in entries.iter().rev().filter_map(|e| e.topic.as_ref()) {
+            if !topics.contains(topic) {
+                topics.push(topic.clone());
+            }
+        }
+        Self {
+            current_topic: entries.iter().rev().find_map(|e| e.topic.clone()),
+            topics,
+            previous: entries
+                .iter()
+                .map(|e| PreviousEntry {
+                    start_ms: e.start_ms,
+                    kind: e.kind.clone(),
+                    text: e.text.clone(),
+                    topic: e.topic.clone(),
+                })
+                .collect(),
+            glossary: Glossary::from_texts(entries.iter().map(|e| e.text.as_str())),
         }
     }
 }
@@ -119,6 +161,10 @@ pub struct WorkerConfig {
     pub max_backoff: Duration,
     pub final_persist_window: Duration,
     pub final_persist_retry: Duration,
+    /// The topic step's own timeout (`TOPIC_STEP_TIMEOUT`).
+    pub topic_timeout: Duration,
+    /// The topic step and the notes call together (`WINDOW_BUDGET`).
+    pub window_budget: Duration,
 }
 
 impl Default for WorkerConfig {
@@ -130,6 +176,8 @@ impl Default for WorkerConfig {
             max_backoff: MAX_BACKOFF,
             final_persist_window: FINAL_PERSIST_WINDOW,
             final_persist_retry: FINAL_PERSIST_RETRY,
+            topic_timeout: TOPIC_STEP_TIMEOUT,
+            window_budget: WINDOW_BUDGET,
         }
     }
 }
@@ -144,7 +192,117 @@ pub fn backoff_delay(cadence: Duration, failures: u32, max: Duration) -> Duratio
 /// The notice for a provider that refused the request.
 pub const REFUSED_NOTICE: &str = "The summary provider refused the request (check its API key, quota or rate limit). Live summary will try again in a few minutes.";
 
-type RequestOutcome = (Window, String, String, Result<Generated, GenerateError>);
+/// The window, provider, model, the notes reply, and the topic the topic
+/// step decided for the window (if it answered).
+type RequestOutcome = (
+    Window,
+    String,
+    String,
+    Result<Generated, GenerateError>,
+    Option<String>,
+);
+
+/// The topic step answers within this, or the window fails and is retried
+/// with the usual back-off: a model that cannot answer a one-line question
+/// in time will not write the notes in time either.
+pub const TOPIC_STEP_TIMEOUT: Duration = Duration::from_secs(15);
+/// One window's requests together (the topic step and the notes) take at
+/// most this, so two long timeouts never run back to back.
+pub const WINDOW_BUDGET: Duration = REQUEST_TIMEOUT;
+
+/// Providers that get the separate topic step: local models, where a small
+/// model asked for notes and a topic together keeps copying the current
+/// topic. A cloud model names the topic in its notes call, so each window
+/// stays one request there.
+pub fn uses_topic_step(provider: &str) -> bool {
+    matches!(
+        provider,
+        "builtin-ai" | "local-llama" | "localllama" | "ollama"
+    )
+}
+
+/// The topic step (`prompt::topic_user_prompt`): the window's topic.
+///
+/// - `Ok(None)`: no step (a cloud provider, no current topic yet, the tail
+///   window at stop) or no usable answer: the notes call names the topic.
+/// - `Ok(None)` without a request, too, while the current topic is younger
+///   than `MIN_TOPIC_MS`: the step does not end it, but the notes call may
+///   still name a clearly different subject (and keeps it otherwise).
+/// - `Err`: the step failed (pre-empted, refused, timed out): the whole
+///   window fails and goes through the worker's retry and back-off.
+///
+/// Traced as a `timeline-request` with id `<n>-topic`.
+#[allow(clippy::too_many_arguments)]
+pub async fn decide_window_topic(
+    generator: &dyn Generator,
+    window: &Window,
+    context: &PromptContext<'_>,
+    notes: &NotesSoFar,
+    cancel: &CancellationToken,
+    timeout: Duration,
+    request: u64,
+) -> Result<Option<String>, GenerateError> {
+    if !uses_topic_step(generator.provider()) {
+        return Ok(None);
+    }
+    let Some(current) = notes.current_topic.as_deref() else {
+        return Ok(None);
+    };
+    let since = prompt::topic_since(&notes.previous, current);
+    if since.is_some_and(|since| window.start_ms - since < MIN_TOPIC_MS) {
+        return Ok(None);
+    }
+    let Some(user) = prompt::topic_user_prompt(window, context) else {
+        return Ok(None);
+    };
+    let id = format!("{request}-topic");
+    crate::replay::trace::emit(
+        "timeline-request",
+        || serde_json::json!({ "id": id, "phase": "start", "kind": "topic", "start_ms": window.start_ms, "end_ms": window.end_ms }),
+    );
+    let step = cancel.child_token();
+    let reply = tokio::select! {
+        reply = generator.generate(prompt::topic_system_prompt(), &user, &step) => reply,
+        _ = crate::clock::sleep(timeout) => {
+            step.cancel();
+            Err(GenerateError::transient("the topic step timed out"))
+        }
+    };
+    let decided = match &reply {
+        Ok(reply) if !reply.truncated => decide_topic(
+            parse_topic_decision(&reply.text).as_ref(),
+            Some(current),
+            since,
+            window.start_ms,
+            &notes.topics,
+            Some(&notes.glossary),
+        ),
+        _ => None,
+    };
+    crate::replay::trace::emit("timeline-request", || {
+        let outcome = match &reply {
+            Ok(reply) if reply.truncated => "truncated".to_string(),
+            Ok(_) if decided.is_none() => "unreadable".to_string(),
+            Ok(_) => "done".to_string(),
+            Err(error) => format!("{:?}", error.kind).to_lowercase(),
+        };
+        serde_json::json!({
+            "id": id,
+            "phase": "done",
+            "kind": "topic",
+            "outcome": outcome,
+            "topic": decided,
+            "new_topic": decided.as_deref().is_some_and(|d| d != current),
+        })
+    });
+    match reply {
+        Ok(_) => Ok(decided),
+        Err(error) => {
+            log::debug!("Live summary topic step failed: {error}");
+            Err(error)
+        }
+    }
+}
 
 struct InFlight {
     handle: JoinHandle<RequestOutcome>,
@@ -161,6 +319,9 @@ struct Worker {
     requests: u64,
     snapshot: TimelineSnapshot,
     unsaved: Vec<TimelineEntry>,
+    /// The last summarized window's segments: the next prompt shows its tail
+    /// as context.
+    carryover: Vec<Segment>,
     /// Requests that failed in a row, for the back-off.
     failures: u32,
     in_flight: Option<InFlight>,
@@ -248,7 +409,7 @@ impl Worker {
         }
     }
 
-    async fn start_request(&mut self, window: Window) {
+    async fn start_request(&mut self, window: Window, final_window: bool) {
         let generator = match self.host.generator().await {
             Ok(generator) => generator,
             Err(error) => {
@@ -265,18 +426,8 @@ impl Worker {
                 window.dropped_segments
             );
         }
-        let previous: Vec<PreviousEntry> = self
-            .snapshot
-            .entries
-            .iter()
-            .map(|e| PreviousEntry {
-                start_ms: e.start_ms,
-                kind: e.kind.clone(),
-                text: e.text.clone(),
-            })
-            .collect();
-        let system = prompt::system_prompt().to_string();
-        let user = prompt::user_prompt(&window, &previous);
+        let notes = NotesSoFar::of(&self.snapshot.entries);
+        let carryover = self.carryover.clone();
         perf_debug!(
             "Live summary request: {} words, {}..{} ms",
             window.words(),
@@ -297,11 +448,54 @@ impl Worker {
                 "dropped_segments": window.dropped_segments,
             })
         });
+        let (budget, topic_timeout) = (self.config.window_budget, self.config.topic_timeout);
         let handle = tokio::spawn(async move {
             let provider = generator.provider().to_string();
             let model = generator.model().to_string();
-            let result = generator.generate(&system, &user, &token).await;
-            (window, provider, model, result)
+            let glossary = notes.glossary.terms();
+            let context = PromptContext {
+                current_topic: notes.current_topic.as_deref(),
+                previous: &notes.previous,
+                glossary: &glossary,
+                carryover: &carryover,
+                decided_topic: None,
+            };
+            let deadline = crate::clock::now() + budget;
+            let decided = if final_window {
+                // The tail window at stop: one request, within the grace.
+                Ok(None)
+            } else {
+                decide_window_topic(
+                    generator.as_ref(),
+                    &window,
+                    &context,
+                    &notes,
+                    &token,
+                    topic_timeout.min(budget),
+                    request,
+                )
+                .await
+            };
+            let decided = match decided {
+                Ok(decided) => decided,
+                Err(error) => return (window, provider, model, Err(error), None),
+            };
+            let user = prompt::user_prompt(
+                &window,
+                &PromptContext {
+                    decided_topic: decided.as_deref(),
+                    ..context
+                },
+            );
+            let notes_call = token.child_token();
+            let result = tokio::select! {
+                result = generator.generate(prompt::system_prompt(), &user, &notes_call) => result,
+                _ = crate::clock::sleep_until(deadline) => {
+                    notes_call.cancel();
+                    Err(GenerateError::transient("the window ran out of time"))
+                }
+            };
+            (window, provider, model, result, decided)
         });
         self.in_flight = Some(InFlight { handle, cancel });
         self.set_status(TimelineStatus::Generating, None);
@@ -316,14 +510,14 @@ impl Worker {
         let request = self.requests;
         crate::replay::trace::emit("timeline-request", || {
             let outcome = match &outcome {
-                Ok((_, _, _, Ok(generated))) if generated.truncated => "truncated".to_string(),
-                Ok((_, _, _, Ok(_))) => "done".to_string(),
-                Ok((_, _, _, Err(error))) => format!("{:?}", error.kind).to_lowercase(),
+                Ok((_, _, _, Ok(generated), _)) if generated.truncated => "truncated".to_string(),
+                Ok((_, _, _, Ok(_), _)) => "done".to_string(),
+                Ok((_, _, _, Err(error), _)) => format!("{:?}", error.kind).to_lowercase(),
                 Err(_) => "panicked".to_string(),
             };
             serde_json::json!({ "id": request, "phase": "done", "outcome": outcome })
         });
-        let (window, provider, model, result) = match outcome {
+        let (window, provider, model, result, decided) = match outcome {
             Ok(outcome) => outcome,
             Err(error) => {
                 warn!("Live summary request task failed: {error}");
@@ -373,14 +567,26 @@ impl Worker {
             .take(DEDUPE_HISTORY)
             .map(|e| e.text.clone())
             .collect();
-        match parse_entries(
+        let notes = NotesSoFar::of(&self.snapshot.entries);
+        // A note's figures must come from what it was written from.
+        let figures = Figures::of(&support_text(&self.carryover, &window.segments));
+        let context = NoteContext {
+            current_topic: notes.current_topic.as_deref(),
+            known_topics: &notes.topics,
+            glossary: Some(&notes.glossary),
+            previous_texts: &history,
+            figures: Some(&figures),
+            decided_topic: decided.as_deref(),
+        };
+        match parse_notes(
             &raw,
             window.start_ms,
             window.end_ms,
             window.max_entries,
-            &history,
+            &context,
         ) {
             Ok(parsed) => {
+                self.carryover = window.segments;
                 let created_at = chrono::Utc::now().to_rfc3339();
                 let new: Vec<TimelineEntry> = parsed
                     .into_iter()
@@ -394,6 +600,7 @@ impl Worker {
                         provider: provider.clone(),
                         model: model.clone(),
                         created_at: created_at.clone(),
+                        topic: entry.topic,
                     })
                     .collect();
                 perf_debug!("Live summary: {} new entries", new.len());
@@ -439,7 +646,7 @@ impl Worker {
         }
         let now = self.now();
         if let Some(window) = self.scheduler.poll(now, self.host.is_paused()) {
-            self.start_request(window).await;
+            self.start_request(window, false).await;
         }
     }
 
@@ -480,7 +687,7 @@ impl Worker {
         if self.host.enabled() && !refused && crate::clock::now() < deadline {
             let now = self.now();
             if let Some(window) = self.scheduler.flush(now) {
-                self.start_request(window).await;
+                self.start_request(window, true).await;
                 self.settle_in_flight(deadline).await;
             }
         }
@@ -501,6 +708,16 @@ impl Worker {
         self.snapshot.error = None;
         self.host.publish(&self.snapshot);
     }
+}
+
+/// The transcript a window's notes may draw on: the context lines and the window.
+pub fn support_text(carryover: &[Segment], segments: &[Segment]) -> String {
+    carryover
+        .iter()
+        .chain(segments)
+        .map(|s| s.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn short_error(message: &str) -> String {
@@ -536,6 +753,7 @@ pub async fn run(
         scheduler: WindowScheduler::with_cadence(Duration::ZERO, config.cadence),
         requests: 0,
         unsaved: Vec::new(),
+        carryover: Vec::new(),
         failures: 0,
         in_flight: None,
     };
@@ -645,6 +863,13 @@ mod tests {
         fail_kind: FailureKind,
         hang: bool,
         prompts: Mutex<Vec<String>>,
+        /// The topic step's questions and its answer; not counted as calls.
+        topic_prompts: Mutex<Vec<String>>,
+        topic_answer: Mutex<String>,
+        /// The topic step fails this way (once), or never answers.
+        topic_fail: Mutex<Option<GenerateError>>,
+        topic_hang: bool,
+        provider: &'static str,
     }
 
     impl FakeGenerator {
@@ -658,6 +883,11 @@ mod tests {
                 fail_kind: FailureKind::Transient,
                 hang: false,
                 prompts: Mutex::new(Vec::new()),
+                topic_prompts: Mutex::new(Vec::new()),
+                topic_answer: Mutex::new(r#"{"same":true}"#.into()),
+                topic_fail: Mutex::new(None),
+                topic_hang: false,
+                provider: "builtin-ai",
             }
         }
     }
@@ -665,17 +895,31 @@ mod tests {
     #[async_trait]
     impl Generator for FakeGenerator {
         fn provider(&self) -> &str {
-            "builtin-ai"
+            self.provider
         }
         fn model(&self) -> &str {
             "fake"
         }
         async fn generate(
             &self,
-            _: &str,
+            system: &str,
             user: &str,
             cancel: &CancellationToken,
         ) -> std::result::Result<Generated, GenerateError> {
+            if system == prompt::topic_system_prompt() {
+                self.topic_prompts.lock().unwrap().push(user.to_string());
+                if self.topic_hang {
+                    cancel.cancelled().await;
+                    return Err(GenerateError::transient("cancelled"));
+                }
+                if let Some(error) = self.topic_fail.lock().unwrap().take() {
+                    return Err(error);
+                }
+                return Ok(Generated {
+                    text: self.topic_answer.lock().unwrap().clone(),
+                    truncated: false,
+                });
+            }
             let call = self.calls.fetch_add(1, Ordering::SeqCst);
             self.prompts.lock().unwrap().push(user.to_string());
             let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
@@ -691,13 +935,19 @@ mod tests {
                         message: "model offline".into(),
                     })
                 } else {
-                    // Distinct text per call, so the dedupe keeps every entry.
-                    let topic = [
-                        "budget", "hiring", "launch", "pricing", "roadmap", "support",
+                    // Distinct text per call, so the dedupe keeps every entry
+                    // (no figures: the transcript has none).
+                    let text = [
+                        "Budget for Acme Robotics approved by finance",
+                        "Hiring freeze lifted for the support team",
+                        "Launch slips by a week after design review",
+                        "Pricing tiers stay unchanged through the summer",
+                        "Roadmap adds offline sync before the beta",
+                        "Support hours extend into weekends",
                     ][call % 6];
                     Ok(Generated {
                         text: format!(
-                            r#"{{"entries":[{{"kind":"decision","text":"Agreed on the {topic} plan, call {call}","speaker":"Others"}}]}}"#
+                            r#"{{"entries":[{{"kind":"decision","text":"{text}","speaker":"Others","topic":"launch plan"}}]}}"#
                         ),
                         truncated: false,
                     })
@@ -717,6 +967,8 @@ mod tests {
             max_backoff: Duration::from_millis(40),
             final_persist_window: Duration::from_millis(100),
             final_persist_retry: Duration::from_millis(10),
+            topic_timeout: Duration::from_secs(5),
+            window_budget: Duration::from_secs(10),
         }
     }
 
@@ -760,6 +1012,199 @@ mod tests {
         assert_eq!(snapshot.status, TimelineStatus::Stopped);
         assert_eq!(snapshot.entries.len(), host.persisted.lock().unwrap().len());
         assert!(snapshot.entries.iter().all(|e| e.kind == "decision"));
+    }
+
+    #[tokio::test]
+    async fn later_prompts_carry_the_topic_names_and_previous_context() {
+        let generator = Arc::new(FakeGenerator::new(Duration::ZERO));
+        let host = host_with(generator.clone());
+        let (tx, rx) = unbounded_channel();
+        let finish = CancellationToken::new();
+        let task = tokio::spawn(run(host.clone(), "s".into(), rx, finish.clone(), config()));
+        tx.send(speech(0)).unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let mut second = speech(60);
+        second.text = format!("{} and then the budget", second.text);
+        tx.send(second).unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        finish.cancel();
+        let snapshot = task.await.unwrap();
+
+        let prompts = generator.prompts.lock().unwrap();
+        assert!(prompts.len() >= 2);
+        assert!(!prompts[0].contains("Current topic"));
+        // The current topic is a minute old: the topic step is not asked,
+        // and the notes call sees the current topic to keep.
+        assert!(generator.topic_prompts.lock().unwrap().is_empty());
+        assert!(prompts[1].contains("Current topic: Launch Plan (since 00:00)\n"));
+        assert!(prompts[1].contains("Glossary (use these spellings): Acme Robotics"));
+        assert!(prompts[1].contains("Earlier transcript (context only, already covered):\n[00:00]"));
+        assert!(prompts[1].contains(
+            "Notes so far (do not repeat):\nTopic \"Launch Plan\":\n- [00:00] (decision)"
+        ));
+        assert!(snapshot
+            .entries
+            .iter()
+            .all(|e| e.topic.as_deref() == Some("Launch Plan") && e.speaker.is_none()));
+        let persisted = host.persisted.lock().unwrap();
+        assert_eq!(persisted[0].topic.as_deref(), Some("Launch Plan"));
+    }
+
+    #[tokio::test]
+    async fn the_topic_step_starts_a_new_topic_when_the_subject_changes() {
+        let generator = Arc::new(FakeGenerator::new(Duration::ZERO));
+        *generator.topic_answer.lock().unwrap() = r#"{"same":false,"topic":"Globex pitch"}"#.into();
+        let host = host_with(generator.clone());
+        let (tx, rx) = unbounded_channel();
+        let finish = CancellationToken::new();
+        let task = tokio::spawn(run(host.clone(), "s".into(), rx, finish.clone(), config()));
+        tx.send(speech(0)).unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Past the shortest topic, so the step may end it.
+        tx.send(speech(180)).unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        finish.cancel();
+        let snapshot = task.await.unwrap();
+        let topics: Vec<_> = snapshot
+            .entries
+            .iter()
+            .map(|e| e.topic.as_deref())
+            .collect();
+        assert_eq!(topics, vec![Some("Launch Plan"), Some("Globex Pitch")]);
+        let topic_prompts = generator.topic_prompts.lock().unwrap();
+        assert!(
+            topic_prompts[0].starts_with("Current topic: \"Launch Plan\" (since 00:00, 3 min)\n")
+        );
+        assert!(topic_prompts[0].contains("Latest notes under it:\n- "));
+    }
+
+    /// Two windows: the first names the topic, the second (past the
+    /// shortest topic) asks the topic step.
+    async fn two_windows(generator: Arc<FakeGenerator>) -> (TimelineSnapshot, Arc<FakeHost>) {
+        let host = host_with(generator);
+        let (tx, rx) = unbounded_channel();
+        let finish = CancellationToken::new();
+        let task = tokio::spawn(run(host.clone(), "s".into(), rx, finish.clone(), config()));
+        tx.send(speech(0)).unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        tx.send(speech(180)).unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        finish.cancel();
+        (task.await.unwrap(), host)
+    }
+
+    #[tokio::test]
+    async fn a_failed_topic_step_fails_the_window_and_it_is_retried() {
+        for kind in [FailureKind::Preempted, FailureKind::Transient] {
+            let generator = Arc::new(FakeGenerator::new(Duration::ZERO));
+            *generator.topic_fail.lock().unwrap() = Some(GenerateError {
+                kind,
+                message: "busy".into(),
+            });
+            let (snapshot, host) = two_windows(generator.clone()).await;
+            // The step was asked again after the failure, and the window's
+            // notes were written by the retry (not by a notes call that went
+            // ahead without a topic).
+            assert!(
+                generator.topic_prompts.lock().unwrap().len() >= 2,
+                "{kind:?}"
+            );
+            assert_eq!(snapshot.entries.len(), 2, "{kind:?}");
+            let statuses: Vec<_> = host
+                .published
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|s| s.status)
+                .collect();
+            if kind == FailureKind::Transient {
+                assert!(statuses.contains(&TimelineStatus::Failed));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_topic_step_backs_off_like_a_refused_request() {
+        let generator = Arc::new(FakeGenerator::new(Duration::ZERO));
+        *generator.topic_fail.lock().unwrap() = Some(GenerateError {
+            kind: FailureKind::Unavailable,
+            message: "status 429".into(),
+        });
+        let (_, host) = two_windows(generator.clone()).await;
+        let statuses: Vec<_> = host
+            .published
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|s| s.status)
+            .collect();
+        assert!(statuses.contains(&TimelineStatus::Unavailable));
+        // The refused attempt made no notes call: the first window and the
+        // retry after the back-off are the only two.
+        assert_eq!(generator.calls.load(Ordering::SeqCst), 2);
+        assert!(generator.topic_prompts.lock().unwrap().len() >= 2);
+    }
+
+    #[tokio::test]
+    async fn a_hung_topic_step_times_out_on_its_own_short_timeout() {
+        let mut generator = FakeGenerator::new(Duration::ZERO);
+        generator.topic_hang = true;
+        let generator = Arc::new(generator);
+        let host = host_with(generator.clone());
+        let (tx, rx) = unbounded_channel();
+        let finish = CancellationToken::new();
+        let mut config = config();
+        config.topic_timeout = Duration::from_millis(30);
+        let task = tokio::spawn(run(host.clone(), "s".into(), rx, finish.clone(), config));
+        tx.send(speech(0)).unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        tx.send(speech(180)).unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        finish.cancel();
+        task.await.unwrap();
+        let statuses: Vec<_> = host
+            .published
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|s| s.status)
+            .collect();
+        assert!(statuses.contains(&TimelineStatus::Failed));
+        assert!(host.published.lock().unwrap().iter().any(|s| s
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("topic step timed out"))));
+    }
+
+    #[tokio::test]
+    async fn cloud_providers_make_one_request_per_window() {
+        let mut generator = FakeGenerator::new(Duration::ZERO);
+        generator.provider = "openai";
+        let generator = Arc::new(generator);
+        let (snapshot, _) = two_windows(generator.clone()).await;
+        assert!(generator.topic_prompts.lock().unwrap().is_empty());
+        assert_eq!(
+            generator.calls.load(Ordering::SeqCst),
+            snapshot.entries.len()
+        );
+        assert!(uses_topic_step("builtin-ai") && !uses_topic_step("claude"));
+    }
+
+    #[tokio::test]
+    async fn the_tail_window_at_stop_skips_the_topic_step() {
+        let generator = Arc::new(FakeGenerator::new(Duration::ZERO));
+        let host = host_with(generator.clone());
+        let (tx, rx) = unbounded_channel();
+        let finish = CancellationToken::new();
+        let task = tokio::spawn(run(host.clone(), "s".into(), rx, finish.clone(), config()));
+        tx.send(speech(0)).unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Speech that only the stop's flush picks up.
+        tx.send(speech(240)).unwrap();
+        finish.cancel();
+        let snapshot = task.await.unwrap();
+        assert_eq!(snapshot.entries.len(), 2);
+        assert!(generator.topic_prompts.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

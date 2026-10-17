@@ -229,6 +229,9 @@ details.detail ul { margin: 4px 0 0 16px; padding: 0; font-size: 11.5px; color: 
 .ls-box li.fresh .ls-text { animation: rise .35s ease-out; }
 .ls-text .badge { margin-right: 6px; }
 .ls-speaker { margin-left: 6px; font-size: 11px; color: var(--ink-subtle); }
+.ls-topic { display: flex; align-items: center; gap: 8px; margin: 10px 0 4px; font-size: 11px; font-weight: 600; color: var(--ink-muted); }
+.ls-topic::before { content: ""; width: 12px; height: 1px; background: var(--hairline); }
+.ls-topic::after { content: ""; flex: 1; height: 1px; background: var(--hairline); }
 .ls-listening { margin: 6px 0 0; display: flex; align-items: center; gap: 8px; font-size: 12px; font-style: italic; color: var(--ink-subtle); }
 .ls-listening i { width: 4px; height: 4px; border-radius: 50%; background: var(--ink-subtle); }
 .notice { margin-bottom: 8px; border-radius: 6px; padding: 6px 10px; font-size: 12px; }

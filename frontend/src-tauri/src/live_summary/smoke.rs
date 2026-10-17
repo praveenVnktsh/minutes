@@ -15,9 +15,11 @@ use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 use super::llm::generation_options;
-use super::parse::parse_entries;
-use super::prompt::{self, PreviousEntry};
+use super::notes::NoteContext;
+use super::parse::parse_notes;
+use super::prompt::{self, PromptContext};
 use super::scheduler::{Segment, Speaker, WindowScheduler, CADENCE};
+use super::worker::{NotesSoFar, TimelineEntry};
 use crate::summary::llm_client::{generate_summary, LLMProvider};
 
 /// (seconds, speaker, text): a synthetic five-minute planning call.
@@ -62,7 +64,8 @@ async fn live_summary_smoke() {
 
     // Replay the transcript on audio time: a window is due every CADENCE.
     let mut scheduler = WindowScheduler::new(Duration::ZERO);
-    let mut previous: Vec<PreviousEntry> = Vec::new();
+    let mut kept: Vec<TimelineEntry> = Vec::new();
+    let mut carryover: Vec<Segment> = Vec::new();
     let mut latencies = Vec::new();
     let end = SAMPLE.last().unwrap().0 + 10;
     let mut samples = SAMPLE.iter().peekable();
@@ -88,7 +91,18 @@ async fn live_summary_smoke() {
         };
         let Some(window) = window else { continue };
 
-        let user = prompt::user_prompt(&window, &previous);
+        let notes = NotesSoFar::of(&kept);
+        let glossary = notes.glossary.terms();
+        let user = prompt::user_prompt(
+            &window,
+            &PromptContext {
+                current_topic: notes.current_topic.as_deref(),
+                previous: &notes.previous,
+                glossary: &glossary,
+                carryover: &carryover,
+                decided_topic: None,
+            },
+        );
         let started = Instant::now();
         let raw = generate_summary(
             &reqwest::Client::new(),
@@ -122,27 +136,44 @@ async fn live_summary_smoke() {
                 continue;
             }
         };
-        let history: Vec<String> = previous.iter().map(|e| e.text.clone()).collect();
-        match parse_entries(
+        let history: Vec<String> = kept.iter().rev().take(10).map(|e| e.text.clone()).collect();
+        let context = NoteContext {
+            current_topic: notes.current_topic.as_deref(),
+            known_topics: &notes.topics,
+            glossary: Some(&notes.glossary),
+            previous_texts: &history,
+            figures: None,
+            decided_topic: None,
+        };
+        match parse_notes(
             &raw,
             window.start_ms,
             window.end_ms,
             window.max_entries,
-            &history,
+            &context,
         ) {
             Ok(entries) => {
+                carryover = window.segments.clone();
                 for entry in entries {
                     println!(
-                        "  [{}] {:<8} {} ({})",
+                        "  [{}] {:<8} {} | {} ({})",
                         prompt::format_clock(entry.start_ms),
                         entry.kind.as_str(),
+                        entry.topic.as_deref().unwrap_or("-"),
                         entry.text,
                         entry.speaker.as_deref().unwrap_or("-")
                     );
-                    previous.push(PreviousEntry {
+                    kept.push(TimelineEntry {
+                        id: kept.len().to_string(),
                         start_ms: entry.start_ms,
+                        end_ms: entry.end_ms,
                         kind: entry.kind.as_str().into(),
                         text: entry.text,
+                        speaker: entry.speaker,
+                        provider: "builtin-ai".into(),
+                        model: model.clone(),
+                        created_at: String::new(),
+                        topic: entry.topic,
                     });
                 }
             }

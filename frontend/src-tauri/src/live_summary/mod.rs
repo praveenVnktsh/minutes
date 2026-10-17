@@ -8,12 +8,17 @@
 //!
 //! See docs/superpowers/specs/2026-10-16-live-summary-timeline-design.md.
 
+pub mod facts;
+pub mod glossary;
 pub mod llm;
+pub mod notes;
 pub mod parse;
 pub mod prompt;
 pub mod scheduler;
 pub mod worker;
 
+#[cfg(test)]
+mod eval;
 #[cfg(test)]
 mod smoke;
 

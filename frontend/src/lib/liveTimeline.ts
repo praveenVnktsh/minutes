@@ -15,6 +15,9 @@ export interface TimelineEntry {
   provider: string;
   model: string;
   created_at: string;
+  /** The section title the entry sits under. Absent on entries made before
+   * topics existed. */
+  topic?: string | null;
 }
 
 /** A stored entry also carries its meeting. */
@@ -81,6 +84,49 @@ export function kindMarker(kind: TimelineKind): { label: string; tone: Tone } | 
     default:
       return null;
   }
+}
+
+/** A run of consecutive entries under one topic. `topic` is null for
+ * entries made before topics existed, which render without a header. */
+export interface TimelineSection<T extends TimelineEntry = TimelineEntry> {
+  topic: string | null;
+  entries: T[];
+}
+
+/** Entries (in time order) grouped into sections: a new section starts when
+ * an entry names a different topic. An entry without a topic stays in the
+ * section before it. */
+export function groupByTopic<T extends TimelineEntry>(entries: T[]): TimelineSection<T>[] {
+  const sections: TimelineSection<T>[] = [];
+  for (const entry of entries) {
+    const topic = entry.topic?.trim() || null;
+    const last = sections[sections.length - 1];
+    if (last && (topic === null || topic === last.topic)) {
+      last.entries.push(entry);
+    } else {
+      sections.push({ topic, entries: [entry] });
+    }
+  }
+  return sections;
+}
+
+/** The speaker label an entry made before topics keeps ("· Others",
+ * "· Priya"), as it was shown when it was written. Entries with a topic
+ * never show one: their notes state what was said, not who said it. */
+export function legacySpeakerLabel(entry: Pick<TimelineEntry, 'kind' | 'text' | 'speaker' | 'topic'>): string | null {
+  if (entry.topic != null || !entry.speaker?.trim()) return null;
+  // Already shown as the owner: "You — task".
+  if (entryDisplayText(entry) !== entry.text) return null;
+  return entry.speaker.trim();
+}
+
+/** The text an entry shows: an action the user owns reads "You — task".
+ * Other speakers are never shown; the note states what was said. */
+export function entryDisplayText(entry: Pick<TimelineEntry, 'kind' | 'text' | 'speaker'>): string {
+  if (entry.kind === 'action' && entry.speaker === 'You' && !/^you\b/i.test(entry.text)) {
+    return `You — ${entry.text}`;
+  }
+  return entry.text;
 }
 
 /** Whether a snapshot belongs on the panel showing `current`: a newer
