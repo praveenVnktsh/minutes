@@ -761,8 +761,13 @@ fn spawn_script(
                     })
                     .collect::<Vec<_>>()
                     .join("\n\n");
-                let _ = crate::copilot::copilot_set_notes(text).await;
-                recorder.debug(debug::SCRIPT, json!({ "kind": "notes", "count": due }));
+                let _ = crate::copilot::copilot_set_notes(text.clone()).await;
+                // The text too, so the viewer's live Copilot sees the notes
+                // as they stood at any moment.
+                recorder.debug(
+                    debug::SCRIPT,
+                    json!({ "kind": "notes", "count": due, "text": text }),
+                );
             }
             while let Some(step) = steps.next_if(|s| s.at_ms <= audio_ms) {
                 let topic =

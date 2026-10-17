@@ -459,6 +459,62 @@
     return null;
   }
 
+  /*
+   * Live Copilot (when `replay serve` serves the viewer).
+   */
+
+  /** What the server needs to rebuild Copilot's inputs at cursor `n`: the
+   * records before it (by `seq`) and its meeting time. */
+  function liveCursor(records, n) {
+    const last = n > 0 ? records[n - 1] : null;
+    return {
+      seq: last ? (Number.isFinite(last.seq) ? last.seq : last.i) + 1 : 0,
+      audio_ms: last ? last.audio_ms : 0,
+    };
+  }
+
+  /** Splits a server-sent-events buffer into complete events
+   * (`{event, data}`, `event` defaulting to "message") and the unfinished rest. */
+  function parseSse(buffer) {
+    const events = [];
+    const text = String(buffer).replace(/\r\n/g, '\n');
+    let start = 0;
+    for (;;) {
+      const end = text.indexOf('\n\n', start);
+      if (end < 0) break;
+      const block = text.slice(start, end);
+      start = end + 2;
+      let event = 'message';
+      const data = [];
+      for (const line of block.split('\n')) {
+        if (!line || line.startsWith(':')) continue;
+        const colon = line.indexOf(':');
+        const field = colon < 0 ? line : line.slice(0, colon);
+        let value = colon < 0 ? '' : line.slice(colon + 1);
+        if (value.startsWith(' ')) value = value.slice(1);
+        if (field === 'event') event = value;
+        else if (field === 'data') data.push(value);
+      }
+      if (data.length) events.push({ event, data: data.join('\n') });
+    }
+    return { events, rest: text.slice(start) };
+  }
+
+  /** The questions asked live (`interactive.jsonl`), oldest first. */
+  function parseInteractive(text) {
+    const asks = [];
+    for (const line of String(text || '').split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      try {
+        const entry = JSON.parse(line);
+        if (entry && typeof entry === 'object') asks.push(entry);
+      } catch (_) {
+        /* a line being written */
+      }
+    }
+    return asks;
+  }
+
   const api = {
     SNAPSHOT_EVERY,
     parseJsonl,
@@ -478,6 +534,9 @@
     buildLanes,
     summarize,
     nextOfName,
+    liveCursor,
+    parseSse,
+    parseInteractive,
     LANES,
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

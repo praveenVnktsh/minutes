@@ -20,6 +20,49 @@ cargo build --release -p llama-helper
 cargo run --release -p meetily --features dev-replay --example replay -- --audio "/path/to/audio.mp4"
 ```
 
+llama-helper is found next to the binary or in the workspace's `target/`, so the
+recorder runs from any folder; `MEETILY_LLAMA_HELPER` still wins when set.
+
+## Served, with a live Copilot
+
+```bash
+cargo run --release -p meetily --features dev-replay --example replay -- serve --open
+# → http://127.0.0.1:7357/replay/   (--port N; --site site/replay serves the viewer from disk)
+```
+
+`replay serve` serves this viewer and the runs under the replays folder on
+127.0.0.1 only. The viewer then shows a **Runs** list (newest first; a run still
+being recorded is followed live) and the Copilot input works: type a question
+(Enter sends, Shift+Enter is a new line) or click a quick action, and the real
+Copilot answers as if asked at the cursor's moment of the meeting. Playback
+pauses while it answers (a toggle under the input). Answers stream with Stop and
+Copy, first-word latency, tokens/s and prompt-prefix reuse, and their `[MM:SS]`
+citations move the cursor.
+
+What runs is the app's Copilot (`copilot::core::Core`): its context builder,
+prompts, model resolution (the run's sandbox settings; the built-in model by
+default), streaming client, prefix reuse and budget trimming. Its inputs are
+rebuilt from `events.jsonl` up to the cursor (`replay::live_copilot`): the final
+transcript lines Copilot had heard, the newest live summary snapshot and the
+user's notes, never re-transcribed. One llama-helper stays up across asks (so
+prefixes are reused) and asks run one at a time. The only difference is a 60 s
+first-word timeout instead of 15 s, so a cold prefix still answers.
+
+Each live ask and its answer is appended to the run's `interactive.jsonl` (never
+to `events.jsonl`); the viewer lists them as "You asked live at [MM:SS]".
+
+| Endpoint | |
+| --- | --- |
+| `GET /api/runs` | The runs: name, recording, length, status (`running`, `done`, `incomplete`), pass/fail counts, start time. |
+| `GET /api/runs/<run>/events`, `/report`, `/interactive` | The run's files. |
+| `GET /api/runs/<run>/tail?from=<line>` | `events.jsonl` from a line on, as server-sent events, following the file until the run ends (`event: end`). |
+| `POST /api/runs/<run>/copilot` | `{audio_ms, seq?, kind: "ask"\|"action", text?, action?}` → server-sent events `queued`, `context`, `warming`, `start`, `first-token`, `delta` `{offset, text}`, then `done` (the saved entry, with `stats`) or `error`. |
+| `POST /api/runs/<run>/copilot/stop` | Stops the running answer inside the helper. |
+
+It answers only `Host: 127.0.0.1:<port>` / `localhost:<port>`, sends no CORS
+headers, takes POSTs only as JSON from its own page, and serves only run folders
+directly under the replays root. Run contents stay on this machine.
+
 It writes `events.jsonl`, `report.json`, `report.md` and `app.log` to
 `~/Library/Application Support/com.meetily.ai/replays/<run>/`. Real meetings
 are private: never commit or upload those files. The committed sample
@@ -70,7 +113,7 @@ Related records share ids.
 | `copilot-request` | Keyed by `id` (the message id): `{phase: "start", task}`, `{phase: "first-token", first_token_ms}`, `{phase: "done", status, error, kind, stats}`. Latencies are wall time. |
 | `timeline-request` | Keyed by `id`: `{phase: "start", start_ms, end_ms, words, dropped_segments}`, `{phase: "done", outcome}` (`done`, `truncated`, `preempted`, `transient`, `unavailable`). |
 | `sidecar` | llama-helper's queue, keyed by request `id`: `{phase: "queued", priority}`, `{phase: "acquired", waited_ms}`, `{phase: "done", ok, busy_ms}`, `{phase: "preempt", id, by}`; and from the app log `{what, message}` (`spawn`, `cancel`, `timeline-preempted`, `timeout`, …). |
-| `script` | A scripted Copilot step: `{at_ms, kind, tag, text, message_id, error}`, or `{kind: "notes", count}` when the user's notes were updated. |
+| `script` | A scripted Copilot step: `{at_ms, kind, tag, text, message_id, error}`, or `{kind: "notes", count, text}` when the user's notes were updated (`text` is what Copilot was given). |
 | `live` | Every 250 ms: `{backlog_s, rtf, rtf_total, busy_s, decoded_audio_s, fed_audio_s, llm_busy}`. `busy_s` and `decoded_audio_s` are cumulative decode time and decoded audio. |
 | `memory` | Every 5 s: `{app_rss_mb, helper_rss_mb}`. |
 | `final-transcript` | `{lines: [{start, end, speaker, text}]}` after the final pass and diarization. |
@@ -98,3 +141,12 @@ Related records share ids.
   axes and the record it starts at.
 
 Run the tests with `node --test site/replay/parser.test.js`.
+
+## Performance
+
+The timeline's lanes are drawn once into an offscreen layer per view (zoom,
+size, axis, theme, selection); each frame only copies it, dims what has not
+happened yet and draws the cursor. Items narrower than a pixel that share one
+are drawn once. The live summary, Copilot and status panels re-render only when
+what they show changes, at most every 100 ms while playing, and the transcript
+appends new rows. A 57k-event run plays at 60+ fps.

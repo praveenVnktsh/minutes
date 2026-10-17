@@ -10,27 +10,47 @@
 <link rel="stylesheet" href="replay.css" />
 <script>
   try { const t = localStorage.getItem('minutes-replay-theme'); if (t) document.documentElement.dataset.theme = t; } catch (e) {}
+  // Errors show on the page, not only in the console.
+  (function () {
+    function show(message) {
+      var banner = document.getElementById('error-banner');
+      if (!banner) return;
+      banner.hidden = false;
+      banner.querySelector('span').textContent = message;
+    }
+    window.replayShowError = show;
+    window.addEventListener('error', function (e) { show((e.message || 'Error') + (e.filename ? ' (' + e.filename.split('/').pop() + ':' + e.lineno + ')' : '')); });
+    window.addEventListener('unhandledrejection', function (e) { show(String((e.reason && (e.reason.message || e.reason)) || 'Unhandled error')); });
+  })();
 </script>
 </head>
 <body>
+<div class="app" id="app">
 <header class="topbar">
-  <div class="brand"><h1>Minutes</h1><span>Replay viewer</span></div>
-  <label class="pill-btn primary" for="files">Open events.jsonl…</label>
+  <div class="brand"><h1>Minutes</h1><span>Replay</span></div>
+  <div class="runs-ctl" id="runs-ctl" hidden>
+    <button class="pill-btn primary" id="runs-btn" type="button" aria-haspopup="true" aria-expanded="false">Runs ▾</button>
+    <span class="run-name" id="run-name"></span>
+    <label class="check" title="Keep reading a run that is still being recorded"><input type="checkbox" id="follow" checked /> Follow live</label>
+  </div>
+  <label class="pill-btn file-ctl" for="files">Open events.jsonl…</label>
   <input id="files" type="file" accept=".jsonl,.json,application/json" multiple hidden />
-  <button class="pill-btn" id="load-sample" type="button">Load sample</button>
+  <button class="pill-btn file-ctl" id="load-sample" type="button">Load sample</button>
   <span class="sep"></span>
   <button class="icon-btn" id="play" type="button" aria-label="Play" disabled>
     <svg viewBox="0 0 16 16" fill="currentColor" id="play-icon"><path d="M4 2.5v11l9-5.5z"/></svg>
   </button>
   <div class="speeds" role="group" aria-label="Playback speed">
-    <button type="button" data-speed="1" aria-pressed="true">1×</button>
+    <button type="button" data-speed="1" aria-pressed="false">1×</button>
     <button type="button" data-speed="4" aria-pressed="false">4×</button>
     <button type="button" data-speed="16" aria-pressed="false">16×</button>
-    <button type="button" data-speed="64" aria-pressed="false">64×</button>
+    <button type="button" data-speed="64" aria-pressed="true">64×</button>
+    <button type="button" data-speed="256" aria-pressed="false">256×</button>
+    <button type="button" data-speed="1024" aria-pressed="false">1024×</button>
   </div>
   <div class="speeds" role="group" aria-label="Time axis">
-    <button type="button" data-axis="audio" aria-pressed="true" title="The meeting clock: audio time, which a replay simulates">Meeting time</button>
-    <button type="button" data-axis="wall" aria-pressed="false" title="How long the replay really took (compressed when unpaced)">Wall time</button>
+    <button type="button" data-axis="audio" aria-pressed="true" title="The meeting clock: audio time, which a replay simulates">Meeting</button>
+    <button type="button" data-axis="wall" aria-pressed="false" title="How long the replay really took (compressed when unpaced)">Wall</button>
   </div>
   <div class="jump">
     <button class="icon-btn" id="prev" type="button" aria-label="Previous event of this type" disabled>
@@ -45,96 +65,115 @@
   <button class="icon-btn" id="theme" type="button" aria-label="Toggle light or dark">
     <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.5a6.5 6.5 0 1 0 0 13z"/><circle cx="8" cy="8" r="6.5" fill="none" stroke="currentColor"/></svg>
   </button>
-  <p class="privacy">Files are read in this browser only. Nothing is uploaded, and this page makes no network requests with your data.</p>
 </header>
 
-<section class="tl-wrap" aria-label="Timeline">
-  <div class="tl-bar">
-    <span class="subtle" id="tl-range"></span>
-    <span class="tl-hint subtle">Scroll to zoom · drag to pan · double-click to fit · click an item to jump there</span>
-    <button class="pill-btn" id="fit" type="button">Fit</button>
+<div class="runs-pop" id="runs-pop" hidden></div>
+
+<section class="col live" aria-label="Live transcript">
+  <div class="live-head">
+    <div class="live-label" id="live-label"><i class="pulse"></i><span>Live</span></div>
+    <span class="subtle small-text" id="tx-count"></span>
   </div>
-  <div class="tl-grid">
+  <div class="tx" id="transcript"><p class="empty">Listening… live transcript will appear here as people speak.</p></div>
+  <div class="partials" id="partials" aria-live="polite"></div>
+</section>
+
+<section class="col summary" aria-label="Live summary">
+  <div class="col-head"><h2>Live summary</h2><span class="subtle small-text" id="ls-count"></span></div>
+  <div class="ls-box" id="live-summary"></div>
+</section>
+
+<section class="col copilot" aria-label="Copilot">
+  <div class="cp-head">
+    <div><h2>Copilot</h2><p>Live · answers from the last few minutes and the live summary</p></div>
+    <span class="switch on" id="cp-suggestions"><i></i>Suggestions</span>
+  </div>
+  <div class="cp-pills" id="cp-pills"></div>
+  <div class="cp-list" id="cp-list"></div>
+  <form class="cp-input" id="cp-form">
+    <div class="cp-box">
+      <textarea id="cp-text" rows="1" placeholder="Ask about this meeting…" aria-label="Ask Copilot about this moment of the meeting"></textarea>
+      <button class="cp-send" id="cp-send" type="submit" aria-label="Send">
+        <svg viewBox="0 0 16 16" fill="currentColor"><path d="M2 8.5 14 2l-3.5 12-2.6-4.4z"/></svg>
+      </button>
+    </div>
+    <div class="cp-opts">
+      <label class="check"><input type="checkbox" id="cp-pause" checked /> Pause while answering</label>
+      <span class="cp-note" id="cp-note"></span>
+    </div>
+    <p class="cp-debug" id="cp-debug"></p>
+  </form>
+</section>
+
+<div class="cover" id="drop">
+  <div class="drop">
+    <h2>Play back a pipeline replay</h2>
+    <div id="runs-inline" hidden></div>
+    <p>Drop an <b>events.jsonl</b> (and its <b>report.json</b>) from a replay folder, or open them above.</p>
+    <p class="subtle">Replays are written to ~/Library/Application Support/com.meetily.ai/replays/ by
+      <code>cargo run --release -p meetily --features dev-replay --example replay -- --audio …</code>.
+      Serve them, with a live Copilot, with <code>… --example replay -- serve --open</code>.</p>
+    <div class="actions">
+      <label class="pill-btn primary" for="files">Open files…</label>
+      <button class="pill-btn" type="button" data-load-sample>Load sample (synthetic meeting)</button>
+    </div>
+    <p class="subtle privacy">Files are read in this browser only. Nothing is uploaded.</p>
+  </div>
+</div>
+
+<div class="bottom">
+  <section class="tl-wrap" aria-label="Timeline">
+    <div class="tl-bar">
+      <span class="subtle" id="tl-range"></span>
+      <span class="tl-hint subtle">Scroll to zoom · drag to pan · double-click to fit · click an item to jump there</span>
+      <button class="pill-btn" id="fit" type="button">Fit</button>
+    </div>
     <div class="tl-canvas-wrap" id="tl-canvas-wrap">
       <canvas id="tl" aria-label="Event timeline"></canvas>
       <div class="tl-tip" id="tl-tip" hidden></div>
     </div>
-    <aside class="inspector" aria-label="Selected event">
+  </section>
+  <aside class="side" aria-label="Details">
+    <div class="side-card">
       <h3>Selected event</h3>
       <div id="inspector" class="subtle">Click an item on the timeline.</div>
-    </aside>
-  </div>
-</section>
-
-<main class="workspace">
-  <section class="main" id="main">
-    <div class="drop" id="drop">
-      <h2>Play back a pipeline replay</h2>
-      <p>Drop an <b>events.jsonl</b> (and its <b>report.json</b>) from a replay folder, or open them above.</p>
-      <p class="subtle">Replays are written to ~/Library/Application Support/com.meetily.ai/replays/ by
-        <code>cargo run --release -p meetily --features dev-replay --example replay -- --audio …</code></p>
-      <div class="actions">
-        <label class="pill-btn primary" for="files">Open files…</label>
-        <button class="pill-btn" type="button" data-load-sample>Load sample (synthetic meeting)</button>
-      </div>
     </div>
-    <div id="run" hidden></div>
-    <div class="rec-pill-wrap">
+    <div class="side-card">
       <div class="rec-pill" id="rec-pill" hidden>
         <span class="dot" id="rec-dot"></span>
         <span class="time" id="rec-time">00:00</span>
         <span class="wave" id="rec-wave"><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span></span>
         <span class="state" id="rec-state">Recording</span>
-        <span class="round pause"><svg viewBox="0 0 16 16" fill="currentColor"><rect x="4" y="3" width="3" height="10" rx="1"/><rect x="9" y="3" width="3" height="10" rx="1"/></svg></span>
-        <span class="round stop"><svg viewBox="0 0 16 16" fill="currentColor"><rect x="3.5" y="3.5" width="9" height="9" rx="1.5"/></svg></span>
       </div>
+      <h3>Now</h3>
+      <div id="now" class="subtle">Nothing loaded.</div>
     </div>
-  </section>
-  <aside class="dock">
-    <section class="live" aria-label="Live transcript">
-      <div class="live-head">
-        <div class="live-label" id="live-label"><i class="pulse"></i><span>Live</span></div>
-        <span class="switch on"><i></i>Live transcript</span>
-      </div>
-      <div class="ls" id="live-summary"></div>
-      <div class="tx" id="transcript"><p class="empty">Listening… live transcript will appear here as people speak.</p></div>
-      <div class="partials" id="partials" aria-live="polite"></div>
-    </section>
-    <section class="copilot" aria-label="Copilot">
-      <div class="cp-head">
-        <div><h2>Copilot</h2><p>Live · answers from the last few minutes and the live summary</p></div>
-        <span class="switch on" id="cp-suggestions"><i></i>Suggestions</span>
-      </div>
-      <div class="cp-pills" id="cp-pills"></div>
-      <div class="cp-list" id="cp-list"></div>
-      <div class="cp-input">
-        <div><span>Ask about this meeting…</span><i></i></div>
-        <p class="cp-debug" id="cp-debug"></p>
-      </div>
-    </section>
-  </aside>
-</main>
-
-<section class="lane" aria-label="Debug">
-  <div class="lane-grid">
-    <div class="panel">
+    <div id="run"></div>
+    <div class="side-card">
+      <h3>Asked live <span class="subtle" id="asks-count"></span></h3>
+      <div class="log" id="asks"><p class="subtle">Questions you ask the Copilot here are saved to the run's interactive.jsonl.</p></div>
+    </div>
+    <div class="side-card">
       <h3>Copilot requests</h3>
       <div class="log" id="requests"></div>
     </div>
-    <div class="panel">
+    <div class="side-card">
       <h3>Detector decisions <select id="detector-filter" aria-label="Filter decisions"><option value="">All</option></select></h3>
       <div class="log" id="detector"></div>
     </div>
-    <div class="panel">
+    <div class="side-card">
       <h3>llama-helper queue</h3>
       <div class="log" id="sidecar"></div>
     </div>
-    <div class="panel">
+    <div class="side-card">
       <h3>Summary runs</h3>
       <div id="summaries" class="subtle">No summary yet.</div>
     </div>
-  </div>
-</section>
+  </aside>
+</div>
+</div>
+
+<div class="error-banner" id="error-banner" role="alert" hidden><span></span><button type="button" aria-label="Dismiss" onclick="this.parentNode.hidden = true">×</button></div>
 
 <script src="parser.js"></script>
 <script src="sample-data.js"></script>

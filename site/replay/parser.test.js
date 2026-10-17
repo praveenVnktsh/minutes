@@ -147,3 +147,26 @@ test('the committed sample parses and plays to the end', () => {
   assert.ok(lanes.copilot.length >= 3);
   assert.ok(lanes.detector.some((d) => d.big));
 });
+
+test('the live Copilot cursor is the records before n', () => {
+  const records = R.parseJsonl(body);
+  assert.deepEqual(R.liveCursor(records, 0), { seq: 0, audio_ms: 0 });
+  assert.deepEqual(R.liveCursor(records, 3), { seq: 3, audio_ms: 900 });
+});
+
+test('server-sent events are split into whole events', () => {
+  const first = R.parseSse('event: start\ndata: {"a":1}\n\n: ping\n\nevent: delta\ndata: {"text":"Hi"}\n\nevent: del');
+  assert.deepEqual(first.events, [
+    { event: 'start', data: '{"a":1}' },
+    { event: 'delta', data: '{"text":"Hi"}' },
+  ]);
+  assert.equal(first.rest, 'event: del');
+  const second = R.parseSse(first.rest + 'ta\r\ndata: a\r\ndata: b\r\n\r\ndata: plain\n\n');
+  assert.deepEqual(second.events, [{ event: 'delta', data: 'a\nb' }, { event: 'message', data: 'plain' }]);
+  assert.equal(second.rest, '');
+});
+
+test('live asks are read from interactive.jsonl', () => {
+  const asks = R.parseInteractive('{"prompt":"a","audio_ms":1}\n\n{"prompt":"b"}\n{"half');
+  assert.deepEqual(asks.map((a) => a.prompt), ['a', 'b']);
+});

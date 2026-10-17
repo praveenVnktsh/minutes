@@ -12,16 +12,31 @@
 //! and stay there: recordings are private, never commit or upload them.
 //! Open `events.jsonl` in the viewer (`site/replay/index.html`).
 //!
+//! The viewer, with the runs and a live Copilot, on http://127.0.0.1:7357:
+//!
+//! ```text
+//! cargo run --release -p meetily --features dev-replay --example replay -- serve --open
+//! ```
+//!
+//! llama-helper is found next to the binary or in the workspace's `target/`,
+//! so neither needs `MEETILY_LLAMA_HELPER` (it still wins when set).
+//!
 //! See `app_lib::replay` for what is fed and recorded.
 
 use std::path::PathBuf;
 
 use anyhow::Result;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(about = "Replay a recorded meeting through the live pipeline")]
+#[command(
+    about = "Replay a recorded meeting through the live pipeline",
+    args_conflicts_with_subcommands = true,
+    subcommand_negates_reqs = true
+)]
 struct Args {
+    #[command(subcommand)]
+    command: Option<Command>,
     /// The recording (audio.mp4 of a meeting folder).
     #[arg(long, required_unless_present = "rescore")]
     audio: Option<PathBuf>,
@@ -60,8 +75,36 @@ struct Args {
     rescore: Option<PathBuf>,
 }
 
+#[derive(Subcommand)]
+enum Command {
+    /// Serve the viewer, the runs and a live Copilot on 127.0.0.1.
+    Serve {
+        #[arg(long, default_value_t = app_lib::replay::serve::DEFAULT_PORT)]
+        port: u16,
+        /// Open the viewer in the browser.
+        #[arg(long)]
+        open: bool,
+        /// Serve the viewer from this folder (site/replay) instead of the
+        /// copy built in, for working on it.
+        #[arg(long)]
+        site: Option<PathBuf>,
+    },
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
+    // Before any thread starts: the sidecar lookup reads it.
+    if app_lib::replay::use_local_llama_helper().is_none() {
+        eprintln!("llama-helper not found: build it with `cargo build --release -p llama-helper` (the built-in model needs it)");
+    }
+    if let Some(Command::Serve { port, open, site }) = args.command {
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
+        let root = dirs::data_dir()
+            .ok_or_else(|| anyhow::anyhow!("No data folder on this system"))?
+            .join(app_lib::replay::runner::APP_IDENTIFIER)
+            .join("replays");
+        return app_lib::replay::serve::serve(root, port, open, site);
+    }
     if let Some(events) = args.rescore {
         let records = app_lib::replay::events::parse_jsonl(&std::fs::read_to_string(&events)?)?;
         let report = app_lib::replay::report::score(&records);
