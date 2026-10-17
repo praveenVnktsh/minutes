@@ -151,6 +151,7 @@ struct Request {
     host: Option<String>,
     origin: Option<String>,
     content_type: Option<String>,
+    range: Option<String>,
     body: Vec<u8>,
 }
 
@@ -183,6 +184,7 @@ fn read_request(stream: &TcpStream) -> Result<Request> {
                 "host" => request.host = Some(value),
                 "origin" => request.origin = Some(value),
                 "content-type" => request.content_type = Some(value),
+                "range" => request.range = Some(value),
                 "content-length" => length = value.parse().unwrap_or(0),
                 _ => {}
             }
@@ -412,6 +414,143 @@ fn query_number(query: &str, key: &str) -> usize {
         .find(|(k, _)| *k == key)
         .and_then(|(_, v)| v.parse().ok())
         .unwrap_or(0)
+}
+
+// ---------------------------------------------------------------------------
+// The recording
+// ---------------------------------------------------------------------------
+
+/// Audio files a run may link, and their types.
+const AUDIO_TYPES: &[(&str, &str)] = &[
+    ("mp4", "audio/mp4"),
+    ("m4a", "audio/mp4"),
+    ("wav", "audio/wav"),
+    ("mp3", "audio/mpeg"),
+    ("webm", "audio/webm"),
+    ("ogg", "audio/ogg"),
+];
+
+/// The recording a run replayed: the `audio.<ext>` the recorder linked into
+/// its sandbox's meeting folder, and nothing else. `Err` names the missing
+/// file when the link no longer resolves.
+pub fn run_audio(dir: &Path) -> Result<(PathBuf, &'static str), String> {
+    let meeting = dir.join("sandbox").join("meeting");
+    let entries =
+        std::fs::read_dir(&meeting).map_err(|_| "This run has no linked recording".to_string())?;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Some(ext) = name.strip_prefix("audio.") else {
+            continue;
+        };
+        let Some((_, kind)) = AUDIO_TYPES
+            .iter()
+            .find(|(e, _)| e.eq_ignore_ascii_case(ext))
+        else {
+            continue;
+        };
+        let link = entry.path();
+        return match link.canonicalize() {
+            Ok(file) if file.is_file() => Ok((file, kind)),
+            _ => Err(format!(
+                "The recording is not on this machine any more: {}",
+                std::fs::read_link(&link).unwrap_or(link).display()
+            )),
+        };
+    }
+    Err("This run has no linked recording".to_string())
+}
+
+/// A `Range` header against a body of `len` bytes: `Ok(None)` for the whole
+/// body (no header, or one this server does not honour, such as several
+/// ranges), `Ok(Some((first, last)))` inclusive, `Err(())` when unsatisfiable
+/// (416).
+pub fn parse_range(header: Option<&str>, len: u64) -> Result<Option<(u64, u64)>, ()> {
+    let Some(spec) = header.and_then(|h| h.trim().strip_prefix("bytes=")) else {
+        return Ok(None);
+    };
+    if spec.contains(',') {
+        return Ok(None);
+    }
+    let Some((first, last)) = spec.trim().split_once('-') else {
+        return Ok(None);
+    };
+    let (first, last) = (first.trim(), last.trim());
+    if first.is_empty() {
+        // The last N bytes.
+        let Ok(n) = last.parse::<u64>() else {
+            return Ok(None);
+        };
+        if n == 0 || len == 0 {
+            return Err(());
+        }
+        return Ok(Some((len.saturating_sub(n), len - 1)));
+    }
+    let Ok(first) = first.parse::<u64>() else {
+        return Ok(None);
+    };
+    let last = if last.is_empty() {
+        u64::MAX
+    } else {
+        match last.parse::<u64>() {
+            Ok(last) if last >= first => last,
+            _ => return Ok(None),
+        }
+    };
+    if first >= len {
+        return Err(());
+    }
+    Ok(Some((first, last.min(len - 1))))
+}
+
+/// Streams the run's recording, honouring `Range` so the browser can seek.
+fn serve_audio(stream: &mut TcpStream, dir: &Path, range: Option<&str>) -> Result<()> {
+    let (path, kind) = match run_audio(dir) {
+        Ok(found) => found,
+        Err(message) => {
+            return respond(
+                stream,
+                "404 Not Found",
+                "text/plain; charset=utf-8",
+                message.as_bytes(),
+            )
+        }
+    };
+    let mut file = std::fs::File::open(&path)?;
+    let len = file.metadata()?.len();
+    let head = |status: &str, length: u64, extra: String| {
+        format!(
+            "HTTP/1.1 {status}\r\nContent-Type: {kind}\r\nContent-Length: {length}\r\n\
+             Accept-Ranges: bytes\r\n{extra}Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n\
+             Connection: close\r\n\r\n"
+        )
+    };
+    match parse_range(range, len) {
+        Err(()) => {
+            write!(
+                stream,
+                "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */{len}\r\n\
+                 Accept-Ranges: bytes\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )?;
+        }
+        Ok(None) => {
+            stream.write_all(head("200 OK", len, String::new()).as_bytes())?;
+            std::io::copy(&mut file, stream)?;
+        }
+        Ok(Some((first, last))) => {
+            let length = last - first + 1;
+            stream.write_all(
+                head(
+                    "206 Partial Content",
+                    length,
+                    format!("Content-Range: bytes {first}-{last}/{len}\r\n"),
+                )
+                .as_bytes(),
+            )?;
+            file.seek(SeekFrom::Start(first))?;
+            std::io::copy(&mut file.take(length), stream)?;
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -978,6 +1117,7 @@ fn handle_with(
         return match what {
             "events" => file("events.jsonl", "application/x-ndjson", &mut stream),
             "report" => file("report.json", "application/json", &mut stream),
+            "audio" => serve_audio(&mut stream, &dir, request.range.as_deref()),
             "interactive" => match std::fs::read(dir.join("interactive.jsonl")) {
                 Ok(body) => respond(&mut stream, "200 OK", "application/x-ndjson", &body),
                 Err(_) => respond(&mut stream, "200 OK", "application/x-ndjson", b""),
@@ -1210,5 +1350,103 @@ mod tests {
             "a".repeat(2_001)
         );
         assert!(parse_ask(long.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn ranges_are_parsed_like_http_says() {
+        assert_eq!(parse_range(None, 100), Ok(None));
+        assert_eq!(parse_range(Some("bytes=0-0"), 100), Ok(Some((0, 0))));
+        assert_eq!(parse_range(Some("bytes=10-19"), 100), Ok(Some((10, 19))));
+        assert_eq!(parse_range(Some("bytes=90-"), 100), Ok(Some((90, 99))));
+        assert_eq!(
+            parse_range(Some("bytes=90-500"), 100),
+            Ok(Some((90, 99))),
+            "clamped"
+        );
+        assert_eq!(
+            parse_range(Some("bytes=-10"), 100),
+            Ok(Some((90, 99))),
+            "suffix"
+        );
+        assert_eq!(
+            parse_range(Some("bytes=-500"), 100),
+            Ok(Some((0, 99))),
+            "suffix over the length"
+        );
+        assert_eq!(
+            parse_range(Some("bytes=100-"), 100),
+            Err(()),
+            "past the end"
+        );
+        assert_eq!(parse_range(Some("bytes=-0"), 100), Err(()));
+        assert_eq!(parse_range(Some("bytes=0-"), 0), Err(()), "an empty file");
+        assert_eq!(
+            parse_range(Some("bytes=5-2"), 100),
+            Ok(None),
+            "invalid: ignored"
+        );
+        assert_eq!(
+            parse_range(Some("bytes=0-1,5-6"), 100),
+            Ok(None),
+            "several: whole body"
+        );
+        assert_eq!(parse_range(Some("items=0-1"), 100), Ok(None));
+    }
+
+    #[test]
+    fn only_the_run_s_linked_recording_is_served_with_ranges() {
+        let root = tempfile::tempdir().unwrap();
+        let run = root.path().join("20261016-100000-a");
+        let meeting = run.join("sandbox").join("meeting");
+        std::fs::create_dir_all(&meeting).unwrap();
+        let recording = tempfile::tempdir().unwrap();
+        let source = recording.path().join("audio.m4a");
+        std::fs::write(&source, (0u8..100).collect::<Vec<u8>>()).unwrap();
+        std::fs::write(meeting.join("other.txt"), "secret").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&source, meeting.join("audio.m4a")).unwrap();
+        #[cfg(not(unix))]
+        std::fs::copy(&source, meeting.join("audio.m4a")).unwrap();
+        let (path, kind) = run_audio(&run).unwrap();
+        assert_eq!(path, source.canonicalize().unwrap());
+        assert_eq!(kind, "audio/mp4");
+
+        let listener = bind(0).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let live = Arc::new(Live::new().unwrap());
+        let root_path = root.path().to_path_buf();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(4) {
+                let _ = handle(stream.unwrap(), &root_path, port, &live);
+            }
+        });
+        let get = |range: &str| {
+            let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            write!(
+                stream,
+                "GET /api/runs/20261016-100000-a/audio HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{range}\r\n"
+            )
+            .unwrap();
+            let mut response = Vec::new();
+            stream.read_to_end(&mut response).unwrap();
+            response
+        };
+        let whole = get("");
+        assert!(whole.starts_with(b"HTTP/1.1 200"));
+        assert!(String::from_utf8_lossy(&whole).contains("Accept-Ranges: bytes"));
+        let part = get("Range: bytes=10-14\r\n");
+        let text = String::from_utf8_lossy(&part);
+        assert!(text.starts_with("HTTP/1.1 206"), "{text}");
+        assert!(text.contains("Content-Range: bytes 10-14/100"));
+        assert!(text.contains("Content-Type: audio/mp4"));
+        assert!(part.ends_with(&[10, 11, 12, 13, 14]));
+        let tail = get("Range: bytes=-3\r\n");
+        assert!(tail.ends_with(&[97, 98, 99]));
+        let past = String::from_utf8_lossy(&get("Range: bytes=200-\r\n")).to_string();
+        assert!(past.starts_with("HTTP/1.1 416"), "{past}");
+        assert!(past.contains("Content-Range: bytes */100"));
+
+        std::fs::remove_file(&source).unwrap();
+        assert!(run_audio(&run).unwrap_err().contains("not on this machine"));
     }
 }

@@ -108,6 +108,11 @@ button:disabled { cursor: default; opacity: .4; }
 .speeds button[aria-pressed="true"] { background: var(--selected); color: var(--ink); font-weight: 600; }
 .clock { font-family: var(--mono); font-size: 12px; color: var(--ink-muted); white-space: nowrap; }
 .served .file-ctl { display: none; }
+.audio-ctl { display: inline-flex; align-items: center; gap: 6px; }
+.audio-ctl input[type="range"] { width: 72px; accent-color: var(--ink); }
+.audio-ctl.off .icon-btn, .audio-ctl.off input { opacity: .4; }
+.audio-note { font-size: 11px; color: var(--ink-subtle); white-space: nowrap; max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+.audio-note code { font-family: var(--mono); font-size: 10.5px; }
 .runs-foot { display: flex; gap: 8px; align-items: center; padding: 8px 6px 4px; border-top: 1px solid var(--hairline); margin-top: 4px; }
 .privacy { margin-top: 12px !important; font-size: 11px; }
 
