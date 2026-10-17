@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/button';
 import { OnboardingContainer } from '../OnboardingContainer';
 import { useOnboarding } from '@/contexts/OnboardingContext';
 import { formatBytes } from '@/lib/download-display';
+import { onboardingDownloadTotal } from '@/lib/liveNotesOnboarding';
 import {
   Tooltip,
   TooltipContent,
@@ -20,6 +21,8 @@ export function SetupOverviewStep() {
     parakeetSizeBytes,
     summaryModelSizeBytes,
     liveNotesModelSizeBytes,
+    liveNotesOptIn,
+    setLiveNotesOptIn,
     selectedSummaryModel,
     startBackgroundDownloads,
   } = useOnboarding();
@@ -55,17 +58,20 @@ export function SetupOverviewStep() {
     {
       number: 3,
       type: 'live-notes',
-      title: 'Download Live Notes Engine',
+      title: 'Live Notes Engine (optional)',
       sizeBytes: liveNotesModelSizeBytes,
-      note: 'A small model for notes while you record. Optional; downloads last.',
+      note: 'A small, faster model for notes while you record. Downloads after the two above finish.',
     },
   ];
 
-  // A total is only honest once both numbers are real, so a half-known total is no total.
-  const totalLabel =
-    parakeetSizeBytes !== null && summaryModelSizeBytes !== null && liveNotesModelSizeBytes !== null
-      ? formatBytes(parakeetSizeBytes + summaryModelSizeBytes + liveNotesModelSizeBytes)
-      : SIZE_UNKNOWN;
+  // A total is only honest once its numbers are real, so a half-known total is no total.
+  const total = onboardingDownloadTotal(
+    parakeetSizeBytes,
+    summaryModelSizeBytes,
+    liveNotesModelSizeBytes,
+    liveNotesOptIn,
+  );
+  const totalLabel = total !== null ? formatBytes(total) : SIZE_UNKNOWN;
 
   const handleContinue = () => {
     // This click is where the transfer is authorised, but nothing about it should hold the
@@ -123,6 +129,17 @@ export function SetupOverviewStep() {
                       {step.sizeBytes !== null ? formatBytes(step.sizeBytes) : SIZE_UNKNOWN} ·{' '}
                       {step.note}
                     </p>
+                    {step.type === 'live-notes' && (
+                      <label className="mt-2 flex cursor-pointer items-center gap-2 text-sm text-ink">
+                        <input
+                          type="checkbox"
+                          checked={liveNotesOptIn}
+                          onChange={(event) => setLiveNotesOptIn(event.target.checked)}
+                          className="rounded border-hairline text-ink focus:ring-2 focus:ring-focus"
+                        />
+                        <span className="select-none">Download the live notes engine</span>
+                      </label>
+                    )}
                   </div>
                 </div>
               );

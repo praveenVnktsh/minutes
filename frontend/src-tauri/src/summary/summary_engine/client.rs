@@ -511,10 +511,36 @@ async fn live_notes_manager(
     Ok((manager, model_def, model_path))
 }
 
-/// A live notes window on a built-in model. Unlike [`generate_with_builtin`]
-/// it keeps the template head and system prompt evaluated between windows
-/// (llama-helper's prefix checkpoint), so each window only evaluates its own
-/// text, and it can constrain the answer with a grammar.
+/// The cache fields of a live notes request: `cache_prompt`, the prefix and
+/// the cached context's n_ctx.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LiveNotesCache {
+    pub prefix_chars: usize,
+    pub context_size: u32,
+}
+
+/// Whether a live notes request uses llama-helper's prompt cache. Only on
+/// their own helper: on the shared one, their prefix checkpoints would
+/// evict Copilot's anchor and prefix (one slot on 8 GB Macs, three
+/// otherwise, least recently used first), so every Copilot ask after a
+/// window would re-evaluate its whole transcript. There they run uncached,
+/// in a fresh context, as before the live notes model existed.
+pub fn live_notes_cache(
+    own_helper: bool,
+    prefix_chars: usize,
+    model_context_size: u32,
+) -> Option<LiveNotesCache> {
+    own_helper.then(|| LiveNotesCache {
+        prefix_chars,
+        context_size: copilot_cache_context(LIVE_NOTES_CACHE_CONTEXT).min(model_context_size),
+    })
+}
+
+/// A live notes window on a built-in model. On the live notes model's own
+/// helper it keeps the template head and system prompt evaluated between
+/// windows (llama-helper's prefix checkpoint), so each window only evaluates
+/// its own text; on the shared helper it runs uncached (see
+/// [`live_notes_cache`]). It can constrain the answer with a grammar.
 pub async fn generate_live_notes(
     app_data_dir: &Path,
     request: LiveNotesRequest<'_>,
@@ -537,6 +563,7 @@ pub async fn generate_live_notes(
         live_notes_manager(app_data_dir, model_name, own_helper).await?;
     let sampling = model_def.sampling.sanitize_for_llama_helper();
     let id = next_request_id();
+    let cache = live_notes_cache(own_helper, prefix_chars, model_def.context_size);
     let request = Request::Generate {
         prompt,
         max_tokens: Some(
@@ -559,12 +586,10 @@ pub async fn generate_live_notes(
         seed: Some(options.seed.unwrap_or(BUILTIN_SEED)),
         id: Some(id),
         stream: None,
-        cache_prompt: Some(true),
-        cache_prefix_chars: Some(prefix_chars),
+        cache_prompt: cache.map(|_| true),
+        cache_prefix_chars: cache.map(|cache| cache.prefix_chars),
         cache_anchor_chars: None,
-        cache_context_size: Some(
-            copilot_cache_context(LIVE_NOTES_CACHE_CONTEXT).min(model_def.context_size),
-        ),
+        cache_context_size: cache.map(|cache| cache.context_size),
         n_threads: generation_threads(),
         flash_attn: None,
         kv_cache_type: None,
@@ -671,7 +696,7 @@ pub fn copilot_cache_context_for(requested: u32, total_memory: Option<u64>) -> u
     }
 }
 
-fn total_memory_bytes() -> Option<u64> {
+pub fn total_memory_bytes() -> Option<u64> {
     static TOTAL: Lazy<Option<u64>> = Lazy::new(|| {
         let mut system = sysinfo::System::new();
         system.refresh_memory();
@@ -895,6 +920,75 @@ pub async fn generate_with_builtin_stream(
     parse_stream_response(&response_json?)
 }
 
+/// Set when model settings changed while recording: the live notes helper is
+/// restarted once the recording stops, not under a meeting's live notes.
+static LIVE_NOTES_RESTART_PENDING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// What a settings change does to the live notes helper.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveNotesRestart {
+    /// No recording: restart it now with the main helper.
+    Now,
+    /// A recording is live: keep it until the recording stops.
+    AfterRecording,
+}
+
+pub fn live_notes_restart(recording: bool) -> LiveNotesRestart {
+    if recording {
+        LiveNotesRestart::AfterRecording
+    } else {
+        LiveNotesRestart::Now
+    }
+}
+
+/// After the model settings were saved: the main helper restarts (it drains
+/// its requests first), and the live notes helper too unless a recording is
+/// live, in which case it is restarted when the recording stops
+/// ([`apply_deferred_live_notes_restart`]). Killing it mid-recording would
+/// drop a window and reload the model under live transcription.
+pub async fn restart_sidecars_for_settings_change() -> Result<()> {
+    let recording = crate::audio::recording_commands::is_recording_or_stopping();
+    let live_notes = match live_notes_restart(recording) {
+        LiveNotesRestart::Now => LIVE_NOTES_SIDECAR.lock().await.take(),
+        LiveNotesRestart::AfterRecording => {
+            log::info!(
+                "Model settings changed while recording: the live notes helper restarts after it"
+            );
+            LIVE_NOTES_RESTART_PENDING.store(true, std::sync::atomic::Ordering::SeqCst);
+            None
+        }
+    };
+    let managers = [SIDECAR_MANAGER.lock().await.take(), live_notes];
+    for manager in managers.into_iter().flatten() {
+        drain_and_shutdown(manager);
+    }
+    Ok(())
+}
+
+/// When a recording has stopped: the live notes helper restart a settings
+/// change deferred, if any.
+pub async fn apply_deferred_live_notes_restart() {
+    if crate::audio::recording_commands::is_recording_or_stopping() {
+        return;
+    }
+    if LIVE_NOTES_RESTART_PENDING.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        if let Some(manager) = LIVE_NOTES_SIDECAR.lock().await.take() {
+            log::info!("Restarting the live notes helper deferred by a settings change");
+            drain_and_shutdown(manager);
+        }
+    }
+}
+
+/// Waits for the manager's requests, then stops it, in the background.
+fn drain_and_shutdown(manager: Arc<SidecarManager>) {
+    tokio::spawn(async move {
+        if let Err(e) = manager.shutdown_gracefully().await {
+            log::error!("Error during graceful shutdown: {}", e);
+        }
+    });
+}
+
 /// Shutdown the global sidecar (graceful cleanup)
 /// Detaches the current manager and spawns a background task to drain active requests
 pub async fn shutdown_sidecar_gracefully() -> Result<()> {
@@ -951,6 +1045,60 @@ pub async fn is_sidecar_healthy() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// llama-helper's checkpoint store as it behaves: the most recently
+    /// used first, at most `slots`.
+    struct Checkpoints {
+        slots: usize,
+        saved: Vec<&'static str>,
+    }
+
+    impl Checkpoints {
+        /// A cache_prompt request: whether `prefix` was restored, then it
+        /// is saved (most recent first).
+        fn request(&mut self, prefix: &'static str) -> bool {
+            let restored = self.saved.contains(&prefix);
+            self.saved.retain(|p| *p != prefix);
+            self.saved.insert(0, prefix);
+            self.saved.truncate(self.slots);
+            restored
+        }
+    }
+
+    #[test]
+    fn live_notes_on_the_shared_helper_keep_copilot_reuse() {
+        for slots in [1, 3] {
+            let mut helper = Checkpoints {
+                slots,
+                saved: Vec::new(),
+            };
+            let mut copilot_reused = Vec::new();
+            for ask in 0..4 {
+                // Copilot: anchor then its stable prefix, on the shared helper;
+                // its next ask finds its prefix the most recent checkpoint.
+                if ask > 0 {
+                    copilot_reused.push(helper.saved.first() == Some(&"copilot-prefix"));
+                }
+                helper.request("copilot-anchor");
+                helper.request("copilot-prefix");
+                // A live notes window between asks, on the same helper.
+                if live_notes_cache(false, 1200, 32_768).is_some() {
+                    helper.request("live-notes-prefix");
+                }
+            }
+            assert_eq!(copilot_reused, [true, true, true], "{slots} slots");
+        }
+        // On their own helper live notes do keep their prefix.
+        let cache = live_notes_cache(true, 1200, 32_768).expect("own helper caches");
+        assert_eq!(cache.prefix_chars, 1200);
+        assert!(cache.context_size <= LIVE_NOTES_CACHE_CONTEXT);
+    }
+
+    #[test]
+    fn a_settings_change_waits_for_the_recording_to_restart_live_notes() {
+        assert_eq!(live_notes_restart(true), LiveNotesRestart::AfterRecording);
+        assert_eq!(live_notes_restart(false), LiveNotesRestart::Now);
+    }
 
     #[test]
     fn model_paths_are_cached_per_data_folder() {

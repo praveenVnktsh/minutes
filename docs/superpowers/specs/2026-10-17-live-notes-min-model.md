@@ -148,17 +148,35 @@ stack to ship and maintain.
 ## Shipping
 
 - **Catalogue.** `gemma4:e2b` ("Gemma 4 E2B (Live notes)"), Gemma 4 chat template (a real
-  system turn: `<|turn>system … <turn|>`), pinned URL, and every built-in model now carries
-  its SHA-256, checked after each download.
-- **Model choice.** With Built-in AI as the summary provider, live notes use `gemma4:e2b`
-  once it is downloaded, on **their own llama-helper process**, so Copilot (on the summary
-  model) and live notes never reload each other's model. The cost is a second resident model:
-  ~0.4 GB of footprint plus its mapped weights. Until it is downloaded, live notes run on the
-  summary model through the same compact, prefix-cached path, sharing the main helper and
-  Copilot's cached context (same n_ctx), so nothing thrashes there either.
-- **Onboarding** downloads it after the summary model, as a third, optional step with its
-  size. Existing users can download it in Settings; nothing downloads without asking.
+  system turn: `<|turn>system … <turn|>`). Every built-in model carries its SHA-256, checked
+  after each download, and its URL names the Hugging Face commit that hash belongs to
+  (`resolve/<40-hex revision>/…`, never `resolve/main`), so a re-upload upstream cannot break
+  downloads.
+- **Opt-in only.** Nothing downloads without asking. Onboarding shows the live notes model as
+  an optional step with a checkbox, ticked by default only on Macs with 16 GB or more; when
+  ticked, the download starts after Parakeet and the summary model are on disk (the backend
+  waits for them, across reloads and restarts). Settings → Summary → *Live notes model* offers
+  "Same as summary model" (the default) or "Gemma 4 E2B (faster, lighter)", with download,
+  progress and remove; Gemma can be chosen once downloaded.
+- **Model choice.** With Built-in AI as the summary provider and Gemma 4 E2B chosen and
+  downloaded, live notes run on it, on **their own llama-helper process** with the compact,
+  prefix-cached path, so Copilot (on the summary model) and live notes never reload each
+  other's model. The cost is a second resident model (~0.4 GB of footprint plus its mapped
+  weights), so Macs with 8 GB or less keep live notes on the summary model.
+- **Everyone else is unchanged.** On the summary model (not opted in, not downloaded, 8 GB
+  Macs) live notes keep the JSON prompt in a fresh context on the shared helper, as before:
+  on Qwen 3.5 4B the compact prompt lost precision (0.72 on m35, under the 0.85 bar), and
+  uncached requests cannot evict Copilot's prefix checkpoints. A summary model that is itself
+  E2B gets the compact prompt, uncached on the shared helper.
+- **Fragments.** Only on the compact path: points under three words are dropped; actions and
+  decisions keep two ("Email Sarah", "Budget approved") unless they point at nothing ("do
+  that").
+- **Settings changes** restart the main helper at once and the live notes helper only after a
+  live recording stops.
+- **Metal offload.** Every layer goes on Metal when the weights plus the KV estimate fit the
+  safe memory budget; a model over it gets the existing sizing logic's partial offload.
 - **Warm vs unload.** The helper stays loaded while windows arrive every minute and exits
   after the usual 5 idle minutes. Reloading per window would cost 1–3 s and page the weights
   back in each time, more than the 1.7 s a window takes.
-- **Cloud providers and Ollama** keep the JSON prompt; only Built-in AI gets the compact one.
+- **Cloud providers and Ollama** keep the JSON prompt; only the live notes model gets the
+  compact one.

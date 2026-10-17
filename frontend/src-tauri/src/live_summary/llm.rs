@@ -137,9 +137,9 @@ pub struct SummaryModelGenerator {
     client: reqwest::Client,
     /// Ollama's recording-time num_ctx, shared by every call while recording.
     num_ctx: Option<u32>,
-    /// Built-in AI: the model live notes run on (the live notes model once
-    /// it is downloaded, else the summary model) and whether that needs the
-    /// second helper.
+    /// Built-in AI with the live notes model (Gemma 4 E2B): that model and
+    /// whether it runs on its own helper. `None` keeps the summary model's
+    /// path (the JSON prompt, a fresh context on the shared helper).
     builtin: Option<(String, bool)>,
 }
 
@@ -148,18 +148,64 @@ pub fn is_builtin(provider: &str) -> bool {
     matches!(provider, "builtin-ai" | "local-llama" | "localllama")
 }
 
-/// The built-in model live notes use with `summary_model` as the summary
-/// model, and whether it runs on its own helper: the live notes model once
-/// its file is in the models folder, else the summary model itself.
-pub fn live_notes_model(models_dir: &std::path::Path, summary_model: &str) -> (String, bool) {
+/// The user's choice of model for live notes (`liveNotesModel` in the app
+/// store). Absent means the summary model: nothing changes for anyone who
+/// has not opted in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LiveNotesChoice {
+    #[default]
+    SummaryModel,
+    LiveNotesModel,
+}
+
+impl LiveNotesChoice {
+    pub const SUMMARY: &'static str = "summary";
+
+    pub fn from_stored(value: Option<&str>) -> Self {
+        match value {
+            Some(crate::summary::summary_engine::models::LIVE_NOTES_MODEL) => Self::LiveNotesModel,
+            _ => Self::SummaryModel,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SummaryModel => Self::SUMMARY,
+            Self::LiveNotesModel => crate::summary::summary_engine::models::LIVE_NOTES_MODEL,
+        }
+    }
+}
+
+/// Macs with this much memory or less never keep two models resident while
+/// recording: live notes stay on the summary model's helper.
+pub const LOW_MEMORY_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+
+/// Whether `total_memory` is a low-memory machine (unknown counts as not).
+pub fn is_low_memory(total_memory: Option<u64>) -> bool {
+    total_memory.is_some_and(|bytes| bytes <= LOW_MEMORY_BYTES)
+}
+
+/// The built-in live notes model and whether it runs on its own helper, or
+/// `None` for the summary model's usual path:
+/// - the summary model is the live notes model: it, on the one helper;
+/// - the user chose the live notes model, its file is downloaded and the Mac
+///   has more than 8 GB: it, on its own helper (no reloads against Copilot);
+/// - otherwise (not chosen, not downloaded, or 8 GB): the summary model,
+///   exactly as before the live notes model existed.
+pub fn live_notes_model(
+    models_dir: &std::path::Path,
+    summary_model: &str,
+    choice: LiveNotesChoice,
+    low_memory: bool,
+) -> Option<(String, bool)> {
     use crate::summary::summary_engine::models::{get_model_by_name, LIVE_NOTES_MODEL};
+    if summary_model == LIVE_NOTES_MODEL {
+        return Some((LIVE_NOTES_MODEL.to_string(), false));
+    }
     let downloaded = get_model_by_name(LIVE_NOTES_MODEL)
         .is_some_and(|model| models_dir.join(model.gguf_file).is_file());
-    if downloaded && summary_model != LIVE_NOTES_MODEL {
-        (LIVE_NOTES_MODEL.to_string(), true)
-    } else {
-        (summary_model.to_string(), false)
-    }
+    (choice == LiveNotesChoice::LiveNotesModel && downloaded && !low_memory)
+        .then(|| (LIVE_NOTES_MODEL.to_string(), true))
 }
 
 impl SummaryModelGenerator {
@@ -167,6 +213,7 @@ impl SummaryModelGenerator {
     pub async fn from_settings(
         pool: &SqlitePool,
         app_data_dir: Option<PathBuf>,
+        choice: LiveNotesChoice,
     ) -> anyhow::Result<Self> {
         let settings = SettingsRepository::get_model_config(pool)
             .await
@@ -184,13 +231,20 @@ impl SummaryModelGenerator {
             crate::summary::service::OllamaPhase::Recording,
         )
         .await;
-        let builtin = (is_builtin(&settings.provider)).then(|| {
-            let models_dir = app_data_dir
-                .as_deref()
-                .map(crate::summary::summary_engine::models::get_models_directory)
-                .unwrap_or_default();
-            live_notes_model(&models_dir, &config.model_name)
-        });
+        let builtin = is_builtin(&settings.provider)
+            .then(|| {
+                let models_dir = app_data_dir
+                    .as_deref()
+                    .map(crate::summary::summary_engine::models::get_models_directory)
+                    .unwrap_or_default();
+                live_notes_model(
+                    &models_dir,
+                    &config.model_name,
+                    choice,
+                    is_low_memory(crate::summary::summary_engine::client::total_memory_bytes()),
+                )
+            })
+            .flatten();
         Ok(Self {
             num_ctx,
             builtin,
@@ -286,25 +340,65 @@ mod tests {
     use super::*;
 
     #[test]
-    fn live_notes_use_their_model_once_it_is_downloaded() {
+    fn live_notes_use_their_model_only_once_chosen_and_downloaded() {
         use crate::summary::summary_engine::models::{get_model_by_name, LIVE_NOTES_MODEL};
+        use LiveNotesChoice::{LiveNotesModel, SummaryModel};
         let dir = tempfile::tempdir().unwrap();
+        let e2b = || Some((LIVE_NOTES_MODEL.to_string(), true));
+        // Chosen but not downloaded: the summary model's usual path.
         assert_eq!(
-            live_notes_model(dir.path(), "qwen3.5:4b"),
-            ("qwen3.5:4b".to_string(), false)
+            live_notes_model(dir.path(), "qwen3.5:4b", LiveNotesModel, false),
+            None
         );
         let file = get_model_by_name(LIVE_NOTES_MODEL).unwrap().gguf_file;
         std::fs::write(dir.path().join(file), b"GGUF").unwrap();
+        // Downloaded but not chosen: existing users are unaffected.
         assert_eq!(
-            live_notes_model(dir.path(), "qwen3.5:4b"),
-            (LIVE_NOTES_MODEL.to_string(), true)
+            live_notes_model(dir.path(), "qwen3.5:4b", SummaryModel, false),
+            None
+        );
+        assert_eq!(
+            live_notes_model(dir.path(), "qwen3.5:4b", LiveNotesModel, false),
+            e2b()
+        );
+        // 8 GB Macs never keep two models resident while recording.
+        assert_eq!(
+            live_notes_model(dir.path(), "qwen3.5:4b", LiveNotesModel, true),
+            None
         );
         // Already the summary model: one helper serves both.
-        assert_eq!(
-            live_notes_model(dir.path(), LIVE_NOTES_MODEL),
-            (LIVE_NOTES_MODEL.to_string(), false)
-        );
+        for choice in [SummaryModel, LiveNotesModel] {
+            assert_eq!(
+                live_notes_model(dir.path(), LIVE_NOTES_MODEL, choice, true),
+                Some((LIVE_NOTES_MODEL.to_string(), false))
+            );
+        }
     }
+
+    #[test]
+    fn the_live_notes_choice_defaults_to_the_summary_model() {
+        use crate::summary::summary_engine::models::LIVE_NOTES_MODEL;
+        assert_eq!(
+            LiveNotesChoice::from_stored(None),
+            LiveNotesChoice::SummaryModel
+        );
+        assert_eq!(
+            LiveNotesChoice::from_stored(Some("summary")),
+            LiveNotesChoice::SummaryModel
+        );
+        assert_eq!(
+            LiveNotesChoice::from_stored(Some("bogus")),
+            LiveNotesChoice::SummaryModel
+        );
+        assert_eq!(
+            LiveNotesChoice::from_stored(Some(LIVE_NOTES_MODEL)),
+            LiveNotesChoice::LiveNotesModel
+        );
+        assert!(is_low_memory(Some(8 * 1024 * 1024 * 1024)));
+        assert!(!is_low_memory(Some(16 * 1024 * 1024 * 1024)));
+        assert!(!is_low_memory(None));
+    }
+
     use crate::summary::llm_client::LLMProvider;
     use crate::summary::llm_client::{build_ollama_chat_body, build_openai_compat_chat_body};
 

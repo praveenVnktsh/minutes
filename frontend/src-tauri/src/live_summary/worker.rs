@@ -221,20 +221,24 @@ pub fn uses_topic_step(provider: &str) -> bool {
     )
 }
 
-/// Providers that get the compact prompt (`prompt::compact_system_prompt`):
-/// the built-in model, where every output token is local compute and the
-/// answer can be held to its grammar.
-pub fn uses_compact_prompt(provider: &str) -> bool {
+/// Whether live notes get the compact prompt (`prompt::compact_system_prompt`):
+/// only the built-in live notes model (Gemma 4 E2B), the model it was
+/// measured on. Every other model, the built-in summary models included,
+/// keeps the JSON prompt (on Qwen 3.5 4B the compact prompt lost precision:
+/// 0.72 on the m35 replay, see the 2026-10-17 live notes spec).
+pub fn uses_compact_prompt(provider: &str, model: &str) -> bool {
     super::llm::is_builtin(provider)
+        && model == crate::summary::summary_engine::models::LIVE_NOTES_MODEL
 }
 
-/// The notes call's prompts for `provider`.
+/// The notes call's prompts for `provider` and `model`.
 pub fn notes_prompts(
     provider: &str,
+    model: &str,
     window: &Window,
     context: &PromptContext<'_>,
 ) -> (&'static str, String) {
-    if uses_compact_prompt(provider) {
+    if uses_compact_prompt(provider, model) {
         (
             prompt::compact_system_prompt(),
             prompt::compact_user_prompt(window, context),
@@ -530,6 +534,7 @@ impl Worker {
             };
             let (system, user) = notes_prompts(
                 &provider,
+                &model,
                 &window,
                 &PromptContext {
                     decided_topic: decided.as_deref(),
@@ -618,8 +623,9 @@ impl Worker {
             .collect();
         let notes = NotesSoFar::of(&self.snapshot.entries);
         // Without a topic step answer, a compact reply's topic line names it.
+        let compact = uses_compact_prompt(&provider, &model);
         let decided = match decided {
-            None if uses_compact_prompt(&provider) => folded_topic(&raw, &notes, window.start_ms),
+            None if compact => folded_topic(&raw, &notes, window.start_ms),
             decided => decided,
         };
         // A note's figures must come from what it was written from.
@@ -631,6 +637,7 @@ impl Worker {
             previous_texts: &history,
             figures: Some(&figures),
             decided_topic: decided.as_deref(),
+            drop_fragments: compact,
         };
         match parse_notes(
             &raw,
@@ -924,6 +931,7 @@ mod tests {
         topic_fail: Mutex<Option<GenerateError>>,
         topic_hang: bool,
         provider: &'static str,
+        model: &'static str,
     }
 
     impl FakeGenerator {
@@ -941,9 +949,10 @@ mod tests {
                 topic_answer: Mutex::new(r#"{"same":true}"#.into()),
                 topic_fail: Mutex::new(None),
                 topic_hang: false,
-                // JSON prompt with the topic step; `builtin-ai` gets the
-                // compact prompt.
-                provider: "ollama",
+                // A built-in summary model: the JSON prompt with the topic
+                // step. Only the live notes model gets the compact prompt.
+                provider: "builtin-ai",
+                model: "qwen3.5:4b",
             }
         }
     }
@@ -954,7 +963,7 @@ mod tests {
             self.provider
         }
         fn model(&self) -> &str {
-            "fake"
+            self.model
         }
         async fn generate(
             &self,
@@ -1115,7 +1124,7 @@ mod tests {
     #[tokio::test]
     async fn the_built_in_model_gets_the_compact_prompt_and_its_topic_line() {
         let mut fake = FakeGenerator::new(Duration::ZERO);
-        fake.provider = "builtin-ai";
+        fake.model = crate::summary::summary_engine::models::LIVE_NOTES_MODEL;
         let generator = Arc::new(fake);
         let host = host_with(generator.clone());
         let (tx, rx) = unbounded_channel();
@@ -1279,6 +1288,33 @@ mod tests {
             snapshot.entries.len()
         );
         assert!(uses_topic_step("builtin-ai") && !uses_topic_step("claude"));
+    }
+
+    #[test]
+    fn only_the_live_notes_model_gets_the_compact_prompt() {
+        use crate::summary::summary_engine::models::LIVE_NOTES_MODEL;
+        assert!(uses_compact_prompt("builtin-ai", LIVE_NOTES_MODEL));
+        // Existing users on a built-in summary model keep the JSON prompt.
+        assert!(!uses_compact_prompt("builtin-ai", "qwen3.5:4b"));
+        assert!(!uses_compact_prompt("builtin-ai", "qwen3.5:2b"));
+        assert!(!uses_compact_prompt("ollama", LIVE_NOTES_MODEL));
+        assert!(!uses_compact_prompt("claude", "claude-sonnet"));
+        let window = Window {
+            start_ms: 0,
+            end_ms: 60_000,
+            segments: Vec::new(),
+            dropped_segments: 0,
+            max_entries: 3,
+        };
+        let context = PromptContext::default();
+        assert_eq!(
+            notes_prompts("builtin-ai", "qwen3.5:4b", &window, &context).0,
+            prompt::system_prompt()
+        );
+        assert_eq!(
+            notes_prompts("builtin-ai", LIVE_NOTES_MODEL, &window, &context).0,
+            prompt::compact_system_prompt()
+        );
     }
 
     #[tokio::test]

@@ -2,6 +2,30 @@
 
 /** The small built-in model live notes run on while recording (models.rs `LIVE_NOTES_MODEL`). */
 export const LIVE_NOTES_MODEL = 'gemma4:e2b';
+
+/** Live notes on the summary model (the default), or on the live notes model. */
+export type LiveNotesModelChoice = 'summary' | typeof LIVE_NOTES_MODEL;
+
+/** `get_live_notes_settings` (live_summary/model_choice.rs). */
+export interface LiveNotesSettings {
+  model: LiveNotesModelChoice;
+  live_notes_model: string;
+  /** An 8 GB Mac: live notes stay on the summary model while recording. */
+  low_memory: boolean;
+  /** Onboarding ticks the live notes download by default (16 GB or more). */
+  opt_in_by_default: boolean;
+  /** An onboarding opt-in still waiting for the required models. */
+  download_pending: boolean;
+}
+
+export const liveNotesApi = {
+  getSettings: () => invoke<LiveNotesSettings>('get_live_notes_settings'),
+  setModel: (model: LiveNotesModelChoice) =>
+    invoke<LiveNotesSettings>('set_live_notes_model', { model }),
+  /** Onboarding's opt-in: download the live notes model once Parakeet and `summaryModel` are in. */
+  downloadAfterSetup: (summaryModel: string) =>
+    invoke<LiveNotesSettings>('request_live_notes_download_after_setup', { summaryModel }),
+};
 export interface BuiltInModelInfo {
   name: string;
   display_name: string;

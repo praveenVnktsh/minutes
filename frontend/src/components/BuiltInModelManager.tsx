@@ -37,7 +37,7 @@ interface BuiltInModelManagerProps {
 }
 
 // Module-level so it is referentially stable across renders.
-const builtInDownloadSource: ModelDownloadSource = {
+export const builtInDownloadSource: ModelDownloadSource = {
   subscribe: (emit) =>
     listenAll([
       listen<BuiltInAIDownloadProgressEvent>(BUILTIN_AI_DOWNLOAD_PROGRESS_EVENT, (event) => {

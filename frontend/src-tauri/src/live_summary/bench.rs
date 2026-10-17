@@ -594,6 +594,7 @@ pub async fn run_config(
                         previous_texts: &history,
                         figures: Some(&figures),
                         decided_topic: decided.as_deref(),
+                        drop_fragments: config.compact(),
                     };
                     match parse_notes(
                         &raw,

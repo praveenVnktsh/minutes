@@ -333,3 +333,26 @@ fn kv_cache_types_parse_and_unknown_ones_are_ignored() {
     };
     assert_ne!(base, quantized);
 }
+
+#[test]
+fn metal_offloads_every_layer_only_within_the_memory_budget() {
+    const GB16: f32 = 16.0 * 0.6;
+    const GB8: f32 = 8.0 * 0.6;
+    // Qwen 3.5 4B (2.55 GB) and Gemma 4 E2B (2.9 GB) on 16 GB: all on Metal.
+    assert_eq!(
+        gpu::metal_gpu_layers(2.55, GB16, 32_768, 33),
+        gpu::ALL_LAYERS
+    );
+    assert_eq!(
+        gpu::metal_gpu_layers(2.9, GB16, 32_768, 33),
+        gpu::ALL_LAYERS
+    );
+    // Qwen 3.5 2B (1.2 GB) still fits on 8 GB.
+    assert_eq!(gpu::metal_gpu_layers(1.2, GB8, 32_768, 28), gpu::ALL_LAYERS);
+    // The 4B on 8 GB is over the budget: the sizing logic's partial offload.
+    let layers = gpu::metal_gpu_layers(2.55, GB8, 32_768, 33);
+    assert!(layers < 33, "{layers}");
+    assert_eq!(layers, gpu::layers_that_fit(2.55, 33, GB8, 32_768));
+    // An unreadable file never gets every layer.
+    assert_eq!(gpu::metal_gpu_layers(0.0, GB16, 32_768, 33), 0);
+}

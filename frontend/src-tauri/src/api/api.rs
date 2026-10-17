@@ -559,10 +559,12 @@ pub async fn api_save_model_config<R: Runtime>(
         error.to_string()
     })?;
 
-    // Trigger graceful shutdown of built-in AI sidecar if it's running
-    // This ensures that if the user switched models/providers, the old one is cleaned up
-    // The shutdown happens in the background, so it won't block the UI
-    if let Err(e) = crate::summary::summary_engine::client::shutdown_sidecar_gracefully().await {
+    // Restart the built-in AI helpers so a switched model or provider takes
+    // effect. Graceful and in the background; the live notes helper waits for
+    // a live recording to stop.
+    if let Err(e) =
+        crate::summary::summary_engine::client::restart_sidecars_for_settings_change().await
+    {
         log_warn!("Failed to initiate graceful sidecar shutdown: {}", e);
     }
 

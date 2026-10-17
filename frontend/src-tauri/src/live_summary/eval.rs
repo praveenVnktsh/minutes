@@ -395,6 +395,7 @@ fn parse_reply(
                 previous_texts: &history,
                 figures: Some(&figures),
                 decided_topic: decided,
+                drop_fragments: false,
             };
             parse_notes(
                 raw,
