@@ -17,8 +17,6 @@ CSV Format (minimal - text column only):
 
 import argparse
 import csv
-import os
-import platform
 import sqlite3
 import sys
 import uuid
@@ -27,19 +25,8 @@ from pathlib import Path
 
 
 def get_default_db_path() -> Path:
-    """Get the default database path based on the platform."""
-    system = platform.system()
-
-    if system == "Darwin":  # macOS
-        base_path = Path.home() / "Library" / "Application Support" / "Meetily"
-    elif system == "Windows":
-        appdata = os.environ.get("APPDATA", "")
-        if appdata:
-            base_path = Path(appdata) / "Meetily"
-        else:
-            base_path = Path.home() / "AppData" / "Roaming" / "Meetily"
-    else:  # Linux and others
-        base_path = Path.home() / ".config" / "Meetily"
+    """Get the default database path (Minutes is Mac-only)."""
+    base_path = Path.home() / "Library" / "Application Support" / "Meetily"
 
     return base_path / "meeting_minutes.sqlite"
 
@@ -250,7 +237,7 @@ Example usage:
     parser.add_argument(
         '--db', '-d',
         default=None,
-        help='Database path (auto-detects platform default if not specified)'
+        help='Database path (defaults to the macOS app data directory)'
     )
 
     parser.add_argument(

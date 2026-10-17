@@ -8,8 +8,8 @@
 # a build agent that passes a local sequence CI does not run would open pull
 # requests that go red, and every red one costs the card an attempt.
 #
-# Needs pnpm, bun and a Rust toolchain on PATH, plus the Tauri system libraries
-# (see CONTRIBUTING.md). Runs CPU-only.
+# Needs an Apple Silicon Mac (Minutes is Mac-only) with pnpm, bun and a Rust
+# toolchain on PATH (see CONTRIBUTING.md).
 set -euo pipefail
 
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"

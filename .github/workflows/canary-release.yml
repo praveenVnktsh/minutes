@@ -35,7 +35,7 @@ jobs:
           BASE=$(grep -o '"version": "[^"]*"' frontend/src-tauri/tauri.conf.json | cut -d'"' -f4)
           MAJOR=$(echo "$BASE" | cut -d. -f1)
           MINOR=$(echo "$BASE" | cut -d. -f2)
-          # Tauri, Apple, and the MSI bundler all require a plain numeric X.Y.Z
+          # Tauri and Apple both require a plain numeric X.Y.Z
           # version, so the third component is a monotonic build counter (the
           # commit count) rather than a prerelease suffix. The canary channel is
           # marked by the GitHub prerelease flag on the release, not the version.
@@ -99,9 +99,6 @@ jobs:
           - platform: "macos-latest"
             args: "--target aarch64-apple-darwin"
             target: "aarch64-apple-darwin"
-          - platform: "windows-latest"
-            args: ""
-            target: "x86_64-pc-windows-msvc"
     uses: ./.github/workflows/build.yml
     with:
       platform: ${{ matrix.platform }}
@@ -134,23 +131,13 @@ jobs:
           workdir="$(mktemp -d)"
 
           gh release download canary -R "$REPO" -D "$workdir" \
-            -p "*_aarch64.dmg" -p "*_x64-setup.exe" -p "*_x64_*-US.msi" || true
+            -p "*_aarch64.dmg" || true
 
           upload=()
           dmg="$(ls "$workdir"/*_aarch64.dmg 2>/dev/null | head -1 || true)"
           if [ -n "$dmg" ]; then
             cp "$dmg" "$workdir/minutes-macos-arm64.dmg"
             upload+=("$workdir/minutes-macos-arm64.dmg")
-          fi
-          exe="$(ls "$workdir"/*_x64-setup.exe 2>/dev/null | head -1 || true)"
-          if [ -n "$exe" ]; then
-            cp "$exe" "$workdir/minutes-windows-x64-setup.exe"
-            upload+=("$workdir/minutes-windows-x64-setup.exe")
-          fi
-          msi="$(ls "$workdir"/*_x64_*-US.msi 2>/dev/null | head -1 || true)"
-          if [ -n "$msi" ]; then
-            cp "$msi" "$workdir/minutes-windows-x64.msi"
-            upload+=("$workdir/minutes-windows-x64.msi")
           fi
 
           if [ ${#upload[@]} -gt 0 ]; then
