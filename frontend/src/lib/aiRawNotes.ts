@@ -67,6 +67,9 @@ export function pendingGroups(
 export interface InsertPlace {
   afterBlockId: string;
   withHeading: boolean;
+  /** Insert before `afterBlockId` instead (it is an empty line of the
+   * user's that stays below the AI lines, where they type next). */
+  before?: boolean;
 }
 
 /**
@@ -78,8 +81,18 @@ export function insertPlace(
   cursorIndex: number,
   aiBlocks: AiBlocks,
   topic: string,
+  emptyIds: ReadonlySet<string> = new Set(),
 ): InsertPlace | null {
   if (blockIds.length === 0) return null;
+  // Empty lines of the user's at the end (the starting bullet, or one just
+  // opened) stay below the AI lines: place among the blocks before them.
+  let end = blockIds.length;
+  while (end > 0 && emptyIds.has(blockIds[end - 1]) && !aiBlocks[blockIds[end - 1]]) end -= 1;
+  if (end < blockIds.length) {
+    if (end === 0) return { afterBlockId: blockIds[0], withHeading: true, before: true };
+    const place = insertPlace(blockIds.slice(0, end), Math.min(cursorIndex, end - 1), aiBlocks, topic);
+    return place;
+  }
   let anchor = -1;
   blockIds.forEach((id, index) => {
     if (aiBlocks[id]?.topic === topic) anchor = index;

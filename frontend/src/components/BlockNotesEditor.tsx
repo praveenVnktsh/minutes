@@ -177,6 +177,14 @@ export function BlockNotesEditor({
     });
   }, [document.rawMarkdown, editable, editor, onChange]);
 
+  /** A block with no text (and no nested blocks), e.g. the starting bullet. */
+  function isEmptyBlock(block: Block): boolean {
+    if (block.children && block.children.length > 0) return false;
+    const content = block.content;
+    if (!Array.isArray(content)) return false;
+    return content.every((item) => item.type === 'text' && item.text.trim() === '');
+  }
+
   // Live notes written into the notes, once the user pauses typing: under
   // their topic below the cursor, else at the end; one undo step of their own.
   const aiOn = aiEntries !== undefined && editable && Boolean(onChange);
@@ -198,7 +206,8 @@ export function BlockNotesEditor({
           } catch {
             cursorIndex = -1;
           }
-          const place = insertPlace(blocks.map((block) => block.id), cursorIndex, aiBlocks.current, group.topic);
+          const emptyIds = new Set(blocks.filter(isEmptyBlock).map((block) => block.id));
+          const place = insertPlace(blocks.map((block) => block.id), cursorIndex, aiBlocks.current, group.topic, emptyIds);
           if (!place) continue;
           const added: PartialBlock[] = [];
           if (place.withHeading) {
@@ -214,7 +223,7 @@ export function BlockNotesEditor({
             added.push({ id, type: 'bulletListItem', content: text });
           }
           editor.transact(() => {
-            editor.insertBlocks(added, place.afterBlockId, 'after');
+            editor.insertBlocks(added, place.afterBlockId, place.before ? 'before' : 'after');
           });
         }
         editor.transact((tr) => closeHistory(tr));

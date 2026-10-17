@@ -62,6 +62,16 @@ describe('AI lines in the Raw notes', () => {
     expect(insertPlace([], -1, ai, 'Hiring')).toBeNull();
   });
 
+  test('keeps a trailing empty line of the user below the AI lines', () => {
+    const ai = { h1: { entryId: '', text: 'Pricing', topic: 'Pricing' }, p1: { entryId: 'e1', text: 'x', topic: 'Pricing' } };
+    // Fresh notes: only the empty starting bullet, cursor in it.
+    expect(insertPlace(['e0'], 0, {}, 'Pricing', new Set(['e0']))).toEqual({ afterBlockId: 'e0', withHeading: true, before: true });
+    // AI lines then the empty bullet: more of the same topic go after p1, above the empty line.
+    expect(insertPlace(['h1', 'p1', 'e0'], 2, ai, 'Pricing', new Set(['e0']))).toEqual({ afterBlockId: 'p1', withHeading: false });
+    // A user's typed line before the empty bullet: a new topic goes after it.
+    expect(insertPlace(['u1', 'e0'], 1, {}, 'Hiring', new Set(['e0']))).toEqual({ afterBlockId: 'u1', withHeading: true });
+  });
+
   test('an AI line the user edits or deletes becomes theirs', () => {
     const remaining = remainingAiBlocks(ai, new Map([['h1', 'Pricing'], ['p1', 'note a, and my addition']]));
     expect(Object.keys(remaining)).toEqual(['h1']);
