@@ -57,6 +57,13 @@ user's notes, never re-transcribed. One llama-helper stays up across asks (so
 prefixes are reused) and asks run one at a time. The only difference is a 60 s
 first-word timeout instead of 15 s, so a cold prefix still answers.
 
+The meeting recording plays along: on the meeting-time axis at 1×, 2× and 4×
+(pitch kept), the recording is the clock the cursor follows; above 4× and on
+the wall-time axis it is muted and the cursor runs on its own. Seeks, jumps and
+citation clicks move it too (re-seeked past 250 ms of drift). Volume and mute
+are remembered in this browser. The recording is the one the run linked in its
+sandbox (`sandbox/meeting/audio.*`), served with HTTP ranges.
+
 Each live ask and its answer is appended to the run's `interactive.jsonl` (never
 to `events.jsonl`); the viewer lists them as "You asked live at [MM:SS]".
 
@@ -64,6 +71,7 @@ to `events.jsonl`); the viewer lists them as "You asked live at [MM:SS]".
 | --- | --- |
 | `GET /api/runs` | The runs: name, recording, length, status (`running`, `done`, `incomplete`), pass/fail counts, start time. |
 | `GET /api/runs/<run>/events`, `/report`, `/interactive` | The run's files. |
+| `GET /api/runs/<run>/audio` | The run's recording, with `Range` support (206/416); 404 with the reason when the file is gone. |
 | `GET /api/runs/<run>/tail?from=<line>` | `events.jsonl` from a line on, as server-sent events, following the file until the run ends (`event: end`). |
 | `POST /api/runs/<run>/copilot` | `{audio_ms, seq?, kind: "ask"\|"action", text?, action?}` → server-sent events `queued`, `context`, `warming`, `start`, `first-token`, `delta` `{offset, text}`, then `done` (the saved entry, with `stats`) or `error`. |
 | `POST /api/runs/<run>/copilot/stop` | Stops the running answer inside the helper. |

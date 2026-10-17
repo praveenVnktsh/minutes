@@ -170,3 +170,22 @@ test('live asks are read from interactive.jsonl', () => {
   const asks = R.parseInteractive('{"prompt":"a","audio_ms":1}\n\n{"prompt":"b"}\n{"half');
   assert.deepEqual(asks.map((a) => a.prompt), ['a', 'b']);
 });
+
+test('the recording plays only on the meeting axis, at 4x or slower, inside the recording', () => {
+  const base = { available: true, axis: 'audio', speed: 1, playing: true, cursorMs: 5000, durationMs: 60000 };
+  assert.deepEqual(R.audioPlan(base), { play: true, rate: 1, reason: 'playing' });
+  assert.deepEqual(R.audioPlan({ ...base, speed: 4 }), { play: true, rate: 4, reason: 'playing' });
+  assert.equal(R.audioPlan({ ...base, speed: 16 }).reason, 'fast');
+  assert.equal(R.audioPlan({ ...base, speed: 16 }).play, false);
+  assert.equal(R.audioPlan({ ...base, axis: 'wall' }).reason, 'wall');
+  assert.equal(R.audioPlan({ ...base, available: false }).reason, 'unavailable');
+  assert.equal(R.audioPlan({ ...base, cursorMs: 60000 }).reason, 'ended');
+  assert.deepEqual(R.audioPlan({ ...base, playing: false }), { play: false, rate: 1, reason: 'paused' });
+  assert.equal(R.audioPlan({ ...base, durationMs: NaN }).play, true, 'duration not known yet');
+});
+
+test('the recording is re-seeked only past 250 ms of drift', () => {
+  assert.equal(R.needsResync(10.2, 10000), false);
+  assert.equal(R.needsResync(10.3, 10000), true);
+  assert.equal(R.needsResync(9.74, 10000), true);
+});

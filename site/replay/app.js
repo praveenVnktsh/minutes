@@ -36,6 +36,7 @@
     tail: null,
     asks: [], // live Copilot asks: saved ones and the one running
     asking: null,
+    audio: { available: false, blocked: false, message: '' },
   };
 
   function showError(message) {
@@ -61,6 +62,7 @@
     view.report = reportJson === undefined ? view.report : reportJson;
     view.run = options.run || null;
     view.asks = options.asks || [];
+    setupAudio(view.run);
     view.n = 0;
     view.cursor = 0;
     view.state = R.stateAt(view.index, 0);
@@ -308,6 +310,7 @@
     view.state = R.stateAt(view.index, view.n, view.state);
     view.cursor = view.n > 0 ? axisOf(view.records[view.n - 1]) : 0;
     renderState();
+    syncAudio();
   }
 
   function seekTime(ms) {
@@ -324,6 +327,7 @@
   }
 
   let lastFrame = 0;
+  let lastAudioSync = 0;
   const fps = { frames: 0, since: 0, value: 0 };
   function tick(now) {
     if (!view.playing) return;
@@ -335,7 +339,13 @@
       fps.frames = 0;
       fps.since = now;
     }
-    const next = view.cursor + dt * view.speed;
+    // While the recording plays, it is the clock (no drift at 1×); otherwise
+    // the frame time times the speed.
+    if (now - lastAudioSync > 500) {
+      lastAudioSync = now;
+      syncAudio();
+    }
+    const next = audioClocked() ? audio.currentTime * 1000 : view.cursor + dt * view.speed;
     if (next >= endOfAxis()) {
       seekTime(endOfAxis());
       if (!view.tail) setPlaying(false);
@@ -351,6 +361,7 @@
     seekAudio: (ms) => seekAudio(ms),
     play: (on) => setPlaying(on !== false),
     setSpeed: (x) => document.querySelector(`[data-speed="${x}"]`)?.click(),
+    audio: () => ({ currentTime: audio.currentTime, paused: audio.paused, rate: audio.playbackRate, src: audio.currentSrc, cursorMs: view.cursor, note: $('audio-note').textContent }),
     cursor: () => ({ n: view.n, audioMs: view.state ? view.state.audioMs : 0, records: view.records.length, run: view.run, playing: view.playing }),
     asks: () => view.asks.map((a) => ({ prompt: a.prompt, status: a.status, reply: a.reply, stats: a.stats, firstTokenMs: a.firstTokenMs, error: a.error })),
   };
@@ -369,12 +380,14 @@
       // Settle the throttled panels on the paused moment.
       renderPanels(true);
     }
+    syncAudio();
   }
 
   $('play').addEventListener('click', () => setPlaying(!view.playing));
   document.querySelectorAll('[data-speed]').forEach((b) => b.addEventListener('click', () => {
     view.speed = Number(b.dataset.speed);
     document.querySelectorAll('[data-speed]').forEach((o) => o.setAttribute('aria-pressed', String(o === b)));
+    syncAudio();
   }));
   document.querySelectorAll('[data-axis]').forEach((b) => b.addEventListener('click', () => {
     if (view.axis === b.dataset.axis) return;
@@ -384,6 +397,7 @@
       fitTimeline();
       seekCount(view.n);
     }
+    syncAudio();
   }));
   const jump = (direction) => {
     const n = R.nextOfName(view.records, view.n, $('jump-name').value, direction);
@@ -497,7 +511,10 @@
   /** Moves the cursor to meeting time `ms`. */
   function seekAudio(ms) {
     if (!view.records.length) return;
-    seekCount(R.countAtAudio(view.records, ms));
+    if (view.axis === 'audio') {
+      seekTime(ms);
+      syncAudio();
+    } else seekCount(R.countAtAudio(view.records, ms));
   }
 
   function jumpTranscript(seconds) {
@@ -832,6 +849,132 @@
         runs.map((r) => `<details class="detail"><summary>Run ${esc(r.run)}: ${esc(r.status)} in ${((r.ms || 0) / 1000).toFixed(0)} s</summary><pre class="summary-md">${esc(r.markdown || r.error || '')}</pre></details>`).join('');
     }
   }
+
+  // ---------------------------------------------------------------------
+  // The recording (served): plays along with the cursor on the meeting axis
+  // ---------------------------------------------------------------------
+
+  const audio = $('audio');
+  audio.preservesPitch = true;
+
+  function audioNote(html) {
+    if ($('audio-note').innerHTML !== html) $('audio-note').innerHTML = html;
+  }
+
+  /** Points the player at the run's recording (or nothing, in file mode). */
+  async function setupAudio(run) {
+    view.audio = { available: false, blocked: false, message: '' };
+    audio.pause();
+    audio.removeAttribute('src');
+    audio.load();
+    $('audio-ctl').classList.toggle('off', !(view.served && run));
+    if (!view.served || !run) {
+      $('audio-ctl').title = 'Audio needs replay serve';
+      audioNote(view.records.length ? 'Audio needs <code>replay serve</code>' : '');
+      return;
+    }
+    $('audio-ctl').title = 'The meeting recording, in step with the cursor';
+    const url = api(`/${encodeURIComponent(run)}/audio`);
+    try {
+      const res = await fetch(url, { headers: { Range: 'bytes=0-0' }, cache: 'no-store' });
+      if (!res.ok) {
+        const message = (await res.text()) || `The recording is unavailable (${res.status})`;
+        view.audio.message = message;
+        $('audio-ctl').classList.add('off');
+        $('audio-ctl').title = message;
+        audioNote(esc(message));
+        return;
+      }
+    } catch (error) {
+      audioNote(esc(`Audio: ${error.message}`));
+      return;
+    }
+    if (view.run !== run) return;
+    audio.src = url;
+    view.audio.available = true;
+    syncAudio();
+  }
+
+  function audioPlan() {
+    return R.audioPlan({
+      available: view.audio.available,
+      axis: view.axis,
+      speed: view.speed,
+      playing: view.playing,
+      cursorMs: view.cursor,
+      durationMs: Number.isFinite(audio.duration) ? audio.duration * 1000 : 0,
+    });
+  }
+
+  /** The recording drives the cursor: it is playing as planned. */
+  function audioClocked() {
+    return view.audio.available && audioPlan().play && !audio.paused && !audio.seeking && audio.readyState >= 2;
+  }
+
+  /** Brings the recording in line with the cursor, the speed and the axis. */
+  function syncAudio() {
+    if (!view.audio.available) return;
+    const plan = audioPlan();
+    const notes = {
+      wall: 'Audio off on wall time',
+      fast: `Audio muted above ${R.AUDIO_MAX_RATE}×`,
+      ended: 'Past the end of the recording',
+    };
+    audioNote(view.audio.blocked && plan.play ? 'Press ▶ to hear the audio' : notes[plan.reason] || '');
+    if (plan.play) {
+      if (audio.playbackRate !== plan.rate) audio.playbackRate = plan.rate;
+      if (R.needsResync(audio.currentTime, view.cursor)) audio.currentTime = view.cursor / 1000;
+      if (audio.paused && !view.audio.starting) {
+        view.audio.starting = true;
+        audio.play().then(() => {
+          view.audio.blocked = false;
+          audioNote('');
+        }).catch(() => {
+          // Autoplay without a click is refused: the cursor plays on silently.
+          view.audio.blocked = true;
+          audioNote('Press ▶ to hear the audio');
+        }).finally(() => { view.audio.starting = false; });
+      }
+    } else {
+      if (!audio.paused) audio.pause();
+      // Paused on the meeting axis: park the recording at the cursor.
+      if (plan.reason === 'paused' && R.needsResync(audio.currentTime, view.cursor)) {
+        audio.currentTime = view.cursor / 1000;
+      }
+    }
+  }
+
+  function applyVolume() {
+    $('mute-icon').style.opacity = audio.muted ? '0.35' : '1';
+    $('mute').setAttribute('aria-label', audio.muted ? 'Unmute' : 'Mute');
+    try {
+      localStorage.setItem('minutes-replay-volume', String(audio.volume));
+      localStorage.setItem('minutes-replay-muted', audio.muted ? '1' : '0');
+    } catch (_) { /* private mode */ }
+  }
+  try {
+    const volume = Number(localStorage.getItem('minutes-replay-volume'));
+    if (localStorage.getItem('minutes-replay-volume') !== null && volume >= 0 && volume <= 1) audio.volume = volume;
+    audio.muted = localStorage.getItem('minutes-replay-muted') === '1';
+  } catch (_) { /* private mode */ }
+  $('volume').value = String(audio.volume);
+  $('volume').addEventListener('input', () => {
+    audio.volume = Number($('volume').value);
+    if (audio.volume > 0 && audio.muted) audio.muted = false;
+    applyVolume();
+  });
+  $('mute').addEventListener('click', () => {
+    audio.muted = !audio.muted;
+    applyVolume();
+  });
+  $('mute-icon').style.opacity = audio.muted ? '0.35' : '1';
+  // A user press of ▶ may start audio the browser refused to autoplay.
+  $('play').addEventListener('click', () => {
+    if (view.audio.blocked) {
+      view.audio.blocked = false;
+      syncAudio();
+    }
+  });
 
   // ---------------------------------------------------------------------
   // Live Copilot
@@ -1302,6 +1445,7 @@
       select(found.item.i, found.item);
     } else if (e.offsetX > LABEL_W) {
       seekTime(msOf(e.offsetX, canvas.clientWidth));
+      syncAudio();
     }
   });
   canvas.addEventListener('wheel', (e) => {
@@ -1369,6 +1513,7 @@
       $('runs-inline').innerHTML = `<p class="subtle" style="padding:10px 12px 0;margin:0">Runs on this machine (newest first). Click one to play it and ask its Copilot live.</p>${runRows(view.runs)}`;
     } else {
       note('Start <code>replay serve</code> to ask the Copilot live.');
+      $('audio-ctl').classList.add('off');
     }
     const hash = new URLSearchParams(location.hash.slice(1));
     if (view.served && hash.has('run')) {

@@ -500,6 +500,31 @@
     return { events, rest: text.slice(start) };
   }
 
+  /*
+   * The recording (served viewer): it plays along on the meeting axis.
+   */
+
+  /** Fastest speed the recording plays at (playbackRate); above it, muted. */
+  const AUDIO_MAX_RATE = 4;
+  /** Drift between the recording and the cursor that triggers a seek. */
+  const AUDIO_RESYNC_MS = 250;
+
+  /** What the recording should do: `{play, rate, reason}`. `reason` is
+   * `unavailable`, `wall` (wall time does not map to the audio), `fast`,
+   * `ended` (the cursor is past the recording), `playing` or `paused`. */
+  function audioPlan({ available, axis, speed, playing, cursorMs, durationMs }) {
+    if (!available) return { play: false, rate: 1, reason: 'unavailable' };
+    if (axis !== 'audio') return { play: false, rate: 1, reason: 'wall' };
+    if (speed > AUDIO_MAX_RATE) return { play: false, rate: 1, reason: 'fast' };
+    if (durationMs > 0 && cursorMs >= durationMs) return { play: false, rate: speed, reason: 'ended' };
+    return { play: !!playing, rate: speed, reason: playing ? 'playing' : 'paused' };
+  }
+
+  /** Whether the recording at `audioSeconds` is too far from the cursor. */
+  function needsResync(audioSeconds, cursorMs, limitMs = AUDIO_RESYNC_MS) {
+    return Math.abs(audioSeconds * 1000 - cursorMs) > limitMs;
+  }
+
   /** The questions asked live (`interactive.jsonl`), oldest first. */
   function parseInteractive(text) {
     const asks = [];
@@ -537,6 +562,9 @@
     liveCursor,
     parseSse,
     parseInteractive,
+    audioPlan,
+    needsResync,
+    AUDIO_MAX_RATE,
     LANES,
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
