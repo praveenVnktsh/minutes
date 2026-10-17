@@ -881,10 +881,11 @@ export function RecordingControllerProvider({
           checkpointFinalization(session, finalization, sessionsRef.current);
         } else if (!finalization.postProcessingStarted && finalPassTookOver(await startFinalPass(false))) {
           finalPassQueued = true;
-          markDeferredMeetingForAutoSummary(savedMeetingId);
           // Enhanced notes built from the live notes do not wait for the
           // final transcript: finish them now. The final pass does not
-          // rewrite them; Re-enhance uses its transcript.
+          // rewrite them; Re-enhance uses its transcript. Only meetings
+          // without them wait for the final pass to summarize (otherwise
+          // the summary job would run a second time when it lands).
           const fromLiveNotes = await invoke<boolean>('has_live_enhanced_notes', {
             meetingId: savedMeetingId,
           }).catch(() => false);
@@ -892,6 +893,8 @@ export function RecordingControllerProvider({
             window.dispatchEvent(new CustomEvent('meetily:meeting-ready-for-summary', {
               detail: { meetingId: savedMeetingId },
             }));
+          } else {
+            markDeferredMeetingForAutoSummary(savedMeetingId);
           }
           finalization.postProcessingStarted = true;
           checkpointFinalization(session, finalization, sessionsRef.current);
