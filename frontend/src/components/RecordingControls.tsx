@@ -60,11 +60,14 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
   return (
     <TooltipProvider>
       <div className="flex flex-col space-y-2">
-        <div className="flex h-[52px] items-center gap-3 rounded-full border border-hairline bg-[color-mix(in_srgb,var(--surface-raised)_90%,transparent)] p-1.5 shadow-[0_18px_40px_-16px_rgba(0,0,0,0.35)] backdrop-blur-xl">
+        {/* No backdrop-filter here: the pill floats over the live transcript and
+            repaints with the waveform, and a backdrop blur makes the compositor
+            re-blur everything under it on each of those frames. */}
+        <div className="flex h-[52px] items-center gap-3 rounded-full border border-hairline bg-[color-mix(in_srgb,var(--surface-raised)_96%,transparent)] p-1.5 shadow-[0_18px_40px_-16px_rgba(0,0,0,0.35)]">
           {isParentProcessing ? (
             <div className="flex items-center gap-2.5 px-5">
               <Sparkles className="h-4 w-4 animate-[spin_2.4s_linear_infinite] text-info" />
-              <span className="animate-shimmer bg-[linear-gradient(90deg,var(--ink-subtle)_0%,var(--ink)_40%,var(--ink-subtle)_80%)] bg-[length:200%_100%] bg-clip-text text-sm font-semibold text-transparent">
+              <span className="animate-pulse bg-[linear-gradient(90deg,var(--ink-subtle)_0%,var(--ink)_40%,var(--ink-subtle)_80%)] bg-[length:200%_100%] bg-clip-text text-sm font-semibold text-transparent">
                 Finishing your meeting…
               </span>
             </div>

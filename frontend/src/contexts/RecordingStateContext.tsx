@@ -54,6 +54,12 @@ export interface RecordingStateContextType extends RecordingState {
   isStartingRecording: boolean;
 }
 
+/** Whether two duration readings show the same whole second (null only equals null). */
+export function sameWholeSecond(a: number | null, b: number | null): boolean {
+  if (a === null || b === null) return a === b;
+  return Math.floor(a) === Math.floor(b);
+}
+
 const RecordingStateContext = createContext<RecordingStateContextType | null>(null);
 
 /** Supplies recording state to a subtree without the recorder (the replay viewer). */
@@ -160,11 +166,17 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
       try {
         const backend = await recordingService.getRecordingState();
         if (disposed || backend.session_id !== sessionId || previousSessionRef.current !== sessionId) return;
-        setState((previous) => ({
-          ...previous,
-          recordingDuration: backend.recording_duration,
-          activeDuration: backend.active_duration,
-        }));
+        // Every consumer shows whole seconds. Publishing each sub-second reading
+        // re-rendered the whole recording UI twice a second for nothing.
+        setState((previous) =>
+          sameWholeSecond(previous.recordingDuration, backend.recording_duration)
+            && sameWholeSecond(previous.activeDuration, backend.active_duration)
+            ? previous
+            : {
+                ...previous,
+                recordingDuration: backend.recording_duration,
+                activeDuration: backend.active_duration,
+              });
       } catch (error) {
         if (!disposed) console.error('[RecordingStateContext] Failed to read recording duration:', error);
       }

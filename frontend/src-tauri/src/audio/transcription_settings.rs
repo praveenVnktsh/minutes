@@ -21,6 +21,10 @@ use crate::config::{DEFAULT_PARAKEET_MODEL, DEFAULT_WHISPER_MODEL};
 const STORE_FILE: &str = "store.json";
 pub const LIVE_MODEL_KEY: &str = "liveTranscriptionModel";
 pub const AUTO_FINAL_PASS_KEY: &str = "autoFinalTranscriptPass";
+/// When the final pass runs: [`FinalPassTiming`]. Replaces the on/off
+/// [`AUTO_FINAL_PASS_KEY`], which is still read when this key is absent and
+/// still written alongside it.
+pub const FINAL_PASS_TIMING_KEY: &str = "finalTranscriptTiming";
 pub const FINAL_MODEL_MIGRATED_KEY: &str = "finalTranscriptModelMigrated";
 
 pub const PROVIDER_WHISPER: &str = "localWhisper";
@@ -66,6 +70,43 @@ impl LiveTranscriptionSettings {
         Self {
             live_model: LiveModelChoice::from_stored(live_model),
             auto_final_pass: auto_final_pass.unwrap_or(true),
+        }
+    }
+}
+
+/// When the automatic final pass ("Improve transcript after meetings") runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FinalPassTiming {
+    /// Right after every meeting.
+    Automatic,
+    /// Right after a meeting on power; on battery or in Low Power Mode it
+    /// waits until the Mac is plugged in and out of it (or the user asks). The default: the pass is the heaviest
+    /// thing the app does after a meeting, and on battery it costs charge
+    /// and fan noise for a transcript that is already readable.
+    WhenPluggedIn,
+    /// Never on its own; the user can still ask for it per meeting.
+    Off,
+}
+
+impl FinalPassTiming {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Automatic => "automatic",
+            Self::WhenPluggedIn => "when-plugged-in",
+            Self::Off => "off",
+        }
+    }
+
+    /// The stored choice; without one, the old on/off switch: off stays off,
+    /// on (or never set) becomes the default.
+    pub fn from_stored(timing: Option<&str>, legacy_auto: Option<bool>) -> Self {
+        match timing {
+            Some("automatic") => Self::Automatic,
+            Some("when-plugged-in") => Self::WhenPluggedIn,
+            Some("off") => Self::Off,
+            _ if legacy_auto == Some(false) => Self::Off,
+            _ => Self::WhenPluggedIn,
         }
     }
 }
@@ -275,16 +316,22 @@ impl FinalPassSkip {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FinalPassDecision {
     Run(EngineChoice),
+    /// Run it once the Mac is plugged in; the live transcript stands until then.
+    WaitForPower(EngineChoice),
     Skip(FinalPassSkip),
 }
 
 /// Whether the final pass runs, and with which engine.
 /// - Edits always win: a transcript with revisions is never replaced.
-/// - `force` (deferred mode) and an empty live transcript (no live engine
-///   was available) run even when the automatic pass is off, since otherwise
-///   the meeting would have no transcript at all.
+/// - `force` (deferred mode, or the user asking for it) and an empty live
+///   transcript (no live engine was available) run now, whatever the timing
+///   and the battery, since otherwise the meeting would have no transcript
+///   or the user would be kept waiting.
+/// - Otherwise "When plugged in" waits while `saving_power` (on battery or
+///   in Low Power Mode, see `quiet_work::saving_power_now`).
 pub fn decide_final_pass(
-    auto_enabled: bool,
+    timing: FinalPassTiming,
+    saving_power: bool,
     force: bool,
     has_revisions: bool,
     has_transcripts: bool,
@@ -293,13 +340,17 @@ pub fn decide_final_pass(
     if has_revisions {
         return FinalPassDecision::Skip(FinalPassSkip::Edited);
     }
-    if !auto_enabled && !force && has_transcripts {
+    let urgent = force || !has_transcripts;
+    if timing == FinalPassTiming::Off && !urgent {
         return FinalPassDecision::Skip(FinalPassSkip::Disabled);
     }
-    match engine {
-        Some(engine) => FinalPassDecision::Run(engine),
-        None => FinalPassDecision::Skip(FinalPassSkip::NoEngine),
+    let Some(engine) = engine else {
+        return FinalPassDecision::Skip(FinalPassSkip::NoEngine);
+    };
+    if timing == FinalPassTiming::WhenPluggedIn && saving_power && !urgent {
+        return FinalPassDecision::WaitForPower(engine);
     }
+    FinalPassDecision::Run(engine)
 }
 
 // ---------------------------------------------------------------------------
@@ -320,6 +371,41 @@ pub fn load_settings<R: Runtime>(app: &AppHandle<R>) -> LiveTranscriptionSetting
             LiveTranscriptionSettings::from_stored(None, None)
         }
     }
+}
+
+/// When the final pass runs, from the store.
+pub fn load_final_pass_timing<R: Runtime>(app: &AppHandle<R>) -> FinalPassTiming {
+    match app.store(STORE_FILE) {
+        Ok(store) => FinalPassTiming::from_stored(
+            store
+                .get(FINAL_PASS_TIMING_KEY)
+                .as_ref()
+                .and_then(|v| v.as_str()),
+            store
+                .get(AUTO_FINAL_PASS_KEY)
+                .as_ref()
+                .and_then(|v| v.as_bool()),
+        ),
+        Err(error) => {
+            warn!("Transcription settings store unavailable, using defaults: {error}");
+            FinalPassTiming::from_stored(None, None)
+        }
+    }
+}
+
+/// Save when the final pass runs. The old on/off key follows it, so anything
+/// still reading that key agrees.
+pub fn save_final_pass_timing<R: Runtime>(
+    app: &AppHandle<R>,
+    timing: FinalPassTiming,
+) -> Result<(), String> {
+    let store = app.store(STORE_FILE).map_err(|e| e.to_string())?;
+    store.set(FINAL_PASS_TIMING_KEY, serde_json::json!(timing.as_str()));
+    store.set(
+        AUTO_FINAL_PASS_KEY,
+        serde_json::json!(timing != FinalPassTiming::Off),
+    );
+    store.save().map_err(|e| e.to_string())
 }
 
 /// Downloaded Whisper and Parakeet models. Initialises the engines (cheap,
@@ -628,44 +714,101 @@ mod tests {
         })
     }
 
+    use FinalPassTiming::{Automatic, Off, WhenPluggedIn};
+
     #[test]
-    fn final_pass_runs_by_default_after_a_live_transcript() {
+    fn final_pass_runs_by_default_after_a_live_transcript_on_power() {
+        for timing in [Automatic, WhenPluggedIn] {
+            assert_eq!(
+                decide_final_pass(timing, false, false, false, true, turbo_choice()),
+                FinalPassDecision::Run(turbo_choice().unwrap())
+            );
+        }
+    }
+
+    #[test]
+    fn on_battery_the_default_waits_for_power_and_automatic_does_not() {
         assert_eq!(
-            decide_final_pass(true, false, false, true, turbo_choice()),
+            decide_final_pass(WhenPluggedIn, true, false, false, true, turbo_choice()),
+            FinalPassDecision::WaitForPower(turbo_choice().unwrap())
+        );
+        assert_eq!(
+            decide_final_pass(Automatic, true, false, false, true, turbo_choice()),
             FinalPassDecision::Run(turbo_choice().unwrap())
         );
     }
 
     #[test]
+    fn asking_for_it_or_having_no_live_transcript_never_waits() {
+        // The user pressed "Improve now" (or deferred mode forced it).
+        assert!(matches!(
+            decide_final_pass(WhenPluggedIn, true, true, false, true, turbo_choice()),
+            FinalPassDecision::Run(_)
+        ));
+        // Without a live transcript the meeting would have no text at all.
+        assert!(matches!(
+            decide_final_pass(WhenPluggedIn, true, false, false, false, turbo_choice()),
+            FinalPassDecision::Run(_)
+        ));
+    }
+
+    #[test]
     fn final_pass_never_replaces_an_edited_transcript_even_when_forced() {
         assert_eq!(
-            decide_final_pass(true, true, true, true, turbo_choice()),
+            decide_final_pass(Automatic, false, true, true, true, turbo_choice()),
             FinalPassDecision::Skip(FinalPassSkip::Edited)
         );
     }
 
     #[test]
     fn disabled_final_pass_still_runs_when_forced_or_without_a_live_transcript() {
-        assert_eq!(
-            decide_final_pass(false, false, false, true, turbo_choice()),
-            FinalPassDecision::Skip(FinalPassSkip::Disabled)
-        );
+        for on_battery in [false, true] {
+            assert_eq!(
+                decide_final_pass(Off, on_battery, false, false, true, turbo_choice()),
+                FinalPassDecision::Skip(FinalPassSkip::Disabled)
+            );
+        }
         assert!(matches!(
-            decide_final_pass(false, true, false, true, turbo_choice()),
+            decide_final_pass(Off, true, true, false, true, turbo_choice()),
             FinalPassDecision::Run(_)
         ));
         assert!(matches!(
-            decide_final_pass(false, false, false, false, turbo_choice()),
+            decide_final_pass(Off, false, false, false, false, turbo_choice()),
             FinalPassDecision::Run(_)
         ));
     }
 
     #[test]
     fn final_pass_without_any_engine_is_skipped_with_a_reason() {
+        for on_battery in [false, true] {
+            assert_eq!(
+                decide_final_pass(WhenPluggedIn, on_battery, false, false, true, None),
+                FinalPassDecision::Skip(FinalPassSkip::NoEngine)
+            );
+        }
+    }
+
+    #[test]
+    fn timing_defaults_to_when_plugged_in_and_keeps_an_old_off_switch() {
+        assert_eq!(FinalPassTiming::from_stored(None, None), WhenPluggedIn);
         assert_eq!(
-            decide_final_pass(true, false, false, true, None),
-            FinalPassDecision::Skip(FinalPassSkip::NoEngine)
+            FinalPassTiming::from_stored(None, Some(true)),
+            WhenPluggedIn
         );
+        assert_eq!(FinalPassTiming::from_stored(None, Some(false)), Off);
+        assert_eq!(
+            FinalPassTiming::from_stored(Some("bogus"), None),
+            WhenPluggedIn
+        );
+        for timing in [Automatic, WhenPluggedIn, Off] {
+            // A stored choice wins over the old switch either way.
+            assert_eq!(
+                FinalPassTiming::from_stored(Some(timing.as_str()), Some(false)),
+                timing
+            );
+            let json = serde_json::to_string(&timing).unwrap();
+            assert_eq!(json, format!("\"{}\"", timing.as_str()));
+        }
     }
 
     #[test]
