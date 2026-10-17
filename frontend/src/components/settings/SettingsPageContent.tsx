@@ -1,11 +1,12 @@
 'use client';
 
 import { useEffect } from 'react';
-import { ArrowLeft, Database, FlaskConical, Mic, Settings2, Sparkles, Webhook } from 'lucide-react';
+import { ArrowLeft, Wrench, Database, FlaskConical, Mic, Settings2, Sparkles, Webhook } from 'lucide-react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { BetaSettings } from '@/components/BetaSettings';
 import { CalendarSettings } from '@/components/CalendarSettings';
 import { DebugSettings } from '@/components/DebugSettings';
+import { DeveloperSettings } from '@/components/DeveloperSettings';
 import { PreferenceSettings } from '@/components/PreferenceSettings';
 import { RecordingSettings } from '@/components/RecordingSettings';
 import { SummaryModelSettings } from '@/components/SummaryModelSettings';
@@ -23,6 +24,7 @@ const TABS = [
   { value: 'summary', label: 'Summary', icon: Sparkles },
   { value: 'integrations', label: 'Integrations', icon: Webhook },
   { value: 'beta', label: 'Beta', icon: FlaskConical },
+  { value: 'developer', label: 'Developer', icon: Wrench },
 ] as const;
 
 export function SettingsPageContent() {
@@ -82,6 +84,7 @@ export function SettingsPageContent() {
             <TabsContent value="summary" className="mt-6"><SummaryModelSettings /></TabsContent>
             <TabsContent value="integrations" className="mt-6"><CalendarSettings /><WebhookSettings /></TabsContent>
             <TabsContent value="beta" className="mt-6"><BetaSettings /><div className="mt-6"><DebugSettings /></div></TabsContent>
+            <TabsContent value="developer" className="mt-6"><DeveloperSettings /></TabsContent>
           </Tabs>
         </div>
       </main>

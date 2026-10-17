@@ -656,6 +656,7 @@ pub fn run() {
             None::<notifications::manager::NotificationManager<tauri::Wry>>,
         )) as NotificationManagerState<tauri::Wry>)
         .manage(audio::init_system_audio_state())
+        .manage(replay::commands::ReplayState::default())
         .manage(summary::summary_engine::ModelManagerState(Arc::new(
             tokio::sync::Mutex::new(None),
         )))
@@ -1012,6 +1013,12 @@ pub fn run() {
             live_summary::get_live_summary_settings,
             live_summary::set_live_summary_settings,
             copilot::copilot_get_state,
+            replay::commands::replay_list_runs,
+            replay::commands::replay_read_file,
+            replay::commands::replay_audio_path,
+            replay::commands::replay_copilot_ask,
+            replay::commands::replay_copilot_stop,
+            replay::commands::replay_copilot_cancel,
             copilot::copilot_ask,
             copilot::copilot_stop,
             copilot::copilot_retry,

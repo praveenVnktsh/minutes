@@ -66,6 +66,7 @@ export function MeetingWorkspace({
   titleError,
   onRegenerateTitle,
   titleRegenerating = false,
+  initialAssistantOpen = false,
 }: {
   title: string;
   createdAt: string;
@@ -92,11 +93,13 @@ export function MeetingWorkspace({
   titleError?: string | null;
   onRegenerateTitle?: () => void | Promise<void>;
   titleRegenerating?: boolean;
+  /** Open the assistant panel on mount (the replay viewer shows Copilot). */
+  initialAssistantOpen?: boolean;
 }) {
   const { collapsed } = useShell();
   const sidebarWidth = collapsed ? SIDEBAR_COLLAPSED_WIDTH : SIDEBAR_WIDTH;
   const [transcriptOpen, setTranscriptOpen] = useState(true);
-  const [chatOpen, setChatOpen] = useState(false);
+  const [chatOpen, setChatOpen] = useState(initialAssistantOpen);
   const [ratio, setRatio] = useState(62);
   const [dockWidth, setDockWidth] = useState(DEFAULT_DOCK_WIDTH);
   const [titleDraft, setTitleDraft] = useState(title);

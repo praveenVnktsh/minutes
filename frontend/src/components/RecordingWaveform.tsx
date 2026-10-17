@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { useLiveSource } from '@/lib/liveSource';
 
 const BAR_COUNT = 24;
 const POLL_MS = 70;
@@ -16,6 +16,7 @@ function toBarHeight(rms: number): number {
  * audio pipeline publishes (`get_recording_level`). Frozen while paused.
  */
 export function RecordingWaveform({ active, className = '' }: { active: boolean; className?: string }) {
+  const source = useLiveSource();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const levels = useRef<number[]>(new Array(BAR_COUNT).fill(0.08));
 
@@ -50,7 +51,7 @@ export function RecordingWaveform({ active, className = '' }: { active: boolean;
     const timer = window.setInterval(async () => {
       let rms = 0;
       try {
-        rms = await invoke<number>('get_recording_level');
+        rms = await source.invoke<number>('get_recording_level');
       } catch {
         // No level available (e.g. between sessions); draw silence.
       }
@@ -63,7 +64,7 @@ export function RecordingWaveform({ active, className = '' }: { active: boolean;
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [active]);
+  }, [active, source]);
 
   return <canvas ref={canvasRef} aria-hidden="true" className={`text-recording ${className}`} />;
 }

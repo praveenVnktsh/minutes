@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core';
+import { tauriLiveSource, type LiveSource } from '@/lib/liveSource';
 import { formatTimelineTime, JUMP_TO_TIME_EVENT } from '@/lib/liveTimeline';
 
 /** The quick actions on the Copilot panel, in display order. */
@@ -87,18 +87,26 @@ export interface CopilotSettings {
 export const COPILOT_STATE_EVENT = 'copilot-state';
 export const COPILOT_DELTA_EVENT = 'copilot-delta';
 
-export const copilotApi = {
-  state: () => invoke<CopilotSnapshot | null>('copilot_get_state'),
-  ask: (action: QuickActionId | null, question: string | null) =>
-    invoke<string>('copilot_ask', { action, question }),
-  stop: (id: string) => invoke<void>('copilot_stop', { id }),
-  retry: (id: string, useBuiltin: boolean) => invoke<void>('copilot_retry', { id, useBuiltin }),
-  shorter: (id: string) => invoke<string>('copilot_shorter', { id }),
-  dismissCard: (id: string, notForMe: boolean) => invoke<void>('copilot_dismiss_card', { id, notForMe }),
-  setNotes: (text: string) => invoke<void>('copilot_set_notes', { text }),
-  getSettings: () => invoke<CopilotSettings>('get_copilot_settings'),
-  setSettings: (settings: CopilotSettings) => invoke<CopilotSettings>('set_copilot_settings', { settings }),
-};
+/** Copilot's commands through a live source: Tauri in the app, a recorded
+ * run in the replay viewer. */
+export function copilotApiFor(source: LiveSource) {
+  return {
+    state: () => source.invoke<CopilotSnapshot | null>('copilot_get_state'),
+    ask: (action: QuickActionId | null, question: string | null) =>
+      source.invoke<string>('copilot_ask', { action, question }),
+    stop: (id: string) => source.invoke<void>('copilot_stop', { id }),
+    retry: (id: string, useBuiltin: boolean) => source.invoke<void>('copilot_retry', { id, useBuiltin }),
+    shorter: (id: string) => source.invoke<string>('copilot_shorter', { id }),
+    dismissCard: (id: string, notForMe: boolean) => source.invoke<void>('copilot_dismiss_card', { id, notForMe }),
+    setNotes: (text: string) => source.invoke<void>('copilot_set_notes', { text }),
+    getSettings: () => source.invoke<CopilotSettings>('get_copilot_settings'),
+    setSettings: (settings: CopilotSettings) => source.invoke<CopilotSettings>('set_copilot_settings', { settings }),
+  };
+}
+
+export type CopilotApi = ReturnType<typeof copilotApiFor>;
+
+export const copilotApi = copilotApiFor(tauriLiveSource);
 
 /** UTF-8 byte length, the unit Rust's `String::len` (the delta offset) uses. */
 function byteLength(text: string): number {

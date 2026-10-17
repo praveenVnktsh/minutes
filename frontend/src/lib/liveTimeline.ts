@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import type { LiveSource } from '@/lib/liveSource';
 import type { Tone } from '@/lib/theme-classes';
 
 /** One live summary entry. Times are audio time from the recording start. */
@@ -45,6 +46,11 @@ export interface LiveSummarySettings {
 export const LIVE_TIMELINE_UPDATE_EVENT = 'live-timeline-update';
 /** Window event the transcript view handles: scroll to `seconds`. */
 export const JUMP_TO_TIME_EVENT = 'meetily:jump-to-time';
+
+/** The recording's live summary snapshot, through a live source. */
+export function currentLiveTimeline(source: LiveSource): Promise<TimelineSnapshot | null> {
+  return source.invoke<TimelineSnapshot | null>('get_live_timeline');
+}
 
 export const liveTimelineApi = {
   current: () => invoke<TimelineSnapshot | null>('get_live_timeline'),

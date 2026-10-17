@@ -39,7 +39,7 @@ interface RecordingState {
   statusMessage?: string;  // Optional message for current status
 }
 
-interface RecordingStateContextType extends RecordingState {
+export interface RecordingStateContextType extends RecordingState {
   sessionId: string | null;
   activeMeetingId: string | null;
   activityStatus: MeetingActivityStatus | null;
@@ -55,6 +55,9 @@ interface RecordingStateContextType extends RecordingState {
 }
 
 const RecordingStateContext = createContext<RecordingStateContextType | null>(null);
+
+/** Supplies recording state to a subtree without the recorder (the replay viewer). */
+export const RecordingStateValueProvider = RecordingStateContext.Provider;
 
 export const useRecordingState = () => {
   const context = useContext(RecordingStateContext);

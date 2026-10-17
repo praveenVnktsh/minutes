@@ -21,23 +21,20 @@
 //! model's, to the provider the run's sandbox settings name (the built-in
 //! model by default, which stays on this machine).
 
-use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{anyhow, Result};
-use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use super::live_copilot::{inputs_at, Cutoff};
-use crate::copilot::context::TimelineItem;
-use crate::copilot::core::{ChatRow, Core, CoreConfig, Delta, Host, MessageStatus, Snapshot};
+pub use super::live_ask::live_config;
+use super::live_ask::LiveAsker;
+pub use super::live_copilot::Cutoff;
 use crate::copilot::prompt::QuickAction;
-use crate::copilot::stream::Streamer;
 
 pub const DEFAULT_PORT: u16 = 7357;
 
@@ -84,8 +81,6 @@ const FONTS: &[(&str, &[u8])] = &[
 const MAX_BODY: usize = 64 * 1024;
 /// The longest question accepted.
 const MAX_QUESTION_CHARS: usize = 2_000;
-/// How often an idle stream checks that the viewer is still there.
-const PING: Duration = Duration::from_secs(1);
 
 // ---------------------------------------------------------------------------
 // Paths and hosts
@@ -340,7 +335,36 @@ fn run_summary(dir: &Path) -> Option<Value> {
     }))
 }
 
-fn list_runs(root: &Path) -> Value {
+/// The recording a run was fed: the media file (usually a link to the real
+/// recording) in its sandbox's meeting folder, resolved to the real file.
+pub fn recording_file(dir: &Path) -> Option<PathBuf> {
+    const MEDIA: &[&str] = &[
+        "mp4", "m4a", "wav", "mp3", "aac", "flac", "ogg", "opus", "webm", "mov", "mkv", "caf",
+    ];
+    let meeting = dir.join("sandbox").join("meeting");
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(meeting)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| MEDIA.contains(&e.to_ascii_lowercase().as_str()))
+        })
+        .collect();
+    // `audio.*` first, then by name, so the choice is stable.
+    entries.sort_by_key(|p| {
+        let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+        (stem != "audio", p.clone())
+    });
+    entries
+        .into_iter()
+        .filter_map(|p| p.canonicalize().ok())
+        .find(|p| p.is_file())
+}
+
+/// The runs under `root`, newest first: what `GET /api/runs` answers.
+pub fn list_runs(root: &Path) -> Value {
     let mut runs: Vec<Value> = std::fs::read_dir(root)
         .into_iter()
         .flatten()
@@ -483,91 +507,10 @@ pub fn parse_ask(body: &[u8]) -> Result<Ask, String> {
     }
 }
 
-enum HostEvent {
-    State(Snapshot),
-    Delta(Delta),
-}
-
-/// Copilot's host for one live ask: the live summary as of the cursor, the
-/// run's sandbox settings, and its events sent to the viewer's stream.
-struct ReplayHost {
-    timeline: Vec<TimelineItem>,
-    sandbox: PathBuf,
-    pool: sqlx::SqlitePool,
-    model: Option<crate::copilot::CopilotModel>,
-    events: Mutex<mpsc::Sender<HostEvent>>,
-}
-
-#[async_trait]
-impl Host for ReplayHost {
-    fn emit_state(&self, snapshot: &Snapshot) {
-        let _ = self
-            .events
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .send(HostEvent::State(snapshot.clone()));
-    }
-
-    fn emit_delta(&self, delta: &Delta) {
-        let _ = self
-            .events
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .send(HostEvent::Delta(delta.clone()));
-    }
-
-    fn timeline(&self) -> Vec<TimelineItem> {
-        self.timeline.clone()
-    }
-
-    fn suggestions_enabled(&self) -> bool {
-        // Only the user's own question runs, never the detector.
-        false
-    }
-
-    fn debug_enabled(&self) -> bool {
-        true
-    }
-
-    fn is_paused(&self) -> bool {
-        false
-    }
-
-    fn live_backlog_secs(&self) -> f64 {
-        0.0
-    }
-
-    async fn streamer(&self, force_builtin: bool) -> Result<Arc<dyn Streamer>, String> {
-        crate::copilot::resolve_streamer(
-            &self.pool,
-            Some(self.sandbox.clone()),
-            self.model.clone(),
-            force_builtin,
-        )
-        .await
-    }
-
-    async fn persist(&self, _rows: &[ChatRow]) -> Result<bool, String> {
-        // Live asks go to the run's interactive.jsonl, written by the server.
-        Ok(true)
-    }
-}
-
-/// The one Copilot request running, for Stop.
-struct Current {
-    run: String,
-    core: Arc<Core>,
-    id: String,
-}
-
 /// State shared by the server's connections for live Copilot asks.
 struct Live {
     runtime: tokio::runtime::Runtime,
-    /// One ask at a time: the helper serves one request anyway, and its
-    /// saved prefix is only reused when asks follow each other.
-    turn: tokio::sync::Mutex<()>,
-    current: Mutex<Option<Current>>,
-    pools: tokio::sync::Mutex<HashMap<PathBuf, sqlx::SqlitePool>>,
+    asker: LiveAsker,
 }
 
 impl Live {
@@ -577,298 +520,33 @@ impl Live {
                 .worker_threads(2)
                 .enable_all()
                 .build()?,
-            turn: tokio::sync::Mutex::new(()),
-            current: Mutex::new(None),
-            pools: tokio::sync::Mutex::new(HashMap::new()),
+            asker: LiveAsker::new(),
         })
     }
 
-    /// The run's sandbox database, opened read-only (its settings and keys).
-    async fn pool(&self, sandbox: &Path) -> Result<sqlx::SqlitePool, String> {
-        let mut pools = self.pools.lock().await;
-        if let Some(pool) = pools.get(sandbox) {
-            return Ok(pool.clone());
-        }
-        let file = sandbox.join("meeting_minutes.sqlite");
-        if !file.is_file() {
-            return Err(
-                "This run has no sandbox database, so its model settings are unknown".into(),
-            );
-        }
-        let options = sqlx::sqlite::SqliteConnectOptions::new()
-            .filename(&file)
-            .read_only(true);
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(2)
-            .connect_with(options)
-            .await
-            .map_err(|e| format!("Could not open the run's sandbox database: {e}"))?;
-        pools.insert(sandbox.to_path_buf(), pool.clone());
-        Ok(pool)
-    }
-
     fn stop(&self, run: &str) -> bool {
-        let current = self.current.lock().unwrap_or_else(|e| e.into_inner());
-        match current.as_ref() {
-            Some(c) if c.run == run => {
-                c.core.stop(&c.id);
-                true
-            }
-            _ => false,
-        }
+        self.asker.stop(run)
     }
 }
 
-/// Copilot's own timings, except a longer wait for the first word: a cold
-/// prefix (the first ask, or one after the window moved) takes 14–17 s on a
-/// 4B built-in model, and the viewer should show that answer and its latency
-/// rather than the app's 15 s give-up. Stats still report the real latency.
-pub fn live_config() -> CoreConfig {
-    CoreConfig {
-        first_token_timeout: Duration::from_secs(60),
-        ..CoreConfig::default()
-    }
-}
-
-/// The run's Copilot model setting, from its sandbox `store.json`.
-fn sandbox_copilot_model(sandbox: &Path) -> Option<crate::copilot::CopilotModel> {
-    let store: Value = std::fs::read_to_string(sandbox.join("store.json"))
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())?;
-    crate::copilot::settings_from_stored(None, None, store.get(crate::copilot::MODEL_KEY)).model
-}
-
-fn status_name(status: MessageStatus) -> &'static str {
-    match status {
-        MessageStatus::Pending => "pending",
-        MessageStatus::Streaming => "streaming",
-        MessageStatus::Done => "done",
-        MessageStatus::Stopped => "stopped",
-        MessageStatus::Error => "error",
-    }
-}
-
-fn append_interactive(dir: &Path, entry: &Value) {
-    let result = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(dir.join("interactive.jsonl"))
-        .and_then(|mut file| writeln!(file, "{entry}"));
-    if let Err(error) = result {
-        log::warn!("replay serve: could not save the live ask: {error}");
-    }
-}
-
-/// Streams one live Copilot answer. Events: `queued`, `context`, `warming`,
-/// `start`, `delta`, `first-token`, `done` (with the saved entry) or `error`.
+/// Streams one live Copilot answer as server-sent events (see
+/// [`super::live_ask`]): `queued`, `context`, `warming`, `start`, `delta`,
+/// `first-token`, `done` (with the saved entry) or `error`.
 fn copilot(stream: &mut TcpStream, live: &Live, run: &str, dir: &Path, body: &[u8]) -> Result<()> {
     let ask = match parse_ask(body) {
         Ok(ask) => ask,
         Err(error) => return respond_json(stream, "400 Bad Request", &json!({ "error": error })),
     };
-    let events = std::fs::read_to_string(dir.join("events.jsonl"))?;
-    let inputs = inputs_at(&events, ask.cutoff);
-    drop(events);
     start_event_stream(stream)?;
-    let mut gone = false;
-    let send = |stream: &mut TcpStream, event: &str, data: Value, gone: &mut bool| {
-        if !*gone && send_event(stream, event, &data).is_err() {
-            *gone = true;
-        }
-    };
-
-    let turn = match live.turn.try_lock() {
-        Ok(turn) => turn,
-        Err(_) => {
-            send(stream, "queued", json!({}), &mut gone);
-            live.runtime.block_on(live.turn.lock())
-        }
-    };
-    // Asked and left while queued: nothing to do.
-    if gone || stream.write_all(b": ping\n\n").is_err() {
-        return Ok(());
-    }
-    send(
-        stream,
-        "context",
-        json!({
-            "lines": inputs.lines.len(),
-            "timeline": inputs.timeline.len(),
-            "notes_chars": inputs.notes.len(),
-            "as_of_ms": inputs.latest_ms(),
-        }),
-        &mut gone,
-    );
-
-    let sandbox = dir.join("sandbox");
-    let pool = match live.runtime.block_on(live.pool(&sandbox)) {
-        Ok(pool) => pool,
-        Err(error) => {
-            send(stream, "error", json!({ "message": error }), &mut gone);
-            return Ok(());
-        }
-    };
-    let (sender, receiver) = mpsc::channel();
-    let host = Arc::new(ReplayHost {
-        timeline: inputs.timeline.clone(),
-        sandbox: sandbox.clone(),
-        pool,
-        model: sandbox_copilot_model(&sandbox),
-        events: Mutex::new(sender),
-    });
-    let _runtime = live.runtime.enter();
-
-    // A cold built-in model loads first (tens of seconds for a 4B model), so
-    // the first answer is not timed out by its load: Copilot's own timeouts
-    // then cover the prompt and the answer, as they do in a meeting.
-    let warm_started = Instant::now();
-    let streamer = match live.runtime.block_on(host.streamer(false)) {
-        Ok(streamer) => streamer,
-        Err(error) => {
-            send(stream, "error", json!({ "message": error }), &mut gone);
-            return Ok(());
-        }
-    };
-    if streamer.prompt_token_limit(1).is_some() {
-        send(
-            stream,
-            "warming",
-            json!({ "provider": streamer.provider(), "model": streamer.model() }),
-            &mut gone,
-        );
-        let tiny = crate::copilot::context::PromptParts {
-            system: String::new(),
-            stable: String::new(),
-            anchor: 0,
-            rest: "hi".into(),
-        };
-        let _ = live.runtime.block_on(streamer.count_tokens(&tiny));
-    }
-    let warm_ms = warm_started.elapsed().as_millis() as u64;
-    drop(streamer);
-
-    let core = Core::new(format!("replay-live-{run}"), host, live_config());
-    for line in inputs.lines.iter().cloned() {
-        core.on_line(line);
-    }
-    core.set_notes(inputs.notes.clone());
-    let asked_at = chrono::Local::now().to_rfc3339();
-    let started = Instant::now();
-    let id = match core.ask(ask.action, ask.question.clone()) {
-        Ok(id) => id,
-        Err(error) => {
-            send(stream, "error", json!({ "message": error }), &mut gone);
-            return Ok(());
-        }
-    };
-    *live.current.lock().unwrap_or_else(|e| e.into_inner()) = Some(Current {
-        run: run.to_string(),
-        core: core.clone(),
-        id: id.clone(),
-    });
-
-    let mut announced = false;
-    let mut first_token_ms: Option<u64> = None;
-    let mut finished = None;
-    let mut last_write = Instant::now();
-    let mut stop_sent = false;
-    while finished.is_none() {
-        match receiver.recv_timeout(PING) {
-            Ok(HostEvent::Delta(delta)) if delta.id == id => {
-                if first_token_ms.is_none() {
-                    let ms = started.elapsed().as_millis() as u64;
-                    first_token_ms = Some(ms);
-                    send(stream, "first-token", json!({ "ms": ms }), &mut gone);
-                }
-                send(
-                    stream,
-                    "delta",
-                    json!({ "offset": delta.offset, "text": delta.delta }),
-                    &mut gone,
-                );
-                last_write = Instant::now();
-            }
-            Ok(HostEvent::Delta(_)) => {}
-            Ok(HostEvent::State(snapshot)) => {
-                let Some(message) = snapshot.messages.into_iter().find(|m| m.id == id) else {
-                    continue;
-                };
-                if !announced && message.status != MessageStatus::Pending {
-                    announced = true;
-                    send(
-                        stream,
-                        "start",
-                        json!({
-                            "id": id,
-                            "provider": message.provider,
-                            "model": message.model,
-                            "as_of_ms": message.audio_ms,
-                        }),
-                        &mut gone,
-                    );
-                }
-                if matches!(
-                    message.status,
-                    MessageStatus::Done | MessageStatus::Stopped | MessageStatus::Error
-                ) {
-                    finished = Some(message);
-                }
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
-        }
-        if !gone && last_write.elapsed() >= PING {
+    let sink = |event: &str, data: Value| {
+        if event == "ping" {
             // Also how a closed tab is noticed: the write fails.
-            if stream.write_all(b": ping\n\n").is_err() {
-                gone = true;
-            }
-            last_write = Instant::now();
+            stream.write_all(b": ping\n\n").is_ok()
+        } else {
+            send_event(stream, event, &data).is_ok()
         }
-        if gone && !stop_sent {
-            stop_sent = true;
-            // The viewer left: stop the answer inside the helper (never by
-            // killing it) and let the request finish its bookkeeping.
-            core.stop(&id);
-        }
-    }
-    *live.current.lock().unwrap_or_else(|e| e.into_inner()) = None;
-    core.deactivate();
-    let Some(message) = finished else {
-        send(
-            stream,
-            "error",
-            json!({ "message": "Copilot ended without an answer" }),
-            &mut gone,
-        );
-        return Ok(());
     };
-    let entry = json!({
-        "id": id,
-        "asked_at": asked_at,
-        "audio_ms": ask.cutoff.audio_ms,
-        "seq": ask.cutoff.seq,
-        "as_of_ms": message.audio_ms,
-        "kind": if ask.action.is_some() { "action" } else { "ask" },
-        "action": message.action,
-        "prompt": message.prompt,
-        "reply": message.reply,
-        "status": status_name(message.status),
-        "error": message.error,
-        "provider": message.provider,
-        "model": message.model,
-        "stats": message.stats,
-        "server_first_token_ms": first_token_ms,
-        "warm_ms": warm_ms,
-        "context": {
-            "lines": inputs.lines.len(),
-            "timeline": inputs.timeline.len(),
-            "notes_chars": inputs.notes.len(),
-        },
-    });
-    append_interactive(dir, &entry);
-    send(stream, "done", entry, &mut gone);
-    drop(turn);
-    Ok(())
+    live.runtime.block_on(live.asker.ask(run, dir, ask, sink))
 }
 
 // ---------------------------------------------------------------------------
