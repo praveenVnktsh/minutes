@@ -1,6 +1,7 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createThrottledFlush } from '@/lib/throttledFlush';
 import { useLiveSource } from '@/lib/liveSource';
 import { VirtualizedTranscriptView } from '@/components/VirtualizedTranscriptView';
 import { useTranscripts } from '@/contexts/TranscriptContext';
@@ -26,20 +27,28 @@ function sourceLabel(source: string): string {
   return source === 'system' ? 'Others' : 'You';
 }
 
+// Partials arrive per decoded chunk on each source; render at most ~10/s.
+const PARTIAL_RENDER_INTERVAL_MS = 100;
+
 /** The streaming model's in-progress utterances, per source. Display only:
  * finished text arrives as regular transcript segments. */
 function useLivePartials(active: boolean): LivePartials {
   const source = useLiveSource();
   const [partials, setPartials] = useState<LivePartials>({});
+  const latestRef = useRef<LivePartials>({});
   useEffect(() => {
+    latestRef.current = {};
     if (!active) {
       setPartials({});
       return undefined;
     }
+    const flush = createThrottledFlush(() => setPartials(latestRef.current), PARTIAL_RENDER_INTERVAL_MS);
     const unlisten = source.listen<TranscriptPartialEvent>(TRANSCRIPT_PARTIAL_EVENT, (event) => {
-      setPartials((current) => applyPartial(current, event.payload));
+      latestRef.current = applyPartial(latestRef.current, event.payload);
+      flush.schedule();
     });
     return () => {
+      flush.cancel();
       void unlisten.then((fn) => fn());
     };
   }, [active, source]);

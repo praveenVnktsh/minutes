@@ -1,5 +1,6 @@
 pub mod acceleration;
 pub mod commands;
+pub mod coreml_encoder;
 pub mod parallel_commands;
 pub mod parallel_processor;
 pub mod system_monitor;

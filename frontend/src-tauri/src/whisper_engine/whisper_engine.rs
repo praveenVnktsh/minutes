@@ -13,7 +13,9 @@ use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{watch, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
-use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+use whisper_rs::{
+    FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState,
+};
 
 /// User-provided vocabulary (names, acronyms, product terms) fed to Whisper as
 /// an initial prompt to bias recognition. Empty by default.
@@ -102,6 +104,11 @@ const CANCEL_DOWNLOAD_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 pub struct WhisperEngine {
     models_dir: PathBuf,
     current_context: Arc<RwLock<Option<WhisperContext>>>,
+    /// One decoding state for the loaded context, reused across calls.
+    /// Creating a state allocates its GPU buffers and, with a Core ML encoder
+    /// next to the model, loads that encoder: per segment that cost more
+    /// than the segment. Cleared whenever the context changes.
+    cached_state: Arc<std::sync::Mutex<Option<WhisperState>>>,
     current_model: Arc<RwLock<Option<String>>>,
     available_models: Arc<RwLock<HashMap<String, ModelInfo>>>,
     // State tracking for smart logging
@@ -195,6 +202,7 @@ impl WhisperEngine {
         let engine = Self {
             models_dir,
             current_context: Arc::new(RwLock::new(None)),
+            cached_state: Arc::new(std::sync::Mutex::new(None)),
             current_model: Arc::new(RwLock::new(None)),
             available_models: Arc::new(RwLock::new(HashMap::new())),
             // Initialize state tracking
@@ -375,7 +383,11 @@ impl WhisperEngine {
                 };
 
                 // Update current context and model
-                *self.current_context.write().await = Some(ctx);
+                {
+                    let mut ctx_guard = self.current_context.write().await;
+                    self.clear_cached_state();
+                    *ctx_guard = Some(ctx);
+                }
                 *self.current_model.write().await = Some(model_name.to_string());
 
                 // Enhanced acceleration status reporting
@@ -400,6 +412,7 @@ impl WhisperEngine {
 
     pub async fn unload_model(&self) -> bool {
         let mut ctx_guard = self.current_context.write().await;
+        self.clear_cached_state();
         let unloaded = ctx_guard.take().is_some();
         if unloaded {
             log::info!("📉Whisper model unloaded");
@@ -574,11 +587,93 @@ impl WhisperEngine {
         repeated_words as f32 / total_words
     }
 
+    fn clear_cached_state(&self) {
+        self.cached_state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+    }
+
+    /// Run `full` on the cached state for `ctx`, or on a fresh one when
+    /// another call holds the cache. `quiet` runs the decode at utility QoS
+    /// (post-meeting work, see [`crate::quiet_work`]).
+    fn run_full<T>(
+        &self,
+        ctx: &WhisperContext,
+        params: FullParams,
+        audio: &[f32],
+        quiet: bool,
+        read: impl FnOnce(&WhisperState) -> Result<T>,
+    ) -> Result<T> {
+        let mut fresh = None;
+        let mut cached = self.cached_state.try_lock().ok();
+        let state: &mut WhisperState = match cached.as_deref_mut() {
+            Some(slot) => {
+                if slot.is_none() {
+                    // With a Core ML encoder this loads (and the first time
+                    // compiles) it: quiet too when the decode is.
+                    *slot = Some(if quiet {
+                        crate::quiet_work::run_quietly(|| ctx.create_state())?
+                    } else {
+                        ctx.create_state()?
+                    });
+                }
+                slot.as_mut().expect("state was just created")
+            }
+            None => fresh.insert(ctx.create_state()?),
+        };
+        if quiet {
+            crate::quiet_work::run_quietly(|| state.full(params, audio))?;
+        } else {
+            state.full(params, audio)?;
+        }
+        read(state)
+    }
+
+    /// Prepare the loaded model for its first transcription: create its
+    /// decoding state, which loads (and on first use compiles) a Core ML
+    /// encoder when one is installed. At utility QoS, so a background warm-up
+    /// stays out of the way.
+    pub async fn warm_up(&self) -> Result<()> {
+        let ctx_lock = self.current_context.read().await;
+        let ctx = ctx_lock
+            .as_ref()
+            .ok_or_else(|| anyhow!("No model loaded. Please load a model first."))?;
+        let mut slot = self.cached_state.lock().unwrap_or_else(|e| e.into_inner());
+        if slot.is_none() {
+            let state = crate::quiet_work::run_quietly(|| ctx.create_state())?;
+            *slot = Some(state);
+        }
+        Ok(())
+    }
+
+    /// [`Self::transcribe_audio_with_confidence`] at utility QoS, for the
+    /// post-meeting pass: macOS may slow it under load or heat rather than
+    /// spin the fans for it.
+    pub async fn transcribe_audio_with_confidence_quietly(
+        &self,
+        audio_data: Vec<f32>,
+        language: Option<String>,
+    ) -> Result<(String, f32, bool)> {
+        self.transcribe_with_confidence_inner(audio_data, language, true)
+            .await
+    }
+
     /// Transcribe audio with streaming support for partial results and adaptive quality
     pub async fn transcribe_audio_with_confidence(
         &self,
         audio_data: Vec<f32>,
         language: Option<String>,
+    ) -> Result<(String, f32, bool)> {
+        self.transcribe_with_confidence_inner(audio_data, language, false)
+            .await
+    }
+
+    async fn transcribe_with_confidence_inner(
+        &self,
+        audio_data: Vec<f32>,
+        language: Option<String>,
+        quiet: bool,
     ) -> Result<(String, f32, bool)> {
         let ctx_lock = self.current_context.read().await;
         let ctx = ctx_lock
@@ -646,27 +741,17 @@ impl WhisperEngine {
 
         // PERFORMANCE: Suppress verbose C library logs during transcription
         // This hides whisper_full_with_state debug logs and beam search details
-        let (num_segments, state) = {
-            // let _suppressor = crate::whisper_engine::StderrSuppressor::new();
-
-            let mut state = ctx.create_state()?;
-            state.full(params, &audio_data)?;
-            let num_segments = state.full_n_segments();
-
-            (num_segments, state)
-            // Suppressor dropped here, stderr restored
-        };
+        let segments = self.run_full(ctx, params, &audio_data, quiet, |state| {
+            let count = state.full_n_segments()?;
+            Ok((0..count)
+                .filter_map(|i| state.full_get_segment_text_lossy(i).ok())
+                .collect::<Vec<String>>())
+        })?;
         let mut result = String::new();
         let mut total_confidence = 0.0;
         let mut segment_count = 0;
 
-        let num_segments = num_segments?;
-        for i in 0..num_segments {
-            let segment_text = match state.full_get_segment_text_lossy(i) {
-                Ok(text) => text,
-                Err(_) => continue,
-            };
-
+        for segment_text in segments {
             // Calculate confidence based on segment length and duration (simplified approach)
             let segment_length = segment_text.len() as f32;
             let segment_confidence = if segment_length > 0.0 {
@@ -814,11 +899,18 @@ impl WhisperEngine {
                 duration_seconds
             );
         }
-        let mut state = ctx.create_state()?;
-        state.full(params, &audio_data)?;
-
-        // Extract text with improved segment handling
-        let num_segments = state.full_n_segments()?;
+        let segments = self.run_full(ctx, params, &audio_data, false, |state| {
+            let count = state.full_n_segments()?;
+            Ok((0..count)
+                .filter_map(|i| {
+                    let text = state.full_get_segment_text_lossy(i).ok()?;
+                    let start = state.full_get_segment_t0(i).unwrap_or(0);
+                    let end = state.full_get_segment_t1(i).unwrap_or(0);
+                    Some((text, start, end))
+                })
+                .collect::<Vec<_>>())
+        })?;
+        let num_segments = segments.len();
 
         // Performance optimization: reduce segment completion logging
         // Only log for significant transcriptions to avoid I/O overhead
@@ -834,22 +926,14 @@ impl WhisperEngine {
         }
         let mut result = String::new();
 
-        for i in 0..num_segments {
-            let segment_text = match state.full_get_segment_text_lossy(i) {
-                Ok(text) => text,
-                Err(_) => continue,
-            };
-
-            let _start_time = state.full_get_segment_t0(i).unwrap_or(0);
-            let _end_time = state.full_get_segment_t1(i).unwrap_or(0);
-
+        for (_i, (segment_text, _start_time, _end_time)) in segments.into_iter().enumerate() {
             // Performance optimization: remove per-segment debug logging
             // This was causing significant I/O overhead during transcription
             // Only log segments for very long audio (>30s) or when explicitly debugging
             if duration_seconds > 30.0 {
                 perf_trace!(
                     "Segment {} ({:.2}s-{:.2}s): '{}'",
-                    i,
+                    _i,
                     _start_time as f64 / 100.0,
                     _end_time as f64 / 100.0,
                     segment_text

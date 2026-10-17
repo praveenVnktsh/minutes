@@ -72,6 +72,12 @@ pub trait Host: Send + Sync + 'static {
     fn live_backlog_secs(&self) -> f64;
     /// The model to use; `force_builtin` for "Use built-in model instead".
     async fn streamer(&self, force_builtin: bool) -> Result<Arc<dyn Streamer>, String>;
+    /// The model for proactive yes/no checks: by default the same as
+    /// [`Host::streamer`]; the app uses the smaller live notes model when
+    /// it runs anyway (see `copilot::confirm_model_for`).
+    async fn confirm_streamer(&self) -> Result<Arc<dyn Streamer>, String> {
+        self.streamer(false).await
+    }
     /// Writes finished moments. `Ok(false)`: the meeting is not bound yet.
     async fn persist(&self, rows: &[ChatRow]) -> Result<bool, String>;
 }
@@ -466,7 +472,7 @@ impl Core {
             at_ms: line.start_ms,
             line: line.text.clone(),
         };
-        let Ok(streamer) = self.host.streamer(false).await else {
+        let Ok(streamer) = self.host.confirm_streamer().await else {
             return false;
         };
         let _busy = crate::clock::busy();

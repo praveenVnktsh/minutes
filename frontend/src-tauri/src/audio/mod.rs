@@ -42,6 +42,7 @@ pub mod transcription;
 
 // Shared utilities for import and retranscription
 pub(crate) mod common;
+pub use common::split_segment_at_silence;
 
 // Shared constants
 pub mod constants;

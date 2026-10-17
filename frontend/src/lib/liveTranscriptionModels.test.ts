@@ -21,6 +21,8 @@ describe('finalPassTookOver', () => {
   test('only a queued pass takes over post-processing', () => {
     expect(finalPassTookOver(queued)).toBe(true);
     expect(finalPassTookOver({ ...queued, status: 'skipped' })).toBe(false);
+    // Waiting for power: the live transcript gets its speakers and summary now.
+    expect(finalPassTookOver({ ...queued, status: 'waiting', taskId: null })).toBe(false);
     expect(finalPassTookOver(undefined)).toBe(false);
     expect(finalPassTookOver(null)).toBe(false);
     expect(finalPassTookOver('queued')).toBe(false);
@@ -39,6 +41,8 @@ describe('finalPassNotice', () => {
     expect(
       finalPassNotice({ ...queued, status: 'skipped', skipReason: 'disabled', message: 'Off' }),
     ).toBeNull();
+    // The meeting header says it waits for power; no toast on top of that.
+    expect(finalPassNotice({ ...queued, status: 'waiting', message: 'Plugged in' })).toBeNull();
     expect(finalPassNotice(undefined)).toBeNull();
   });
 });

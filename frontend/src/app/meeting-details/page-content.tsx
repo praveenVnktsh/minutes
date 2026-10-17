@@ -28,6 +28,7 @@ import { toast } from 'sonner';
 // Custom hooks
 import { useMeetingData } from '@/hooks/meeting-details/useMeetingData';
 import { useSummaryGeneration } from '@/hooks/meeting-details/useSummaryGeneration';
+import { useFinalPassWaiting } from '@/hooks/useFinalPassWaiting';
 import { useTemplates } from '@/hooks/meeting-details/useTemplates';
 import { useCopyOperations } from '@/hooks/meeting-details/useCopyOperations';
 import { useTitleRegeneration } from '@/hooks/meeting-details/useTitleRegeneration';
@@ -105,6 +106,7 @@ export default function PageContent({
     ? latestTerminalActivity.error
     : null;
   const summaryActivity = activity.getSummaryActivity(meeting.id);
+  const finalPass = useFinalPassWaiting(meeting.id);
   const [liveFolderPath, setLiveFolderPath] = useState<string | null>(null);
 
   // Ref to store the modal open function from SummaryGeneratorButtonGroup
@@ -313,7 +315,20 @@ export default function PageContent({
           : `${label} ${Math.round(inFlightActivity.progress_percentage)}%`;
       })()}
     </span>
-  ) : activityError ? <span role="alert" className="text-xs font-medium text-error">{activityError}</span> : null;
+  ) : activityError ? <span role="alert" className="text-xs font-medium text-error">{activityError}</span>
+  : finalPass.waiting ? (
+    <span className={`flex shrink-0 items-center gap-1.5 rounded-full px-3 py-1.5 text-[11px] font-medium ${badge.neutral}`} role="status" title="Waiting until your Mac is plugged in and out of Low Power Mode">
+      Transcript improves when plugged in ·
+      <button
+        type="button"
+        className="font-semibold text-ink underline-offset-2 hover:underline disabled:opacity-60"
+        disabled={finalPass.starting}
+        onClick={() => void finalPass.improveNow()}
+      >
+        Improve now
+      </button>
+    </span>
+  ) : null;
 
   const summaryToolbarActions = (
     <Popover>
