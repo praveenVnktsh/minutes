@@ -106,24 +106,44 @@ pub const COREML: Bundle = Bundle {
             sha256: "a87b5b8a0e0a989fa7db3121f279ce6af70e337feb55ab553b8d0658db70b9d3",
         },
         ModelFile {
-            name: "decoder_joint.mlmodelc/analytics/coremldata.bin",
+            name: "decoder.mlmodelc/analytics/coremldata.bin",
             bytes: 243,
-            sha256: "d46ecf790a728d91b8962ec62e597980e288e66c775e45429bf734b54c658ffc",
+            sha256: "bca0e343fa0d698de8bdb22c66fd377b79104f606b1bfffc90931fe2161029b8",
         },
         ModelFile {
-            name: "decoder_joint.mlmodelc/coremldata.bin",
-            bytes: 514,
-            sha256: "d9a7f7cfece967a69dca59b3fc3cc7d1ecff93ad2815ac3ba6b47e057db22172",
+            name: "decoder.mlmodelc/coremldata.bin",
+            bytes: 493,
+            sha256: "4d0549ac72a38abdcbe7927f2b7d488386d6b96f1f5e837d93ba9e379de04f4e",
         },
         ModelFile {
-            name: "decoder_joint.mlmodelc/model.mil",
-            bytes: 17_146,
-            sha256: "517bb31cf87eb8aa80adaa8c3fee2df0fd7d7dd0c8791e615c5023886c39d572",
+            name: "decoder.mlmodelc/model.mil",
+            bytes: 13_093,
+            sha256: "8298f16d3926565b77732b549fa9c64fedebb2e5a29a76e33d0b2e970e93ae69",
         },
         ModelFile {
-            name: "decoder_joint.mlmodelc/weights/weight.bin",
-            bytes: 17_876_866,
-            sha256: "96cac67a1352e45a2418284779dbd5efe5865159b7b92f328247e5ed31485f52",
+            name: "decoder.mlmodelc/weights/weight.bin",
+            bytes: 14_429_952,
+            sha256: "d9758e49f9b2b9a0462c933256663d4174209739e62f0ddc14e4147bc50e7818",
+        },
+        ModelFile {
+            name: "joint.mlmodelc/analytics/coremldata.bin",
+            bytes: 243,
+            sha256: "478804308534c7f9cab1030aa9ce19ddf672fcd15deba633fe3ed5da8f53b103",
+        },
+        ModelFile {
+            name: "joint.mlmodelc/coremldata.bin",
+            bytes: 401,
+            sha256: "46363626fd89730ade6e6461e8be808c7fade198fb0df63db83fb00ed033abb2",
+        },
+        ModelFile {
+            name: "joint.mlmodelc/model.mil",
+            bytes: 5_064,
+            sha256: "73bcc51b58ff73c7620e31a2c32dc5ef4939e8ec2a77ec22242303422bfafba4",
+        },
+        ModelFile {
+            name: "joint.mlmodelc/weights/weight.bin",
+            bytes: 3_446_978,
+            sha256: "d1d45514a91da39f24e264712a9f8b5a2a90e9cbce04bad3f3f74242bea106d5",
         },
         ModelFile {
             name: "encoder/encoder_int8.mlmodelc/analytics/coremldata.bin",
@@ -359,7 +379,7 @@ pub async fn download<R: Runtime>(app: &AppHandle<R>) -> Result<()> {
             info!("Live model {} downloaded and verified", bundle.id);
             emit(app, terminal_event(bundle, "completed", None));
             if std::ptr::eq(bundle, &COREML) {
-                super::engine::spawn_prepare(app.clone());
+                super::engine::spawn_prepare(app.clone(), false);
             }
         }
         Err(error) if error.to_string() == "cancelled" => {
@@ -438,6 +458,34 @@ mod tests {
                 assert!(file.bytes > 0);
             }
             assert!(bundle.total_bytes() > 550 * 1024 * 1024);
+        }
+    }
+
+    #[test]
+    fn the_core_ml_bundle_has_what_the_helper_loads() {
+        // nemotron-helper's NemotronModel opens these.
+        for needed in [
+            "metadata.json",
+            "tokenizer.json",
+            "encoder/encoder_int8.mlmodelc/",
+            "decoder.mlmodelc/",
+            "joint.mlmodelc/",
+        ] {
+            assert!(
+                COREML.files.iter().any(|file| file.name.starts_with(needed)),
+                "{needed}"
+            );
+        }
+        for model in ["encoder/encoder_int8", "decoder", "joint"] {
+            for part in [
+                "coremldata.bin",
+                "model.mil",
+                "weights/weight.bin",
+                "analytics/coremldata.bin",
+            ] {
+                let name = format!("{model}.mlmodelc/{part}");
+                assert!(COREML.files.iter().any(|f| f.name == name), "{name}");
+            }
         }
     }
 

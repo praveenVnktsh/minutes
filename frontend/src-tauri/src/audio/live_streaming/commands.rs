@@ -109,7 +109,7 @@ async fn apply_engine_change<R: Runtime>(app: &AppHandle<R>) {
         super::engine::unload();
     }
     if model::is_downloaded(app) {
-        super::engine::spawn_prepare(app.clone());
+        super::engine::spawn_prepare(app.clone(), false);
     } else if !model::is_downloading() {
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
@@ -197,7 +197,7 @@ pub fn spawn_default_model_setup(app: AppHandle) {
         {
             // Keeps Core ML's compiled-model cache warm (it is rebuilt after
             // OS updates), so recordings start without the compile.
-            super::engine::spawn_prepare(app.clone());
+            super::engine::spawn_prepare(app.clone(), true);
         }
 
         let final_model = settings::configured_final_model(&app).await;

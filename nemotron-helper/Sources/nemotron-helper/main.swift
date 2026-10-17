@@ -103,6 +103,7 @@ if let file = arguments["transcribe"] {
             "first_token_audio_s": firstTokenAudio ?? -1,
             "encoder_s": Timing.encoderSeconds, "encoder_calls": Timing.encoderCalls,
             "decoder_s": Timing.decoderSeconds, "decoder_calls": Timing.decoderCalls,
+            "joint_s": Timing.jointSeconds, "joint_calls": Timing.jointCalls,
             "text": tokens.joined().trimmingCharacters(in: .whitespaces),
             "times": times,
         ]))

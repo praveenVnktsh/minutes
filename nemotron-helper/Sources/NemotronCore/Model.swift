@@ -50,7 +50,8 @@ public final class NemotronModel {
     public let config: ModelConfig
     public let vocabulary: Vocabulary
     let encoder: MLModel
-    let decoderJoint: MLModel
+    let decoder: MLModel
+    let joint: MLModel
     public let compute: ComputeChoice
     let mel: MelExtractor
 
@@ -72,7 +73,9 @@ public final class NemotronModel {
             return try MLModel(contentsOf: url, configuration: configuration)
         }
         encoder = try load("encoder/encoder_int8.mlmodelc", compute.units)
-        decoderJoint = try load("decoder_joint.mlmodelc", smallOnCPU ? .cpuOnly : compute.units)
+        let small: MLComputeUnits = smallOnCPU ? .cpuOnly : compute.units
+        decoder = try load("decoder.mlmodelc", small)
+        joint = try load("joint.mlmodelc", small)
         mel = MelExtractor(
             numMelBins: config.melFeatures, sampleRate: config.sampleRate, hop: config.hop,
             winLength: config.winLength, preEmphasis: config.preEmphasis, periodicWindow: false)
@@ -93,10 +96,12 @@ public enum Timing {
     nonisolated(unsafe) public static var decoderSeconds = 0.0
     nonisolated(unsafe) public static var encoderCalls = 0
     nonisolated(unsafe) public static var decoderCalls = 0
+    nonisolated(unsafe) public static var jointSeconds = 0.0
+    nonisolated(unsafe) public static var jointCalls = 0
 }
 
 /// One audio stream: continuous log-mel, the cache-aware encoder, and greedy
-/// RNN-T through the fused prediction + joint network. Its API mirrors
+/// RNN-T (prediction network on each emitted token, joint network per frame). Its API mirrors
 /// sherpa-onnx's OnlineStream, so the app's segmentation runs unchanged on
 /// either engine.
 public final class StreamSession: RecognizerSession {
@@ -120,6 +125,10 @@ public final class StreamSession: RecognizerSession {
     private var h: MLMultiArray
     private var c: MLMultiArray
     private var lastToken: Int32
+    /// Prediction network output for `lastToken`, and the state after it.
+    private var decoderOut: MLMultiArray?
+    private var nextH: MLMultiArray?
+    private var nextC: MLMultiArray?
     private let tokenLength: MLMultiArray
 
     public private(set) var tokenIds: [Int] = []
@@ -250,24 +259,43 @@ public final class StreamSession: RecognizerSession {
         framesDecoded += length
     }
 
-    private func decodeFrame(_ step: MLMultiArray, frame: Int) throws {
+    /// Run the prediction network on `lastToken` from state (h, c). Its
+    /// output only changes when a token is emitted, so it is cached between
+    /// frames and the joint network alone runs per frame.
+    private func predict() throws {
         let token = try MLMultiArray.zeros([1, 1], .int32)
+        token[0] = NSNumber(value: lastToken)
+        let started = DispatchTime.now().uptimeNanoseconds
+        let out = try model.decoder.prediction(from: MLDictionaryFeatureProvider(dictionary: [
+            "token": MLFeatureValue(multiArray: token),
+            "token_length": MLFeatureValue(multiArray: tokenLength),
+            "h_in": MLFeatureValue(multiArray: h),
+            "c_in": MLFeatureValue(multiArray: c),
+        ]))
+        Timing.decoderSeconds += Double(DispatchTime.now().uptimeNanoseconds - started) / 1e9
+        Timing.decoderCalls += 1
+        guard let output = out.featureValue(for: "decoder_out")?.multiArrayValue,
+              let hOut = out.featureValue(for: "h_out")?.multiArrayValue,
+              let cOut = out.featureValue(for: "c_out")?.multiArrayValue
+        else { throw HelperError.badOutput("decoder") }
+        decoderOut = output
+        nextH = hOut
+        nextC = cOut
+    }
+
+    private func decodeFrame(_ step: MLMultiArray, frame: Int) throws {
         for _ in 0..<10 {
-            token[0] = NSNumber(value: lastToken)
-            let decoderStarted = DispatchTime.now().uptimeNanoseconds
-            let out = try model.decoderJoint.prediction(from: MLDictionaryFeatureProvider(dictionary: [
-                "token": MLFeatureValue(multiArray: token),
-                "token_length": MLFeatureValue(multiArray: tokenLength),
-                "h_in": MLFeatureValue(multiArray: h),
-                "c_in": MLFeatureValue(multiArray: c),
+            if decoderOut == nil { try predict() }
+            let started = DispatchTime.now().uptimeNanoseconds
+            let out = try model.joint.prediction(from: MLDictionaryFeatureProvider(dictionary: [
                 "encoder": MLFeatureValue(multiArray: step),
+                "decoder": MLFeatureValue(multiArray: decoderOut!),
             ]))
-            Timing.decoderSeconds += Double(DispatchTime.now().uptimeNanoseconds - decoderStarted) / 1e9
-            Timing.decoderCalls += 1
-            guard let logits = out.featureValue(for: "logits")?.multiArrayValue,
-                  let hOut = out.featureValue(for: "h_out")?.multiArrayValue,
-                  let cOut = out.featureValue(for: "c_out")?.multiArrayValue
-            else { throw HelperError.badOutput("decoder_joint") }
+            Timing.jointSeconds += Double(DispatchTime.now().uptimeNanoseconds - started) / 1e9
+            Timing.jointCalls += 1
+            guard let logits = out.featureValue(for: "logits")?.multiArrayValue else {
+                throw HelperError.badOutput("joint")
+            }
             let classes = min(config.vocabSize + 1, logits.count)
             let stride = logits.strides.last?.intValue ?? 1
             var best = 0
@@ -279,9 +307,11 @@ public final class StreamSession: RecognizerSession {
             if best == config.blankIdx { return }
             tokenIds.append(best)
             tokenFrames.append(frame)
+            // The emitted token advances the prediction network.
             lastToken = Int32(best)
-            h = hOut
-            c = cOut
+            h = nextH!
+            c = nextC!
+            decoderOut = nil
         }
     }
 }

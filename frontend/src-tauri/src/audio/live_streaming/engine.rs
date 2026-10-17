@@ -209,10 +209,14 @@ pub fn unload() {
 
 /// Compile the Core ML models for the device the setting uses, in the
 /// background, so the first recording does not wait for it. Core ML caches
-/// the compiled model, so this is quick once done.
-pub fn spawn_prepare<R: Runtime>(app: AppHandle<R>) {
+/// the compiled model (a cold Neural Engine compile took over a minute, a
+/// cached load under a second). The GPU's shader compile is not cached
+/// between launches (~10–20 s on every load), so at app start (`startup`)
+/// there is nothing to gain for it and it is skipped.
+pub fn spawn_prepare<R: Runtime>(app: AppHandle<R>, startup: bool) {
     let compute = match load_settings(&app).live_engine {
         LiveEngineChoice::Cpu => return,
+        LiveEngineChoice::Gpu if startup => return,
         LiveEngineChoice::Gpu => Compute::Gpu,
         LiveEngineChoice::NeuralEngine => Compute::NeuralEngine,
         LiveEngineChoice::Auto => AUTO_COMPUTE,
