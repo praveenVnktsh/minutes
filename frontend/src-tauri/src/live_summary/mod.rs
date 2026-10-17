@@ -231,9 +231,10 @@ pub fn start_session<R: Runtime>(app: &AppHandle<R>, session_id: String) {
     *LATEST.lock().unwrap_or_else(|e| e.into_inner()) = None;
 
     let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
-    let started = std::time::Instant::now();
+    let started = crate::clock::now();
     let listener: EventId = app.listen("transcript-update", move |event: tauri::Event| {
-        if let Some(segment) = segment_from_event(event.payload(), started.elapsed()) {
+        let received_at = crate::clock::now().saturating_duration_since(started);
+        if let Some(segment) = segment_from_event(event.payload(), received_at) {
             let _ = sender.send(segment);
         }
     });

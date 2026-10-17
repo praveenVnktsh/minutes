@@ -199,42 +199,13 @@ impl<R: Runtime> Host for AppHost<R> {
     }
 
     async fn streamer(&self, force_builtin: bool) -> Result<Arc<dyn Streamer>, String> {
-        let pool = self.pool()?;
-        let app_data_dir: Option<PathBuf> = self.app.path().app_data_dir().ok();
-        let (provider, model) = if force_builtin {
-            let dir = app_data_dir
-                .as_deref()
-                .ok_or("The app data folder is unavailable")?;
-            let model = downloaded_builtin_model(dir)
-                .ok_or("No built-in model is downloaded. Download one in Settings → Summary.")?;
-            ("builtin-ai".to_string(), model)
-        } else if let Some(choice) = load_settings(&self.app).model {
-            (choice.provider, choice.model)
-        } else {
-            let settings = SettingsRepository::get_model_config(&pool)
-                .await
-                .map_err(|e| format!("Could not read the summary model setting: {e}"))?
-                .filter(|s| !s.provider.trim().is_empty() && !s.model.trim().is_empty())
-                .ok_or("Choose a summary model (or a Copilot model) in Settings first.")?;
-            (settings.provider, settings.model)
-        };
-        let config = load_llm_config(&pool, &provider, &model, None).await?;
-        // Copilot only runs while recording: the recording-time num_ctx every
-        // other call shares, so Ollama never reloads the model mid-meeting.
-        let num_ctx = crate::summary::service::ollama_num_ctx_for(
-            &config.provider,
-            &config.model_name,
-            config.ollama_endpoint.as_deref(),
-            crate::summary::service::OllamaPhase::Recording,
+        resolve_streamer(
+            &self.pool()?,
+            self.app.path().app_data_dir().ok(),
+            load_settings(&self.app).model,
+            force_builtin,
         )
-        .await;
-        Ok(Arc::new(ProviderStreamer {
-            provider_id: provider,
-            config,
-            app_data_dir,
-            client: reqwest::Client::new(),
-            num_ctx,
-        }))
+        .await
     }
 
     async fn persist(&self, rows: &[ChatRow]) -> Result<bool, String> {
@@ -262,6 +233,51 @@ impl<R: Runtime> Host for AppHost<R> {
     }
 }
 
+/// Copilot's model: the built-in one when forced, else the Copilot model
+/// setting (`choice`), else the summary model; keys and endpoints from the
+/// database. The replay viewer's live Copilot resolves its model here too.
+pub(crate) async fn resolve_streamer(
+    pool: &sqlx::SqlitePool,
+    app_data_dir: Option<PathBuf>,
+    choice: Option<CopilotModel>,
+    force_builtin: bool,
+) -> Result<Arc<dyn Streamer>, String> {
+    let (provider, model) = if force_builtin {
+        let dir = app_data_dir
+            .as_deref()
+            .ok_or("The app data folder is unavailable")?;
+        let model = downloaded_builtin_model(dir)
+            .ok_or("No built-in model is downloaded. Download one in Settings → Summary.")?;
+        ("builtin-ai".to_string(), model)
+    } else if let Some(choice) = choice {
+        (choice.provider, choice.model)
+    } else {
+        let settings = SettingsRepository::get_model_config(pool)
+            .await
+            .map_err(|e| format!("Could not read the summary model setting: {e}"))?
+            .filter(|s| !s.provider.trim().is_empty() && !s.model.trim().is_empty())
+            .ok_or("Choose a summary model (or a Copilot model) in Settings first.")?;
+        (settings.provider, settings.model)
+    };
+    let config = load_llm_config(pool, &provider, &model, None).await?;
+    // Copilot only runs while recording: the recording-time num_ctx every
+    // other call shares, so Ollama never reloads the model mid-meeting.
+    let num_ctx = crate::summary::service::ollama_num_ctx_for(
+        &config.provider,
+        &config.model_name,
+        config.ollama_endpoint.as_deref(),
+        crate::summary::service::OllamaPhase::Recording,
+    )
+    .await;
+    Ok(Arc::new(ProviderStreamer {
+        provider_id: provider,
+        config,
+        app_data_dir,
+        client: reqwest::Client::new(),
+        num_ctx,
+    }))
+}
+
 // ---------------------------------------------------------------------------
 // Lifecycle
 // ---------------------------------------------------------------------------
@@ -280,7 +296,7 @@ struct TranscriptEvent {
     audio_end_time: f64,
 }
 
-fn line_from_event(payload: &str) -> Option<Line> {
+pub(crate) fn line_from_event(payload: &str) -> Option<Line> {
     let event: TranscriptEvent = serde_json::from_str(payload).ok()?;
     if event.is_partial || event.text.trim().is_empty() {
         return None;

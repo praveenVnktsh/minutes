@@ -509,7 +509,12 @@ impl SidecarManager {
             tokens,
         } = request;
         let guard = RequestGuard::new(self.active_request_count.clone());
+        let _busy = crate::clock::busy();
         let queued_at = Instant::now();
+        crate::replay::trace::emit(
+            "sidecar",
+            || serde_json::json!({ "phase": "queued", "id": id, "priority": format!("{priority:?}") }),
+        );
         let acquire = self.acquire_exchange(priority, id);
         let exchange = {
             let queue_limit = async {
@@ -532,6 +537,14 @@ impl SidecarManager {
                 exchange = acquire => exchange,
             }
         };
+        crate::replay::trace::emit("sidecar", || {
+            serde_json::json!({
+                "phase": "acquired",
+                "id": id,
+                "priority": format!("{priority:?}"),
+                "waited_ms": queued_at.elapsed().as_millis() as u64,
+            })
+        });
         let timeout = if timeout_includes_queue {
             timeout.saturating_sub(queued_at.elapsed())
         } else {
@@ -565,6 +578,14 @@ impl SidecarManager {
             if result.is_ok() {
                 *pipes.last_activity.write().await = Instant::now();
             }
+            crate::replay::trace::emit("sidecar", || {
+                serde_json::json!({
+                    "phase": "done",
+                    "id": id,
+                    "ok": result.is_ok(),
+                    "busy_ms": queued_at.elapsed().as_millis() as u64,
+                })
+            });
             let _ = reply_tx.send(result);
         });
 
@@ -623,6 +644,10 @@ impl SidecarManager {
                 Attempt::Acquired(guard) => return guard,
                 Attempt::Wait { preempt } => {
                     if let Some(victim) = preempt {
+                        crate::replay::trace::emit(
+                            "sidecar",
+                            || serde_json::json!({ "phase": "preempt", "id": victim, "by": id }),
+                        );
                         log::info!("Pre-empting background llama-helper request {victim}");
                         self.pipes().send_cancel(victim).await;
                     }
@@ -1111,9 +1136,11 @@ impl ExchangeQueue {
                 queue: self.clone(),
             });
         }
+        // Meeting time (`crate::clock`), which a replay runs faster than real.
+        let now = crate::clock::now().into_std();
         let recently = state
             .last_preempt
-            .is_some_and(|at| at.elapsed() < PREEMPT_MIN_GAP);
+            .is_some_and(|at| now.saturating_duration_since(at) < PREEMPT_MIN_GAP);
         let preempt = match state.holder.as_mut() {
             Some(holder)
                 if priority == Priority::Interactive
@@ -1128,7 +1155,7 @@ impl ExchangeQueue {
             _ => None,
         };
         if preempt.is_some() {
-            state.last_preempt = Some(Instant::now());
+            state.last_preempt = Some(now);
         }
         Attempt::Wait { preempt }
     }

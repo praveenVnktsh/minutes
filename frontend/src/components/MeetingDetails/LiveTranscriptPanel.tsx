@@ -1,8 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
+import { useLiveSource } from '@/lib/liveSource';
 import { VirtualizedTranscriptView } from '@/components/VirtualizedTranscriptView';
 import { useTranscripts } from '@/contexts/TranscriptContext';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
@@ -30,19 +29,20 @@ function sourceLabel(source: string): string {
 /** The streaming model's in-progress utterances, per source. Display only:
  * finished text arrives as regular transcript segments. */
 function useLivePartials(active: boolean): LivePartials {
+  const source = useLiveSource();
   const [partials, setPartials] = useState<LivePartials>({});
   useEffect(() => {
     if (!active) {
       setPartials({});
       return undefined;
     }
-    const unlisten = listen<TranscriptPartialEvent>(TRANSCRIPT_PARTIAL_EVENT, (event) => {
+    const unlisten = source.listen<TranscriptPartialEvent>(TRANSCRIPT_PARTIAL_EVENT, (event) => {
       setPartials((current) => applyPartial(current, event.payload));
     });
     return () => {
       void unlisten.then((fn) => fn());
     };
-  }, [active]);
+  }, [active, source]);
   return partials;
 }
 
@@ -52,6 +52,7 @@ function useLivePartials(active: boolean): LivePartials {
  * live-transcription toggle so it can be flipped during an active meeting.
  */
 export function LiveTranscriptPanel() {
+  const source = useLiveSource();
   const { transcripts } = useTranscripts();
   const { isRecording, isPaused, isProcessing, isStopping } = useRecordingState();
   const { betaFeatures } = useConfig();
@@ -67,10 +68,10 @@ export function LiveTranscriptPanel() {
   const handleToggle = useCallback((enabled: boolean) => {
     setLiveEnabled(enabled);
     localStorage.setItem(LIVE_TRANSCRIPTION_STORAGE_KEY, String(enabled));
-    invoke('set_live_transcription_enabled', { enabled }).catch((error) =>
+    source.invoke('set_live_transcription_enabled', { enabled }).catch((error) =>
       console.error('Failed to toggle live transcription:', error),
     );
-  }, []);
+  }, [source]);
 
   const toggleAvailable = betaFeatures.liveTranscription;
   const partials = orderedPartials(useLivePartials(isRecording || isStopping));

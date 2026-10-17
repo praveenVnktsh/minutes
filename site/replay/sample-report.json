@@ -1,0 +1,203 @@
+{
+  "schema_version": 1,
+  "meta": {
+    "audio_name": "sample (synthetic product-launch meeting)",
+    "duration_s": 220,
+    "fed_s": 220,
+    "limitations": [
+      "Synthetic demo data: no real meeting."
+    ],
+    "live_engine": "nemotron-streaming / nemotron-speech-streaming-en-0.6b-560ms",
+    "schema_version": 1,
+    "speed": 1,
+    "summary_model": "builtin-ai / qwen3.5:4b"
+  },
+  "criteria": [
+    {
+      "id": "idle",
+      "label": "Idle: no model requests before the first line",
+      "status": "pass",
+      "value": "0 requests",
+      "detail": []
+    },
+    {
+      "id": "first_words",
+      "label": "First words ≤ 3 s (local model)",
+      "status": "fail",
+      "value": "median 1100 ms, max 1100 ms, 1 without an answer",
+      "detail": [
+        "00:59 ask [honesty]: first words 1100 ms, 1900 ms total, 19.8 tok/s",
+        "02:29 action [what-to-say]: first words 900 ms, 3100 ms total, 22.6 tok/s",
+        "03:09 ask: first words – ms, – total, 0.0 tok/s"
+      ]
+    },
+    {
+      "id": "streaming",
+      "label": "Answers stream (≥ 2 chunks each)",
+      "status": "pass",
+      "value": "3/3 answers streamed",
+      "detail": []
+    },
+    {
+      "id": "reuse",
+      "label": "Prompt tokens reused on repeat asks",
+      "status": "pass",
+      "value": "1/1 reused",
+      "detail": [
+        "02:29 action: 1240/1510 prompt tokens reused"
+      ]
+    },
+    {
+      "id": "card_latency",
+      "label": "Suggestion card ≤ 3 s after the line finalizes",
+      "status": "pass",
+      "value": "1 cards, median 900 ms, max 900 ms",
+      "detail": [
+        "card for the line at 02:06 appeared 900 ms after it finalized"
+      ]
+    },
+    {
+      "id": "card_cooldown",
+      "label": "At most one card per 20 s",
+      "status": "not_applicable",
+      "value": "min gap –",
+      "detail": []
+    },
+    {
+      "id": "detector",
+      "label": "Detector fires (review for false alarms)",
+      "status": "info",
+      "value": "1 fired, 1 model no, 0 skipped, 13 rule rejects",
+      "detail": [
+        "15 Others lines; decisions: confirm_no 1, confirm_yes 1, confirming 2, rule_reject 13",
+        "fired on the line at 02:06 (wall 02:11)"
+      ],
+      "private_detail": [
+        "[02:06] Can you put together a quick model of paid only versus freemium?"
+      ]
+    },
+    {
+      "id": "citations",
+      "label": "[MM:SS] links land on a final-transcript line",
+      "status": "pass",
+      "value": "4/4 valid",
+      "detail": []
+    },
+    {
+      "id": "honesty",
+      "label": "\"Not discussed\" honesty",
+      "status": "pass",
+      "value": "1/1 said it had not come up",
+      "detail": [],
+      "private_detail": [
+        "That hasn't come up in the meeting so far."
+      ]
+    },
+    {
+      "id": "live_rtf",
+      "label": "Live transcription RTF < 0.9 (60 s of audio windows)",
+      "status": "pass",
+      "value": "max 0.57 (at 02:54), overall 0.57, while the model ran 0.57 over 5 s of audio, max backlog 1.9 s at 02:31",
+      "detail": []
+    },
+    {
+      "id": "after_end",
+      "label": "No Copilot work after End meeting",
+      "status": "pass",
+      "value": "0 events",
+      "detail": []
+    },
+    {
+      "id": "summary_determinism",
+      "label": "Summary identical across two runs",
+      "status": "pass",
+      "value": "2 of 2 runs completed, identical: true",
+      "detail": [
+        "run 1: completed in 34 s, 221 chars",
+        "run 2: completed in 33 s, 221 chars"
+      ]
+    }
+  ],
+  "requests": [
+    {
+      "id": "ask-1",
+      "kind": "ask",
+      "tag": "honesty",
+      "audio_ms": 59000,
+      "status": "done",
+      "first_token_ms": 1100,
+      "total_ms": 1900,
+      "tokens_per_second": 19.8,
+      "prompt_tokens": 980,
+      "reused_tokens": 0,
+      "deltas": 9,
+      "error": null
+    },
+    {
+      "id": "card-1",
+      "kind": "suggestion",
+      "tag": null,
+      "audio_ms": 126000,
+      "status": "done",
+      "first_token_ms": 780,
+      "total_ms": 2400,
+      "tokens_per_second": 21.4,
+      "prompt_tokens": 1420,
+      "reused_tokens": 1180,
+      "deltas": 20,
+      "error": null
+    },
+    {
+      "id": "ask-2",
+      "kind": "action",
+      "tag": "what-to-say",
+      "audio_ms": 149000,
+      "status": "done",
+      "first_token_ms": 900,
+      "total_ms": 3100,
+      "tokens_per_second": 22.6,
+      "prompt_tokens": 1510,
+      "reused_tokens": 1240,
+      "deltas": 31,
+      "error": null
+    },
+    {
+      "id": "ask-3",
+      "kind": "ask",
+      "tag": null,
+      "audio_ms": 189000,
+      "status": "error",
+      "first_token_ms": null,
+      "total_ms": null,
+      "tokens_per_second": null,
+      "prompt_tokens": null,
+      "reused_tokens": null,
+      "deltas": 0,
+      "error": "Copilot timed out waiting for the model (15 s)."
+    }
+  ],
+  "stats": {
+    "copilot_errors": 1,
+    "copilot_requests": 4,
+    "detector": {
+      "confirm_no": 1,
+      "confirm_yes": 1,
+      "confirming": 2,
+      "rule_reject": 13
+    },
+    "final_lines": 24,
+    "final_pass_s": 54,
+    "live_lines": 24,
+    "others_lines": 15,
+    "peak_app_rss_mb": 1505.0,
+    "peak_helper_rss_mb": 3350.0,
+    "sidecar": {
+      "done": 3,
+      "preempt": 1,
+      "queued": 3,
+      "spawn": 1,
+      "timeline-preempted": 1
+    },
+    "timeline_entries": 4
+  }
+}

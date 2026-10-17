@@ -45,6 +45,7 @@ pub mod api;
 pub mod app_logging;
 pub mod audio;
 pub mod calendar;
+pub mod clock;
 pub mod config;
 pub mod console_utils;
 pub mod copilot;
@@ -64,6 +65,7 @@ pub mod onboarding;
 pub mod openai;
 pub mod openrouter;
 pub mod parakeet_engine;
+pub mod replay;
 pub mod shortcuts;
 pub mod state;
 pub mod summary;
@@ -654,6 +656,7 @@ pub fn run() {
             None::<notifications::manager::NotificationManager<tauri::Wry>>,
         )) as NotificationManagerState<tauri::Wry>)
         .manage(audio::init_system_audio_state())
+        .manage(replay::commands::ReplayState::default())
         .manage(summary::summary_engine::ModelManagerState(Arc::new(
             tokio::sync::Mutex::new(None),
         )))
@@ -734,6 +737,10 @@ pub fn run() {
 
             // Restore debug mode before anything else uses it.
             optional_setup_step("debug mode", || debug_mode::load(_app.handle()));
+            // Developer → Replays: the replay commands refuse until it is on.
+            optional_setup_step("developer replays", || {
+                replay::commands::load(_app.handle())
+            });
 
             // Load the custom transcription vocabulary into the Whisper engine.
             optional_setup_step("transcription vocabulary", || {
@@ -1010,6 +1017,14 @@ pub fn run() {
             live_summary::get_live_summary_settings,
             live_summary::set_live_summary_settings,
             copilot::copilot_get_state,
+            replay::commands::get_replays_enabled,
+            replay::commands::set_replays_enabled,
+            replay::commands::replay_list_runs,
+            replay::commands::replay_read_file,
+            replay::commands::replay_audio_path,
+            replay::commands::replay_copilot_ask,
+            replay::commands::replay_copilot_stop,
+            replay::commands::replay_copilot_cancel,
             copilot::copilot_ask,
             copilot::copilot_stop,
             copilot::copilot_retry,

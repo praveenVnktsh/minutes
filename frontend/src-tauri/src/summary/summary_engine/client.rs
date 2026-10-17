@@ -180,8 +180,10 @@ lazy_static::lazy_static! {
     static ref SIDECAR_MANAGER: Arc<Mutex<Option<Arc<SidecarManager>>>> = Arc::new(Mutex::new(None));
 }
 
-// Model path cache to avoid repeated filesystem I/O and model lookups
-static MODEL_PATH_CACHE: Lazy<RwLock<HashMap<String, PathBuf>>> =
+// Model path cache to avoid repeated filesystem I/O and model lookups. Keyed
+// by the data folder and the model name: a replay's sandbox resolves its own
+// models folder and never the app's (nor the app the sandbox's).
+static MODEL_PATH_CACHE: Lazy<RwLock<HashMap<(PathBuf, String), PathBuf>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
 
 /// Initialize the global sidecar manager
@@ -202,10 +204,11 @@ async fn get_sidecar_manager() -> Result<Arc<SidecarManager>> {
 
 /// Get cached model path with read-through caching to avoid repeated filesystem I/O
 fn get_cached_model_path(app_data_dir: &Path, model_name: &str) -> Result<PathBuf> {
+    let key = (app_data_dir.to_path_buf(), model_name.to_string());
     // Try read lock first (fast path for cache hits)
     {
         let cache = MODEL_PATH_CACHE.read().unwrap();
-        if let Some(path) = cache.get(model_name) {
+        if let Some(path) = cache.get(&key) {
             // Verify file still exists before returning cached path
             if path.exists() {
                 return Ok(path.clone());
@@ -217,7 +220,7 @@ fn get_cached_model_path(app_data_dir: &Path, model_name: &str) -> Result<PathBu
     let mut cache = MODEL_PATH_CACHE.write().unwrap();
 
     // Double-check after acquiring write lock (another thread may have updated it)
-    if let Some(path) = cache.get(model_name) {
+    if let Some(path) = cache.get(&key) {
         if path.exists() {
             return Ok(path.clone());
         }
@@ -235,7 +238,7 @@ fn get_cached_model_path(app_data_dir: &Path, model_name: &str) -> Result<PathBu
     }
 
     // Cache the validated path
-    cache.insert(model_name.to_string(), model_path.clone());
+    cache.insert(key, model_path.clone());
     Ok(model_path)
 }
 
@@ -408,7 +411,7 @@ pub async fn generate_with_builtin(
             .unwrap_or_else(|e| e.into_inner());
         let delay = background_pacing_delay(
             last_end,
-            std::time::Instant::now(),
+            crate::clock::now().into_std(),
             crate::audio::recording_commands::is_recording_or_stopping(),
         );
         if !delay.is_zero() {
@@ -416,9 +419,9 @@ pub async fn generate_with_builtin(
             match cancellation_token {
                 Some(token) => tokio::select! {
                     _ = token.cancelled() => return Err(anyhow!(SidecarError::Cancelled)),
-                    _ = tokio::time::sleep(delay) => {}
+                    _ = crate::clock::sleep(delay) => {}
                 },
-                None => tokio::time::sleep(delay).await,
+                None => crate::clock::sleep(delay).await,
             }
         }
     }
@@ -473,7 +476,7 @@ static LAST_GENERATION_END: std::sync::Mutex<Option<std::time::Instant>> =
 fn note_generation_end() {
     *LAST_GENERATION_END
         .lock()
-        .unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now());
+        .unwrap_or_else(|e| e.into_inner()) = Some(crate::clock::now().into_std());
 }
 
 /// How long a background request should wait before it starts.
@@ -784,6 +787,37 @@ pub async fn is_sidecar_healthy() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_paths_are_cached_per_data_folder() {
+        let model = models::get_available_models().remove(0);
+        let place = |dir: &Path| {
+            let models_dir = models::get_models_directory(dir);
+            std::fs::create_dir_all(&models_dir).unwrap();
+            let file = models_dir.join(&model.gguf_file);
+            std::fs::write(&file, b"gguf").unwrap();
+            file
+        };
+        let app = tempfile::tempdir().unwrap();
+        let sandbox = tempfile::tempdir().unwrap();
+        let app_model = place(app.path());
+        let sandbox_model = place(sandbox.path());
+        assert_eq!(
+            get_cached_model_path(sandbox.path(), &model.name).unwrap(),
+            sandbox_model
+        );
+        assert_eq!(
+            get_cached_model_path(app.path(), &model.name).unwrap(),
+            app_model,
+            "the sandbox's cached path is not the app's"
+        );
+        assert_eq!(
+            get_cached_model_path(sandbox.path(), &model.name).unwrap(),
+            sandbox_model
+        );
+        let empty = tempfile::tempdir().unwrap();
+        assert!(get_cached_model_path(empty.path(), &model.name).is_err());
+    }
 
     #[test]
     fn test_request_serialization() {

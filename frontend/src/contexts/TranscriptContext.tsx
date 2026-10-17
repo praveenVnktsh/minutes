@@ -8,7 +8,7 @@ import { transcriptService } from '@/services/transcriptService';
 import { recordingService } from '@/services/recordingService';
 import { indexedDBService } from '@/services/indexedDBService';
 
-interface TranscriptContextType {
+export interface TranscriptContextType {
   transcripts: Transcript[];
   transcriptsRef: MutableRefObject<Transcript[]>
   addTranscript: (update: TranscriptUpdate) => void;
@@ -23,6 +23,9 @@ interface TranscriptContextType {
 }
 
 const TranscriptContext = createContext<TranscriptContextType | undefined>(undefined);
+
+/** Supplies transcripts to a subtree without the recorder (the replay viewer). */
+export const TranscriptValueProvider = TranscriptContext.Provider;
 
 export function TranscriptProvider({ children }: { children: ReactNode }) {
   const [transcripts, setTranscripts] = useState<Transcript[]>([]);

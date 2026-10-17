@@ -341,6 +341,9 @@ async function readCompletedTranscripts(sessionId: string): Promise<Transcript[]
 
 const RecordingControllerContext = createContext<RecordingControllerValue | null>(null);
 
+/** Supplies a controller to a subtree that must never drive the recorder (the replay viewer). */
+export const RecordingControllerValueProvider = RecordingControllerContext.Provider;
+
 export function useRecordingController(): RecordingControllerValue {
   const context = useContext(RecordingControllerContext);
   if (!context) {

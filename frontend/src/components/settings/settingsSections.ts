@@ -5,6 +5,7 @@ export const SETTINGS_SECTIONS = [
   'summary',
   'integrations',
   'beta',
+  'developer',
 ] as const;
 
 export type SettingsSection = typeof SETTINGS_SECTIONS[number];

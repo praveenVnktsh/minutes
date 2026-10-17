@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState, type ReactNode } from 'react';
-import { listen } from '@tauri-apps/api/event';
+import { useLiveSource } from '@/lib/liveSource';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 import { badge, panel } from '@/lib/theme-classes';
 import {
@@ -11,7 +11,7 @@ import {
   formatTimelineTime,
   groupByTopic,
   kindMarker,
-  liveTimelineApi,
+  currentLiveTimeline,
   statusNotice,
   type TimelineEntry,
   type TimelineSnapshot,
@@ -20,16 +20,17 @@ import {
 /** The recording's live summary: hydrated from the Rust worker (which keeps
  * running across navigation) and kept current by its update events. */
 export function useLiveTimeline(): TimelineSnapshot | null {
+  const source = useLiveSource();
   const [snapshot, setSnapshot] = useState<TimelineSnapshot | null>(null);
   useEffect(() => {
     let disposed = false;
     let unlisten: (() => void) | undefined;
-    void liveTimelineApi.current()
+    void currentLiveTimeline(source)
       .then((current) => {
         if (!disposed && current) setSnapshot((previous) => acceptSnapshot(previous, current));
       })
       .catch((error) => console.warn('Could not load the live summary:', error));
-    void listen<TimelineSnapshot>(LIVE_TIMELINE_UPDATE_EVENT, ({ payload }) => {
+    void source.listen<TimelineSnapshot>(LIVE_TIMELINE_UPDATE_EVENT, ({ payload }) => {
       setSnapshot((previous) => acceptSnapshot(previous, payload));
     }).then((fn) => {
       if (disposed) fn();
@@ -39,7 +40,7 @@ export function useLiveTimeline(): TimelineSnapshot | null {
       disposed = true;
       unlisten?.();
     };
-  }, []);
+  }, [source]);
   return snapshot;
 }
 
