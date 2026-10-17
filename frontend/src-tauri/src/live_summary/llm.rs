@@ -346,6 +346,18 @@ impl Generator for SummaryModelGenerator {
     }
 }
 
+/// The line limit only applies to the live notes model's compact one-note-
+/// per-line answer. Other built-in models answer in JSON, which may span many
+/// lines, so cutting them off after a few lines would lose notes.
+fn line_limit_for(model: &str, max_lines: Option<u32>) -> Option<u32> {
+    use crate::summary::summary_engine::models::LIVE_NOTES_MODEL;
+    if model == LIVE_NOTES_MODEL {
+        max_lines
+    } else {
+        None
+    }
+}
+
 impl SummaryModelGenerator {
     /// The call, with a line limit on the live notes model's compact answer
     /// (other models and providers write JSON: no limit).
@@ -367,6 +379,7 @@ impl SummaryModelGenerator {
             // its own (no unreadable window in the benchmark), and checking
             // every token against a grammar made generation 10-25 % slower.
             let grammar = None;
+            let max_lines = line_limit_for(model, max_lines);
             return generate_live_notes(
                 app_data_dir,
                 LiveNotesRequest {
@@ -414,6 +427,20 @@ impl SummaryModelGenerator {
             truncated: completion.truncated,
         })
         .map_err(GenerateError::from_provider_error)
+    }
+}
+
+#[cfg(test)]
+mod line_limit_tests {
+    use super::line_limit_for;
+    use crate::summary::summary_engine::models::LIVE_NOTES_MODEL;
+
+    #[test]
+    fn only_the_compact_live_notes_model_stops_early() {
+        assert_eq!(line_limit_for(LIVE_NOTES_MODEL, Some(4)), Some(4));
+        assert_eq!(line_limit_for("qwen3.5:4b", Some(4)), None);
+        assert_eq!(line_limit_for("gemma3:1b", Some(4)), None);
+        assert_eq!(line_limit_for(LIVE_NOTES_MODEL, None), None);
     }
 }
 
