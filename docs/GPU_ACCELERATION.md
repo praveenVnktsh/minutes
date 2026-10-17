@@ -1,57 +1,18 @@
 # GPU Acceleration Guide
 
-Minutes supports GPU acceleration for transcription, which can significantly improve performance. This guide provides detailed information on how to set up and configure GPU acceleration for your system.
+Minutes is Mac-only (Apple Silicon, macOS 13+), and transcription always runs on the GPU through Apple's frameworks.
 
-## Supported Backends
+## Backends
 
-Minutes uses the `whisper-rs` library, which supports several GPU acceleration backends:
+Minutes uses the `whisper-rs` library with two Apple backends:
 
-*   **CUDA:** For NVIDIA GPUs.
-*   **Metal:** For Apple Silicon and modern Intel-based Macs.
+*   **Metal:** GPU acceleration on Apple Silicon.
 *   **Core ML:** An additional acceleration layer for Apple Silicon.
-*   **Vulkan:** A cross-platform solution for modern AMD and Intel GPUs.
-*   **OpenBLAS:** A CPU-based optimization that can provide a significant speed-up over standard CPU processing.
 
-## Automatic GPU Detection
+Both are enabled unconditionally: the macOS dependency section of `frontend/src-tauri/Cargo.toml` declares `whisper-rs` with the `metal` and `coreml` features, so a plain `pnpm tauri:dev` or `pnpm tauri:build` already uses them.
 
-The build scripts (`dev-gpu.sh`, `build-gpu.sh`) are designed to automatically detect your GPU and enable the appropriate feature flag during the build process. The detection is handled by the `scripts/auto-detect-gpu.js` script.
+The llama-helper sidecar (built-in summary models) is built with `--features metal`. `scripts/build-local-macos.sh` and the CI workflows do this for you.
 
-Here's the detection priority:
+## Cargo Features
 
-1.  **CUDA (NVIDIA)**
-2.  **Metal (Apple)**
-3.  **Vulkan (AMD/Intel)**
-4.  **OpenBLAS (CPU)**
-
-If no GPU is detected, the application will fall back to CPU-only processing.
-
-## Manual Configuration
-
-If you want to manually configure the GPU acceleration backend, you can do so by enabling the corresponding feature flag in the `frontend/src-tauri/Cargo.toml` file.
-
-For example, to enable CUDA, you would modify the `[features]` section as follows:
-
-```toml
-[features]
-default = ["cuda"]
-
-# ... other features
-
-cuda = ["whisper-rs/cuda"]
-```
-
-Then, you would build the application using the standard `pnpm tauri:build` command.
-
-## Platform-Specific Instructions
-
-### Linux
-
-For detailed instructions on setting up GPU acceleration on Linux, please refer to the [Linux build instructions](BUILDING.md#--building-on-linux).
-
-### macOS
-
-On macOS, Metal GPU acceleration is enabled by default. No additional configuration is required.
-
-### Windows
-
-To enable GPU acceleration on Windows, you will need to install the appropriate toolkit for your GPU (e.g., the CUDA Toolkit for NVIDIA GPUs) and then build the application with the corresponding feature flag enabled.
+The `metal` and `coreml` Cargo features remain as explicit opt-ins for scripts such as `pnpm tauri:dev:metal` and `pnpm tauri:dev:coreml`. `openmp` is available for whisper.cpp's OpenMP CPU threading but is not used by default.

@@ -1,7 +1,5 @@
-#[cfg(target_os = "macos")]
 use std::time::{Duration, Instant};
 
-#[cfg(target_os = "macos")]
 use cidre::{core_audio as ca, os};
 
 /// Event types for system audio detection
@@ -72,12 +70,10 @@ impl Drop for BackgroundTask {
 }
 
 /// Detects system audio usage on macOS
-#[cfg(target_os = "macos")]
 pub struct MacOSSystemAudioDetector {
     background: BackgroundTask,
 }
 
-#[cfg(target_os = "macos")]
 impl Default for MacOSSystemAudioDetector {
     fn default() -> Self {
         Self {
@@ -86,21 +82,18 @@ impl Default for MacOSSystemAudioDetector {
     }
 }
 
-#[cfg(target_os = "macos")]
 const DEVICE_IS_RUNNING_SOMEWHERE: ca::PropAddr = ca::PropAddr {
     selector: ca::PropSelector::DEVICE_IS_RUNNING_SOMEWHERE,
     scope: ca::PropScope::GLOBAL,
     element: ca::PropElement::MAIN,
 };
 
-#[cfg(target_os = "macos")]
 struct DetectorState {
     last_state: bool,
     last_change: Instant,
     debounce_duration: Duration,
 }
 
-#[cfg(target_os = "macos")]
 impl DetectorState {
     fn new() -> Self {
         Self {
@@ -126,7 +119,6 @@ impl DetectorState {
     }
 }
 
-#[cfg(target_os = "macos")]
 impl MacOSSystemAudioDetector {
     pub fn start(&mut self, callback: SystemAudioCallback) {
         self.background.start(|running, mut stop_rx| {
@@ -373,7 +365,6 @@ impl MacOSSystemAudioDetector {
     }
 }
 
-#[cfg(target_os = "macos")]
 /// Apps currently capturing the microphone. Mic capture is the signal that the
 /// user is actually in a call, unlike output audio (music, video, etc.).
 fn list_microphone_using_apps() -> Vec<crate::meeting_detection::AudioApp> {
@@ -414,14 +405,12 @@ fn list_microphone_using_apps() -> Vec<crate::meeting_detection::AudioApp> {
     }
 }
 
-#[cfg(target_os = "macos")]
 extern "C" {
     // libquarantine (part of libSystem): the pid macOS holds responsible for
     // `pid`, e.g. the browser that owns a helper or WebKit GPU process.
     fn responsibility_get_pid_responsible_for_pid(pid: i32) -> i32;
 }
 
-#[cfg(target_os = "macos")]
 fn responsible_pid(pid: i32) -> i32 {
     match unsafe { responsibility_get_pid_responsible_for_pid(pid) } {
         responsible if responsible > 0 => responsible,
@@ -429,7 +418,6 @@ fn responsible_pid(pid: i32) -> i32 {
     }
 }
 
-#[cfg(target_os = "macos")]
 fn browser_capturing_mic_has_google_meet(capturing: &[crate::meeting_detection::AudioApp]) -> bool {
     const BROWSERS: [&str; 3] = ["Google Chrome", "Microsoft Edge", "Safari"];
 
@@ -441,7 +429,6 @@ fn browser_capturing_mic_has_google_meet(capturing: &[crate::meeting_detection::
     })
 }
 
-#[cfg(target_os = "macos")]
 fn browser_has_google_meet_tab(application_name: &str) -> bool {
     let script = format!(
         "tell application \"{}\" to get URL of every tab of every window",
@@ -479,7 +466,6 @@ fn browser_has_google_meet_tab(application_name: &str) -> bool {
     }
 }
 
-#[cfg(target_os = "macos")]
 fn google_meet_url_is_open(browser_urls: &str) -> bool {
     browser_urls.split(',').any(|url| {
         let Some(path) = url.trim().strip_prefix("https://meet.google.com/") else {
@@ -492,26 +478,6 @@ fn google_meet_url_is_open(browser_urls: &str) -> bool {
                 part.len() == *length && part.chars().all(|c| c.is_ascii_alphabetic())
             })
     })
-}
-
-// Stub implementation for non-macOS platforms
-#[cfg(not(target_os = "macos"))]
-pub struct MacOSSystemAudioDetector;
-
-#[cfg(not(target_os = "macos"))]
-impl Default for MacOSSystemAudioDetector {
-    fn default() -> Self {
-        Self
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-impl MacOSSystemAudioDetector {
-    pub fn start(&mut self, _callback: SystemAudioCallback) {
-        tracing::warn!("System audio detection is only supported on macOS");
-    }
-
-    pub fn stop(&mut self) {}
 }
 
 /// Public interface for system audio detection
@@ -538,7 +504,6 @@ impl SystemAudioDetector {
 mod tests {
     use super::*;
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn recognizes_google_meet_call_urls_only() {
         assert!(google_meet_url_is_open(
@@ -552,7 +517,6 @@ mod tests {
         assert!(!google_meet_url_is_open("https://youtube.com/watch?v=123"));
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn helper_processes_resolve_to_their_owning_app() {
         let mut child = std::process::Command::new("/bin/sleep")

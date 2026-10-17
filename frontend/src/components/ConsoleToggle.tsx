@@ -47,14 +47,6 @@ export function ConsoleToggle() {
     }
   };
 
-  // Only show this component on Windows or macOS
-  if (typeof window !== 'undefined') {
-    const userAgent = window.navigator.userAgent;
-    if (!userAgent.includes('Windows') && !userAgent.includes('Mac')) {
-      return null;
-    }
-  }
-
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
@@ -85,7 +77,7 @@ export function ConsoleToggle() {
         </Button>
       </div>
       <p className="text-sm text-muted-foreground">
-        Show or hide the developer console window. On Windows, this controls the console window. On macOS, this opens Terminal with app logs.
+        Opens or closes a Terminal window streaming the app logs.
       </p>
     </div>
   );

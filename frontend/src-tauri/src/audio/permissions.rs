@@ -9,13 +9,10 @@
 // old check here passed for a user who would get nothing.
 
 use anyhow::Result;
-// Only the macOS paths log: off macOS these functions have nothing to say.
-#[cfg(target_os = "macos")]
 use log::{error, info};
 
 use crate::audio::permission_check::{verify_system_audio, PermissionReport};
 
-#[cfg(target_os = "macos")]
 use std::process::Command;
 
 /// Log where the Audio Capture permission (macOS 14.4+) lives. This reports
@@ -28,7 +25,6 @@ use std::process::Command;
 /// source of an answer is audio arriving, which
 /// `permission_check::verify_system_audio` waits for. Callers that need to know
 /// must ask that instead of reading anything into this `true`.
-#[cfg(target_os = "macos")]
 pub fn check_screen_recording_permission() -> bool {
     info!("ℹ️  Core Audio tap requires Audio Capture permission (macOS 14.4+)");
     info!("📍 The permission dialog appears when the first Core Audio tap is created");
@@ -38,19 +34,12 @@ pub fn check_screen_recording_permission() -> bool {
     true
 }
 
-/// The same non-answer off macOS, where no such permission exists.
-#[cfg(not(target_os = "macos"))]
-pub fn check_screen_recording_permission() -> bool {
-    true // No Audio Capture permission on this platform, so nothing to report
-}
-
 /// Open Privacy & Security so the user can find the Audio Capture row.
 ///
 /// Opening the page is the whole of it. macOS offers no URL that deep-links to
 /// the Audio Capture pane and no API that asks for the grant directly, so the
 /// user has to find the row themselves, and whether they then grant it is not
 /// visible from here.
-#[cfg(target_os = "macos")]
 pub fn request_screen_recording_permission() -> Result<()> {
     info!("🔐 Opening System Settings for Audio Capture permission...");
 
@@ -76,11 +65,6 @@ pub fn request_screen_recording_permission() -> Result<()> {
             Err(anyhow::anyhow!("Failed to open System Settings: {}", e))
         }
     }
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn request_screen_recording_permission() -> Result<()> {
-    Ok(()) // Not required on other platforms
 }
 
 /// Tauri command to log where the Screen Recording (Audio Capture) setting is.
@@ -129,23 +113,5 @@ mod tests {
         // change that gives it a real reading has to come through this test and
         // say what it now checks.
         assert!(check_screen_recording_permission());
-    }
-
-    /// Off macOS the app captures no system audio at all, so onboarding must
-    /// not be handed a grant for it. The macOS path is left to a machine with a
-    /// tap: CI runs `cargo test -p meetily` on headless Ubuntu and nothing here
-    /// may open a device.
-    #[cfg(not(target_os = "macos"))]
-    #[tokio::test]
-    async fn the_onboarding_command_claims_no_grant_off_macos() {
-        use crate::audio::permission_check::PermissionVerdict;
-
-        let report = trigger_system_audio_permission_command()
-            .await
-            .expect("the system audio check reports a verdict rather than an error");
-
-        assert_eq!(report.verdict, PermissionVerdict::Undetermined);
-        assert!(!report.is_authorized());
-        assert!(!report.is_denied());
     }
 }

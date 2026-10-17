@@ -392,12 +392,8 @@ mod tests {
         let elsewhere = tempfile::tempdir().unwrap();
         let real = elsewhere.path().join("audio.mp4");
         std::fs::write(&real, b"media").unwrap();
-        #[cfg(unix)]
         std::os::unix::fs::symlink(&real, meeting.join("audio.mp4")).unwrap();
-        #[cfg(not(unix))]
-        std::fs::copy(&real, meeting.join("audio.mp4")).unwrap();
         let found = audio_for(root.path(), run).unwrap().unwrap();
-        #[cfg(unix)]
         assert_eq!(found, real.canonicalize().unwrap(), "the link is followed");
         assert!(found.is_file());
     }

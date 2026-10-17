@@ -26,9 +26,9 @@ export interface RecordingStoppedPayload {
   error?: string;
 }
 
-// Bound the start invoke: > ~40s Bluetooth mic cold-start and ~90s worst-case
-// Windows device enumeration, but still finite so a hung native start settles
-// the UI into ERROR instead of an eternal STARTING spinner.
+// Bound the start invoke: well above a ~40s Bluetooth mic cold-start, but still
+// finite so a hung native start settles the UI into ERROR instead of an eternal
+// STARTING spinner.
 const START_TIMEOUT_MS = 120000;
 
 // ponytail: on timeout we only reject — no auto stop_recording. Calling stop

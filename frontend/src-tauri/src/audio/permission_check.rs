@@ -50,7 +50,6 @@ const POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// The tap is given less time than the microphone because there is nothing to
 /// wait for beyond the first buffer: no verdict improves by listening longer to
 /// a channel that may legitimately be silent.
-#[cfg(target_os = "macos")]
 const SYSTEM_AUDIO_WAIT: Duration = Duration::from_secs(2);
 
 /// Used when the device is open but will not name itself, so a detail line
@@ -60,9 +59,8 @@ const UNNAMED_DEVICE: &str = "the default microphone";
 /// The sentence recording-start and onboarding both show a user whose
 /// microphone came back denied. One copy, so the two surfaces cannot drift.
 ///
-/// It names no platform's settings app: this check now runs on Windows and
-/// Linux too, where the macOS wording the record-start check used to print
-/// would be a direction to a screen that does not exist.
+/// It names the privacy settings generally rather than a specific System
+/// Settings pane.
 ///
 /// A denial means the stream opened, ran for its whole window and delivered not
 /// one callback, so the permission is the first thing to check but not the only
@@ -291,7 +289,6 @@ fn microphone_verdict(evidence: MicrophoneEvidence, device_name: &str) -> Permis
 }
 
 /// Verify system audio the same way.
-#[cfg(target_os = "macos")]
 pub async fn verify_system_audio() -> PermissionReport {
     use futures_util::StreamExt;
 
@@ -336,31 +333,7 @@ pub async fn verify_system_audio() -> PermissionReport {
     report
 }
 
-/// Verify system audio the same way.
-///
-/// There is no system audio to verify off macOS: `start_system_audio_capture`
-/// bails with "not yet implemented for this platform" before any permission
-/// could be involved. The check this replaces returned a grant here, which was
-/// a claim about a channel the app cannot open at all.
-#[cfg(not(target_os = "macos"))]
-pub async fn verify_system_audio() -> PermissionReport {
-    let report = PermissionReport::undetermined(
-        "System audio capture is not implemented on this platform, so there is no permission to \
-         verify",
-    );
-    info!(
-        "System audio permission check concluded {:?}: {}",
-        report.verdict,
-        report.detail.as_deref().unwrap_or("no further detail")
-    );
-    report
-}
-
 /// The verdict a run of the tap supports.
-///
-/// Compiled off macOS as well so its rule is covered by the tests on every
-/// platform CI runs.
-#[cfg(any(target_os = "macos", test))]
 fn system_audio_verdict(heard_audio: bool) -> PermissionReport {
     if heard_audio {
         return PermissionReport::authorized(Some(
@@ -404,9 +377,8 @@ fn build_observation_stream(
         warn!("Microphone permission check stream error: {}", error)
     };
 
-    // Every sample format the device might hand back is accepted: this check now
-    // runs on Windows and Linux, where an input whose native format is not f32
-    // is ordinary, and a stream that failed to build for that reason would be
+    // Every sample format the device might hand back is accepted: a stream that
+    // failed to build because its native format is not f32 would otherwise be
     // reported as an undetermined permission it has nothing to do with.
     let stream = match config.sample_format() {
         cpal::SampleFormat::F32 => device.build_input_stream(
@@ -570,10 +542,9 @@ mod tests {
     }
 
     #[test]
-    fn the_denied_message_holds_on_every_platform_this_check_now_runs_on() {
-        // It is shown on Windows and Linux too, so it may not send anyone to a
-        // macOS settings pane. It also may not blame a mute: a muted input
-        // delivers zeroes and is reported undetermined, so a user who reads
+    fn the_denied_message_names_no_settings_pane_and_blames_no_mute() {
+        // It may not send anyone to a specific settings pane, and it may not
+        // blame a mute: a muted input delivers zeroes and is reported undetermined, so a user who reads
         // this sentence has a device that delivered nothing at all.
         assert!(!MICROPHONE_DENIED_MESSAGE.contains("System Settings"));
         assert!(!MICROPHONE_DENIED_MESSAGE.contains("Privacy & Security"));

@@ -433,30 +433,13 @@ const LOW_MEMORY_CHECKPOINTS: usize = 1;
 const LOW_MEMORY_CACHE_CONTEXT: u32 = 4096;
 const LOW_MEMORY_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
-/// Total physical memory, when the platform reports it.
+/// Total physical memory, from macOS's `hw.memsize`.
 fn total_memory_bytes() -> Option<u64> {
-    #[cfg(target_os = "macos")]
-    {
-        let output = std::process::Command::new("sysctl")
-            .args(["-n", "hw.memsize"])
-            .output()
-            .ok()?;
-        return String::from_utf8(output.stdout).ok()?.trim().parse().ok();
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
-        let kb: u64 = meminfo
-            .lines()
-            .find(|line| line.starts_with("MemTotal:"))?
-            .split_whitespace()
-            .nth(1)?
-            .parse()
-            .ok()?;
-        return Some(kb * 1024);
-    }
-    #[allow(unreachable_code)]
-    None
+    let output = std::process::Command::new("sysctl")
+        .args(["-n", "hw.memsize"])
+        .output()
+        .ok()?;
+    String::from_utf8(output.stdout).ok()?.trim().parse().ok()
 }
 
 /// Checkpoint count and cached-context cap for this machine.

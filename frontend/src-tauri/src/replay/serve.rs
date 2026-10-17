@@ -803,10 +803,7 @@ mod tests {
         let source = recording.path().join("audio.m4a");
         std::fs::write(&source, (0u8..100).collect::<Vec<u8>>()).unwrap();
         std::fs::write(meeting.join("other.txt"), "secret").unwrap();
-        #[cfg(unix)]
         std::os::unix::fs::symlink(&source, meeting.join("audio.m4a")).unwrap();
-        #[cfg(not(unix))]
-        std::fs::copy(&source, meeting.join("audio.m4a")).unwrap();
         let (path, kind) = run_audio(&run).unwrap();
         assert_eq!(path, source.canonicalize().unwrap());
         assert_eq!(kind, "audio/mp4");

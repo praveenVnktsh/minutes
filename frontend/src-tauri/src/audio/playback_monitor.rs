@@ -2,7 +2,6 @@
 use anyhow::Result;
 use serde::Serialize;
 
-#[cfg(target_os = "macos")]
 use log::debug;
 
 #[derive(Debug, Clone, Serialize)]
@@ -15,23 +14,9 @@ pub struct AudioOutputInfo {
 
 /// Get information about the current audio output device
 pub async fn get_active_audio_output() -> Result<AudioOutputInfo> {
-    #[cfg(target_os = "macos")]
-    {
-        get_macos_output().await
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        get_windows_output().await
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        get_linux_output().await
-    }
+    get_macos_output().await
 }
 
-#[cfg(target_os = "macos")]
 async fn get_macos_output() -> Result<AudioOutputInfo> {
     use cpal::traits::{DeviceTrait, HostTrait};
 
@@ -76,88 +61,6 @@ async fn get_macos_output() -> Result<AudioOutputInfo> {
         "Active output device: {} (Bluetooth: {}, Type: {}, Rate: {:?} Hz)",
         device_name, is_bluetooth, device_type, sample_rate
     );
-
-    Ok(AudioOutputInfo {
-        device_name,
-        is_bluetooth,
-        sample_rate,
-        device_type,
-    })
-}
-
-#[cfg(target_os = "windows")]
-async fn get_windows_output() -> Result<AudioOutputInfo> {
-    use cpal::traits::{DeviceTrait, HostTrait};
-
-    let host = cpal::default_host();
-    let device = host
-        .default_output_device()
-        .ok_or_else(|| anyhow::anyhow!("No default output device found"))?;
-
-    let device_name = device.name().unwrap_or_else(|_| "Unknown".to_string());
-
-    let sample_rate = device
-        .default_output_config()
-        .ok()
-        .map(|config| config.sample_rate().0);
-
-    // Windows Bluetooth detection
-    let name_lower = device_name.to_lowercase();
-    let is_bluetooth = name_lower.contains("bluetooth")
-        || name_lower.contains("wireless")
-        || name_lower.contains("bt ")
-        || name_lower.contains("airpods")
-        || name_lower.contains("wh-")
-        || name_lower.contains("headset");
-
-    let device_type = if name_lower.contains("speaker") {
-        "Speaker".to_string()
-    } else if name_lower.contains("headphone") || name_lower.contains("headset") {
-        "Headphones".to_string()
-    } else {
-        "Unknown".to_string()
-    };
-
-    Ok(AudioOutputInfo {
-        device_name,
-        is_bluetooth,
-        sample_rate,
-        device_type,
-    })
-}
-
-#[cfg(target_os = "linux")]
-async fn get_linux_output() -> Result<AudioOutputInfo> {
-    use cpal::traits::{DeviceTrait, HostTrait};
-
-    let host = cpal::default_host();
-    let device = host
-        .default_output_device()
-        .ok_or_else(|| anyhow::anyhow!("No default output device found"))?;
-
-    let device_name = device.name().unwrap_or_else(|_| "Unknown".to_string());
-
-    let sample_rate = device
-        .default_output_config()
-        .ok()
-        .map(|config| config.sample_rate().0);
-
-    // Linux Bluetooth detection (PulseAudio/PipeWire naming)
-    let name_lower = device_name.to_lowercase();
-    let is_bluetooth = name_lower.contains("bluez")
-        || name_lower.contains("bluetooth")
-        || name_lower.contains("wireless")
-        || name_lower.contains("a2dp")
-        || name_lower.contains("airpods")
-        || name_lower.contains("wh-");
-
-    let device_type = if name_lower.contains("speaker") {
-        "Speaker".to_string()
-    } else if name_lower.contains("headphone") || name_lower.contains("headset") {
-        "Headphones".to_string()
-    } else {
-        "Unknown".to_string()
-    };
 
     Ok(AudioOutputInfo {
         device_name,

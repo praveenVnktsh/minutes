@@ -27,15 +27,9 @@ pub(crate) fn recommend_summary_model(_is_macos: bool, _system_ram_gb: u64) -> &
 
 pub(crate) fn get_recommended_summary_model_for_current_system() -> Result<&'static str, String> {
     let system_ram_gb = get_system_ram_gb()?;
-    let is_macos = cfg!(target_os = "macos");
+    log::info!("System RAM detected: {} GB", system_ram_gb);
 
-    log::info!(
-        "System RAM detected: {} GB, Platform: {}",
-        system_ram_gb,
-        if is_macos { "macOS" } else { "other" }
-    );
-
-    Ok(recommend_summary_model(is_macos, system_ram_gb))
+    Ok(recommend_summary_model(true, system_ram_gb))
 }
 
 // ============================================================================

@@ -202,17 +202,9 @@ impl EnhancedAudioStreamManager {
 /// This can be based on device name, capabilities, or user preferences
 fn should_use_enhanced_system_audio(device: &AudioDevice) -> bool {
     // For now, always use enhanced capture on macOS
-    #[cfg(target_os = "macos")]
-    {
-        // You could add logic here to check device capabilities or user preferences
-        // For example, only use enhanced capture for certain device types
-        true
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        false
-    }
+    // You could add logic here to check device capabilities or user preferences
+    // For example, only use enhanced capture for certain device types
+    true
 }
 
 #[cfg(test)]
@@ -223,10 +215,7 @@ mod tests {
     fn test_should_use_enhanced_system_audio() {
         let device = Arc::new(AudioDevice::new("Test Device".to_string(), super::super::DeviceType::Output));
 
-        #[cfg(target_os = "macos")]
         assert!(should_use_enhanced_system_audio(&device));
 
-        #[cfg(not(target_os = "macos"))]
-        assert!(!should_use_enhanced_system_audio(&device));
     }
 }

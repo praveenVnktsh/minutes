@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Minutes — the meeting recorder that never leaves the room</title>
-<meta name="description" content="Minutes records your meetings, transcribes them on your own machine, and turns the notes you jotted into notes worth keeping. No bot in the call. No cloud. No account. Free and open source for macOS and Windows." />
+<meta name="description" content="Minutes records your meetings, transcribes them on your own machine, and turns the notes you jotted into notes worth keeping. No bot in the call. No cloud. No account. Free and open source for Apple Silicon Macs." />
 <meta name="theme-color" content="#121211" media="(prefers-color-scheme: dark)" />
 <meta name="theme-color" content="#fbfaf7" media="(prefers-color-scheme: light)" />
 <meta property="og:type" content="website" />
@@ -441,7 +441,7 @@ section { position: relative; }
 /* ---------- download ---------- */
 .dl { text-align: center; display: grid; justify-items: center; gap: 22px; }
 .dl h2 { font-size: clamp(44px, 7.5vw, 96px); letter-spacing: -.035em; line-height: .98; max-width: 14ch; }
-.dl-cards { display: grid; grid-template-columns: repeat(2, minmax(0, 340px)); gap: 16px; margin-top: 26px; width: 100%; justify-content: center; }
+.dl-cards { display: grid; grid-template-columns: minmax(0, 340px); gap: 16px; margin-top: 26px; width: 100%; justify-content: center; }
 @media (max-width: 720px) { .dl-cards { grid-template-columns: 1fr; } }
 .dl-card { border: 1px solid var(--hairline); border-radius: 20px; padding: 24px; background: var(--surface-1); text-align: left; display: grid; gap: 14px; text-decoration: none; transition: border-color .25s, transform .25s; }
 .dl-card:hover { border-color: var(--ink-subtle); transform: translateY(-2px); }
@@ -484,7 +484,6 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
   <defs>
     <symbol id="logo" viewBox="0 0 24 24"><rect x="3" y="8" width="2.6" height="8" rx="1.3"/><rect x="7.2" y="8" width="2.6" height="8" rx="1.3"/><circle cx="12" cy="12" r="1.5"/><rect x="14.2" y="8" width="2.6" height="8" rx="1.3"/><rect x="18.4" y="8" width="2.6" height="8" rx="1.3"/></symbol>
     <symbol id="i-apple" viewBox="0 0 24 24"><path fill="currentColor" d="M16.4 12.6c0-2.5 2-3.7 2.1-3.8-1.2-1.7-3-1.9-3.6-2-1.5-.2-3 .9-3.8.9-.8 0-2-.9-3.3-.9-1.7 0-3.3 1-4.2 2.5-1.8 3.1-.5 7.8 1.3 10.3.9 1.2 1.9 2.6 3.2 2.6 1.3-.1 1.8-.8 3.3-.8 1.6 0 2 .8 3.3.8 1.4 0 2.3-1.3 3.1-2.5 1-1.4 1.4-2.8 1.4-2.9 0 0-2.8-1.1-2.8-4.2zM13.9 5.1c.7-.9 1.2-2 1-3.1-1 0-2.2.7-2.9 1.5-.6.7-1.2 1.9-1.1 3 1.1.1 2.3-.6 3-1.4z"/></symbol>
-    <symbol id="i-win" viewBox="0 0 24 24"><path fill="currentColor" d="M3 5.5 10.4 4.5v7H3zm0 13 7.4 1v-7H3zm8.3 1.1L21 21v-8.5h-9.7zm0-15.2v7.1H21V3z"/></symbol>
     <symbol id="i-gh" viewBox="0 0 24 24"><path fill="currentColor" d="M12 1.5a10.5 10.5 0 0 0-3.3 20.5c.5.1.7-.2.7-.5v-1.8c-2.9.6-3.5-1.4-3.5-1.4-.5-1.2-1.2-1.5-1.2-1.5-1-.7.1-.6.1-.6 1 .1 1.6 1.1 1.6 1.1.9 1.6 2.5 1.1 3.1.9.1-.7.4-1.1.7-1.4-2.3-.3-4.8-1.2-4.8-5.2 0-1.1.4-2.1 1.1-2.8-.1-.3-.5-1.4.1-2.8 0 0 .9-.3 2.9 1.1a10 10 0 0 1 5.3 0c2-1.4 2.9-1.1 2.9-1.1.6 1.4.2 2.5.1 2.8.7.8 1.1 1.7 1.1 2.8 0 4-2.5 4.9-4.8 5.2.4.3.7 1 .7 1.9v2.9c0 .3.2.6.7.5A10.5 10.5 0 0 0 12 1.5z"/></symbol>
     <symbol id="i-down" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 4v12m0 0 5-5m-5 5-5-5M5 20h14"/></symbol>
     <symbol id="i-mic" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></g></symbol>
@@ -535,7 +534,7 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
     <div class="wrap">
       <div class="hero-copy">
         <a class="pill reveal" href="https://github.com/praveenvnktsh/minutes/releases/latest">
-          <span class="dot"><span class="rec-dot"></span>New</span> Free &amp; open source for macOS and Windows
+          <span class="dot"><span class="rec-dot"></span>New</span> Free &amp; open source for Apple Silicon Macs
         </a>
         <h1 class="reveal d1"><span style="white-space:nowrap">Every word, kept.</span><br /><span class="soft">Nothing sent.</span></h1>
         <p class="lede reveal d2">Minutes records your meetings, transcribes them on your own machine, and turns the notes you jotted into notes worth keeping. No bot in the call. No cloud. No account.</p>
@@ -613,14 +612,14 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
         <span class="ticker-item"><b>$0</b> per month, forever</span><i>✦</i>
         <span class="ticker-item"><b>Mic + system</b> audio, mixed</span><i>✦</i>
         <span class="ticker-item"><b>Whisper</b> &amp; <b>Parakeet</b> on-device</span><i>✦</i>
-        <span class="ticker-item"><b>Metal · CUDA · Vulkan</b> acceleration</span><i>✦</i>
+        <span class="ticker-item"><b>Metal · Core ML</b> acceleration</span><i>✦</i>
         <span class="ticker-item"><b>Works</b> in airplane mode</span><i>✦</i>
         <span aria-hidden="true" class="ticker-item"><b>0 bytes</b> of audio uploaded</span><i aria-hidden="true">✦</i>
         <span aria-hidden="true" class="ticker-item"><b>0 bots</b> joining your calls</span><i aria-hidden="true">✦</i>
         <span aria-hidden="true" class="ticker-item"><b>$0</b> per month, forever</span><i aria-hidden="true">✦</i>
         <span aria-hidden="true" class="ticker-item"><b>Mic + system</b> audio, mixed</span><i aria-hidden="true">✦</i>
         <span aria-hidden="true" class="ticker-item"><b>Whisper</b> &amp; <b>Parakeet</b> on-device</span><i aria-hidden="true">✦</i>
-        <span aria-hidden="true" class="ticker-item"><b>Metal · CUDA · Vulkan</b> acceleration</span><i aria-hidden="true">✦</i>
+        <span aria-hidden="true" class="ticker-item"><b>Metal · Core ML</b> acceleration</span><i aria-hidden="true">✦</i>
         <span aria-hidden="true" class="ticker-item"><b>Works</b> in airplane mode</span><i aria-hidden="true">✦</i>
       </div>
     </div>
@@ -733,8 +732,8 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
 
         <article class="card reveal">
           <h3>Fast on your hardware.</h3>
-          <p>GPU acceleration on every platform, with a CPU fallback.</p>
-          <div class="vis gpu" aria-hidden="true"><span class="hot">Metal</span><span>Core ML</span><span>CUDA</span><span>Vulkan</span><span>CPU</span></div>
+          <p>Metal and Core ML put transcription on the Apple Silicon GPU.</p>
+          <div class="vis gpu" aria-hidden="true"><span class="hot">Metal</span><span>Core ML</span><span>Apple Silicon</span></div>
         </article>
 
         <article class="card reveal d1">
@@ -848,7 +847,7 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
       <div class="stack reveal">
         <div><small>CORE</small><b>Rust</b><span>Audio capture, mixing, inference and storage in a Tauri 2 core.</span></div>
         <div><small>SPEECH</small><b>whisper.cpp · Parakeet</b><span>Two local speech engines, voice-activity filtered.</span></div>
-        <div><small>ACCELERATION</small><b>Metal · CUDA · Vulkan</b><span>Core ML on Apple Silicon, GPUs everywhere else.</span></div>
+        <div><small>ACCELERATION</small><b>Metal · Core ML</b><span>Transcription and summaries on the Apple Silicon GPU.</span></div>
         <div><small>STORAGE</small><b>SQLite</b><span>One local database file. Yours to back up, move or delete.</span></div>
       </div>
     </div>
@@ -865,11 +864,6 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
           <span class="os"><svg><use href="#i-apple"/></svg>macOS</span>
           <small>Apple Silicon · macOS 13 or later</small>
           <span class="get"><svg><use href="#i-down"/></svg>minutes-macos-arm64.dmg</span>
-        </a>
-        <a class="dl-card reveal d1" id="dl-win" href="https://github.com/praveenvnktsh/minutes/releases/latest/download/minutes-windows-x64-setup.exe">
-          <span class="os"><svg><use href="#i-win"/></svg>Windows</span>
-          <small>x64 installer · <span style="text-decoration:underline" id="msi">.msi also available</span></small>
-          <span class="get"><svg><use href="#i-down"/></svg>minutes-windows-x64-setup.exe</span>
         </a>
       </div>
       <p class="dl-note reveal">Minutes isn't notarized by Apple yet, so macOS may warn on first launch. Right-click the app and choose <b>Open</b>, or run <code>xattr -dr com.apple.quarantine /Applications/minutes.app</code> once. Updates after that are signed and automatic.</p>
@@ -918,19 +912,15 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
   const nav = $('#nav');
   addEventListener('scroll', () => nav.classList.toggle('scrolled', scrollY > 8), { passive: true });
 
-  /* ---------- OS-aware download button ---------- */
+  /* ---------- Mac-aware download button (Minutes is Mac-only) ---------- */
   const ua = navigator.userAgent;
-  const os = /Mac/.test(ua) && !/iPhone|iPad/.test(ua) ? 'mac' : /Win/.test(ua) ? 'win' : null;
-  if (os) {
+  if (/Mac/.test(ua) && !/iPhone|iPad/.test(ua)) {
     const a = $('.dl-primary');
-    a.href = $(os === 'mac' ? '#dl-mac' : '#dl-win').href;
-    $('.dl-label', a).textContent = os === 'mac' ? 'Download for macOS' : 'Download for Windows';
-    $('.os-icon use', a).setAttribute('href', os === 'mac' ? '#i-apple' : '#i-win');
-    const card = $(os === 'mac' ? '#dl-mac' : '#dl-win');
-    card.classList.add('primary');
-    if (os === 'win') card.parentNode.prepend(card);
+    a.href = $('#dl-mac').href;
+    $('.dl-label', a).textContent = 'Download for macOS';
+    $('.os-icon use', a).setAttribute('href', '#i-apple');
+    $('#dl-mac').classList.add('primary');
   }
-  $('#msi').addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); location.href = 'https://github.com/praveenvnktsh/minutes/releases/latest/download/minutes-windows-x64.msi'; });
 
   /* ---------- reveal on scroll ---------- */
   const io = new IntersectionObserver(es => es.forEach(e => { if (e.isIntersecting) { e.target.classList.add('in'); io.unobserve(e.target); } }), { rootMargin: '0px 0px -8% 0px' });

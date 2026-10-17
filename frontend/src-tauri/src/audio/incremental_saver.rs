@@ -116,14 +116,6 @@ fn run_ffmpeg_concat(list_file: &Path, output: &Path) -> Result<()> {
             .ok_or_else(|| anyhow!("Invalid output path"))?,
     ]);
 
-    // Hide console window on Windows to prevent CMD popup during finalization
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
-
     let ffmpeg_output = command
         .output()
         .map_err(|e| anyhow!("Failed to run FFmpeg: {}", e))?;

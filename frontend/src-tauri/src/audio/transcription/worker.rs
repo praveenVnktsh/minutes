@@ -76,7 +76,6 @@ fn next_sequence_id_if_not_duplicate(
 /// event, drop duplicates, draw a sequence id, and send `transcript-update`.
 /// Times are on the recording timeline, already shifted by any resume offset.
 /// Returns whether the segment was emitted. Used by the streaming worker.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn emit_final_segment<R: Runtime>(
     app: &AppHandle<R>,
     deduper: &mut TranscriptDeduper,

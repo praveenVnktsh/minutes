@@ -5,12 +5,10 @@ import { act, create } from 'react-test-renderer'
 // Restore the real modules afterwards so these mocks cannot leak into a later file.
 const originalCore = { ...(await import('@tauri-apps/api/core')) }
 const originalConfig = { ...(await import('@/contexts/ConfigContext')) }
-const originalPlatform = { ...(await import('@/hooks/usePlatform')) }
 const originalUpdateSettings = { ...(await import('@/components/UpdateSettings')) }
 afterAll(() => {
   mock.module('@tauri-apps/api/core', () => originalCore)
   mock.module('@/contexts/ConfigContext', () => originalConfig)
-  mock.module('@/hooks/usePlatform', () => originalPlatform)
   mock.module('@/components/UpdateSettings', () => originalUpdateSettings)
 })
 
@@ -62,10 +60,6 @@ mock.module('@/contexts/ConfigContext', () => ({
     loadPreferences: async () => {},
     updateNotificationSettings: async () => {},
   }),
-}))
-mock.module('@/hooks/usePlatform', () => ({
-  ...originalPlatform,
-  usePlatform: () => 'linux',
 }))
 // Stubbed so this file tests the shortcuts list PreferenceSettings owns, not update-check wiring,
 // which has no bearing on the pause shortcut and would otherwise need its own provider mocked.

@@ -1,5 +1,7 @@
 # Contributing to Minutes
 
+Minutes is a Mac-only app (Apple Silicon, macOS 13+). Changes that add Windows or Linux support are out of scope.
+
 Issues and pull requests are welcome at [github.com/praveenvnktsh/minutes](https://github.com/praveenvnktsh/minutes).
 
 ## Feedback from the App
@@ -42,13 +44,7 @@ bash scripts/pr-check.sh
 
 It typechecks, lints, tests and builds the frontend, then stages the `llama-helper` sidecar and runs the Rust tests. The order matters: the Rust app embeds the built frontend at compile time, and the Tauri build refuses to compile until the sidecar exists. foreman's `board.toml` uses the same script as its test command, so a change that passes it locally is a change CI will pass.
 
-It needs `pnpm`, `bun` and a Rust toolchain on `PATH`. On Linux it also needs the Tauri system libraries:
-
-```bash
-sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libasound2-dev libopenblas-dev libx11-dev libxtst-dev libxrandr-dev
-```
-
-CI runs it CPU-only on Ubuntu 22.04. On your own machine you can add a GPU feature, such as `cargo test -p meetily --features metal` on macOS. See [docs/BUILDING.md](docs/BUILDING.md) for platform setup.
+It needs an Apple Silicon Mac, plus `pnpm`, `bun` and a Rust toolchain on `PATH`. Minutes is Mac-only (macOS 13+), and CI runs the same script on a `macos-latest` runner. See [docs/BUILDING.md](docs/BUILDING.md) for setup.
 
 ## License
 

@@ -23,33 +23,6 @@ if (!version) {
   process.exit(1);
 }
 
-// Detect system architecture for macOS builds
-function detectMacOSArchitecture(bundleDir) {
-  // Check if bundle directory path contains architecture hints
-  if (bundleDir.includes('aarch64') || bundleDir.includes('arm64')) {
-    return 'darwin-aarch64';
-  }
-  if (bundleDir.includes('x86_64') || bundleDir.includes('x64')) {
-    return 'darwin-x86_64';
-  }
-
-  // Try to detect from system architecture
-  try {
-    const os = require('os');
-    const arch = os.arch();
-    if (arch === 'arm64') {
-      return 'darwin-aarch64';
-    } else if (arch === 'x64') {
-      return 'darwin-x86_64';
-    }
-  } catch (e) {
-    // Fallback if detection fails
-  }
-
-  // Default fallback - will be overridden by filename detection if possible
-  return null;
-}
-
 // Remove 'v' prefix from version if present
 const versionClean = version.replace(/^v/, '');
 const versionDir = `v${versionClean}`;
@@ -79,12 +52,7 @@ const bundleFiles = files.filter(filename => {
   // Only process files (not directories) and skip signature files
   return stats.isFile() && !filename.endsWith('.sig') && (
     filename.endsWith('.tar.gz') ||
-    filename.endsWith('.zip') ||
-    filename.endsWith('.dmg') ||
-    filename.endsWith('.exe') ||
-    filename.endsWith('.msi') ||
-    filename.endsWith('.AppImage') ||
-    filename.endsWith('.deb')
+    filename.endsWith('.dmg')
   );
 });
 
@@ -92,27 +60,9 @@ bundleFiles.forEach(filename => {
   const name = filename.toLowerCase();
   let platform = null;
 
-  // Detect platform from filename
-  // Check for tar.gz bundles first (most common for macOS/Linux)
+  // Minutes is Mac-only (Apple Silicon), so every macOS bundle is darwin-aarch64.
   if (name.includes('darwin') || name.includes('macos') || name.includes('.dmg') || (name.includes('.app') && name.includes('.tar.gz'))) {
-    if (name.includes('aarch64') || name.includes('arm64') || name.includes('m1') || name.includes('m2')) {
-      platform = 'darwin-aarch64';
-    } else if (name.includes('x86_64') || name.includes('x64') || name.includes('intel')) {
-      platform = 'darwin-x86_64';
-    } else {
-      // Try to detect from system/bundle directory if filename doesn't specify
-      const detectedArch = detectMacOSArchitecture(bundleDir);
-      if (detectedArch) {
-        platform = detectedArch;
-      } else {
-        // Default to aarch64 for modern macOS builds (most common)
-        platform = 'darwin-aarch64';
-      }
-    }
-  } else if (name.includes('windows') || name.includes('.exe') || name.includes('.msi') || (name.includes('.zip') && !name.includes('darwin') && !name.includes('macos'))) {
-    platform = 'windows-x86_64';
-  } else if (name.includes('linux') || name.includes('.appimage') || name.includes('.deb') || (name.includes('.tar.gz') && !name.includes('darwin') && !name.includes('macos'))) {
-    platform = 'linux-x86_64';
+    platform = 'darwin-aarch64';
   }
 
   if (platform && !platforms[platform]) {
@@ -145,8 +95,8 @@ bundleFiles.forEach(filename => {
 });
 
 if (Object.keys(platforms).length === 0) {
-  console.error('Error: No platform bundles found in the directory');
-  console.error('Expected files with names containing: darwin, macos, windows, linux, .exe, .dmg, .app, .AppImage');
+  console.error('Error: No macOS bundles found in the directory');
+  console.error('Expected macOS bundles: .app.tar.gz or .dmg');
   process.exit(1);
 }
 

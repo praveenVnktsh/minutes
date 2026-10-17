@@ -13,17 +13,6 @@ fn detect_vram_gb() -> f32 {
         }
     }
 
-    #[cfg(feature = "cuda")]
-    {
-        // NVIDIA CUDA: Query device memory
-        if let Some(vram) = detect_cuda_vram() {
-            eprintln!("CUDA VRAM detected: {:.2} GB", vram);
-            return vram;
-        }
-    }
-
-    // TODO: Vulkan VRAM detection
-
     eprintln!("VRAM detection not available, using conservative estimate");
     4.0 // Conservative fallback
 }
@@ -41,22 +30,6 @@ fn detect_metal_vram() -> Option<f32> {
                     // Assume GPU can use ~60% of system memory on Apple Silicon
                     return Some(gb * 0.6);
                 }
-            }
-        }
-    }
-    None
-}
-
-#[cfg(feature = "cuda")]
-fn detect_cuda_vram() -> Option<f32> {
-    // Use nvidia-smi to query VRAM
-    if let Ok(output) = std::process::Command::new("nvidia-smi")
-        .args(&["--query-gpu=memory.free", "--format=csv,noheader,nounits"])
-        .output()
-    {
-        if let Ok(stdout) = String::from_utf8(output.stdout) {
-            if let Ok(mb) = stdout.trim().parse::<f32>() {
-                return Some(mb / 1024.0); // Convert MB to GB
             }
         }
     }

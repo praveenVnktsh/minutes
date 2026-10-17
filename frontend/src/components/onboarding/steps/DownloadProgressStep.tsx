@@ -57,7 +57,6 @@ interface DownloadCardProps {
 export function DownloadProgressStep() {
   const {
     goNext,
-    goToStep,
     selectedSummaryModel,
     parakeetDownloaded,
     setParakeetDownloaded,
@@ -73,8 +72,6 @@ export function DownloadProgressStep() {
     cancelParakeetDownload,
     cancelSummaryDownload,
   } = useOnboarding();
-
-  const [isMac, setIsMac] = useState(false);
 
   // The transfers are authorised by the click on the previous screen, so on arrival a
   // download is either already running, already finished, or was never started at all —
@@ -204,20 +201,6 @@ export function DownloadProgressStep() {
       });
     }
   };
-
-  // Detect platform on mount
-  useEffect(() => {
-    const checkPlatform = async () => {
-      try {
-        const { platform } = await import('@tauri-apps/plugin-os');
-        setIsMac(platform() === 'macos');
-      } catch (e) {
-        setIsMac(navigator.userAgent.includes('Mac'));
-      }
-    };
-
-    checkPlatform();
-  }, []);
 
   // The summary model name resolves asynchronously and may still have been empty when the
   // previous screen fired the downloads, so this catches up once it arrives. It starts the
@@ -370,13 +353,8 @@ export function DownloadProgressStep() {
       });
     }
 
-    if (isMac) {
-      // macOS: Go to Permissions step next
-      goNext();
-    } else {
-      // Non-macOS: Permissions step doesn't render here, so jump straight to the mic check
-      goToStep(5);
-    }
+    // Permissions come next
+    goNext();
   };
 
   const renderDownloadCard = ({
@@ -566,7 +544,7 @@ export function DownloadProgressStep() {
       title="Getting things ready"
       description="Next, a quick check that Minutes can hear you."
       step={3}
-      totalSteps={isMac ? 5 : 4}
+      totalSteps={5}
     >
       <div className="flex flex-col items-center space-y-6">
         {/* Download Cards */}

@@ -38,18 +38,7 @@ impl InputDeviceKind {
         info!("🔍 Detecting device type for: '{}'", device_name);
 
         // Layer 1: Platform-specific native detection (highest accuracy)
-        #[cfg(target_os = "macos")]
         if let Some(kind) = Self::detect_macos_native(device_name) {
-            return kind;
-        }
-
-        #[cfg(target_os = "windows")]
-        if let Some(kind) = Self::detect_windows_native(device_name) {
-            return kind;
-        }
-
-        #[cfg(target_os = "linux")]
-        if let Some(kind) = Self::detect_linux_native(device_name) {
             return kind;
         }
 
@@ -239,7 +228,6 @@ impl InputDeviceKind {
 // ============================================================================
 
 // macOS: Core Audio Transport Type API
-#[cfg(target_os = "macos")]
 impl InputDeviceKind {
     /// Detect device type using macOS Core Audio Transport Type API
     ///
@@ -292,125 +280,6 @@ impl InputDeviceKind {
                     );
                 }
             }
-        }
-
-        None // Fall through to heuristic detection
-    }
-}
-
-// Windows: WASAPI Device Properties
-#[cfg(target_os = "windows")]
-impl InputDeviceKind {
-    /// Detect device type using Windows WASAPI naming conventions
-    ///
-    /// Windows WASAPI exposes Bluetooth devices with specific naming patterns.
-    /// This method checks for common Windows Bluetooth device prefixes.
-    fn detect_windows_native(device_name: &str) -> Option<Self> {
-        let name_lower = device_name.to_lowercase();
-
-        // Windows-specific Bluetooth device naming patterns
-        // WASAPI exposes Bluetooth devices with specific prefixes
-
-        // Pattern 1: "Bluetooth Audio (Device Name)"
-        if name_lower.starts_with("bluetooth audio") {
-            info!(
-                "✅ Windows WASAPI: Bluetooth Audio prefix detected for '{}'",
-                device_name
-            );
-            return Some(InputDeviceKind::Bluetooth);
-        }
-
-        // Pattern 2: "Bluetooth Hands-Free Audio"
-        if name_lower.contains("bluetooth hands-free") {
-            info!(
-                "✅ Windows WASAPI: Bluetooth Hands-Free detected for '{}'",
-                device_name
-            );
-            return Some(InputDeviceKind::Bluetooth);
-        }
-
-        // Pattern 3: "Bluetooth Stereo Audio"
-        if name_lower.contains("bluetooth stereo") {
-            info!(
-                "✅ Windows WASAPI: Bluetooth Stereo detected for '{}'",
-                device_name
-            );
-            return Some(InputDeviceKind::Bluetooth);
-        }
-
-        // Pattern 4: USB Audio devices
-        if name_lower.contains("usb audio") {
-            info!(
-                "✅ Windows WASAPI: USB Audio detected for '{}'",
-                device_name
-            );
-            return Some(InputDeviceKind::Wired);
-        }
-
-        // Pattern 5: Realtek, Conexant, etc. (built-in audio chips)
-        if name_lower.contains("realtek") || name_lower.contains("conexant") {
-            info!(
-                "✅ Windows WASAPI: Built-in audio detected for '{}'",
-                device_name
-            );
-            return Some(InputDeviceKind::Wired);
-        }
-
-        None // Fall through to heuristic detection
-    }
-}
-
-// Linux: BlueZ/PulseAudio Device Hints
-#[cfg(target_os = "linux")]
-impl InputDeviceKind {
-    /// Detect device type using Linux BlueZ/PulseAudio naming conventions
-    ///
-    /// Linux exposes Bluetooth devices through BlueZ with specific naming patterns.
-    /// PulseAudio also includes codec information that helps identify Bluetooth devices.
-    fn detect_linux_native(device_name: &str) -> Option<Self> {
-        let name_lower = device_name.to_lowercase();
-
-        // Pattern 1: BlueZ devices (most common)
-        // Example: "bluez_sink.XX_XX_XX_XX_XX_XX.a2dp_sink"
-        if name_lower.contains("bluez") {
-            info!("✅ Linux: BlueZ device detected for '{}'", device_name);
-            return Some(InputDeviceKind::Bluetooth);
-        }
-
-        // Pattern 2: Explicit "bluetooth" in name
-        if name_lower.contains("bluetooth") {
-            info!(
-                "✅ Linux: 'bluetooth' keyword detected for '{}'",
-                device_name
-            );
-            return Some(InputDeviceKind::Bluetooth);
-        }
-
-        // Pattern 3: A2DP codec identifier (Bluetooth audio profile)
-        if name_lower.contains(".a2dp") {
-            info!("✅ Linux: A2DP codec detected for '{}'", device_name);
-            return Some(InputDeviceKind::Bluetooth);
-        }
-
-        // Pattern 4: HFP/HSP codec identifier (Bluetooth headset profile)
-        if name_lower.contains(".hfp") || name_lower.contains(".hsp") {
-            info!("✅ Linux: HFP/HSP codec detected for '{}'", device_name);
-            return Some(InputDeviceKind::Bluetooth);
-        }
-
-        // Pattern 5: USB devices
-        if name_lower.contains("usb audio") || name_lower.starts_with("usb") {
-            info!("✅ Linux: USB audio detected for '{}'", device_name);
-            return Some(InputDeviceKind::Wired);
-        }
-
-        // Pattern 6: HDA Intel (built-in)
-        if name_lower.contains("hda intel") {
-            info!(
-                "✅ Linux: HDA Intel (built-in) detected for '{}'",
-                device_name
-            );
-            return Some(InputDeviceKind::Wired);
         }
 
         None // Fall through to heuristic detection

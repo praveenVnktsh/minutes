@@ -46,11 +46,7 @@ use std::path::{Path, PathBuf};
 /// one folder up (`target/release` from `target/release/examples`), or in the
 /// workspace's `target/release` / `target/debug`.
 pub fn find_llama_helper(exe: Option<&Path>) -> Option<PathBuf> {
-    let name = if cfg!(windows) {
-        "llama-helper.exe"
-    } else {
-        "llama-helper"
-    };
+    let name = "llama-helper";
     let mut candidates = Vec::new();
     if let Some(dir) = exe.and_then(Path::parent) {
         candidates.push(dir.join(name));
@@ -90,11 +86,7 @@ mod tests {
         let target = tempfile::tempdir().unwrap();
         let examples = target.path().join("examples");
         std::fs::create_dir(&examples).unwrap();
-        let name = if cfg!(windows) {
-            "llama-helper.exe"
-        } else {
-            "llama-helper"
-        };
+        let name = "llama-helper";
         std::fs::write(target.path().join(name), "").unwrap();
         let found = find_llama_helper(Some(&examples.join("replay"))).unwrap();
         assert_eq!(found, target.path().join(name));

@@ -14,7 +14,7 @@ name: "PR Check"
 # so does anything else that reads it, so do not rename it casually.
 #
 # The sequence itself is scripts/pr-check.sh; this file only provisions the
-# runner for it (toolchains, system libraries, caches).
+# runner for it (toolchains and caches).
 
 on:
   pull_request:
@@ -36,10 +36,9 @@ permissions:
 jobs:
   pr-check:
     name: PR Check
-    # 22.04, not 24.04: build.yml pins exact libwebkit2gtk versions on 24.04
-    # and installs them unpinned on 22.04. The unpinned list is the one that
-    # does not break the day the archive moves on.
-    runs-on: ubuntu-22.04
+    # Minutes is Mac-only (Apple Silicon); the Rust crate refuses to compile
+    # for any other target, so the check runs on an Apple Silicon runner.
+    runs-on: macos-latest
     timeout-minutes: 90
     steps:
       - name: Checkout
@@ -62,16 +61,9 @@ jobs:
           cache-dependency-path: frontend/pnpm-lock.yaml
 
       # `pnpm test` runs scripts/test-each.mjs, which runs each test file in its
-      # own `bun test` process. See that file for why a single `bun test` passed
-      # on macOS and failed here.
+      # own `bun test` process. See that file for why.
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
-
-      # The unpinned 22.04 list from build.yml.
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libasound2-dev libopenblas-dev libx11-dev libxtst-dev libxrandr-dev
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable

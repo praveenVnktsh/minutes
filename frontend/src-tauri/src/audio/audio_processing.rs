@@ -250,7 +250,6 @@ impl LoudnessNormalizer {
 /// - 10-15 dB noise reduction in typical office/home environments
 /// - Preserves speech quality and intelligibility
 /// - Low latency (~10ms per frame)
-/// - Cross-platform (works on macOS, Windows, Linux)
 pub struct NoiseSuppressionProcessor {
     denoiser: DenoiseState<'static>,
     frame_buffer: Vec<f32>,

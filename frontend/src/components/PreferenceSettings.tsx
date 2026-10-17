@@ -7,19 +7,16 @@ import { invoke } from "@tauri-apps/api/core"
 import { toast } from "sonner"
 import Analytics from "@/lib/analytics"
 import { useConfig, NotificationSettings } from "@/contexts/ConfigContext"
-import { usePlatform } from "@/hooks/usePlatform"
 import { UpdateSettings } from "./UpdateSettings"
 import { SaveFeedback, type SaveFeedbackState } from "./ui/status-feedback"
 
 const OS_MODIFIER_KEYS = /^(Meta|Control|Alt|Shift)/
 
 /** Build a global-hotkey string (e.g. "CmdOrCtrl+Shift+KeyR") from a key event. */
-function eventToShortcut(event: KeyboardEvent, isMac: boolean): string | null {
-  const primary = isMac ? event.metaKey : event.ctrlKey;
-  const secondary = isMac ? event.ctrlKey : event.metaKey;
+function eventToShortcut(event: KeyboardEvent): string | null {
   const mods: string[] = [];
-  if (primary) mods.push("CmdOrCtrl");
-  else if (secondary) mods.push(isMac ? "Control" : "Super");
+  if (event.metaKey) mods.push("CmdOrCtrl");
+  else if (event.ctrlKey) mods.push("Control");
   if (event.altKey) mods.push("Alt");
   if (event.shiftKey) mods.push("Shift");
 
@@ -31,19 +28,18 @@ function eventToShortcut(event: KeyboardEvent, isMac: boolean): string | null {
 }
 
 /** Render a stored shortcut as a friendly label. */
-function displayShortcut(value: string, isMac: boolean): string {
+function displayShortcut(value: string): string {
   if (!value) return "Not set";
   return value
     .split("+")
     .map((part) => {
-      if (part === "CmdOrCtrl") return isMac ? "⌘" : "Ctrl";
-      if (part === "Super") return isMac ? "⌘" : "Win";
+      if (part === "CmdOrCtrl" || part === "Super") return "⌘";
       if (part === "Control") return "Ctrl";
-      if (part === "Alt") return isMac ? "⌥" : "Alt";
-      if (part === "Shift") return isMac ? "⇧" : "Shift";
+      if (part === "Alt") return "⌥";
+      if (part === "Shift") return "⇧";
       return part.replace(/^Key/, "").replace(/^Digit/, "");
     })
-    .join(isMac ? "" : "+");
+    .join("");
 }
 
 export function PreferenceSettings() {
@@ -59,8 +55,6 @@ export function PreferenceSettings() {
   const [isInitialLoad, setIsInitialLoad] = useState(true);
   const [previousNotificationsEnabled, setPreviousNotificationsEnabled] = useState<boolean | null>(null);
   const hasTrackedViewRef = useRef(false);
-  const platform = usePlatform();
-  const isMac = platform === 'macos';
   const [shortcuts, setShortcuts] = useState<{ recording: string; window: string; pause: string } | null>(null);
   const [recordingKey, setRecordingKey] = useState<'recording' | 'window' | 'pause' | null>(null);
   const [shortcutSaveState, setShortcutSaveState] = useState<SaveFeedbackState | null>(null);
@@ -104,7 +98,7 @@ export function PreferenceSettings() {
         setRecordingKey(null);
         return;
       }
-      const value = eventToShortcut(event, isMac);
+      const value = eventToShortcut(event);
       if (!value || shortcutSavingRef.current) return;
       const previous = shortcuts;
       const next = { ...previous, [recordingKey]: value };
@@ -113,7 +107,7 @@ export function PreferenceSettings() {
     };
     window.addEventListener('keydown', onKeyDown, true);
     return () => window.removeEventListener('keydown', onKeyDown, true);
-  }, [recordingKey, shortcuts, isMac, saveShortcuts]);
+  }, [recordingKey, shortcuts, saveShortcuts]);
 
   const clearShortcut = (which: 'recording' | 'window' | 'pause') => {
     if (!shortcuts) return;
@@ -291,7 +285,7 @@ export function PreferenceSettings() {
                       : 'border-hairline bg-surface-2 text-ink-muted hover:text-ink'
                   }`}
                 >
-                  {recordingKey === key ? 'Press keys…' : displayShortcut(shortcuts?.[key] ?? '', isMac)}
+                  {recordingKey === key ? 'Press keys…' : displayShortcut(shortcuts?.[key] ?? '')}
                 </button>
                 {shortcuts?.[key] && (
                   <button

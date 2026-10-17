@@ -213,8 +213,6 @@ impl SortformerDiarizer {
     /// Loads the model on the CPU execution provider and checks that it exposes
     /// the inputs and outputs this runner feeds and reads.
     pub fn new(model_path: &Path) -> Result<Self> {
-        crate::ensure_onnx_runtime_available()
-            .context("ONNX Runtime is unavailable, so Sortformer diarization cannot run")?;
         ensure!(
             model_path.is_file(),
             "Sortformer model not found at {}",

@@ -21,7 +21,7 @@ assignees: ''
 3. [And so on...]
 
 ## Environment
-- OS: [e.g., macOS, Windows, Linux]
+- macOS version: [e.g., macOS 15.1]
 - Browser: [e.g., Chrome, Firefox, Safari]
 - Version: [e.g., 1.0.0]
 - Node Version: [e.g., 18.0.0]

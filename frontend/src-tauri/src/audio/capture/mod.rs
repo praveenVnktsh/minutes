@@ -4,7 +4,6 @@ pub mod backend_config;
 pub mod microphone;
 pub mod system;
 
-#[cfg(target_os = "macos")]
 pub mod core_audio;
 
 // Re-export capture functionality
@@ -13,7 +12,6 @@ pub use system::{
     SystemAudioCapture, SystemAudioStream,
 };
 
-#[cfg(target_os = "macos")]
 pub use core_audio::{CoreAudioCapture, CoreAudioStream};
 
 // Re-export backend configuration

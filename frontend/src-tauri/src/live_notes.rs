@@ -43,11 +43,6 @@ fn write_document(path: &Path, document: &LiveNotesDocument) -> Result<(), Strin
     let temporary_path = path.with_extension("json.tmp");
     std::fs::write(&temporary_path, payload)
         .map_err(|error| format!("Could not save live notes: {error}"))?;
-    #[cfg(target_os = "windows")]
-    if path.exists() {
-        std::fs::remove_file(path)
-            .map_err(|error| format!("Could not replace previous live notes: {error}"))?;
-    }
     std::fs::rename(&temporary_path, path)
         .map_err(|error| format!("Could not finalize live notes: {error}"))?;
     Ok(())

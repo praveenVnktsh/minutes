@@ -17,7 +17,6 @@ import { BYTES_PER_MIB } from '@/lib/download-display';
 import {
   LIVE_MODEL_DISPLAY_NAME,
   LIVE_MODEL_DOWNLOAD_PROGRESS_EVENT,
-  liveModelSupported,
   liveTranscriptionApi,
   type LiveModelChoice,
   type LiveModelDownloadProgressEvent,
@@ -122,8 +121,7 @@ export function LiveTranscriptionModelSettings() {
     }
   }, [refresh]);
 
-  const supported = liveModelSupported(settings);
-  const liveModel = supported ? settings?.liveModel ?? 'nemotron-streaming' : 'chunked';
+  const liveModel = settings?.liveModel ?? 'nemotron-streaming';
   const sizeMb = Math.round((settings?.liveModelStatus.sizeBytes ?? 0) / BYTES_PER_MIB);
 
   return (
@@ -143,19 +141,13 @@ export function LiveTranscriptionModelSettings() {
               <SelectValue placeholder="Select live model" />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="nemotron-streaming" disabled={!supported}>
-                {LIVE_MODEL_DISPLAY_NAME} {supported ? '(Recommended)' : '(macOS only)'}
+              <SelectItem value="nemotron-streaming">
+                {LIVE_MODEL_DISPLAY_NAME} (Recommended)
               </SelectItem>
               <SelectItem value="chunked">Final transcript model, in chunks</SelectItem>
             </SelectContent>
           </Select>
         </div>
-        {!supported && (
-          <p className="mx-1 mt-2 text-xs text-ink-muted">
-            {LIVE_MODEL_DISPLAY_NAME} is not available on this platform yet, so live text uses the
-            final transcript model.
-          </p>
-        )}
         {liveModel === 'nemotron-streaming' && (
           <div className="mt-4">
             <TranscriptModelCard

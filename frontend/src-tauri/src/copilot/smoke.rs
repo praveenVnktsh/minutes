@@ -284,7 +284,6 @@ fn copilot_latency_and_prefix_reuse_on_the_builtin_model() {
     }
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 #[ignore]
 fn live_transcription_rtf_with_copilot_running() {
@@ -412,7 +411,6 @@ fn live_transcription_rtf_with_copilot_running() {
 }
 
 /// 16 kHz mono PCM16 WAV samples.
-#[cfg(target_os = "macos")]
 fn read_wav_16k(path: &std::path::Path) -> Vec<f32> {
     let bytes = std::fs::read(path).unwrap();
     let mut offset = 12;

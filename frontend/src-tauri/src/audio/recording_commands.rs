@@ -553,9 +553,8 @@ fn resolve_mic_or_default<R: Runtime>(
 /// Audio" in the UI) -> default output. Returns `None` only when no output
 /// device exists — system audio is optional, mic-only recording proceeds.
 ///
-/// ponytail: no cpal enumeration check (unlike the mic helper) — Linux system
-/// devices are Pulse/ALSA monitor *inputs* tagged Output, so output_devices()
-/// would false-negative them. stream.rs still hard-fails on a missing device.
+/// No cpal enumeration check (unlike the mic helper): stream.rs still
+/// hard-fails on a missing device.
 fn resolve_system_or_default(requested_name: Option<&str>) -> Option<Arc<super::AudioDevice>> {
     if let Some(name) = requested_name {
         match parse_audio_device(name) {
@@ -585,28 +584,19 @@ fn resolve_system_or_default(requested_name: Option<&str>) -> Option<Arc<super::
     }
 }
 
-/// Verify the microphone and finish validation before creating any recording
-/// resources, on every platform. The wake below is macOS-specific; the
-/// verification is not, and used to inherit the macOS gate that wrapped both —
-/// which meant Windows and Linux started recording without ever establishing
-/// that audio reaches the app, so a denied or dead microphone became a meeting
+/// Wake idle audio hardware, then verify the microphone, before creating any
+/// recording resources, so a denied or dead microphone never becomes a meeting
 /// of silence.
 async fn prepare_audio_for_recording(
     system_device: Option<&super::AudioDevice>,
 ) -> Result<(), String> {
-    // Only macOS parks idle audio hardware, so only macOS has anything to wake;
-    // the device it would wake is of no use to the other platforms here.
-    #[cfg(target_os = "macos")]
     wake_idle_audio_hardware(system_device).await;
-    #[cfg(not(target_os = "macos"))]
-    let _ = system_device;
 
     verify_microphone_before_recording().await
 }
 
 /// Nudge idle audio hardware awake before the microphone is checked, so a
 /// sleeping interface does not read as a microphone producing nothing.
-#[cfg(target_os = "macos")]
 async fn wake_idle_audio_hardware(system_device: Option<&super::AudioDevice>) {
     use cpal::traits::{DeviceTrait, HostTrait};
 
@@ -689,13 +679,6 @@ async fn validate_transcription_engine_before_capture<R: Runtime>(
             "deferred"
         }
     );
-
-    if let Err(error) = crate::ensure_onnx_runtime_available() {
-        return Err(map_recording_start_error(
-            app,
-            RecordingStartError::TranscriptionRuntime(error),
-        ));
-    }
 
     // Decide the live path and load its model now, while a load failure can
     // still fall back. A missing model never stops the recording: it degrades
@@ -965,14 +948,10 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
             }
         };
 
-    #[cfg(not(target_os = "macos"))]
-    let microphone_device = resolve_mic_or_default(&app, preferred_mic_name.as_deref());
-
     let system_device = resolve_system_or_default(preferred_system_name.as_deref());
 
     prepare_audio_for_recording(system_device.as_deref()).await?;
 
-    #[cfg(target_os = "macos")]
     let microphone_device = resolve_mic_or_default(&app, preferred_mic_name.as_deref());
 
     // Async-first approach - no more blocking operations!
@@ -1207,14 +1186,10 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     )
     .map_err(|e| e.to_string())?;
 
-    #[cfg(not(target_os = "macos"))]
-    let mic_device = resolve_mic_or_default(&app, mic_device_name.as_deref());
-
     let system_device = resolve_system_or_default(system_device_name.as_deref());
 
     prepare_audio_for_recording(system_device.as_deref()).await?;
 
-    #[cfg(target_os = "macos")]
     let mic_device = resolve_mic_or_default(&app, mic_device_name.as_deref());
 
     // Async-first approach for custom devices - no more blocking operations!
@@ -2696,7 +2671,6 @@ async fn trigger_mic_fallback_to_default<R: Runtime>(
     //
     // Non-fatal: on error we log and proceed to the swap anyway. A failed
     // wake is strictly better than no wake.
-    #[cfg(target_os = "macos")]
     {
         // Read from the captured session directly (no manager lock) — this
         // stays correct even if the global manager has since been swapped by

@@ -4,7 +4,7 @@
 
 <p align="center">
   <a href="https://github.com/praveenvnktsh/minutes/releases/latest"><img src="https://img.shields.io/github/v/release/praveenvnktsh/minutes?style=for-the-badge&label=download&color=2ea043" alt="Download the latest release" /></a>
-  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows-000000?style=for-the-badge" alt="Platforms" />
+  <img src="https://img.shields.io/badge/platform-macOS%20(Apple%20Silicon)-000000?style=for-the-badge" alt="Platforms" />
   <img src="https://img.shields.io/badge/stack-Tauri%202%20%C2%B7%20Rust%20%C2%B7%20Next.js-000000?style=for-the-badge" alt="Stack" />
   <img src="https://img.shields.io/badge/100%25%20local-%26%20private-2ea043?style=for-the-badge" alt="Local-first" />
   <img src="https://img.shields.io/badge/license-MIT-3b82f6?style=for-the-badge" alt="MIT" />
@@ -67,7 +67,7 @@
 
 ### Transcription and models
 - **Whisper.cpp / whisper-rs** and **NVIDIA Parakeet** paths, running locally.
-- **GPU acceleration**: Metal + CoreML (macOS), CUDA/Vulkan (Windows), CPU fallback.
+- **GPU acceleration**: Metal + CoreML on Apple Silicon.
 - **Built-in AI** summary models plus **Ollama** for local summarization.
 - Optional external providers (**Claude, Groq, OpenRouter**) when you configure them.
 - **Speaker diarization** with an editable speaker manager and reassignment.
@@ -85,16 +85,15 @@ Click to download the latest version directly:
 | Platform | Download |
 | --- | --- |
 | **macOS** (Apple Silicon) | [**minutes-macos-arm64.dmg**](https://github.com/praveenvnktsh/minutes/releases/latest/download/minutes-macos-arm64.dmg) |
-| **Windows** (x64) | [**minutes-windows-x64-setup.exe**](https://github.com/praveenvnktsh/minutes/releases/latest/download/minutes-windows-x64-setup.exe) · [.msi](https://github.com/praveenvnktsh/minutes/releases/latest/download/minutes-windows-x64.msi) |
 
 All releases and notes: [github.com/praveenvnktsh/minutes/releases/latest](https://github.com/praveenvnktsh/minutes/releases/latest).
-Minutes ships installers for macOS and Windows only. Linux is unsupported: the release pipeline publishes no Linux artifact, and the audio capture layer (ALSA/PulseAudio) is not regularly tested. Building from source on Linux still works and is documented below, for contributors.
+**Minutes is Mac-only: Apple Silicon, macOS 13 or later.** Windows and Linux are not supported, and the code no longer builds for them.
 
 > **macOS first launch:** Minutes isn't notarized yet, so macOS may warn that it "could not verify it is free of malware". To open it, **right-click the app → Open → Open**, or run `xattr -dr com.apple.quarantine /Applications/minutes.app` once.
 
 ## Quick start
 
-Install Rust, Node.js, pnpm 9.15.9, and your platform's native build tools. On macOS install Xcode and select it with `xcode-select`.
+On an Apple Silicon Mac, install Rust, Node.js, pnpm 9.15.9, and Xcode (select it with `xcode-select`).
 
 ```bash
 git clone https://github.com/praveenvnktsh/minutes.git
@@ -110,7 +109,7 @@ cd frontend
 pnpm tauri:build:local:mac
 ```
 
-See [docs/BUILDING.md](docs/BUILDING.md) for platform details, and [docs/building_in_linux.md](docs/building_in_linux.md) for the unsupported, source-only Linux build.
+See [docs/BUILDING.md](docs/BUILDING.md) for details.
 
 ## Architecture
 
