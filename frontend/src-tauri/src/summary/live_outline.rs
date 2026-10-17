@@ -757,6 +757,54 @@ fn with_link(text: &str, ms: Option<i64>) -> String {
     }
 }
 
+/// Someone taking a task on, in the transcript line a reported action
+/// links to. First person only: "you'll"/"let's" lines were mostly the
+/// model reading a suggestion as a task.
+static COMMITMENT: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"(?i)\b(i'll|i will|i can (?:send|share|introduce|intro|connect|help|set up|make|do)|i'm going to|i am going to|let me|we'll|we will|happy to)\b",
+    )
+    .unwrap()
+});
+/// An explicit agreement, in the words around a reported decision.
+static AGREEMENT: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)\b(agree|agreed|decide|decided|let's|let us|go with|sounds good|settled|deal|we'll|we will)\b").unwrap()
+});
+static DUE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\s*\(due:?\s*([^)]*)\)").unwrap());
+/// The transcript line a follow-up links to and the line after it (the
+/// answer to a request). Wider windows let unrelated "I'll"s through.
+fn evidence_near(lines: &[&TranscriptLine], ms: i64) -> String {
+    let Some(index) = lines
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, l)| (l.ms - ms).abs())
+        .map(|(i, _)| i)
+    else {
+        return String::new();
+    };
+    lines[index..(index + 2).min(lines.len())]
+        .iter()
+        .map(|l| l.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The task with its `(due: …)` kept only when the evidence says it: small
+/// models fill in "next meeting" or "Unassigned" when nobody gave a date.
+fn supported_due(task: &str, evidence: &str) -> String {
+    let Some(captures) = DUE.captures(task) else {
+        return task.to_string();
+    };
+    let said = content_words(evidence);
+    let due = content_words(&captures[1]);
+    let supported = !due.is_empty() && due.iter().all(|w| said.contains(w));
+    if supported {
+        task.to_string()
+    } else {
+        DUE.replace(task, "").trim().to_string()
+    }
+}
+
 fn split_owner(text: &str) -> (Option<String>, String) {
     for separator in [" — ", " – ", " - ", ": "] {
         if let Some((owner, task)) = text.split_once(separator) {
@@ -791,13 +839,22 @@ pub fn parse_section_reply(raw: &str, span: (i64, i64), lines: &[&TranscriptLine
             }
             let ms = ms.or_else(|| best_line(&text, lines));
             if label.starts_with("action") {
+                let Some(evidence) = ms.map(|ms| evidence_near(lines, ms)) else {
+                    continue;
+                };
+                if !COMMITMENT.is_match(&evidence) {
+                    continue;
+                }
                 let (owner, task) = split_owner(&text);
                 reply.actions.push(FollowUp {
-                    text: task,
+                    text: supported_due(&task, &evidence),
                     owner,
                     ms,
                 });
             } else if label.starts_with("decision") {
+                if !ms.is_some_and(|ms| AGREEMENT.is_match(&evidence_near(lines, ms))) {
+                    continue;
+                }
                 reply.decisions.push(FollowUp {
                     text,
                     owner: None,
@@ -872,7 +929,12 @@ pub fn fallback_reply(section: &Section) -> SectionReply {
 }
 
 fn push_unique(list: &mut Vec<FollowUp>, item: FollowUp) {
-    if item.text.trim().is_empty() || list.iter().any(|other| is_repeat(&item.text, &other.text)) {
+    let bare = |text: &str| DUE.replace(text, "").to_string();
+    if item.text.trim().is_empty()
+        || list
+            .iter()
+            .any(|other| is_repeat(&bare(&item.text), &bare(&other.text)))
+    {
         return;
     }
     list.push(item);
@@ -1435,10 +1497,10 @@ mod tests {
     #[test]
     fn replies_keep_bullets_check_links_and_collect_follow_ups() {
         let (lines, _) = parse_transcript(
-            "[01:00] [Others] the annual plan costs forty dollars per seat\n[02:00] [You] I will send the deck by Friday",
+            "[01:00] [Others] the annual plan costs forty dollars per seat\n[02:00] [You] I will send the deck by Friday\n[02:50] [Others] agreed, we go annual",
         );
         let lines: Vec<&TranscriptLine> = lines.iter().collect();
-        let raw = "Here are the notes:\n## Pricing\n- Annual plan at $40 per seat [01:00]\n  - Discount for 3 years\n- Seat count unknown (45:00)\n* Annual plan costs forty dollars [01:00-01:30]\nAction: You — send the deck (due: Friday) [02:00]\n**Decision:** go annual\nQuestion: How many seats?";
+        let raw = "Here are the notes:\n## Pricing\n- Annual plan at $40 per seat [01:00]\n  - Discount for 3 years\n- Seat count unknown (45:00)\n* Annual plan costs forty dollars [01:00-01:30]\nAction: You — send the deck (due: Friday) [02:00]\n**Decision:** go annual [02:50]\nQuestion: How many seats?";
         let reply = parse_section_reply(raw, (0, 180_000), &lines);
         assert_eq!(
             reply.bullets,
@@ -1459,6 +1521,36 @@ mod tests {
         );
         assert_eq!(reply.decisions[0].text, "go annual");
         assert_eq!(reply.questions[0].text, "How many seats?");
+    }
+
+    #[test]
+    fn reported_follow_ups_need_words_that_back_them() {
+        let (lines, _) = parse_transcript(
+            "[01:00] [Others] can you tell me more about your background\n[02:00] [Others] great\n[03:00] [You] sure, I'll send the deck\n[09:00] [Others] we should think about pricing",
+        );
+        let lines: Vec<&TranscriptLine> = lines.iter().collect();
+        let raw = "Action: You — share your background (due: next meeting) [01:00]\nAction: You — send the deck (due: next meeting) [03:00]\nAction: Others — book a call\nDecision: pricing is settled [09:00]";
+        let reply = parse_section_reply(raw, (0, 600_000), &lines);
+        // A question is not a commitment; an unsaid due date is dropped; an
+        // action with no line behind it is dropped; "should" is no agreement.
+        assert_eq!(
+            reply.actions,
+            [FollowUp {
+                text: "send the deck".into(),
+                owner: Some("You".into()),
+                ms: Some(180_000)
+            }]
+        );
+        assert!(reply.decisions.is_empty());
+        // "I can't" is no commitment.
+        let (lines, _) = parse_transcript("[01:00] [You] I can't do that legally yet");
+        let lines: Vec<&TranscriptLine> = lines.iter().collect();
+        let reply = parse_section_reply(
+            "Action: You — clarify the rules [01:00]",
+            (0, 120_000),
+            &lines,
+        );
+        assert!(reply.actions.is_empty());
     }
 
     #[test]

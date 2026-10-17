@@ -2183,8 +2183,13 @@ mod tests {
         fn transcript(filler: usize) -> String {
             (0..20)
                 .map(|i| {
+                    let said = if i == 12 {
+                        "I will draft the role by Monday "
+                    } else {
+                        ""
+                    };
                     format!(
-                        "[{:02}:{:02}] [Others] line {i} {}",
+                        "[{:02}:{:02}] [Others] line {i} {said}{}",
                         i / 2,
                         (i % 2) * 30,
                         "x".repeat(filler)
