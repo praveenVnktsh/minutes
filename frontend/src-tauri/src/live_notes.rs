@@ -20,6 +20,10 @@ pub struct LiveNote {
 #[serde(rename_all = "camelCase")]
 pub struct LiveNotesDocument {
     pub version: u32,
+    /// Epoch milliseconds. The webview computes it from a fractional
+    /// duration, so a decimal is accepted and rounded rather than failing
+    /// every save.
+    #[serde(deserialize_with = "whole_ms")]
     pub meeting_started_at_ms: i64,
     pub updated_at: String,
     pub notes: Vec<LiveNote>,
@@ -35,6 +39,18 @@ pub struct LiveNotesDocument {
     /// Live notes already written into the notes (entry ids).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ai_entries: Option<serde_json::Value>,
+}
+
+/// An integer, or a finite number rounded to the nearest integer.
+fn whole_ms<'de, D>(deserializer: D) -> Result<i64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = f64::deserialize(deserializer)?;
+    if !value.is_finite() {
+        return Err(serde::de::Error::custom("meetingStartedAtMs must be a finite number"));
+    }
+    Ok(value.round() as i64)
 }
 
 impl LiveNotesDocument {
@@ -220,6 +236,23 @@ pub async fn save_meeting_live_notes(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     store_meeting_notes(state.db_manager.pool(), &meeting_id, &document).await
+}
+
+#[cfg(test)]
+mod whole_ms_tests {
+    use super::LiveNotesDocument;
+
+    fn doc(started: &str) -> serde_json::Result<LiveNotesDocument> {
+        serde_json::from_str(&format!(
+            r#"{{"version":1,"meetingStartedAtMs":{started},"updatedAt":"2026-10-17T00:00:00Z","notes":[]}}"#
+        ))
+    }
+
+    #[test]
+    fn a_fractional_start_time_is_rounded_not_rejected() {
+        assert_eq!(doc("1792265893512.629").unwrap().meeting_started_at_ms, 1792265893513);
+        assert_eq!(doc("1792265893512").unwrap().meeting_started_at_ms, 1792265893512);
+    }
 }
 
 #[cfg(test)]
