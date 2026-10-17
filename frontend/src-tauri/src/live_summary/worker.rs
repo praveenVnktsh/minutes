@@ -14,6 +14,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use super::enhancer::{EnhancedSnapshot, Sections, UnsavedSection};
 use super::facts::Figures;
 use super::glossary::Glossary;
 use super::llm::{FailureKind, GenerateError, Generated, Generator, REQUEST_TIMEOUT};
@@ -21,7 +22,11 @@ use super::notes::{decide_topic, NoteContext, MIN_TOPIC_MS};
 use super::parse::{parse_notes, parse_topic_decision, ParsedEntry, TopicDecision};
 use super::prompt::{self, PreviousEntry, PromptContext};
 use super::scheduler::{Segment, Window, WindowScheduler, CADENCE};
+use crate::database::repositories::enhanced_sections::EnhancedSectionRow;
 use crate::database::repositories::timeline::TimelineEntryRow;
+use crate::summary::live_outline::{
+    topic_runs, transcript_line, LiveNote, TopicRun, TranscriptLine, UserNote, WrittenSection,
+};
 
 /// How often the worker checks whether a window is due.
 pub const TICK: Duration = Duration::from_secs(2);
@@ -151,6 +156,19 @@ pub trait WorkerHost: Send + Sync {
     /// its entries: they must not come back) from a transient write failure.
     async fn meeting_exists(&self, meeting_id: &str) -> Result<bool>;
     fn publish(&self, snapshot: &TimelineSnapshot);
+    /// The user's own notes so far, with the time each was typed at.
+    async fn user_notes(&self) -> Vec<UserNote> {
+        Vec::new()
+    }
+    /// Store an Enhanced notes section written during the meeting.
+    async fn persist_section(&self, row: &EnhancedSectionRow) -> Result<()> {
+        let _ = row;
+        Ok(())
+    }
+    /// The Enhanced notes as they stand, for the meeting page.
+    fn publish_enhanced(&self, snapshot: &EnhancedSnapshot) {
+        let _ = snapshot;
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -361,6 +379,19 @@ struct InFlight {
     cancel: CancellationToken,
 }
 
+/// The run, the section (or why not), and the provider and model.
+type SectionOutcome = (
+    TopicRun,
+    std::result::Result<WrittenSection, GenerateError>,
+    String,
+    String,
+);
+
+struct SectionInFlight {
+    handle: JoinHandle<SectionOutcome>,
+    cancel: CancellationToken,
+}
+
 struct Worker {
     host: Arc<dyn WorkerHost>,
     config: WorkerConfig,
@@ -377,9 +408,178 @@ struct Worker {
     /// Requests that failed in a row, for the back-off.
     failures: u32,
     in_flight: Option<InFlight>,
+    /// Every final segment so far: the transcript the sections are written from.
+    history: Vec<Segment>,
+    /// Enhanced notes sections written, queued and waiting to be stored.
+    sections: Sections,
+    section_in_flight: Option<SectionInFlight>,
+    /// The recording stopped: no new sections.
+    stopping: bool,
 }
 
 impl Worker {
+    fn accept(&mut self, segment: Segment) {
+        self.history.push(segment.clone());
+        self.scheduler.push(segment);
+    }
+
+    fn live_notes(&self) -> Vec<LiveNote> {
+        self.snapshot
+            .entries
+            .iter()
+            .map(|e| {
+                LiveNote::new(
+                    e.start_ms,
+                    e.end_ms,
+                    &e.kind,
+                    &e.text,
+                    e.speaker.as_deref(),
+                    e.topic.as_deref(),
+                )
+            })
+            .collect()
+    }
+
+    fn transcript(&self) -> Vec<TranscriptLine> {
+        let mut lines: Vec<TranscriptLine> = self
+            .history
+            .iter()
+            .map(|s| transcript_line(s.start_ms, s.speaker.label(), &s.text))
+            .collect();
+        lines.sort_by_key(|l| l.ms);
+        lines
+    }
+
+    fn heard_until(&self) -> i64 {
+        self.history.iter().map(|s| s.end_ms).max().unwrap_or(0)
+    }
+
+    fn publish_enhanced(&self) {
+        let snapshot = self.sections.view(
+            &self.snapshot.session_id,
+            self.snapshot.meeting_id.clone(),
+            &self.live_notes(),
+            &self.transcript(),
+            self.heard_until(),
+        );
+        self.host.publish_enhanced(&snapshot);
+    }
+
+    /// After new notes: queue the topics that closed, start the next
+    /// section if none is being written, and show where the notes stand.
+    async fn enhance(&mut self) {
+        let runs = topic_runs(&self.live_notes(), self.heard_until());
+        self.sections.queue_closed(&runs);
+        self.start_section().await;
+        self.publish_enhanced();
+    }
+
+    async fn start_section(&mut self) {
+        if self.section_in_flight.is_some() {
+            return;
+        }
+        let Some(run) = self.sections.queue.pop_front() else {
+            return;
+        };
+        let generator = match self.host.generator().await {
+            Ok(generator) => generator,
+            Err(error) => {
+                info!("Enhanced notes: no model for a section ({error:#})");
+                self.sections.failed(run.start_ms);
+                return;
+            }
+        };
+        let user_notes = self.host.user_notes().await;
+        let transcript = self.transcript();
+        let cancel = CancellationToken::new();
+        let token = cancel.clone();
+        let handle = tokio::spawn(async move {
+            let provider = generator.provider().to_string();
+            let model = generator.model().to_string();
+            let result = crate::summary::live_enhanced::write_section(
+                generator.as_ref(),
+                &run,
+                &transcript,
+                &user_notes,
+                &token,
+            )
+            .await;
+            (run, result, provider, model)
+        });
+        self.section_in_flight = Some(SectionInFlight { handle, cancel });
+    }
+
+    async fn finish_section(
+        &mut self,
+        outcome: std::result::Result<SectionOutcome, tokio::task::JoinError>,
+    ) {
+        self.section_in_flight = None;
+        match outcome {
+            Ok((run, Ok(section), provider, model)) => {
+                perf_debug!(
+                    "Enhanced notes: wrote a section of {} chars",
+                    section.body.len()
+                );
+                self.sections.written(UnsavedSection {
+                    section,
+                    end_ms: run.end_ms,
+                    provider,
+                    model,
+                });
+                self.persist_sections().await;
+            }
+            Ok((run, Err(error), _, _)) => {
+                warn!("Enhanced notes: a section failed ({error}); it is retried later");
+                self.sections.failed(run.start_ms);
+            }
+            Err(error) => warn!("Enhanced notes: the section task failed: {error}"),
+        }
+        self.start_section().await;
+        self.publish_enhanced();
+    }
+
+    /// Store written sections once the meeting exists. Returns whether
+    /// nothing is left unsaved.
+    async fn persist_sections(&mut self) -> bool {
+        self.refresh_meeting_id();
+        let Some(meeting_id) = self.snapshot.meeting_id.clone() else {
+            return self.sections.unsaved.is_empty();
+        };
+        let mut left = Vec::new();
+        for unsaved in std::mem::take(&mut self.sections.unsaved) {
+            if let Err(error) = self.host.persist_section(&unsaved.row(&meeting_id)).await {
+                if matches!(self.host.meeting_exists(&meeting_id).await, Ok(false)) {
+                    continue;
+                }
+                warn!("Enhanced notes: could not store a section, will retry: {error:#}");
+                left.push(unsaved);
+            }
+        }
+        self.sections.unsaved = left;
+        self.sections.unsaved.is_empty()
+    }
+
+    /// At stop: let the section being written finish, up to `deadline`, and
+    /// start no other (the stop writes what is left).
+    async fn settle_section(&mut self, deadline: tokio::time::Instant) {
+        self.sections.queue.clear();
+        let Some(SectionInFlight { mut handle, cancel }) = self.section_in_flight.take() else {
+            return;
+        };
+        tokio::select! {
+            outcome = &mut handle => self.finish_section(outcome).await,
+            _ = crate::clock::sleep_until(deadline) => {
+                info!("Enhanced notes: leaving the section in flight to the stop");
+                cancel.cancel();
+                drop(handle);
+            }
+        }
+        if let Some(in_flight) = self.section_in_flight.take() {
+            in_flight.cancel.cancel();
+        }
+        self.sections.queue.clear();
+    }
+
     fn now(&self) -> Duration {
         crate::clock::now().saturating_duration_since(self.started)
     }
@@ -679,6 +879,9 @@ impl Worker {
                 self.snapshot.status = TimelineStatus::Listening;
                 self.snapshot.error = None;
                 self.host.publish(&self.snapshot);
+                if !self.stopping {
+                    self.enhance().await;
+                }
             }
             Err(error) => {
                 // The reply holds meeting content: only its size reaches the
@@ -702,6 +905,9 @@ impl Worker {
 
     async fn tick(&mut self) {
         let _ = self.persist_unsaved().await;
+        if !self.sections.unsaved.is_empty() {
+            let _ = self.persist_sections().await;
+        }
         if !self.host.enabled() {
             self.scheduler.clear();
             self.set_status(TimelineStatus::Disabled, None);
@@ -745,7 +951,7 @@ impl Worker {
     async fn finish(&mut self, segments: &mut UnboundedReceiver<Segment>, grace: Duration) {
         let deadline = crate::clock::now() + grace;
         while let Ok(segment) = segments.try_recv() {
-            self.scheduler.push(segment);
+            self.accept(segment);
         }
         self.settle_in_flight(deadline).await;
         // A provider that just refused us is not asked again for the tail.
@@ -757,11 +963,20 @@ impl Worker {
                 self.settle_in_flight(deadline).await;
             }
         }
+        // A section being written may finish within the grace; the rest, and
+        // the topic under way, are written by the summary at stop.
+        self.stopping = true;
+        self.settle_section(deadline).await;
         // The recording no longer waits on us: keep trying to store the last
         // entries for a while (a locked database, a meeting row still being
         // written), then give up.
         let persist_deadline = Instant::now() + self.config.final_persist_window;
-        while !self.persist_unsaved().await && Instant::now() < persist_deadline {
+        loop {
+            let entries_saved = self.persist_unsaved().await;
+            let sections_saved = self.persist_sections().await;
+            if (entries_saved && sections_saved) || Instant::now() >= persist_deadline {
+                break;
+            }
             tokio::time::sleep(self.config.final_persist_retry).await;
         }
         if !self.unsaved.is_empty() {
@@ -822,6 +1037,10 @@ pub async fn run(
         carryover: Vec::new(),
         failures: 0,
         in_flight: None,
+        history: Vec::new(),
+        sections: Sections::default(),
+        section_in_flight: None,
+        stopping: false,
     };
     worker.host.publish(&worker.snapshot);
 
@@ -840,10 +1059,18 @@ pub async fn run(
             } => {
                 worker.finish_request(outcome).await;
             }
+            outcome = async {
+                match worker.section_in_flight.as_mut() {
+                    Some(in_flight) => (&mut in_flight.handle).await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                worker.finish_section(outcome).await;
+            }
             segment = segments.recv() => match segment {
                 Some(segment) => {
                     perf_trace!("Live summary segment: {} chars", segment.text.len());
-                    worker.scheduler.push(segment);
+                    worker.accept(segment);
                 }
                 None => break,
             },
@@ -880,6 +1107,8 @@ mod tests {
         persisted: Mutex<Vec<TimelineEntryRow>>,
         published: Mutex<Vec<TimelineSnapshot>>,
         generator: Mutex<Option<Arc<dyn Generator>>>,
+        sections: Mutex<Vec<EnhancedSectionRow>>,
+        enhanced: Mutex<Vec<EnhancedSnapshot>>,
     }
 
     #[async_trait]
@@ -916,6 +1145,19 @@ mod tests {
         fn publish(&self, snapshot: &TimelineSnapshot) {
             self.published.lock().unwrap().push(snapshot.clone());
         }
+        async fn user_notes(&self) -> Vec<UserNote> {
+            vec![UserNote {
+                ms: Some(30_000),
+                text: "ask about the venue".into(),
+            }]
+        }
+        async fn persist_section(&self, row: &EnhancedSectionRow) -> Result<()> {
+            self.sections.lock().unwrap().push(row.clone());
+            Ok(())
+        }
+        fn publish_enhanced(&self, snapshot: &EnhancedSnapshot) {
+            self.enhanced.lock().unwrap().push(snapshot.clone());
+        }
     }
 
     /// Replies with one entry per call, after `delay`; can fail the first calls
@@ -939,6 +1181,8 @@ mod tests {
         model: &'static str,
         /// The line limit of each notes call.
         max_lines: Mutex<Vec<usize>>,
+        /// Enhanced notes section calls.
+        section_prompts: Mutex<Vec<String>>,
     }
 
     impl FakeGenerator {
@@ -961,6 +1205,7 @@ mod tests {
                 provider: "builtin-ai",
                 model: "qwen3.5:4b",
                 max_lines: Mutex::new(Vec::new()),
+                section_prompts: Mutex::new(Vec::new()),
             }
         }
     }
@@ -989,6 +1234,13 @@ mod tests {
             user: &str,
             cancel: &CancellationToken,
         ) -> std::result::Result<Generated, GenerateError> {
+            if system == crate::summary::live_outline::section_system_prompt() {
+                self.section_prompts.lock().unwrap().push(user.to_string());
+                return Ok(Generated {
+                    text: "- Launch moves to the second week of next month [00:00]".into(),
+                    truncated: false,
+                });
+            }
             if system == prompt::topic_system_prompt() {
                 self.topic_prompts.lock().unwrap().push(user.to_string());
                 if self.topic_hang {
@@ -1170,6 +1422,52 @@ mod tests {
             .collect();
         assert_eq!(topics, vec![Some("Launch Plan"), Some("Launch Plan")]);
         assert!(snapshot.entries.iter().all(|e| e.kind == "decision"));
+    }
+
+    #[tokio::test]
+    async fn a_closed_topic_gets_its_enhanced_section_written_and_stored() {
+        let generator = Arc::new(FakeGenerator::new(Duration::ZERO));
+        let host = host_with(generator.clone());
+        let (tx, rx) = unbounded_channel();
+        let finish = CancellationToken::new();
+        let task = tokio::spawn(run(host.clone(), "s".into(), rx, finish.clone(), config()));
+        for start in [0, 60, 120] {
+            tx.send(speech(start)).unwrap();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        // Three notes under Launch Plan, the topic still open: nothing yet.
+        assert!(generator.section_prompts.lock().unwrap().is_empty());
+        let open = host.enhanced.lock().unwrap().last().cloned().unwrap();
+        assert_eq!(open.sections.len(), 1);
+        assert!(open.sections[0].writing && open.sections[0].body.is_empty());
+
+        *generator.topic_answer.lock().unwrap() = r#"{"same":false,"topic":"Globex pitch"}"#.into();
+        tx.send(speech(240)).unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        finish.cancel();
+        task.await.unwrap();
+
+        let prompts = generator.section_prompts.lock().unwrap();
+        assert_eq!(prompts.len(), 1, "only the closed topic is written");
+        assert!(prompts[0].starts_with("Part of the meeting: Launch Plan (00:00–04:00)"));
+        assert!(prompts[0].contains("do not repeat):\n- ask about the venue"));
+        assert!(prompts[0].contains("[02:00] [Others] we went through the plan"));
+        assert!(!prompts[0].contains("[04:00] [Others]"));
+        let sections = host.sections.lock().unwrap();
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].meeting_id, "meeting-1");
+        assert_eq!(sections[0].title, "Launch Plan");
+        assert_eq!(
+            sections[0].body,
+            "- ask about the venue\n- Launch moves to the second week of next month [00:00]"
+        );
+        let last = host.enhanced.lock().unwrap().last().cloned().unwrap();
+        let shape: Vec<(&str, bool)> = last
+            .sections
+            .iter()
+            .map(|s| (s.title.as_str(), s.writing))
+            .collect();
+        assert_eq!(shape, [("Launch Plan", false), ("Globex Pitch", true)]);
     }
 
     #[tokio::test]

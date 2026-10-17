@@ -882,6 +882,17 @@ export function RecordingControllerProvider({
         } else if (!finalization.postProcessingStarted && finalPassTookOver(await startFinalPass(false))) {
           finalPassQueued = true;
           markDeferredMeetingForAutoSummary(savedMeetingId);
+          // Enhanced notes built from the live notes do not wait for the
+          // final transcript: finish them now. The final pass does not
+          // rewrite them; Re-enhance uses its transcript.
+          const fromLiveNotes = await invoke<boolean>('has_live_enhanced_notes', {
+            meetingId: savedMeetingId,
+          }).catch(() => false);
+          if (fromLiveNotes) {
+            window.dispatchEvent(new CustomEvent('meetily:meeting-ready-for-summary', {
+              detail: { meetingId: savedMeetingId },
+            }));
+          }
           finalization.postProcessingStarted = true;
           checkpointFinalization(session, finalization, sessionsRef.current);
         } else if (!finalization.postProcessingStarted) {

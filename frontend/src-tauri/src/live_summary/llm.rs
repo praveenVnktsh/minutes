@@ -141,6 +141,37 @@ pub trait Generator: Send + Sync {
     ) -> Result<Generated, GenerateError> {
         self.generate(system_prompt, user_prompt, cancel).await
     }
+
+    /// An Enhanced notes section (or its title): a longer answer than a
+    /// window's notes, of at most `max_lines` lines on a model that can stop
+    /// there. The default is [`Generator::generate`].
+    async fn generate_section(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+        _max_lines: usize,
+        cancel: &CancellationToken,
+    ) -> Result<Generated, GenerateError> {
+        self.generate(system_prompt, user_prompt, cancel).await
+    }
+}
+
+/// Output cap of an Enhanced notes section call: four bullets and two
+/// questions with room to spare.
+pub const SECTION_MAX_OUTPUT_TOKENS: u32 = 448;
+/// A section call taking longer than this is abandoned (its run keeps its
+/// live notes, or is written again at stop).
+pub const SECTION_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// The generation settings of a section call: the live notes' (low
+/// temperature, fixed seed, background priority), with a longer answer.
+pub(crate) fn section_generation_options() -> GenerationOptions {
+    GenerationOptions {
+        max_tokens: Some(SECTION_MAX_OUTPUT_TOKENS),
+        output_cap: Some(SECTION_MAX_OUTPUT_TOKENS),
+        timeout: Some(SECTION_TIMEOUT),
+        ..generation_options()
+    }
 }
 
 /// The summary model setting, resolved for live summary calls.
@@ -306,6 +337,32 @@ impl SummaryModelGenerator {
     }
 }
 
+impl SummaryModelGenerator {
+    /// A built-in model without the settings database (developer
+    /// evaluations): `own_helper` runs it on the live notes helper.
+    #[cfg(test)]
+    pub(crate) fn builtin_for_eval(app_data_dir: PathBuf, model: &str, own_helper: bool) -> Self {
+        use crate::summary::llm_client::LLMProvider;
+        Self {
+            provider_id: "builtin-ai".to_string(),
+            config: LlmConfig {
+                provider: LLMProvider::BuiltInAI,
+                model_name: model.to_string(),
+                api_key: String::new(),
+                ollama_endpoint: None,
+                custom_openai_endpoint: None,
+                max_tokens: None,
+                temperature: None,
+                top_p: None,
+            },
+            app_data_dir: Some(app_data_dir),
+            client: reqwest::Client::new(),
+            num_ctx: None,
+            builtin: Some((model.to_string(), own_helper)),
+        }
+    }
+}
+
 #[async_trait]
 impl Generator for SummaryModelGenerator {
     fn provider(&self) -> &str {
@@ -325,8 +382,14 @@ impl Generator for SummaryModelGenerator {
         user_prompt: &str,
         cancel: &CancellationToken,
     ) -> Result<Generated, GenerateError> {
-        self.generate_with_limit(system_prompt, user_prompt, None, cancel)
-            .await
+        self.generate_with_limit(
+            system_prompt,
+            user_prompt,
+            None,
+            generation_options(),
+            cancel,
+        )
+        .await
     }
 
     async fn generate_notes(
@@ -340,6 +403,24 @@ impl Generator for SummaryModelGenerator {
             system_prompt,
             user_prompt,
             u32::try_from(max_lines).ok(),
+            generation_options(),
+            cancel,
+        )
+        .await
+    }
+
+    async fn generate_section(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+        max_lines: usize,
+        cancel: &CancellationToken,
+    ) -> Result<Generated, GenerateError> {
+        self.generate_with_limit(
+            system_prompt,
+            user_prompt,
+            u32::try_from(max_lines).ok(),
+            section_generation_options(),
             cancel,
         )
         .await
@@ -366,6 +447,7 @@ impl SummaryModelGenerator {
         system_prompt: &str,
         user_prompt: &str,
         max_lines: Option<u32>,
+        options: GenerationOptions,
         cancel: &CancellationToken,
     ) -> Result<Generated, GenerateError> {
         if let (Some((model, own_helper)), Some(app_data_dir)) =
@@ -374,7 +456,6 @@ impl SummaryModelGenerator {
             use crate::summary::summary_engine::client::{
                 generate_live_notes, BuiltinGenerateOptions, LiveNotesRequest,
             };
-            let options = generation_options();
             // No grammar: the live notes model keeps the compact format on
             // its own (no unreadable window in the benchmark), and checking
             // every token against a grammar made generation 10-25 % slower.
@@ -406,7 +487,7 @@ impl SummaryModelGenerator {
             })
             .map_err(|error| GenerateError::from_provider_error(error.to_string()));
         }
-        let mut options = generation_options();
+        let mut options = options;
         options.num_ctx = self.num_ctx;
         generate_summary(
             &self.client,

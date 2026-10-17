@@ -580,6 +580,15 @@ pub async fn api_process_transcript<R: Runtime>(
 
     // ponytail: summary starts are rare; use per-meeting locks only if start contention is measured.
     let _start_guard = SUMMARY_START_LOCK.lock().await;
+    // A meeting that already has finished notes is being re-enhanced: notes
+    // built from live notes then write every section again.
+    let regenerate = SummaryProcessesRepository::get_summary_data(&pool, &m_id)
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|process| {
+            process.status.eq_ignore_ascii_case("completed") && process.result.is_some()
+        });
     let started_at = next_summary_start(Utc::now());
     SummaryProcessesRepository::create_or_reset_process(&pool, &m_id, started_at)
         .await
@@ -620,6 +629,7 @@ pub async fn api_process_transcript<R: Runtime>(
             final_prompt,
             final_template_id,
             summary_language,
+            regenerate,
         )
         .await;
     });

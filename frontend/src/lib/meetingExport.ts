@@ -1,6 +1,7 @@
 import type { MeetingSummary, Transcript } from '@/types';
 import type { LiveNotesDocument } from '@/lib/liveNotes';
 import { formatNoteTimestamp } from '@/lib/liveNotes';
+import { citationHrefSeconds } from '@/lib/copilot';
 
 export interface TranscriptPage {
   transcripts: Transcript[];
@@ -82,6 +83,8 @@ function inlineMarkdown(content: unknown): string {
     if (inline.type === 'link') {
       const label = inlineMarkdown(inline.content);
       const href = typeof inline.href === 'string' ? inline.href : '';
+      // A `[MM:SS]` transcript link only works inside the app: export its text.
+      if (citationHrefSeconds(href) !== null) return label;
       return href ? `[${label}](${href})` : label;
     }
 
@@ -182,7 +185,15 @@ export function blockNoteBlocksToMarkdown(blocks: unknown[]): string {
 
 export function originalNotesMarkdown(document: LiveNotesDocument | null): string {
   if (!document) return '';
-  if (Array.isArray(document.editorBlocks)) return blockNoteBlocksToMarkdown(document.editorBlocks);
+  if (Array.isArray(document.editorBlocks)) {
+    // The user's own notes: lines the AI wrote into them are left out.
+    const aiBlocks = document.aiBlocks ?? {};
+    const own = document.editorBlocks.filter((block) => {
+      const id = (block as { id?: unknown } | null)?.id;
+      return typeof id !== 'string' || !(id in aiBlocks);
+    });
+    return blockNoteBlocksToMarkdown(own);
+  }
   if (document.rawMarkdown !== undefined) return document.rawMarkdown.trim();
 
   return document.notes

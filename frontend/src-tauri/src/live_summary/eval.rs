@@ -164,7 +164,7 @@ struct RunResult {
 }
 
 /// Final live transcript segments of a replay run, on audio time.
-pub(super) fn load_segments(events: &Path, until_ms: Option<i64>) -> anyhow::Result<Vec<Segment>> {
+pub(crate) fn load_segments(events: &Path, until_ms: Option<i64>) -> anyhow::Result<Vec<Segment>> {
     let text = std::fs::read_to_string(events)?;
     let mut segments = Vec::new();
     for line in text.lines() {

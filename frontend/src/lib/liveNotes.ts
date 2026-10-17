@@ -1,3 +1,5 @@
+import type { AiBlocks } from '@/lib/aiRawNotes';
+
 export interface LiveNote {
   id: string;
   timestampSeconds: number;
@@ -12,6 +14,11 @@ export interface LiveNotesDocument {
   notes: LiveNote[];
   rawMarkdown?: string;
   editorBlocks?: unknown[];
+  /** Lines the AI wrote into the notes ("Write live notes into my notes"),
+   * by block id. Editing one makes it the user's. */
+  aiBlocks?: AiBlocks;
+  /** Live notes already written into the notes, so a deleted one stays gone. */
+  aiEntries?: string[];
 }
 
 export const LIVE_NOTES_FALLBACK_KEY = 'meetily.liveNotes.current';

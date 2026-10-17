@@ -19,8 +19,9 @@ import { MeetingAssistantPanel } from '@/components/MeetingDetails/MeetingAssist
 import { CopilotPanel } from '@/components/MeetingDetails/CopilotPanel';
 import { MeetingRawNotesEditor } from '@/components/MeetingDetails/MeetingRawNotesEditor';
 import { LiveTranscriptPanel } from '@/components/MeetingDetails/LiveTranscriptPanel';
+import { LiveEnhancedNotes } from '@/components/MeetingDetails/LiveEnhancedNotes';
+import { LiveRawNotes } from '@/components/MeetingDetails/LiveRawNotes';
 import { FloatingRecordingControls } from '@/components/MeetingDetails/FloatingRecordingControls';
-import { LiveNotesPad } from '@/components/LiveNotesPad';
 import { useMeetingActivity } from '@/contexts/MeetingActivityContext';
 import { liveNotesTarget, meetingNotesTarget, notePersistenceService } from '@/services/notePersistenceService';
 import { toast } from 'sonner';
@@ -80,6 +81,9 @@ export default function PageContent({
   // State
   const customPrompt = '';
   const [notesMode, setNotesMode] = useState<NotesMode>('enhanced');
+  // While recording: Raw (your notes) by default; Enhanced fills in as
+  // topics close.
+  const [liveNotesMode, setLiveNotesMode] = useState<NotesMode>('raw');
   // True when raw notes changed after the last enhancement, so the workspace can
   // nudge the user to re-enhance instead of regenerating automatically.
   const [notesDirtySinceSummary, setNotesDirtySinceSummary] = useState(false);
@@ -399,11 +403,12 @@ export default function PageContent({
         <MeetingWorkspace
           title={meetingData.meetingTitle}
           createdAt={meeting.created_at}
-          notesMode="raw"
-          onNotesModeChange={() => {}}
-          canShowEnhanced={false}
-          summary={null}
-          rawNotes={<LiveNotesPad bare />}
+          notesMode={liveNotesMode}
+          onNotesModeChange={setLiveNotesMode}
+          canShowEnhanced
+          hasEnhancedContent={false}
+          summary={<LiveEnhancedNotes />}
+          rawNotes={<LiveRawNotes />}
           transcript={<LiveTranscriptPanel />}
           assistant={
             <CopilotPanel

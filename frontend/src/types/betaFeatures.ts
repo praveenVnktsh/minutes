@@ -33,12 +33,19 @@ export interface BetaFeatures {
    * @since v1.5
    */
   micEchoCancellation: boolean;
+  /**
+   * Write the live notes into the user's Raw notes during a meeting, under
+   * their topic, as AI lines (muted, tagged), once the user pauses typing
+   * @since v1.6
+   */
+  liveNotesInRawNotes: boolean;
 }
 
 export const DEFAULT_BETA_FEATURES: BetaFeatures = {
   importAndRetranscribe: true, // Default: enabled
   liveTranscription: true, // Deferred transcription mode is available by default
   micEchoCancellation: false, // Opt-in until it has been proven on real calls
+  liveNotesInRawNotes: false, // Experimental: opt-in
 };
 
 
@@ -49,6 +56,7 @@ export const BETA_FEATURE_NAMES: Record<keyof BetaFeatures, string> = {
   importAndRetranscribe: 'Import Audio & Retranscribe',
   liveTranscription: 'Live Transcription Toggle',
   micEchoCancellation: 'Mic Echo Cancellation',
+  liveNotesInRawNotes: 'Write live notes into my notes',
 };
 
 /**
@@ -58,6 +66,7 @@ export const BETA_FEATURE_DESCRIPTIONS: Record<keyof BetaFeatures, string> = {
   importAndRetranscribe: 'Import audio files to transcribe or retranscribe existing meetings with different language settings.',
   liveTranscription: 'Show a toggle to enable/disable live transcription during recording. When off, audio is still recorded but transcription is skipped to save resources.',
   micEchoCancellation: 'When the other side plays through your speakers, remove their voice from the microphone before transcribing, so it is not transcribed twice. Takes effect from the next recording.',
+  liveNotesInRawNotes: 'During a meeting, add the live notes to your Raw notes under their topic, whenever you pause typing. AI lines look lighter; edit one and it becomes yours.',
 };
 
 /**

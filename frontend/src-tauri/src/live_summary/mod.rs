@@ -8,6 +8,7 @@
 //!
 //! See docs/superpowers/specs/2026-10-16-live-summary-timeline-design.md.
 
+pub mod enhancer;
 pub mod facts;
 pub mod glossary;
 pub mod llm;
@@ -21,7 +22,7 @@ pub mod worker;
 #[cfg(test)]
 mod bench;
 #[cfg(test)]
-mod eval;
+pub(crate) mod eval;
 #[cfg(test)]
 mod smoke;
 
@@ -35,9 +36,13 @@ use tauri::{AppHandle, Emitter, EventId, Listener, Manager, Runtime, State};
 use tauri_plugin_store::StoreExt;
 use tokio_util::sync::CancellationToken;
 
+use crate::database::repositories::enhanced_sections::{
+    EnhancedSectionRow, EnhancedSectionsRepository,
+};
 use crate::database::repositories::timeline::{TimelineEntryRow, TimelineRepository};
 use crate::meeting_activity::{self, ActivityStatus};
 use crate::state::AppState;
+use enhancer::{EnhancedSnapshot, ENHANCED_UPDATE_EVENT};
 use llm::{Generator, SummaryModelGenerator};
 use scheduler::{Segment, Speaker};
 use worker::{TimelineSnapshot, WorkerConfig, WorkerHost};
@@ -55,6 +60,53 @@ static SESSION: Mutex<Option<ActiveSession>> = Mutex::new(None);
 /// The latest snapshot of the current (or last) session, for the panel to
 /// rehydrate after navigating.
 static LATEST: Mutex<Option<TimelineSnapshot>> = Mutex::new(None);
+/// The latest Enhanced notes of the current (or last) session, for the
+/// meeting page to rehydrate.
+static LATEST_ENHANCED: Mutex<Option<EnhancedSnapshot>> = Mutex::new(None);
+
+/// A session's worker that has not exited yet, and its meeting once known:
+/// the summary at stop waits for it, so its last notes and section are in.
+struct Running {
+    session_id: String,
+    meeting_id: Option<String>,
+    done: tokio::sync::watch::Receiver<bool>,
+}
+
+static RUNNING: Mutex<Vec<Running>> = Mutex::new(Vec::new());
+
+fn note_meeting(session_id: &str, meeting_id: Option<&str>) {
+    let Some(meeting_id) = meeting_id else {
+        return;
+    };
+    let mut running = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(run) = running
+        .iter_mut()
+        .find(|r| r.session_id == session_id && r.meeting_id.is_none())
+    {
+        run.meeting_id = Some(meeting_id.to_string());
+    }
+}
+
+/// Waits (up to `timeout`) until the live summary worker of `meeting_id`
+/// has exited: its last window, the section it was writing and their
+/// writes are done. Returns at once when no worker belongs to the meeting.
+pub async fn settle_meeting(meeting_id: &str, timeout: std::time::Duration) {
+    let waits: Vec<tokio::sync::watch::Receiver<bool>> = RUNNING
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .filter(|r| r.meeting_id.as_deref() == Some(meeting_id))
+        .map(|r| r.done.clone())
+        .collect();
+    for mut done in waits {
+        if tokio::time::timeout(timeout, done.wait_for(|finished| *finished))
+            .await
+            .is_err()
+        {
+            warn!("Live summary: the worker of meeting {meeting_id} is still running; not waiting longer");
+        }
+    }
+}
 
 /// Whether the live summary is on. An absent key means on.
 pub fn enabled_from_stored(value: Option<&serde_json::Value>) -> bool {
@@ -110,6 +162,8 @@ fn segment_from_event(payload: &str, received_at: std::time::Duration) -> Option
 struct AppHost<R: Runtime> {
     app: AppHandle<R>,
     session_id: String,
+    /// The recording folder, once known (the user's notes live there).
+    folder: Mutex<Option<String>>,
 }
 
 impl<R: Runtime> AppHost<R> {
@@ -168,7 +222,54 @@ impl<R: Runtime> WorkerHost for AppHost<R> {
         Ok(row.is_some())
     }
 
+    async fn user_notes(&self) -> Vec<crate::summary::live_outline::UserNote> {
+        let cached = self
+            .folder
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let folder = match cached {
+            Some(folder) => folder,
+            None => match crate::audio::recording_commands::get_meeting_folder_path().await {
+                Ok(Some(folder)) => {
+                    *self.folder.lock().unwrap_or_else(|e| e.into_inner()) = Some(folder.clone());
+                    folder
+                }
+                _ => return Vec::new(),
+            },
+        };
+        let read = tauri::async_runtime::spawn_blocking(move || {
+            crate::live_notes::read_folder_document(&folder)
+        })
+        .await;
+        match read {
+            Ok(Ok(Some(document))) => document.user_notes(),
+            Ok(Ok(None)) => Vec::new(),
+            Ok(Err(error)) => {
+                perf_debug!("Enhanced notes: could not read the user's notes: {error}");
+                Vec::new()
+            }
+            Err(_) => Vec::new(),
+        }
+    }
+
+    async fn persist_section(&self, row: &EnhancedSectionRow) -> Result<()> {
+        EnhancedSectionsRepository::upsert(&self.pool()?, row).await?;
+        Ok(())
+    }
+
+    fn publish_enhanced(&self, snapshot: &EnhancedSnapshot) {
+        if active_session_id().is_some_and(|active| active != self.session_id) {
+            return;
+        }
+        *LATEST_ENHANCED.lock().unwrap_or_else(|e| e.into_inner()) = Some(snapshot.clone());
+        if let Err(error) = self.app.emit(ENHANCED_UPDATE_EVENT, snapshot) {
+            warn!("Enhanced notes: could not emit an update: {error}");
+        }
+    }
+
     fn publish(&self, snapshot: &TimelineSnapshot) {
+        note_meeting(&self.session_id, snapshot.meeting_id.as_deref());
         let Some(snapshot) =
             publishable(&self.session_id, active_session_id().as_deref(), snapshot)
         else {
@@ -235,6 +336,16 @@ pub fn start_session<R: Runtime>(app: &AppHandle<R>, session_id: String) {
         previous.finish.cancel();
     }
     *LATEST.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    *LATEST_ENHANCED.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    let (done_sender, done) = tokio::sync::watch::channel(false);
+    RUNNING
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(Running {
+            session_id: session_id.clone(),
+            meeting_id: None,
+            done,
+        });
 
     let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
     let started = crate::clock::now();
@@ -254,6 +365,7 @@ pub fn start_session<R: Runtime>(app: &AppHandle<R>, session_id: String) {
     let host: Arc<dyn WorkerHost> = Arc::new(AppHost {
         app: app.clone(),
         session_id: session_id.clone(),
+        folder: Mutex::new(None),
     });
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -273,6 +385,11 @@ pub fn start_session<R: Runtime>(app: &AppHandle<R>, session_id: String) {
             Err(error) => warn!("Live summary worker for {session_id} ended abnormally: {error}"),
         }
         app.unlisten(listener);
+        let _ = done_sender.send(true);
+        RUNNING
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|r| r.session_id != session_id);
         let mut active = SESSION.lock().unwrap_or_else(|e| e.into_inner());
         if active.as_ref().is_some_and(|s| s.session_id == session_id) {
             *active = None;
@@ -320,6 +437,34 @@ pub struct LiveSummarySettings {
 #[tauri::command]
 pub async fn get_live_timeline() -> Option<TimelineSnapshot> {
     LATEST.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// The current (or last) session's Enhanced notes, so the meeting page can
+/// rehydrate.
+#[tauri::command]
+pub async fn get_live_enhanced() -> Option<EnhancedSnapshot> {
+    LATEST_ENHANCED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+/// Whether a meeting's Enhanced notes are built from its live notes (the
+/// summary then needs no pass over the final transcript, so the stop can
+/// start it at once).
+#[tauri::command]
+pub async fn has_live_enhanced_notes(
+    meeting_id: String,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let notes: Vec<crate::summary::live_outline::LiveNote> =
+        TimelineRepository::list_for_meeting(state.db_manager.pool(), &meeting_id)
+            .await
+            .map_err(|e| format!("Could not load the meeting's live notes: {e}"))?
+            .iter()
+            .map(crate::summary::live_outline::LiveNote::from)
+            .collect();
+    Ok(crate::summary::live_outline::check(&notes, &[], 1).is_ok())
 }
 
 #[tauri::command]

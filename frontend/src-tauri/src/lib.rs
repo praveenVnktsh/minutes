@@ -927,6 +927,8 @@ pub fn run() {
             live_notes::get_meeting_live_notes,
             live_notes::save_meeting_live_notes,
             live_summary::get_live_timeline,
+            live_summary::get_live_enhanced,
+            live_summary::has_live_enhanced_notes,
             live_summary::list_meeting_timeline_entries,
             live_summary::get_live_summary_settings,
             live_summary::set_live_summary_settings,
