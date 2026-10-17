@@ -136,7 +136,7 @@ pub(crate) fn write_transcripts_json(folder: &Path, segments: &[TranscriptSegmen
 /// Scans for 100ms windows with minimal RMS energy within +/-3 seconds of each target
 /// split point. If no clear silence is found, falls back to a 1-second overlap split
 /// to avoid cutting words at boundaries.
-pub(crate) fn split_segment_at_silence(
+pub fn split_segment_at_silence(
     segment: &crate::audio::vad::SpeechSegment,
     max_samples: usize,
 ) -> Vec<crate::audio::vad::SpeechSegment> {

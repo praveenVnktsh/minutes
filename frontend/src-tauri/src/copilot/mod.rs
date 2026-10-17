@@ -142,6 +142,51 @@ impl<R: Runtime> AppHost<R> {
     }
 }
 
+impl<R: Runtime> AppHost<R> {
+    /// The live notes model for proactive checks, when [`confirm_model_for`]
+    /// says so; `None` keeps them on Copilot's usual model.
+    async fn live_notes_confirm_streamer(&self) -> Option<Arc<dyn Streamer>> {
+        let pool = self.pool().ok()?;
+        let app_data_dir = self.app.path().app_data_dir().ok()?;
+        let summary = SettingsRepository::get_model_config(&pool).await.ok()??;
+        let models_dir = models::get_models_directory(&app_data_dir);
+        let live_notes = crate::live_summary::llm::live_notes_model(
+            &models_dir,
+            &summary.model,
+            crate::live_summary::model_choice::choice(&self.app),
+            crate::summary::summary_engine::client::total_memory_bytes(),
+        );
+        let model = confirm_model_for(
+            load_settings(&self.app).model.is_some(),
+            &summary.provider,
+            live_notes,
+        )?;
+        Some(Arc::new(stream::LiveNotesConfirmStreamer {
+            app_data_dir,
+            model,
+        }))
+    }
+}
+
+/// Which model takes Copilot's proactive yes/no checks instead of Copilot's
+/// own: the live notes model, when Copilot follows the summary model, that
+/// is the built-in one, and live notes run the live notes model on its own
+/// helper (it is loaded for the meeting anyway). `live_notes` is
+/// `live_summary::llm::live_notes_model`'s answer.
+pub fn confirm_model_for(
+    copilot_model_set: bool,
+    summary_provider: &str,
+    live_notes: Option<(String, bool)>,
+) -> Option<String> {
+    if copilot_model_set || !crate::live_summary::llm::is_builtin(summary_provider) {
+        return None;
+    }
+    match live_notes {
+        Some((model, true)) => Some(model),
+        _ => None,
+    }
+}
+
 /// The first built-in model that is downloaded, for "Use built-in model instead".
 fn downloaded_builtin_model(app_data_dir: &std::path::Path) -> Option<String> {
     models::get_available_models()
@@ -206,6 +251,13 @@ impl<R: Runtime> Host for AppHost<R> {
             force_builtin,
         )
         .await
+    }
+
+    async fn confirm_streamer(&self) -> Result<Arc<dyn Streamer>, String> {
+        if let Some(streamer) = self.live_notes_confirm_streamer().await {
+            return Ok(streamer);
+        }
+        self.streamer(false).await
     }
 
     async fn persist(&self, rows: &[ChatRow]) -> Result<bool, String> {
@@ -492,6 +544,26 @@ pub async fn set_copilot_settings<R: Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn proactive_checks_use_the_live_notes_model_only_when_it_runs_on_its_own_helper() {
+        let e2b = || Some(("gemma-4-e2b".to_string(), true));
+        assert_eq!(
+            confirm_model_for(false, "builtin-ai", e2b()).as_deref(),
+            Some("gemma-4-e2b")
+        );
+        // A Copilot model of the user's own choosing is always used.
+        assert_eq!(confirm_model_for(true, "builtin-ai", e2b()), None);
+        // Cloud or Ollama summary models: Copilot's model as before.
+        assert_eq!(confirm_model_for(false, "claude", e2b()), None);
+        // The summary model is the live notes model (one helper), or live
+        // notes run on the summary model: nothing to gain.
+        assert_eq!(
+            confirm_model_for(false, "builtin-ai", Some(("gemma-4-e2b".into(), false))),
+            None
+        );
+        assert_eq!(confirm_model_for(false, "builtin-ai", None), None);
+    }
 
     #[test]
     fn settings_default_to_suggestions_on_debug_off_summary_model() {

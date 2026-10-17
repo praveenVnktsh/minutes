@@ -1,9 +1,9 @@
 use chrono::{DateTime, Duration, Utc};
-use std::path::{Path, PathBuf};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use sqlx::{FromRow, SqlitePool};
+use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager, Runtime};
 use tauri_plugin_store::StoreExt;
 use url::Url;
@@ -69,7 +69,10 @@ struct TranscriptReading {
 /// Blank segments are dropped rather than kept as empty lines, matching how
 /// murmr reads a meeting's `transcripts.json`, so the two readings of one
 /// meeting produce the same text.
-async fn read_transcript(pool: &SqlitePool, meeting_id: &str) -> Result<TranscriptReading, sqlx::Error> {
+async fn read_transcript(
+    pool: &SqlitePool,
+    meeting_id: &str,
+) -> Result<TranscriptReading, sqlx::Error> {
     let rows: Vec<(String, Option<f64>)> = sqlx::query_as(
         "SELECT transcript, audio_end_time FROM transcripts
          WHERE meeting_id = ?
@@ -125,8 +128,8 @@ fn folder_facts(folder: Option<&Path>, started_at: DateTime<Utc>) -> FolderFacts
         // The receiver rejects an end before the start; send none instead.
         .filter(|ended| *ended >= started_at)
         .map(|ended| ended.to_rfc3339());
-    let transcription_model = read_transcription_model(folder)
-        .map(|model| format!("{}:{}", model.provider, model.model));
+    let transcription_model =
+        read_transcription_model(folder).map(|model| format!("{}:{}", model.provider, model.model));
     FolderFacts {
         ended_at,
         transcription_model,
@@ -439,7 +442,9 @@ mod tests {
         assert!(validate_config(&config("http://hooks.example.com/meetily")).is_err());
     }
 
-    async fn pool_with_transcripts(rows: &[(&str, &str, &str, Option<f64>, Option<f64>)]) -> SqlitePool {
+    async fn pool_with_transcripts(
+        rows: &[(&str, &str, &str, Option<f64>, Option<f64>)],
+    ) -> SqlitePool {
         let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
         sqlx::query(
             "CREATE TABLE transcripts (
@@ -505,7 +510,9 @@ mod tests {
     }
 
     fn at(value: &str) -> DateTime<Utc> {
-        DateTime::parse_from_rfc3339(value).unwrap().with_timezone(&Utc)
+        DateTime::parse_from_rfc3339(value)
+            .unwrap()
+            .with_timezone(&Utc)
     }
 
     fn meeting(folder: Option<&Path>) -> MeetingModel {
@@ -548,7 +555,10 @@ mod tests {
 
         let payload = payload_for(&pool, meeting(Some(folder.path()))).await;
 
-        assert_eq!(payload["meeting"]["started_at"], "2026-09-30T10:00:00+00:00");
+        assert_eq!(
+            payload["meeting"]["started_at"],
+            "2026-09-30T10:00:00+00:00"
+        );
         assert_eq!(payload["meeting"]["ended_at"], "2026-09-30T10:25:00+00:00");
         assert_eq!(payload["result"]["transcript"], "hello\nworld");
         assert_eq!(payload["result"]["transcript_segments"], 2);

@@ -435,7 +435,9 @@ async fn run_nemotron<R: Runtime>(
     );
     let progress_app = app.clone();
     let progress_meeting = meeting_id.to_string();
-    let segments = tokio::task::spawn_blocking(move || -> Result<Vec<SpeakerSegment>> {
+    // Post-meeting work: the calling thread (which drives ONNX Runtime and
+    // takes part in its work) at utility QoS.
+    let segments = crate::quiet_work::spawn_quietly(move || -> Result<Vec<SpeakerSegment>> {
         let mut diarizer = SortformerDiarizer::new(&model)?;
         let mut last = None;
         diarizer.diarize(&samples, |fraction| {
@@ -633,7 +635,7 @@ async fn run_pyannote<R: Runtime>(
         40,
         "Detecting and clustering speakers...",
     );
-    tokio::task::spawn_blocking(move || diarize_with_pyannote(&samples, &models, num_speakers))
+    crate::quiet_work::spawn_quietly(move || diarize_with_pyannote(&samples, &models, num_speakers))
         .await
         .map_err(|error| anyhow!("Diarization task failed: {error}"))?
 }

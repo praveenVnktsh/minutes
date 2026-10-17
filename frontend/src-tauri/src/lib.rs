@@ -65,6 +65,7 @@ pub mod onboarding;
 pub mod openai;
 pub mod openrouter;
 pub mod parakeet_engine;
+pub mod quiet_work;
 pub mod replay;
 pub mod shortcuts;
 pub mod state;
@@ -779,6 +780,8 @@ pub fn run() {
             optional_setup_step("resume workers", || {
                 audio::diarization::init_resume_worker(_app.handle());
                 audio::final_pass::init_resume_worker(_app.handle());
+                audio::final_pass::init_power_watcher(_app.handle());
+                whisper_engine::coreml_encoder::spawn_setup(_app.handle());
             });
 
             // Deliver durable transcription-complete webhooks in the background.
@@ -1094,6 +1097,10 @@ pub fn run() {
             // Retranscription commands
             audio::retranscription::start_retranscription_command,
             audio::final_pass::start_final_transcript_pass,
+            audio::final_pass::final_pass_waiting,
+            audio::final_pass::run_waiting_final_pass,
+            audio::final_pass::get_final_pass_timing,
+            audio::final_pass::set_final_pass_timing,
             audio::live_streaming::commands::get_live_transcription_settings,
             audio::live_streaming::commands::set_live_transcription_settings,
             audio::live_streaming::commands::live_model_get_status,
