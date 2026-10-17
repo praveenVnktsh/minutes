@@ -63,6 +63,9 @@ enum Request {
         /// GBNF the output must follow.
         #[serde(skip_serializing_if = "Option::is_none")]
         grammar: Option<&'static str>,
+        /// Stop after this many complete non-empty lines.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        max_lines: Option<u32>,
     },
     Tokenize {
         text: String,
@@ -413,6 +416,7 @@ pub async fn generate_with_builtin(
         flash_attn: None,
         kv_cache_type: None,
         grammar: None,
+        max_lines: None,
     };
 
     let request_json = serde_json::to_string(&request)?;
@@ -482,6 +486,9 @@ pub struct LiveNotesRequest<'a> {
     pub user_prompt: &'a str,
     /// GBNF the answer must follow.
     pub grammar: Option<&'static str>,
+    /// Stop after this many lines (the topic line and the notes kept): the
+    /// model's extra notes would be dropped anyway.
+    pub max_lines: Option<u32>,
     /// Run on the live notes helper (another model than the main helper's).
     pub own_helper: bool,
     pub options: BuiltinGenerateOptions,
@@ -554,6 +561,7 @@ pub async fn generate_live_notes(
         system_prompt,
         user_prompt,
         grammar,
+        max_lines,
         own_helper,
         options,
     } = request;
@@ -594,6 +602,7 @@ pub async fn generate_live_notes(
         flash_attn: None,
         kv_cache_type: None,
         grammar,
+        max_lines,
     };
     let timeout = options
         .timeout
@@ -899,6 +908,7 @@ pub async fn generate_with_builtin_stream(
         flash_attn: None,
         kv_cache_type: None,
         grammar: None,
+        max_lines: None,
     };
     let response_json = manager
         .send(SidecarRequest {
@@ -1157,6 +1167,7 @@ mod tests {
             flash_attn: None,
             kv_cache_type: None,
             grammar: None,
+            max_lines: None,
         };
 
         let json = serde_json::to_string(&request).unwrap();
@@ -1323,6 +1334,7 @@ mod tests {
             flash_attn: None,
             kv_cache_type: None,
             grammar: None,
+            max_lines: None,
         })
         .unwrap();
         assert!(json.contains("\"id\":4"));

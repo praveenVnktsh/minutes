@@ -504,6 +504,10 @@ impl Worker {
         let handle = tokio::spawn(async move {
             let provider = generator.provider().to_string();
             let model = generator.model().to_string();
+            let mut window = window;
+            if uses_compact_prompt(&provider, &model) {
+                window.max_entries += prompt::COMPACT_EXTRA_NOTES;
+            }
             let glossary = notes.glossary.terms();
             let context = PromptContext {
                 current_topic: notes.current_topic.as_deref(),
@@ -543,7 +547,7 @@ impl Worker {
             );
             let notes_call = token.child_token();
             let result = tokio::select! {
-                result = generator.generate(system, &user, &notes_call) => result,
+                result = generator.generate_notes(system, &user, 1 + window.max_entries, &notes_call) => result,
                 _ = crate::clock::sleep_until(deadline) => {
                     notes_call.cancel();
                     Err(GenerateError::transient("the window ran out of time"))
@@ -638,6 +642,7 @@ impl Worker {
             figures: Some(&figures),
             decided_topic: decided.as_deref(),
             drop_fragments: compact,
+            segments: &window.segments,
         };
         match parse_notes(
             &raw,
@@ -932,6 +937,8 @@ mod tests {
         topic_hang: bool,
         provider: &'static str,
         model: &'static str,
+        /// The line limit of each notes call.
+        max_lines: Mutex<Vec<usize>>,
     }
 
     impl FakeGenerator {
@@ -953,6 +960,7 @@ mod tests {
                 // step. Only the live notes model gets the compact prompt.
                 provider: "builtin-ai",
                 model: "qwen3.5:4b",
+                max_lines: Mutex::new(Vec::new()),
             }
         }
     }
@@ -961,6 +969,16 @@ mod tests {
     impl Generator for FakeGenerator {
         fn provider(&self) -> &str {
             self.provider
+        }
+        async fn generate_notes(
+            &self,
+            system: &str,
+            user: &str,
+            max_lines: usize,
+            cancel: &CancellationToken,
+        ) -> std::result::Result<Generated, GenerateError> {
+            self.max_lines.lock().unwrap().push(max_lines);
+            self.generate(system, user, cancel).await
         }
         fn model(&self) -> &str {
             self.model
@@ -1138,7 +1156,11 @@ mod tests {
         let snapshot = task.await.unwrap();
 
         let prompts = generator.prompts.lock().unwrap();
-        assert!(prompts[0].starts_with("Current topic: none yet (name it)\n"));
+        assert!(prompts[0].starts_with("No topic yet: name it on the topic line\n"));
+        // One note more than the scheduler's two, and the call stops after
+        // the topic line and those three notes.
+        assert!(prompts[0].contains("then up to 3 notes about the new transcript"));
+        assert_eq!(*generator.max_lines.lock().unwrap(), vec![4, 4]);
         assert!(prompts[1].contains("Current topic: Launch Plan (since 00:01)\n"));
         assert!(prompts[1].contains("topic: Launch Plan\n00:01|decision|-|"));
         let topics: Vec<_> = snapshot

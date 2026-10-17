@@ -145,6 +145,7 @@ async fn live_summary_smoke() {
             figures: None,
             decided_topic: None,
             drop_fragments: false,
+            segments: &window.segments,
         };
         match parse_notes(
             &raw,

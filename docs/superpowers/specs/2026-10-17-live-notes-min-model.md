@@ -28,6 +28,20 @@ A config passes when, on **both** replays (`sequoia-networking`, 27.8 min, and `
 | Actions | every action has an owner, and the reference's real actions are found |
 | Repeats of the last 8 notes | ≤ 1 |
 
+**The usage budget ("barely any usage")**, per meeting-hour, mean of 3 runs per replay:
+
+| Resource | Budget |
+| --- | --- |
+| Model busy (wall time a request holds the model) | ≤ 3 % of the hour (108 s) |
+| GPU time of the live notes helper | ≤ 2 % of the hour (72 s) |
+| Live transcription (Nemotron) real-time factor | ≤ 2 % slower |
+| Peak extra memory (the helper's physical footprint) | ≤ 0.6 GB |
+
+The RTF impact is the back-to-back slowdown (live notes requests with no gap, the worst case)
+times the share of the hour the model is busy. Memory is the footprint macOS charges the
+process (Activity Monitor's "Memory"); the mapped GGUF weights (2.9 GiB, clean and file-backed)
+come on top in RSS and are reported separately.
+
 **Reference.** Current production: Qwen 3.5 4B Q4_K_M, the notetaker JSON prompt with the
 topic step, a fresh 32k context per request, llama-cpp-2 0.1.146.
 
@@ -145,6 +159,96 @@ A faster Mac-only runtime (an MLX sidecar, LiteRT-LM for Gemma 4) was not tried:
 ~60 tokens, which those runtimes would shave by a fraction, against a second inference
 stack to ship and maintain.
 
+## Closing the goal
+
+Branch `perf/live-notes-goal-close`. Same machine (Apple M5, 24 GB), still not quiet (another
+project's test suite and builds ran: load average 5–20 during the runs), so latencies and RTF
+are noisy; token counts are exact and GPU seconds varied ±5 % between identical runs.
+
+### Noise: the reference against itself
+
+The reference is now the production 4B config on the current runtime (JSON prompt, topic step,
+fresh 32k context, llama-cpp-2 0.1.160), run 3× (seeds: production, 1, 2; with the same seed
+two runs are byte-identical, so the seed is what varies). Coverage of run *k* against each
+other run, and of each E2B run against each 4B run (mean [min–max] over the pairs):
+
+| | sequoia | m35 |
+| --- | --- | --- |
+| 4B vs 4B (self-agreement, 6 pairs) | 0.79 [0.71–0.86] | 0.75 [0.71–0.79] |
+| E2B as shipped in #105 vs 4B (9 pairs) | 0.75 [0.61–0.89] | 0.63 [0.53–0.72] |
+| E2B final vs 4B (9 pairs) | **0.84 [0.74–0.93]** | **0.83 [0.76–0.89]** |
+| precision, E2B final (9 pairs) | 0.97 [0.95–1.00] | 0.91 [0.89–0.93] |
+
+The 4B agrees with itself at 0.75–0.79: the 0.75 bar is at the reference's own noise floor,
+so a candidate has to cover the reference about as well as the reference covers itself. The
+shipped E2B did not (0.63 on m35). The final E2B does on both replays, in every one of its 3
+runs (per-run means 0.82–0.85).
+
+Matcher review: the near misses (Dice 0.15–0.3) printed for m35 were different facts in all but
+one case (a same-fact pair at 0.29), and every unmatched reference action was found in other
+words (below). The matcher is, if anything, strict; it was left unchanged.
+
+### Final E2B against every bar (3 runs per replay)
+
+| Metric | sequoia | m35 | Bar | |
+| --- | --- | --- | --- | --- |
+| Narration (shown) | 0–1 % | 1–3 % | ≤ 5 % | pass |
+| Notes over 14 words (longest) | 0 (11) | 0 (12) | 0 | pass |
+| Unsupported numbers | 0 | 0 | 0 | pass |
+| Failed windows | 0 % | 0 % | ≤ 2 % | pass |
+| Coverage vs the 4B runs | 0.84 ± 0.10 | 0.83 ± 0.07 | ≥ 0.75 | pass |
+| Precision | 0.97 ± 0.03 | 0.91 ± 0.02 | ≥ 0.85 | pass |
+| Minutes per chapter | 4.0–5.6 | 5.1 | 3–8 | pass |
+| Actions owned / reference actions found | all / 2 of 2 | all / 1 of 1 | all | pass |
+| Repeats of the last 8 notes | 0 | 0 | ≤ 1 | pass |
+| Notes | 83 | 100 | | (4B: 28–31 / 34–36) |
+
+(± is half the min–max spread.) Reference actions: Dice found 1–2 of the 4B's 2 on sequoia;
+by hand both are there in all 3 runs, as actions owned by Others, in other words than the
+reference's (both are offers of introductions). E2B also files 2–3 offers per run that the
+commitment check does not confirm.
+
+### Usage against the budget (mean of 3 runs per replay)
+
+| | sequoia | m35 | Budget | |
+| --- | --- | --- | --- | --- |
+| Model busy, % of the hour | 2.6 % (2.5–2.7) | 2.2 % (2.2–2.3) | ≤ 3 % | pass |
+| GPU, % of the hour | 1.94 % (1.9–2.0) | 1.69 % (1.7) | ≤ 2 % | pass, 3 % margin |
+| CPU, % of a core-hour | 0.2 % | 0.2 % | | |
+| Live transcription RTF impact | ≤ 1.5 % | ≤ 1.2 % | ≤ 2 % | pass |
+| Peak footprint | 396 MB | 396 MB | ≤ 0.6 GB | pass |
+| RSS incl. mapped weights | 3.2–3.4 GB | 3.3 GB | (weights, not budgeted) | |
+| Generated / new prompt tokens per window | 61 / 544 | 56 / 396 | | |
+| Window latency mean / max | 1.6 / 2.2 s | 1.4 / 2.0 s | | |
+
+RTF: Nemotron alone 0.49–0.70 on the busy machine; with E2B requests back to back ×0.77–×1.55
+over 3 runs (the busy machine swamps it); the worst, ×1.55, at 2.6 % busy is +1.5 %.
+
+The floor: generation is ~75 % of the GPU time, and generated tokens are set by the notes
+written (three a window on dense speech, where coverage needs them, below). What could be cut
+without losing notes was cut; what is left is ~60 tokens a window.
+
+### What raised coverage, and what it cost
+
+| Attempt (E2B, 1–3 seeds) | Coverage seq / m35 | Precision | GPU % seq | Kept |
+| --- | --- | --- | --- | --- |
+| #105 as shipped | 0.75 / 0.63 | 0.95 / 0.91 | 1.9 | |
+| + parser: a speaker label written as a fifth column (`04:12\|point\|-\|Others\|…`) was kept as the note's first word, in 64 of 67 notes on m35; topic "none yet" taken as a title | 0.77 / 0.62 | 0.93 / 0.90 | 2.0 | yes |
+| "cover every distinct new fact, decision or action, one note each", 2 notes | 0.73 / 0.68 | 0.98 / 0.92 | 2.0 | |
+| same, 3 notes a window | 0.83 / 0.86 | 0.97 / 0.90 | 2.2–2.3 | yes |
+| notes without times (placed by their words) | 0.69 / 0.66 | 0.96 / 0.90 | 1.7 | no: fewer, vaguer notes |
+| no owner column on points | 0.76 / 0.82 | 0.97 / 0.89 | 2.2–2.4 | no: longer notes |
+| "terse, 5 to 9 words, never more than 12" | 0.84 / 0.82 | 0.97 / 0.93 | 2.0–2.1 | yes |
+| "4 to 8 words" | 0.83 / 0.80 | 0.95 / 0.92 | 2.1–2.3 | no: same length |
+| 75 s / 90 s cadence | 0.64 / 0.68, 0.79 / 0.74 | | 1.9–2.1 | no: and 9–12 min chapters |
+| no carried-over context / 45 words of it | 0.84 / 0.79, 0.79 / 0.83 | 0.98 / 0.87, 0.98 / 0.89 | 1.9–2.1 | no: precision for ~1 % |
+| stop generating after the topic line and the notes kept (`max_lines`) | same notes | same | **1.9–2.0** | yes |
+
+Dropping each window's third note after the fact costs 0.13–0.19 coverage: E2B does not
+reliably put the reference's fact first, so it needs the third chance. It wrote 3.6 lines a
+window where 3 are kept; llama-helper now stops at the line limit (`max_lines`) instead of
+generating notes the parser drops: 68 → 61 tokens a window, the same notes.
+
 ## Shipping
 
 - **Catalogue.** `gemma4:e2b` ("Gemma 4 E2B (Live notes)"), Gemma 4 chat template (a real
@@ -152,14 +256,19 @@ stack to ship and maintain.
   after each download, and its URL names the Hugging Face commit that hash belongs to
   (`resolve/<40-hex revision>/…`, never `resolve/main`), so a re-upload upstream cannot break
   downloads.
-- **Opt-in only.** Nothing downloads without asking. Onboarding shows the live notes model as
-  an optional step with a checkbox, ticked by default only on Macs with 16 GB or more; when
-  ticked, the download starts after Parakeet and the summary model are on disk (the backend
-  waits for them, across reloads and restarts). Settings → Summary → *Live notes model* offers
-  "Same as summary model" (the default) or "Gemma 4 E2B (faster, lighter)", with download,
-  progress and remove; Gemma can be chosen once downloaded.
-- **Model choice.** With Built-in AI as the summary provider and Gemma 4 E2B chosen and
-  downloaded, live notes run on it, on **their own llama-helper process** with the compact,
+- **Download opt-in, use by default.** Nothing downloads without asking. Onboarding shows the
+  live notes model as an optional step with a checkbox, ticked by default only on Macs with
+  16 GB or more; when ticked, the download starts after Parakeet and the summary model are on
+  disk (the backend waits for them, across reloads and restarts). Once the file is on disk,
+  live notes use it by default on Macs with 16 GB or more: no stored choice (`liveNotesModel`
+  absent) means the default, so existing users who never picked get it too. Settings →
+  Summary → *Live notes model* shows the model in use and offers "Same as summary model" or
+  "Gemma 4 E2B (faster, lighter)", with download, progress and remove; picking either is
+  stored and wins over the default. Removing the file is not a choice: live notes fall back
+  to the summary model until it is downloaded again. An explicit Gemma choice still works on
+  12 GB; 8 GB Macs never run two models.
+- **Model choice.** With Built-in AI as the summary provider and Gemma 4 E2B in use (chosen or
+  by default) and downloaded, live notes run on it, on **their own llama-helper process** with the compact,
   prefix-cached path, so Copilot (on the summary model) and live notes never reload each
   other's model. The cost is a second resident model (~0.4 GB of footprint plus its mapped
   weights), so Macs with 8 GB or less keep live notes on the summary model.
@@ -168,6 +277,10 @@ stack to ship and maintain.
   on Qwen 3.5 4B the compact prompt lost precision (0.72 on m35, under the 0.85 bar), and
   uncached requests cannot evict Copilot's prefix checkpoints. A summary model that is itself
   E2B gets the compact prompt, uncached on the shared helper.
+- **Compact path notes.** Up to three notes a window (four from a merged backlog), one per
+  distinct fact, decision or action, 5–9 words; the request stops after the topic line and
+  those notes. A speaker label written as an extra column is dropped, an action's owner in
+  the wrong column kept.
 - **Fragments.** Only on the compact path: points under three words are dropped; actions and
   decisions keep two ("Email Sarah", "Budget approved") unless they point at nothing ("do
   that").

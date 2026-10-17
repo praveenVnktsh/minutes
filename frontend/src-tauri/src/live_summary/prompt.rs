@@ -361,11 +361,12 @@ project they work on now, or from that project to another company, is a new topi
 person's name. note: the task, starting with a verb.\n\
 - decision: the participants explicitly agree on something. point: everything else (facts, \
 plans described, opinions, questions). owner is - for points and decisions.\n\
-- note: headline style, 6 to 12 words, never more than 14. Facts, names and numbers first. \
+- note: terse headline, 5 to 9 words, never more than 12. Facts, names and numbers first. \
 Say WHAT was said, never who said it: no \"Others\", \"Speaker\", \"They\", no \"discusses\" or \"mentions\".\n\
 - Numbers only as said in the new transcript, never moved between companies or people.\n\
-- Usually one note; a second only for a separate substantive fact. Skip small talk and \
-anything already noted. If nothing new was said, write \"none\" after the topic line.\n\
+- Cover every distinct new fact, decision or action in the new transcript, most important \
+first: one note each, never two notes on the same thing. Skip small talk and anything already \
+noted. If nothing new was said, write \"none\" after the topic line.\n\
 \n\
 Transcript labels: You is the person recording, Others is everyone else. Never put them in a note.\n\
 \n\
@@ -399,7 +400,7 @@ pub fn compact_user_prompt(window: &Window, context: &PromptContext<'_>) -> Stri
                 None => prompt.push_str(&format!("Current topic: {topic}\n")),
             }
         }
-        None => prompt.push_str("Current topic: none yet (name it)\n"),
+        None => prompt.push_str("No topic yet: name it on the topic line\n"),
     }
     if !context.glossary.is_empty() {
         prompt.push_str(&format!("Spellings: {}\n", context.glossary.join(", ")));
@@ -440,13 +441,19 @@ pub fn compact_user_prompt(window: &Window, context: &PromptContext<'_>) -> Stri
     let count = if window.max_entries <= 1 {
         "at most 1 note".to_string()
     } else {
-        format!("up to {} notes (usually one)", window.max_entries)
+        format!("up to {} notes", window.max_entries)
     };
     prompt.push_str(&format!(
-        "\nThe topic line, then {count} about the new transcript, or none."
+        "\nThe topic line, then {count} about the new transcript (one per distinct fact, decision or action), or none."
     ));
     prompt
 }
+
+/// Notes the compact prompt asks for beyond the scheduler's
+/// `max_entries`: the small model's notes each carry one fact, and the
+/// benchmark's coverage of the reference model's notes needs the third
+/// (0.68 → 0.82 on the replays), at a few more generated tokens.
+pub const COMPACT_EXTRA_NOTES: usize = 1;
 
 /// GBNF for the compact answer: the topic line, then `none` or one to
 /// three note lines.
@@ -510,7 +517,8 @@ mod tests {
         assert!(compact.len() * 2 < system_prompt().len());
         assert!(compact.contains("topic: same\nmm:ss|kind|owner|note"));
         assert!(compact.contains("never who said it"));
-        assert!(compact.contains("never more than 14"));
+        assert!(compact.contains("never more than 12"));
+        assert!(compact.contains("Cover every distinct new fact"));
         assert!(compact.contains("write \"none\" after the topic line"));
         assert!(compact.contains("|action|You|"));
     }
@@ -539,10 +547,10 @@ mod tests {
         );
         assert!(user.contains("[01:01] Others: We should ship on Friday."));
         assert!(user.ends_with(
-            "The topic line, then up to 2 notes (usually one) about the new transcript, or none."
+            "The topic line, then up to 2 notes about the new transcript (one per distinct fact, decision or action), or none."
         ));
         let first = compact_user_prompt(&window(), &PromptContext::default());
-        assert!(first.starts_with("Current topic: none yet (name it)\n"));
+        assert!(first.starts_with("No topic yet: name it on the topic line\n"));
     }
 
     #[test]

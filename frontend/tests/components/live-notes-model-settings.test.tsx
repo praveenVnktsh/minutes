@@ -11,16 +11,22 @@ afterAll(() => {
 });
 
 let status: { type: string } = { type: 'not_downloaded' };
-let choice = 'summary';
+// The stored choice (null: never picked) and the backend's resolution of it on a 16 GB Mac:
+// Gemma once downloaded, unless "Same as summary model" was picked.
+let choice: string | null = null;
 const calls: string[] = [];
 const invoke = mock(async (command: string, args?: Record<string, unknown>) => {
   calls.push(command);
   switch (command) {
+    case 'builtin_ai_delete_model':
+      status = { type: 'not_downloaded' };
+      return null;
     case 'get_live_notes_settings':
     case 'set_live_notes_model':
       if (command === 'set_live_notes_model') choice = String(args?.model);
       return {
-        model: choice,
+        model: choice !== 'summary' && status.type === 'available' ? 'gemma4:e2b' : 'summary',
+        explicit: choice !== null,
         live_notes_model: 'gemma4:e2b',
         low_memory: false,
         opt_in_by_default: true,
@@ -63,7 +69,7 @@ async function render() {
 describe('live notes model settings', () => {
   beforeEach(() => {
     status = { type: 'not_downloaded' };
-    choice = 'summary';
+    choice = null;
     calls.length = 0;
   });
 
@@ -81,18 +87,30 @@ describe('live notes model settings', () => {
     renderer.unmount();
   });
 
-  test('a downloaded model can be chosen and removed, falling back to the summary model', async () => {
+  test('once downloaded Gemma is the default, and "Same as summary model" can be picked', async () => {
     status = { type: 'available' };
     const renderer = await render();
     const control = renderer.root.findByProps({ 'aria-label': 'Live notes model' });
     expect(control.props.options.every((o: { disabled: boolean }) => !o.disabled)).toBe(true);
-    await act(async () => { await control.props.onValueChange('gemma4:e2b'); });
-    expect(choice).toBe('gemma4:e2b');
+    expect(control.props.value).toBe('gemma4:e2b');
+    expect(calls).not.toContain('set_live_notes_model');
 
+    await act(async () => { await control.props.onValueChange('summary'); });
+    expect(choice).toBe('summary');
+    expect(renderer.root.findByProps({ 'aria-label': 'Live notes model' }).props.value).toBe('summary');
+    renderer.unmount();
+  });
+
+  test('removing the model is not a choice: live notes fall back to the summary model', async () => {
+    status = { type: 'available' };
+    const renderer = await render();
     const remove = button(renderer, 'Remove');
     await act(async () => { await remove!.props.onClick(); });
-    expect(choice).toBe('summary');
+    await act(async () => { await Promise.resolve(); });
     expect(calls).toContain('builtin_ai_delete_model');
+    expect(calls).not.toContain('set_live_notes_model');
+    expect(choice).toBeNull();
+    expect(renderer.root.findByProps({ 'aria-label': 'Live notes model' }).props.value).toBe('summary');
     renderer.unmount();
   });
 });

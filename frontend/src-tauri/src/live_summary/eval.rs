@@ -396,6 +396,7 @@ fn parse_reply(
                 figures: Some(&figures),
                 decided_topic: decided,
                 drop_fragments: false,
+                segments: &window.segments,
             };
             parse_notes(
                 raw,
