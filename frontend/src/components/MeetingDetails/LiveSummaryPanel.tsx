@@ -1,13 +1,15 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 import { badge, panel } from '@/lib/theme-classes';
 import {
   LIVE_TIMELINE_UPDATE_EVENT,
   acceptSnapshot,
+  entryDisplayText,
   formatTimelineTime,
+  groupByTopic,
   kindMarker,
   liveTimelineApi,
   statusNotice,
@@ -54,10 +56,51 @@ export function TimelineEntryRow({ entry }: { entry: TimelineEntry }) {
             {marker.label}
           </span>
         )}
-        {entry.text}
-        {entry.speaker && <span className="ml-1.5 text-[11px] text-ink-subtle">· {entry.speaker}</span>}
+        {entryDisplayText(entry)}
       </span>
     </>
+  );
+}
+
+/** A topic's section header: a thin rule and the title. */
+export function TopicHeader({ topic }: { topic: string }) {
+  return (
+    <div className="flex items-center gap-2 pb-1 pt-1 text-[11px] font-semibold text-ink-muted">
+      <span aria-hidden className="h-px w-3 shrink-0 bg-hairline" />
+      <span className="min-w-0 truncate" title={topic}>{topic}</span>
+      <span aria-hidden className="h-px min-w-4 flex-1 bg-hairline" />
+    </div>
+  );
+}
+
+/** Entries grouped under their topics. `renderEntry` draws one entry's row
+ * (the chapters wrap it in a button). */
+export function TimelineSections<T extends TimelineEntry>({
+  entries,
+  renderEntry,
+  itemClassName,
+  listClassName = 'space-y-1.5',
+}: {
+  entries: T[];
+  renderEntry: (entry: T) => ReactNode;
+  itemClassName?: string;
+  listClassName?: string;
+}) {
+  return (
+    <ol className="space-y-1">
+      {groupByTopic(entries).map((section) => (
+        <li key={`${section.topic ?? ''}-${section.entries[0].id}`} aria-label={section.topic ?? undefined}>
+          {section.topic && <TopicHeader topic={section.topic} />}
+          <ol className={listClassName}>
+            {section.entries.map((entry) => (
+              <li key={entry.id} className={itemClassName}>
+                {renderEntry(entry)}
+              </li>
+            ))}
+          </ol>
+        </li>
+      ))}
+    </ol>
   );
 }
 
@@ -89,13 +132,11 @@ export function LiveSummaryPanel({ active }: { active: boolean }) {
             </p>
           )}
           {entries.length > 0 && (
-            <ol className="space-y-1.5">
-              {entries.map((entry) => (
-                <li key={entry.id} className="flex gap-2">
-                  <TimelineEntryRow entry={entry} />
-                </li>
-              ))}
-            </ol>
+            <TimelineSections
+              entries={entries}
+              itemClassName="flex gap-2"
+              renderEntry={(entry) => <TimelineEntryRow entry={entry} />}
+            />
           )}
           {listening && (
             <p aria-live="polite" className="mt-1.5 flex items-center gap-2 text-xs italic text-ink-subtle">

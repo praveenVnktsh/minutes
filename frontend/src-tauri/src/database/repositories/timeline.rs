@@ -19,6 +19,10 @@ pub struct TimelineEntryRow {
     pub provider: String,
     pub model: String,
     pub created_at: String,
+    /// The section title the entry sits under; NULL on entries made before
+    /// topics existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic: Option<String>,
 }
 
 pub struct TimelineRepository;
@@ -39,8 +43,8 @@ impl TimelineRepository {
         for entry in entries {
             let result = sqlx::query(
                 "INSERT OR IGNORE INTO meeting_timeline_entries
-                    (id, meeting_id, start_ms, end_ms, kind, text, speaker, provider, model, created_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (id, meeting_id, start_ms, end_ms, kind, text, speaker, provider, model, created_at, topic)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&entry.id)
             .bind(&entry.meeting_id)
@@ -52,6 +56,7 @@ impl TimelineRepository {
             .bind(&entry.provider)
             .bind(&entry.model)
             .bind(&entry.created_at)
+            .bind(&entry.topic)
             .execute(&mut *transaction)
             .await?;
             inserted += result.rows_affected();
@@ -65,7 +70,7 @@ impl TimelineRepository {
         meeting_id: &str,
     ) -> Result<Vec<TimelineEntryRow>, SqlxError> {
         sqlx::query_as::<_, TimelineEntryRow>(
-            "SELECT id, meeting_id, start_ms, end_ms, kind, text, speaker, provider, model, created_at
+            "SELECT id, meeting_id, start_ms, end_ms, kind, text, speaker, provider, model, created_at, topic
              FROM meeting_timeline_entries
              WHERE meeting_id = ?
              ORDER BY start_ms ASC, created_at ASC",
@@ -119,7 +124,41 @@ mod tests {
             provider: "builtin-ai".to_string(),
             model: "qwen".to_string(),
             created_at: "2026-10-16T00:00:00Z".to_string(),
+            topic: Some("Launch Plan".to_string()),
         }
+    }
+
+    #[tokio::test]
+    async fn topics_are_stored_and_older_entries_without_one_still_load() {
+        let pool = pool().await;
+        let meeting_id = meeting(&pool).await;
+        // An entry written before the topic column existed.
+        sqlx::query(
+            "INSERT INTO meeting_timeline_entries
+                (id, meeting_id, start_ms, end_ms, kind, text, speaker, provider, model, created_at)
+             VALUES ('old', ?, 0, 1000, 'point', 'Older entry', 'Others', 'builtin-ai', 'qwen', '2026-10-15T00:00:00Z')",
+        )
+        .bind(&meeting_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        TimelineRepository::insert_entries(&pool, &[entry(&meeting_id, "new", 5_000, "point")])
+            .await
+            .unwrap();
+
+        let listed = TimelineRepository::list_for_meeting(&pool, &meeting_id)
+            .await
+            .unwrap();
+        assert_eq!(listed[0].id, "old");
+        assert_eq!(listed[0].topic, None);
+        assert_eq!(listed[1].topic.as_deref(), Some("Launch Plan"));
+        // An entry without a topic serializes without the field, as before.
+        let json = serde_json::to_value(&listed[0]).unwrap();
+        assert!(json.get("topic").is_none());
+        assert_eq!(
+            serde_json::to_value(&listed[1]).unwrap()["topic"],
+            "Launch Plan"
+        );
     }
 
     #[tokio::test]

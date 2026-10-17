@@ -7,6 +7,8 @@ use serde_json::Value;
 use std::collections::HashSet;
 use std::fmt;
 
+use super::notes::{NoteContext, Refiner};
+
 /// Longest entry text kept, in characters.
 pub const MAX_TEXT_CHARS: usize = 200;
 /// Longest free-form speaker label kept, in characters.
@@ -55,6 +57,9 @@ pub struct ParsedEntry {
     pub kind: EntryKind,
     pub text: String,
     pub speaker: Option<String>,
+    /// The section the note belongs to, as the model named it (refined by
+    /// `parse_notes`).
+    pub topic: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -80,6 +85,9 @@ impl std::error::Error for ParseError {}
 /// Times are clamped into the window, entries repeating `previous_texts` (or
 /// each other) are dropped, and at most `max_entries` are kept. An explicit
 /// empty list is a valid "nothing new" answer.
+///
+/// This is the reply as the model wrote it; `parse_notes` also applies the
+/// notetaker rules (topics, no narration, strict kinds, names).
 pub fn parse_entries(
     raw: &str,
     window_start_ms: i64,
@@ -87,8 +95,48 @@ pub fn parse_entries(
     max_entries: usize,
     previous_texts: &[String],
 ) -> Result<Vec<ParsedEntry>, ParseError> {
+    parse_with(
+        raw,
+        window_start_ms,
+        window_end_ms,
+        max_entries,
+        previous_texts,
+        None,
+    )
+}
+
+/// Like `parse_entries`, with the notetaker rules of `notes::Refiner`:
+/// topics resolved against the current one, narration rewritten or dropped,
+/// actions and decisions held to their definitions, names spelled as in the
+/// glossary. Repeats are judged on the refined text.
+pub fn parse_notes(
+    raw: &str,
+    window_start_ms: i64,
+    window_end_ms: i64,
+    max_entries: usize,
+    context: &NoteContext<'_>,
+) -> Result<Vec<ParsedEntry>, ParseError> {
+    parse_with(
+        raw,
+        window_start_ms,
+        window_end_ms,
+        max_entries,
+        context.previous_texts,
+        Some(context),
+    )
+}
+
+fn parse_with(
+    raw: &str,
+    window_start_ms: i64,
+    window_end_ms: i64,
+    max_entries: usize,
+    previous_texts: &[String],
+    context: Option<&NoteContext<'_>>,
+) -> Result<Vec<ParsedEntry>, ParseError> {
     let cleaned = strip_fences(&strip_think(raw));
-    let items = match reply_json_value(&cleaned) {
+    let value = reply_json_value(&cleaned).or_else(|| reply_json_value(&repair_brackets(&cleaned)));
+    let items = match value {
         Some(value) => entry_items(value).ok_or(ParseError::UnexpectedShape)?,
         None => {
             let salvaged = salvage_objects(&cleaned);
@@ -104,6 +152,7 @@ pub fn parse_entries(
     };
 
     let window_end_ms = window_end_ms.max(window_start_ms);
+    let mut refiner = context.map(Refiner::new);
     let mut seen: Vec<HashSet<String>> = previous_texts.iter().map(|t| word_set(t)).collect();
     let mut entries = Vec::new();
     for item in items {
@@ -113,6 +162,13 @@ pub fn parse_entries(
         let Some(entry) = entry_from(&item, window_start_ms, window_end_ms) else {
             continue;
         };
+        let entry = match refiner.as_mut() {
+            Some(refiner) => match refiner.refine(entry) {
+                Some(entry) => entry,
+                None => continue,
+            },
+            None => entry,
+        };
         let words = word_set(&entry.text);
         if words.is_empty()
             || seen
@@ -120,6 +176,9 @@ pub fn parse_entries(
                 .any(|other| overlap(&words, other) >= DUPLICATE_OVERLAP)
         {
             continue;
+        }
+        if let Some(refiner) = refiner.as_mut() {
+            refiner.accept(&entry);
         }
         seen.push(words);
         entries.push(entry);
@@ -235,6 +294,52 @@ fn salvage_objects(text: &str) -> Vec<Value> {
     found
 }
 
+/// `text` with mismatched closing brackets fixed, string-aware: small models
+/// write `{"entries":[{"text":"…"]}`, dropping the object's `}`. A `]` that
+/// meets an open `{` closes it first; a `}` that meets an open `[` closes
+/// the array first. Brackets still open at the end are closed.
+fn repair_brackets(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 4);
+    let mut open: Vec<char> = Vec::new();
+    let mut in_string = false;
+    let mut escaped = false;
+    for c in text.chars() {
+        if in_string {
+            out.push(c);
+            match c {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '{' | '[' => open.push(c),
+            '}' | ']' => {
+                let wanted = if c == '}' { '{' } else { '[' };
+                while let Some(&top) = open.last() {
+                    if top == wanted {
+                        break;
+                    }
+                    out.push(if top == '{' { '}' } else { ']' });
+                    open.pop();
+                }
+                open.pop();
+            }
+            _ => {}
+        }
+        out.push(c);
+    }
+    if !in_string {
+        while let Some(top) = open.pop() {
+            out.push(if top == '{' { '}' } else { ']' });
+        }
+    }
+    out
+}
+
 /// Index of the `}` closing the `{` at `start`, string-aware.
 fn balanced_end(bytes: &[u8], start: usize) -> Option<usize> {
     let mut depth = 0usize;
@@ -294,6 +399,11 @@ fn entry_from(item: &Value, window_start_ms: i64, window_end_ms: i64) -> Option<
         kind,
         text,
         speaker: item.get("speaker").and_then(speaker_label),
+        topic: ["topic", "section", "chapter"]
+            .iter()
+            .find_map(|key| item.get(*key).and_then(Value::as_str))
+            .map(|topic| topic.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|topic| !topic.is_empty()),
     })
 }
 
@@ -403,6 +513,7 @@ mod tests {
                 kind: EntryKind::Decision,
                 text: "Ship on Friday".into(),
                 speaker: Some("Others".into()),
+                topic: None,
             }]
         );
     }
@@ -462,6 +573,20 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].text, "Hiring plan {draft} reviewed");
         assert_eq!(entries[0].start_ms, 61_000);
+    }
+
+    #[test]
+    fn an_object_missing_its_closing_brace_is_repaired() {
+        let raw = r#"{"entries":[{"start":"01:05","kind":"point","text":"Budget is fine","topic":"Budget"]}"#;
+        let entries = parse(raw).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].text, "Budget is fine");
+        assert_eq!(entries[0].topic.as_deref(), Some("Budget"));
+        // Brackets inside strings are left alone.
+        assert_eq!(
+            repair_brackets(r#"{"a":[{"t":"x ] y"]}"#),
+            r#"{"a":[{"t":"x ] y"}]}"#
+        );
     }
 
     #[test]

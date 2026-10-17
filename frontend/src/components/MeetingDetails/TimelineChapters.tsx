@@ -10,7 +10,7 @@ import {
   type StoredTimelineEntry,
   type TimelineSnapshot,
 } from '@/lib/liveTimeline';
-import { TimelineEntryRow } from './LiveSummaryPanel';
+import { TimelineEntryRow, TimelineSections } from './LiveSummaryPanel';
 
 /** A meeting's stored live summary entries. Reloads when the recording's
  * worker stores its last entry after the page opened. */
@@ -66,9 +66,11 @@ export function TimelineChapters({ meetingId }: { meetingId: string | undefined 
         <span className="font-normal normal-case tracking-normal text-ink-subtle">({entries.length})</span>
       </button>
       {open && (
-        <ol className="mt-1.5 max-h-48 space-y-0.5 overflow-y-auto">
-          {entries.map((entry) => (
-            <li key={entry.id}>
+        <div className="mt-1.5 max-h-48 overflow-y-auto">
+          <TimelineSections
+            entries={entries}
+            listClassName="space-y-0.5"
+            renderEntry={(entry) => (
               <button
                 type="button"
                 onClick={() => jumpToTime(entry.start_ms)}
@@ -77,9 +79,9 @@ export function TimelineChapters({ meetingId }: { meetingId: string | undefined 
               >
                 <TimelineEntryRow entry={entry} />
               </button>
-            </li>
-          ))}
-        </ol>
+            )}
+          />
+        </div>
       )}
     </section>
   );

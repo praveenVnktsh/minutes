@@ -1,11 +1,67 @@
 import { describe, expect, test } from 'bun:test';
 import {
   acceptSnapshot,
+  entryDisplayText,
   formatTimelineTime,
+  groupByTopic,
   kindMarker,
   statusNotice,
+  type TimelineEntry,
   type TimelineSnapshot,
 } from './liveTimeline';
+
+function entry(id: string, topic: string | null | undefined, overrides: Partial<TimelineEntry> = {}): TimelineEntry {
+  return {
+    id,
+    start_ms: 0,
+    end_ms: 1_000,
+    kind: 'point',
+    text: `entry ${id}`,
+    speaker: null,
+    provider: 'builtin-ai',
+    model: 'qwen3.5:4b',
+    created_at: '2026-10-16T00:00:00Z',
+    ...(topic === undefined ? {} : { topic }),
+    ...overrides,
+  };
+}
+
+describe('groupByTopic', () => {
+  test('starts a section whenever the topic changes', () => {
+    const sections = groupByTopic([
+      entry('a', 'Launch Plan'),
+      entry('b', 'Launch Plan'),
+      entry('c', 'Pricing'),
+      entry('d', 'Launch Plan'),
+    ]);
+    expect(sections.map((s) => [s.topic, s.entries.map((e) => e.id)])).toEqual([
+      ['Launch Plan', ['a', 'b']],
+      ['Pricing', ['c']],
+      ['Launch Plan', ['d']],
+    ]);
+  });
+
+  test('entries without a topic stay in the section before them, or render without a header', () => {
+    // Stored before topics existed: no field at all.
+    expect(groupByTopic([entry('a', undefined), entry('b', null)])).toEqual([
+      { topic: null, entries: [entry('a', undefined), entry('b', null)] },
+    ]);
+    const mixed = groupByTopic([entry('a', 'Budget'), entry('b', null), entry('c', '  ')]);
+    expect(mixed).toHaveLength(1);
+    expect(mixed[0].entries).toHaveLength(3);
+    expect(groupByTopic([])).toEqual([]);
+  });
+});
+
+describe('entryDisplayText', () => {
+  test('an action the user owns reads "You — task"; no other speaker is shown', () => {
+    expect(entryDisplayText({ kind: 'action', speaker: 'You', text: 'send the deck' })).toBe('You — send the deck');
+    expect(entryDisplayText({ kind: 'action', speaker: 'Others', text: 'Priya sends the deck' })).toBe('Priya sends the deck');
+    expect(entryDisplayText({ kind: 'point', speaker: 'You', text: 'Budget is fine' })).toBe('Budget is fine');
+    // Older entries already name the user.
+    expect(entryDisplayText({ kind: 'action', speaker: 'You', text: 'You suggest a call' })).toBe('You suggest a call');
+  });
+});
 
 function snapshot(sessionId: string, status: TimelineSnapshot['status']): TimelineSnapshot {
   return { session_id: sessionId, meeting_id: null, status, error: null, entries: [] };

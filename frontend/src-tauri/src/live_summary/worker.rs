@@ -14,9 +14,11 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use super::glossary::Glossary;
 use super::llm::{FailureKind, GenerateError, Generated, Generator};
-use super::parse::{parse_entries, ParsedEntry};
-use super::prompt::{self, PreviousEntry};
+use super::notes::NoteContext;
+use super::parse::{parse_notes, ParsedEntry};
+use super::prompt::{self, PreviousEntry, PromptContext};
 use super::scheduler::{Segment, Window, WindowScheduler, CADENCE};
 use crate::database::repositories::timeline::TimelineEntryRow;
 
@@ -64,6 +66,10 @@ pub struct TimelineEntry {
     pub provider: String,
     pub model: String,
     pub created_at: String,
+    /// The section the note sits under. Absent on notes made before topics
+    /// existed, so readers must treat it as optional.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub topic: Option<String>,
 }
 
 impl TimelineEntry {
@@ -79,6 +85,41 @@ impl TimelineEntry {
             provider: self.provider.clone(),
             model: self.model.clone(),
             created_at: self.created_at.clone(),
+            topic: self.topic.clone(),
+        }
+    }
+}
+
+/// What the next prompt and parse know from the notes so far: the current
+/// topic, earlier topics (most recent first), earlier notes, and the names.
+pub struct NotesSoFar {
+    pub current_topic: Option<String>,
+    pub topics: Vec<String>,
+    pub previous: Vec<PreviousEntry>,
+    pub glossary: Glossary,
+}
+
+impl NotesSoFar {
+    pub fn of(entries: &[TimelineEntry]) -> Self {
+        let mut topics: Vec<String> = Vec::new();
+        for topic in entries.iter().rev().filter_map(|e| e.topic.as_ref()) {
+            if !topics.contains(topic) {
+                topics.push(topic.clone());
+            }
+        }
+        Self {
+            current_topic: entries.iter().rev().find_map(|e| e.topic.clone()),
+            topics,
+            previous: entries
+                .iter()
+                .map(|e| PreviousEntry {
+                    start_ms: e.start_ms,
+                    kind: e.kind.clone(),
+                    text: e.text.clone(),
+                    topic: e.topic.clone(),
+                })
+                .collect(),
+            glossary: Glossary::from_texts(entries.iter().map(|e| e.text.as_str())),
         }
     }
 }
@@ -158,6 +199,9 @@ struct Worker {
     scheduler: WindowScheduler,
     snapshot: TimelineSnapshot,
     unsaved: Vec<TimelineEntry>,
+    /// The last summarized window's segments: the next prompt shows its tail
+    /// as context.
+    carryover: Vec<Segment>,
     /// Requests that failed in a row, for the back-off.
     failures: u32,
     in_flight: Option<InFlight>,
@@ -262,18 +306,18 @@ impl Worker {
                 window.dropped_segments
             );
         }
-        let previous: Vec<PreviousEntry> = self
-            .snapshot
-            .entries
-            .iter()
-            .map(|e| PreviousEntry {
-                start_ms: e.start_ms,
-                kind: e.kind.clone(),
-                text: e.text.clone(),
-            })
-            .collect();
+        let notes = NotesSoFar::of(&self.snapshot.entries);
+        let glossary = notes.glossary.terms();
         let system = prompt::system_prompt().to_string();
-        let user = prompt::user_prompt(&window, &previous);
+        let user = prompt::user_prompt(
+            &window,
+            &PromptContext {
+                current_topic: notes.current_topic.as_deref(),
+                previous: &notes.previous,
+                glossary: &glossary,
+                carryover: &self.carryover,
+            },
+        );
         perf_debug!(
             "Live summary request: {} words, {}..{} ms",
             window.words(),
@@ -348,14 +392,22 @@ impl Worker {
             .take(DEDUPE_HISTORY)
             .map(|e| e.text.clone())
             .collect();
-        match parse_entries(
+        let notes = NotesSoFar::of(&self.snapshot.entries);
+        let context = NoteContext {
+            current_topic: notes.current_topic.as_deref(),
+            known_topics: &notes.topics,
+            glossary: Some(&notes.glossary),
+            previous_texts: &history,
+        };
+        match parse_notes(
             &raw,
             window.start_ms,
             window.end_ms,
             window.max_entries,
-            &history,
+            &context,
         ) {
             Ok(parsed) => {
+                self.carryover = window.segments;
                 let created_at = chrono::Utc::now().to_rfc3339();
                 let new: Vec<TimelineEntry> = parsed
                     .into_iter()
@@ -369,6 +421,7 @@ impl Worker {
                         provider: provider.clone(),
                         model: model.clone(),
                         created_at: created_at.clone(),
+                        topic: entry.topic,
                     })
                     .collect();
                 perf_debug!("Live summary: {} new entries", new.len());
@@ -507,6 +560,7 @@ pub async fn run(
         started: Instant::now(),
         scheduler: WindowScheduler::with_cadence(Duration::ZERO, config.cadence),
         unsaved: Vec::new(),
+        carryover: Vec::new(),
         failures: 0,
         in_flight: None,
     };
@@ -666,7 +720,7 @@ mod tests {
                     ][call % 6];
                     Ok(Generated {
                         text: format!(
-                            r#"{{"entries":[{{"kind":"decision","text":"Agreed on the {topic} plan, call {call}","speaker":"Others"}}]}}"#
+                            r#"{{"entries":[{{"kind":"decision","text":"Agreed on the {topic} plan with Acme Robotics, call {call}","speaker":"Others","topic":"launch plan"}}]}}"#
                         ),
                         truncated: false,
                     })
@@ -729,6 +783,39 @@ mod tests {
         assert_eq!(snapshot.status, TimelineStatus::Stopped);
         assert_eq!(snapshot.entries.len(), host.persisted.lock().unwrap().len());
         assert!(snapshot.entries.iter().all(|e| e.kind == "decision"));
+    }
+
+    #[tokio::test]
+    async fn later_prompts_carry_the_topic_names_and_previous_context() {
+        let generator = Arc::new(FakeGenerator::new(Duration::ZERO));
+        let host = host_with(generator.clone());
+        let (tx, rx) = unbounded_channel();
+        let finish = CancellationToken::new();
+        let task = tokio::spawn(run(host.clone(), "s".into(), rx, finish.clone(), config()));
+        tx.send(speech(0)).unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let mut second = speech(60);
+        second.text = format!("{} and then the budget", second.text);
+        tx.send(second).unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        finish.cancel();
+        let snapshot = task.await.unwrap();
+
+        let prompts = generator.prompts.lock().unwrap();
+        assert!(prompts.len() >= 2);
+        assert!(!prompts[0].contains("Current topic"));
+        assert!(prompts[1].contains("Current topic: Launch Plan (since 00:00)\n"));
+        assert!(prompts[1].contains("Glossary (use these spellings): Acme Robotics"));
+        assert!(prompts[1].contains("Earlier transcript (context only, already covered):\n[00:00]"));
+        assert!(prompts[1].contains(
+            "Notes so far (do not repeat):\nTopic \"Launch Plan\":\n- [00:00] (decision)"
+        ));
+        assert!(snapshot
+            .entries
+            .iter()
+            .all(|e| e.topic.as_deref() == Some("Launch Plan") && e.speaker.is_none()));
+        let persisted = host.persisted.lock().unwrap();
+        assert_eq!(persisted[0].topic.as_deref(), Some("Launch Plan"));
     }
 
     #[tokio::test]

@@ -26,7 +26,7 @@ live worker (Nemotron or chunked) ──emit──▶ "transcript-update" (final
                                live_summary::worker (tokio task)
          ┌────────────────────────────────────┼─────────────────────────────────────┐
          │ WindowScheduler (pure)             │ prompt::build (pure)                 │
-         │  pending segments, cadence 60 s,   │  last 3 entries, "You"/"Others"     │
+         │  pending segments, cadence 60 s,   │  topic, glossary, last 8 notes       │
          │  ≥ 25 words, one request in flight │                                      │
          └────────────────┬───────────────────┴──────────────┬──────────────────────┘
                           ▼                                  ▼
@@ -91,44 +91,80 @@ Constants are in `scheduler.rs`.
 - **Silence.** Below `MIN_WORDS` there is no request and no entry. Short text carries over to
   the next window, unless it is older than `MAX_IDLE_CARRY`, in which case it is dropped. This
   stops a stray "okay" from widening the next window by ten minutes.
-- **Entries per window.** A normal window asks for 1–2 entries. A merged window, one spanning
+- **Entries per window.** A normal window allows up to 2 entries (usually one). A merged window, one spanning
   more than 1.5× the cadence, may return up to 3.
 
 ## Prompt
 
-- **System prompt.** You write a live meeting timeline. The labels are explained:
-  - `You` is the person recording, on the microphone.
-  - `Others` is the remote participants from system audio, possibly several people.
+Revised on `enhance/live-notes-style`: the model is a **notetaker**. Notes say what was said,
+never who said it, and sit under topics.
 
-  Output is JSON only:
-  `{"entries":[{"start":"mm:ss","end":"mm:ss","kind":"point|decision|action","text":"…","speaker":"You|Others|null"}]}`.
-  - `text` is at most 15 words.
-  - `decision` means something was agreed.
-  - `action` means someone will do something.
-  - An empty list is allowed when nothing new happened.
+- **System prompt.** The labels are explained (`You` is the person recording, `Others` is
+  everyone else) and the model is told never to mention them in a note.
+  - Headline style, 6–12 words and never more than 14; facts, names and numbers first; tidy
+    numbers. Usually one note per window; `{"entries":[]}` is a normal answer.
+  - `action`: one specific person commits to a concrete task. `speaker` is the owner (`You`, a
+    name, or `Others` only if no one more specific is known) and `text` is the task alone.
+    `decision`: an explicit agreement. Everything else is a `point`; points and decisions have
+    `speaker: null`.
+  - `topic`: the main subject in at most 5 words (a company, product, project or person), a
+    chapter title. Copy the current topic while the subject is the same; a new company,
+    project, person or agenda item is a new topic.
+  - Short good/bad examples (synthetic, no meeting content).
+
+  Output: `{"entries":[{"start":"mm:ss","end":"mm:ss","topic":"…","kind":"point","text":"…","speaker":null}]}`.
 - **User prompt.**
-  - The last 3 entries, under "Already noted (do not repeat)".
-  - The window's transcript lines, as `[mm:ss] You: …`.
-  - How many entries to return.
+  - `Current topic: <title> (since mm:ss)`. Once the topic has run over 5 minutes it is offered
+    as a choice ("Topic so far: …, name the topic afresh") rather than the default, because a
+    small model otherwise copies it forever.
+  - `Glossary (use these spellings): …`: up to 20 names from earlier notes (`glossary.rs`).
+  - The last 8 notes, grouped under their topics, under "Notes so far (do not repeat)".
+  - The previous window's last 30 s (at most 90 words), under "Earlier transcript (context
+    only, already covered)".
+  - The window's transcript lines, as `[mm:ss] You: …`, and "Write up to N notes (usually one)".
 
 ## Output parsing
 
-`parse.rs` returns `Vec<ParsedEntry>` or a `ParseError`.
+`parse.rs` returns `Vec<ParsedEntry>` or a `ParseError`. `parse_notes` adds the notetaker rules
+of `notes.rs`; `parse_entries` is the reply as written (kept for the A/B tool).
 
 - Strips `<think>…</think>` (and an unclosed `<think>` up to the first `{`) and code fences.
 - Accepts `{"entries":[…]}`, a bare array, or a single object.
-- If the JSON is truncated (because of the 150-token cap), it salvages every complete
-  `{…}` object that has a `text`.
+- Repairs mismatched brackets (a dropped `}` before `]`). If the JSON is truncated, it
+  salvages every complete `{…}` object that has a `text`.
 - **Times.** Times may be `"mm:ss"`, `"h:mm:ss"` or seconds. They are clamped into the
   window. A missing or invalid time falls back to the window's bounds, and `end` is never
   before `start`.
 - **Kind.** Synonyms are normalised: "action item" and "todo" become `action`, "agreed"
   becomes `decision`. Anything else becomes `point`.
+- **Notetaker rules** (`notes.rs`):
+  - Narration ("Others discuss…", "The speaker notes that…", "Speaker holds…") is rewritten to
+    its content, or dropped when too little is left or it describes the person ("Others are
+    excited…"). A narrated note is never an action or a decision.
+  - "You'll send the deck" becomes owner `You`, task "send the deck". An action without an
+    owner, or whose text is a statement ("The team…", "Goal: …"), becomes a point. A named
+    owner missing from the text is put in front ("Priya — build the model").
+  - A decision phrased as a question becomes a point. Points and decisions drop `speaker`.
+  - Run-on notes over 16 words keep their leading `;` clauses. "Ai"/"Ml"/"Av"/"Gpu" become
+    acronyms.
+  - Names that are close variants of an established glossary spelling (seen twice, more
+    often than the variant) are rewritten to it.
+  - Topics are tidied (≤ 5 words, title-case-ish). A proposal that is a near-duplicate of the
+    current topic, or shares a specific word with it, reuses the current title; one that is a
+    near-duplicate of an earlier topic reuses that title. No topic means the current one.
 - **Text.** It is trimmed and capped at 200 characters. Empty text is dropped, as is a
-  near-duplicate of a recent entry (normalised, case-insensitive). At most the requested
-  number of entries is kept.
+  near-duplicate of a recent entry (normalised, case-insensitive), judged on the refined
+  text. At most the requested number of entries is kept.
 - **Errors.** Output with no usable JSON is a `ParseError`. The worker logs it, skips the
   window, and sets the status to failed. The next window retries.
+
+## A/B evaluation
+
+`live_summary/eval.rs` is an ignored test that replays a replay run's `events.jsonl` through
+the scheduler, the old and the new prompt and parser on a simulated clock with the real
+built-in model, and writes `live-summary-ab.md` into the replay folder. That report quotes
+meeting content: it stays on the machine and is never committed. The usage is in the file's
+header.
 
 ## Model call
 
@@ -137,9 +173,9 @@ Constants are in `scheduler.rs`.
 `summary::service::load_llm_config` is now `pub(crate)`.
 
 - **Built-in AI.** It calls `summary_engine::generate_with_builtin_options` with
-  `max_tokens = 150` and `temperature = 0.2`. This is a narrow addition next to
+  `max_tokens = 256` (150 before topics) and `temperature = 0.2`. This is a narrow addition next to
   `generate_with_builtin`, which now delegates to it with the old defaults.
-- **Other providers.** They call `llm_client::generate_summary` with `max_tokens = 150` and
+- **Other providers.** They call `llm_client::generate_summary` with `max_tokens = 256` and
   `temperature = 0.2`. Today only Custom OpenAI forwards these values. The others rely on the
   short-output instruction, and the parser tolerates truncation.
 - **Seed.** No seed is sent. llama-helper on this base has no seed, and
@@ -162,7 +198,13 @@ CREATE TABLE meeting_timeline_entries (
   created_at TEXT NOT NULL
 );
 CREATE INDEX idx_meeting_timeline_entries_meeting ON meeting_timeline_entries(meeting_id, start_ms);
+-- 20261016000400: the note's section title; NULL on entries made before topics.
+ALTER TABLE meeting_timeline_entries ADD COLUMN topic TEXT;
 ```
+
+- **Topic.** Optional everywhere: rows, the `live-timeline-update` entries and the frontend
+  type. An entry without one serializes without the field, so older readers (the replay
+  viewer) are unaffected, and the UI renders it without a header.
 
 - **Times.** They are audio time relative to the recording start. A resumed recording already
   carries the resume offset in its segment times. The entries therefore still line up after
@@ -200,13 +242,15 @@ CREATE INDEX idx_meeting_timeline_entries_meeting ON meeting_timeline_entries(me
 - **During recording.** A "Live summary" section at the top of the live transcript dock
   (`LiveSummaryPanel`).
   - It is collapsible and capped at about 40% of the height.
-  - It shows a time-stamped list. Decisions use the `badge.success` recipe and actions use
-    `badge.info`.
+  - It shows a time-stamped list grouped under topic headers (a thin `hairline` rule and the
+    title; `groupByTopic` starts a section when the topic changes). Decisions use the
+    `badge.success` recipe and actions use `badge.info`. The speaker is never shown, except
+    an action the user owns, which reads "You — task".
   - A subtle "Listening…" tail shows while the session is active.
   - When the status is `failed`, a non-blocking `panel.warning` notice reads "Live summary
     paused". It clears on the next success.
-- **After the meeting.** A "Chapters" list above the transcript in `TranscriptPanel`.
-  Clicking an entry dispatches `meetily:jump-to-time` `{ seconds }`.
+- **After the meeting.** A "Chapters" list above the transcript in `TranscriptPanel`, grouped
+  the same way. Clicking an entry dispatches `meetily:jump-to-time` `{ seconds }`.
   `VirtualizedTranscriptView` handles that event with `nearestSegmentIndex`, the helper the
   base branch added for the final-pass swap. If the target is past the loaded page, it lands
   on the last loaded row.

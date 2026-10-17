@@ -17,8 +17,10 @@ use crate::summary::llm_client::{generate_summary, GenerationOptions};
 use crate::summary::service::{load_llm_config, LlmConfig};
 use crate::summary::summary_engine::sidecar::OnAbandon;
 
-/// Output cap per request: one or two entries of JSON fit comfortably.
-pub const MAX_OUTPUT_TOKENS: u32 = 150;
+/// Output cap per request: up to three notes of JSON, each with its topic,
+/// fit comfortably. A reply cut off at the cap is skipped, so the cap leaves
+/// headroom rather than trimming to the typical reply.
+pub const MAX_OUTPUT_TOKENS: u32 = 256;
 /// Sampling temperature: low, so entries stay factual and stable.
 pub const TEMPERATURE: f32 = 0.2;
 /// A request taking longer than this is abandoned; the next window retries.

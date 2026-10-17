@@ -117,6 +117,21 @@ describe('TimelineChapters', () => {
     expect(jumps).toEqual([91]);
   });
 
+  test('groups chapters under topic headers and still jumps by entry', async () => {
+    stored = [
+      { ...entry('a', 65_000, 'point', 'Sync bug is the last blocker'), topic: 'Launch Plan' },
+      { ...entry('b', 91_000, 'decision', 'Launch on the tenth'), topic: 'Launch Plan' },
+      { ...entry('c', 125_000, 'point', 'Free tier held back a month'), topic: 'Pricing' },
+    ];
+    await act(async () => { renderer = create(<TimelineChapters meetingId="meeting-1" />); });
+    await flush();
+    const sections = renderer!.root.findAll((node) => node.type === 'li' && typeof node.props['aria-label'] === 'string');
+    expect(sections.map((node) => node.props['aria-label'])).toEqual(['Launch Plan', 'Pricing']);
+    expect(text()).not.toContain('· Others');
+    const buttons = renderer!.root.findAll((node) => node.type === 'button' && node.props.title === 'Jump to this point in the transcript');
+    expect(buttons).toHaveLength(3);
+  });
+
   test('reloads when the recording stores its last entry for this meeting', async () => {
     await act(async () => { renderer = create(<TimelineChapters meetingId="meeting-1" />); });
     await flush();
@@ -135,6 +150,30 @@ describe('LiveSummaryPanel', () => {
     expect(text()).toContain('Ravi adds sync tests');
     expect(text()).toContain('Action');
     expect(text()).toContain('Listening…');
+  });
+
+  test('shows topic headers, the user\'s actions as "You — task", and never the speaker otherwise', async () => {
+    current = {
+      session_id: 's',
+      meeting_id: 'meeting-1',
+      status: 'listening',
+      error: null,
+      entries: [
+        { ...entry('a', 5_000, 'point', 'Team grew to ~100 people'), topic: 'Hiring' },
+        { ...entry('b', 9_000, 'action', 'connect with founders'), speaker: 'You', topic: 'Hiring' },
+        { ...entry('c', 30_000, 'point', 'Office opens in Austin'), topic: 'Expansion' },
+      ],
+    };
+    await act(async () => { renderer = create(<LiveSummaryPanel active />); });
+    await flush();
+    const rendered = text();
+    expect(rendered).toContain('Hiring');
+    expect(rendered).toContain('Expansion');
+    expect(rendered.indexOf('Hiring')).toBeLessThan(rendered.indexOf('Team grew'));
+    expect(rendered.indexOf('Expansion')).toBeLessThan(rendered.indexOf('Office opens'));
+    expect(rendered).toContain('You — connect with founders');
+    expect(rendered).not.toContain('· Others');
+    expect(rendered).not.toContain('· You');
   });
 
   test('a failure shows a non-blocking paused notice that clears on the next update', async () => {
