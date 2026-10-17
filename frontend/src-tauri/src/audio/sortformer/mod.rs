@@ -228,6 +228,9 @@ impl SortformerDiarizer {
             .with_optimization_level(GraphOptimizationLevel::Level3)?
             .with_execution_providers([CPUExecutionProvider::default().build()])?
             .with_intra_threads(intra_threads)?
+            // Idle threads sleep instead of spinning: spinning kept cores
+            // busy (and warm) between operators for no speed-up here.
+            .with_intra_op_spinning(false)?
             .commit_from_file(model_path)
             .with_context(|| {
                 format!(

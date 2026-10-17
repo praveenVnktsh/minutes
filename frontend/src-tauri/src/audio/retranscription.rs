@@ -215,7 +215,7 @@ async fn run_retranscription<R: Runtime>(
 
     // Decode the audio file (CPU-intensive, run in blocking task)
     let path_for_decode = audio_path.clone();
-    let decoded = tokio::task::spawn_blocking(move || decode_audio_file(&path_for_decode))
+    let decoded = crate::quiet_work::spawn_quietly(move || decode_audio_file(&path_for_decode))
         .await
         .map_err(|e| anyhow!("Decode task panicked: {}", e))??;
     let duration_seconds = decoded.duration_seconds;
@@ -239,7 +239,7 @@ async fn run_retranscription<R: Runtime>(
     }
 
     // Convert to 16kHz mono format (CPU-intensive, run in blocking task)
-    let audio_samples = tokio::task::spawn_blocking(move || decoded.to_whisper_format())
+    let audio_samples = crate::quiet_work::spawn_quietly(move || decoded.to_whisper_format())
         .await
         .map_err(|e| anyhow!("Resample task panicked: {}", e))?;
     info!(
@@ -260,7 +260,7 @@ async fn run_retranscription<R: Runtime>(
     let app_for_vad = app.clone();
     let meeting_id_for_vad = meeting_id.clone();
 
-    let speech_segments = tokio::task::spawn_blocking(move || {
+    let speech_segments = crate::quiet_work::spawn_quietly(move || {
         get_speech_chunks_with_progress(
             &audio_samples,
             VAD_REDEMPTION_TIME_MS,
@@ -471,7 +471,10 @@ async fn run_retranscription<R: Runtime>(
             } else {
                 let engine = whisper_engine.as_ref().unwrap();
                 let (text, conf, _) = engine
-                    .transcribe_audio_with_confidence(segment.samples.clone(), language.clone())
+                    .transcribe_audio_with_confidence_quietly(
+                        segment.samples.clone(),
+                        language.clone(),
+                    )
                     .await
                     .map_err(|e| anyhow!("Whisper transcription failed on segment {}: {}", i, e))?;
                 (text, conf)

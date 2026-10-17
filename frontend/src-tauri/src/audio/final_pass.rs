@@ -16,6 +16,11 @@ use super::transcription_settings::{self as settings, FinalPassDecision, FinalPa
 
 pub const COMPLETE_EVENT: &str = "final-transcript-pass-complete";
 pub const TASK_TITLE: &str = "Final transcript";
+/// `{ meeting_id, waiting }`: a meeting's pass started or stopped waiting for
+/// the Mac to be plugged in.
+pub const WAITING_EVENT: &str = "final-transcript-pass-waiting";
+/// How often the power watcher checks for waiting passes.
+const POWER_POLL: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[derive(Debug, Clone, Serialize)]
 pub struct FinalPassComplete {
@@ -32,7 +37,7 @@ pub struct FinalPassComplete {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FinalPassStarted {
-    /// "queued" or "skipped".
+    /// "queued", "waiting" (for the Mac to be plugged in) or "skipped".
     pub status: &'static str,
     pub task_id: Option<String>,
     pub skip_reason: Option<FinalPassSkip>,
@@ -104,18 +109,36 @@ async fn queue_final_pass<R: Runtime>(
     .await?
         > 0;
 
-    let current = settings::load_settings(app);
+    let timing = settings::load_final_pass_timing(app);
+    let saving_power = crate::quiet_work::saving_power_now();
     let preferred = settings::configured_final_model(app).await;
     let available = settings::availability().await;
     let engine = settings::choose_final_engine(&preferred, &available);
 
     match settings::decide_final_pass(
-        current.auto_final_pass,
+        timing,
+        saving_power,
         force,
         has_revisions,
         has_transcripts,
         engine,
     ) {
+        FinalPassDecision::WaitForPower(choice) => {
+            mark_waiting(pool, &meeting_id, &meeting_folder_path, language.as_deref())
+                .await
+                .map_err(|error| format!("Could not record the waiting final pass: {error}"))?;
+            info!("Final pass for {meeting_id} waits until the Mac is plugged in");
+            emit_waiting(app, &meeting_id, true);
+            Ok(FinalPassStarted {
+                status: "waiting",
+                task_id: None,
+                skip_reason: None,
+                message: Some(WAITING_MESSAGE.to_string()),
+                provider: Some(choice.engine.provider),
+                model: Some(choice.engine.model),
+                fallback_notice: choice.fallback_notice,
+            })
+        }
         FinalPassDecision::Skip(reason) => {
             info!("Final pass skipped for {meeting_id}: {reason:?}");
             Ok(FinalPassStarted {
@@ -140,7 +163,12 @@ async fn queue_final_pass<R: Runtime>(
             )
             .await
             {
+                // Without the durable row the waiting-for-power watcher would
+                // keep finding the old row and queue this meeting again.
                 warn!("Final pass: could not record the queued pass for {meeting_id}: {error}");
+                return Err(format!(
+                    "Could not queue the transcript improvement for this meeting: {error}"
+                ));
             }
             let task = TranscriptionTask {
                 task_id: String::new(),
@@ -156,6 +184,7 @@ async fn queue_final_pass<R: Runtime>(
                 final_pass: true,
             };
             let task_id = get_queue().enqueue(app, task).await;
+            emit_waiting(app, &meeting_id, false);
             info!(
                 "Final pass queued for {meeting_id} with {} (task {task_id})",
                 choice.engine.display_name()
@@ -171,6 +200,75 @@ async fn queue_final_pass<R: Runtime>(
             })
         }
     }
+}
+
+pub const WAITING_MESSAGE: &str =
+    "The transcript will be improved when your Mac is plugged in and out of Low Power Mode.";
+
+fn emit_waiting<R: Runtime>(app: &AppHandle<R>, meeting_id: &str, waiting: bool) {
+    let payload = serde_json::json!({ "meeting_id": meeting_id, "waiting": waiting });
+    if let Err(error) = app.emit(WAITING_EVENT, payload) {
+        warn!("Failed to emit {WAITING_EVENT}: {error}");
+    }
+}
+
+/// Whether the meeting's final pass is waiting for the Mac to be plugged in.
+#[tauri::command]
+pub async fn final_pass_waiting<R: Runtime>(
+    app: AppHandle<R>,
+    meeting_id: String,
+) -> Result<bool, String> {
+    let state = app
+        .try_state::<crate::state::AppState>()
+        .ok_or("App state not available")?;
+    is_waiting(state.db_manager.pool(), &meeting_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// The user asked for a waiting pass now ("Improve now"), plugged in or not.
+#[tauri::command]
+pub async fn run_waiting_final_pass<R: Runtime>(
+    app: AppHandle<R>,
+    meeting_id: String,
+) -> Result<FinalPassStarted, String> {
+    let pool = app
+        .try_state::<crate::state::AppState>()
+        .ok_or("App state not available")?
+        .db_manager
+        .pool()
+        .clone();
+    let pass = waiting_passes(&pool)
+        .await
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find(|pass| pass.meeting_id == meeting_id)
+        .ok_or("This meeting's transcript is not waiting to be improved")?;
+    queue_final_pass(
+        &app,
+        pass.meeting_id,
+        pass.meeting_folder_path,
+        pass.language,
+        true,
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn get_final_pass_timing<R: Runtime>(app: AppHandle<R>) -> settings::FinalPassTiming {
+    settings::load_final_pass_timing(&app)
+}
+
+/// Save when the final pass runs. Passes already waiting for power are left
+/// to the watcher, which drops them if they no longer run.
+#[tauri::command]
+pub async fn set_final_pass_timing<R: Runtime>(
+    app: AppHandle<R>,
+    timing: settings::FinalPassTiming,
+) -> Result<settings::FinalPassTiming, String> {
+    settings::save_final_pass_timing(&app, timing)?;
+    info!("Final pass timing set to {}", timing.as_str());
+    Ok(timing)
 }
 
 pub fn emit_complete<R: Runtime>(app: &AppHandle<R>, event: FinalPassComplete) {
@@ -261,20 +359,154 @@ pub(crate) async fn mark_queued(
     language: Option<&str>,
     force: bool,
 ) -> sqlx::Result<()> {
+    upsert(
+        pool,
+        meeting_id,
+        meeting_folder_path,
+        language,
+        force,
+        false,
+    )
+    .await
+}
+
+/// Record a pass that waits for the Mac to be plugged in.
+pub(crate) async fn mark_waiting(
+    pool: &sqlx::SqlitePool,
+    meeting_id: &str,
+    meeting_folder_path: &str,
+    language: Option<&str>,
+) -> sqlx::Result<()> {
+    upsert(pool, meeting_id, meeting_folder_path, language, false, true).await
+}
+
+async fn upsert(
+    pool: &sqlx::SqlitePool,
+    meeting_id: &str,
+    meeting_folder_path: &str,
+    language: Option<&str>,
+    force: bool,
+    waiting: bool,
+) -> sqlx::Result<()> {
     sqlx::query(
-        "INSERT INTO pending_final_passes (meeting_id, meeting_folder_path, language, force, queued_at) \
-         VALUES (?, ?, ?, ?, ?) \
+        "INSERT INTO pending_final_passes (meeting_id, meeting_folder_path, language, force, queued_at, waiting_for_power) \
+         VALUES (?, ?, ?, ?, ?, ?) \
          ON CONFLICT(meeting_id) DO UPDATE SET meeting_folder_path = excluded.meeting_folder_path, \
-         language = excluded.language, force = excluded.force, queued_at = excluded.queued_at",
+         language = excluded.language, force = excluded.force, queued_at = excluded.queued_at, \
+         waiting_for_power = excluded.waiting_for_power",
     )
     .bind(meeting_id)
     .bind(meeting_folder_path)
     .bind(language)
     .bind(force)
     .bind(chrono::Utc::now().to_rfc3339())
+    .bind(waiting)
     .execute(pool)
     .await?;
     Ok(())
+}
+
+pub(crate) async fn is_waiting(pool: &sqlx::SqlitePool, meeting_id: &str) -> sqlx::Result<bool> {
+    Ok(sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM pending_final_passes WHERE meeting_id = ? AND waiting_for_power = 1",
+    )
+    .bind(meeting_id)
+    .fetch_one(pool)
+    .await?
+        > 0)
+}
+
+/// Passes waiting for power, oldest first.
+pub(crate) async fn waiting_passes(pool: &sqlx::SqlitePool) -> sqlx::Result<Vec<PendingFinalPass>> {
+    sqlx::query_as::<_, PendingFinalPass>(
+        "SELECT meeting_id, meeting_folder_path, language, force, attempts FROM pending_final_passes \
+         WHERE waiting_for_power = 1 ORDER BY queued_at",
+    )
+    .fetch_all(pool)
+    .await
+}
+
+/// Drop a waiting pass that will not run (turned off, edited, no model):
+/// the meeting keeps its live transcript, diarized when the meeting ended.
+async fn drop_waiting(pool: &sqlx::SqlitePool, meeting_id: &str) -> sqlx::Result<()> {
+    sqlx::query("DELETE FROM pending_final_passes WHERE meeting_id = ? AND waiting_for_power = 1")
+        .bind(meeting_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// What the power watcher does now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WatcherStep {
+    Sleep,
+    QueueWaiting,
+}
+
+/// Waiting passes are queued once the Mac is on power, out of Low Power
+/// Mode, and no meeting is
+/// being recorded (the pass would compete with live transcription).
+pub fn watcher_step(saving_power: bool, recording: bool, waiting: usize) -> WatcherStep {
+    if waiting > 0 && !saving_power && !recording {
+        WatcherStep::QueueWaiting
+    } else {
+        WatcherStep::Sleep
+    }
+}
+
+/// Queue waiting passes once the Mac is plugged in.
+pub fn init_power_watcher<R: Runtime>(app: &AppHandle<R>) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        // Let startup's own resume go first.
+        tokio::time::sleep(RESUME_DELAY + POWER_POLL).await;
+        loop {
+            if let Some(pool) = app
+                .try_state::<crate::state::AppState>()
+                .map(|state| state.db_manager.pool().clone())
+            {
+                let waiting = waiting_passes(&pool).await.unwrap_or_else(|error| {
+                    warn!("Final pass: could not list waiting passes: {error}");
+                    Vec::new()
+                });
+                let step = watcher_step(
+                    crate::quiet_work::saving_power_now(),
+                    crate::audio::recording_commands::is_recording().await,
+                    waiting.len(),
+                );
+                if step == WatcherStep::QueueWaiting {
+                    for pass in waiting {
+                        info!(
+                            "Final pass: the Mac is plugged in, running the waiting pass for {}",
+                            pass.meeting_id
+                        );
+                        match queue_final_pass(
+                            &app,
+                            pass.meeting_id.clone(),
+                            pass.meeting_folder_path.clone(),
+                            pass.language.clone(),
+                            false,
+                        )
+                        .await
+                        {
+                            Ok(started) if started.status == "skipped" => {
+                                if let Err(error) = drop_waiting(&pool, &pass.meeting_id).await {
+                                    warn!("Final pass: could not drop a waiting pass: {error}");
+                                }
+                                emit_waiting(&app, &pass.meeting_id, false);
+                            }
+                            Ok(_) => {}
+                            Err(error) => warn!(
+                                "Final pass: could not queue the waiting pass for {}: {error}",
+                                pass.meeting_id
+                            ),
+                        }
+                    }
+                }
+            }
+            tokio::time::sleep(POWER_POLL).await;
+        }
+    });
 }
 
 /// The pass replaced the transcript: called inside that transaction, so the
@@ -307,7 +539,7 @@ pub(crate) async fn interrupted_passes(
     let since = (chrono::Utc::now() - chrono::Duration::days(RESUME_WINDOW_DAYS)).to_rfc3339();
     sqlx::query_as::<_, PendingFinalPass>(
         "SELECT meeting_id, meeting_folder_path, language, force, attempts FROM pending_final_passes \
-         WHERE queued_at >= ? ORDER BY queued_at",
+         WHERE queued_at >= ? AND waiting_for_power = 0 ORDER BY queued_at",
     )
     .bind(since)
     .fetch_all(pool)
@@ -397,7 +629,8 @@ pub fn init_resume_worker<R: Runtime>(app: &AppHandle<R>) {
                 )
                 .await
                 {
-                    Ok(started) if started.status == "queued" => Ok(()),
+                    // Queued again, or waiting for power once more.
+                    Ok(started) if started.status != "skipped" => Ok(()),
                     Ok(started) => Err(started
                         .message
                         .unwrap_or_else(|| "the interrupted final pass could not run".into())),
@@ -471,7 +704,64 @@ mod tests {
         ))
         .await
         .unwrap();
+        pool.execute(include_str!(
+            "../../migrations/20261017120000_add_pending_final_pass_waiting.sql"
+        ))
+        .await
+        .unwrap();
         pool
+    }
+
+    #[tokio::test]
+    async fn a_waiting_pass_is_not_resumed_at_startup_and_runs_once_queued() {
+        let pool = pool().await;
+        mark_waiting(&pool, "m1", "/tmp/m1", Some("en"))
+            .await
+            .unwrap();
+        mark_queued(&pool, "m2", "/tmp/m2", None, false)
+            .await
+            .unwrap();
+        assert!(is_waiting(&pool, "m1").await.unwrap());
+        assert!(!is_waiting(&pool, "m2").await.unwrap());
+
+        // Startup resumes only m2; m1 belongs to the power watcher.
+        let resumed = interrupted_passes(&pool).await.unwrap();
+        assert_eq!(resumed.len(), 1);
+        assert_eq!(resumed[0].meeting_id, "m2");
+        let waiting = waiting_passes(&pool).await.unwrap();
+        assert_eq!(waiting.len(), 1);
+        assert_eq!(waiting[0].language.as_deref(), Some("en"));
+
+        // Plugged in: queuing it clears the wait, and it resumes like any pass.
+        mark_queued(&pool, "m1", "/tmp/m1", Some("en"), false)
+            .await
+            .unwrap();
+        assert!(!is_waiting(&pool, "m1").await.unwrap());
+        assert!(waiting_passes(&pool).await.unwrap().is_empty());
+        assert_eq!(interrupted_passes(&pool).await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_waiting_pass_that_will_not_run_is_dropped() {
+        let pool = pool().await;
+        mark_waiting(&pool, "m1", "/tmp/m1", None).await.unwrap();
+        drop_waiting(&pool, "m1").await.unwrap();
+        assert!(!is_waiting(&pool, "m1").await.unwrap());
+        assert!(waiting_passes(&pool).await.unwrap().is_empty());
+        // Only waiting rows are dropped this way: a queued pass stays.
+        mark_queued(&pool, "m2", "/tmp/m2", None, false)
+            .await
+            .unwrap();
+        drop_waiting(&pool, "m2").await.unwrap();
+        assert_eq!(interrupted_passes(&pool).await.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn waiting_passes_run_only_on_power_and_outside_a_recording() {
+        assert_eq!(watcher_step(false, false, 1), WatcherStep::QueueWaiting);
+        assert_eq!(watcher_step(true, false, 1), WatcherStep::Sleep);
+        assert_eq!(watcher_step(false, true, 1), WatcherStep::Sleep);
+        assert_eq!(watcher_step(false, false, 0), WatcherStep::Sleep);
     }
 
     #[tokio::test]

@@ -6,6 +6,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
 import { SaveFeedback, StatusFeedback } from '@/components/ui/status-feedback';
 import { createEmptyLiveNotesDocument } from '@/lib/liveNotes';
+import type { TimelineEntry } from '@/lib/liveTimeline';
 import {
   liveNotesTarget,
   notePersistenceService,
@@ -20,7 +21,14 @@ const BlockNotesEditor = dynamic(
   },
 );
 
-export function LiveNotesPad({ bare = false }: { bare?: boolean } = {}) {
+export function LiveNotesPad({
+  bare = false,
+  aiEntries,
+}: {
+  bare?: boolean;
+  /** Experimental: live notes to write into these notes as AI lines. */
+  aiEntries?: TimelineEntry[];
+} = {}) {
   const { isRecording, recordingDuration } = useRecordingState();
   const [folderPath, setFolderPath] = useState<string | null>(null);
   const [folderError, setFolderError] = useState(false);
@@ -120,7 +128,7 @@ export function LiveNotesPad({ bare = false }: { bare?: boolean } = {}) {
           />
         </div>
         <div className="mx-auto w-full max-w-[860px] px-10 pb-24 pt-6">
-          <BlockNotesEditor document={snapshot.document} onChange={handleDocumentChange} />
+          <BlockNotesEditor document={snapshot.document} onChange={handleDocumentChange} aiEntries={aiEntries} />
         </div>
       </div>
     );
@@ -148,7 +156,7 @@ export function LiveNotesPad({ bare = false }: { bare?: boolean } = {}) {
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto px-8 pb-36 pt-3">
         <div className="mx-auto min-h-full max-w-[820px] rounded-2xl bg-[var(--surface-raised)] px-8 py-8 shadow-[0_1px_0_rgba(45,43,37,0.04)]">
-          <BlockNotesEditor document={snapshot.document} onChange={handleDocumentChange} />
+          <BlockNotesEditor document={snapshot.document} onChange={handleDocumentChange} aiEntries={aiEntries} />
         </div>
       </div>
     </div>

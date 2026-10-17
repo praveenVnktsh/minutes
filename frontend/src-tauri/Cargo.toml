@@ -32,6 +32,10 @@ dev-replay = ["tauri/test"]
 name = "replay"
 required-features = ["dev-replay"]
 
+[[example]]
+name = "final_pass_bench"
+required-features = ["dev-replay"]
+
 [build-dependencies]
 tauri-build = { version = "2.3.0", features = [] }
 reqwest = { version = "0.11", features = ["blocking", "multipart", "json", "stream"] }
@@ -152,6 +156,8 @@ tauri-plugin-log = { version = "2.6.0", features = ["colored"] }
 
 # macOS system integration
 objc = "0.2.7"
+libc = "0.2"           # pthread QoS for quiet post-meeting work
+zip = "2.2"            # Core ML encoder archives
 time = { version = "0.3", features = ["formatting"] }
 core-graphics = "0.23"
 cidre = { git = "https://github.com/yury/cidre", rev = "a9587fa", features = ["av"] }

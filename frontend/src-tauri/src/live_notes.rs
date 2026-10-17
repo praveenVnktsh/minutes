@@ -27,6 +27,42 @@ pub struct LiveNotesDocument {
     pub raw_markdown: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub editor_blocks: Option<serde_json::Value>,
+    /// Blocks the AI wrote into the notes ("Write live notes into my
+    /// notes"), by block id: `{ entryId, text }`. A block the user edits
+    /// leaves the map and becomes theirs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_blocks: Option<serde_json::Value>,
+    /// Live notes already written into the notes (entry ids).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_entries: Option<serde_json::Value>,
+}
+
+impl LiveNotesDocument {
+    /// Whether block `id` is AI text, not the user's.
+    pub fn is_ai_block(&self, id: &str) -> bool {
+        self.ai_blocks
+            .as_ref()
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|blocks| blocks.contains_key(id))
+    }
+
+    /// The user's own notes, with the audio time each was typed at; AI
+    /// lines are left out.
+    pub fn user_notes(&self) -> Vec<crate::summary::live_outline::UserNote> {
+        self.notes
+            .iter()
+            .filter(|note| !note.text.trim().is_empty() && !self.is_ai_block(&note.id))
+            .map(|note| crate::summary::live_outline::UserNote {
+                ms: Some((note.timestamp_seconds.max(0.0) * 1000.0).round() as i64),
+                text: note.text.trim().to_string(),
+            })
+            .collect()
+    }
+}
+
+/// The live notes document of a recording folder, if there is one.
+pub(crate) fn read_folder_document(folder_path: &str) -> Result<Option<LiveNotesDocument>, String> {
+    read_document(&notes_path(folder_path)?)
 }
 
 fn notes_path(folder_path: &str) -> Result<PathBuf, String> {
@@ -70,7 +106,7 @@ fn notes_markdown(document: &LiveNotesDocument) -> String {
     document
         .notes
         .iter()
-        .filter(|note| !note.text.is_empty())
+        .filter(|note| !note.text.is_empty() && !document.is_ai_block(&note.id))
         .map(|note| {
             let seconds = note.timestamp_seconds.max(0.0).floor() as u64;
             let marker = if note.important {
@@ -197,6 +233,8 @@ mod tests {
             updated_at: "2026-01-01T00:00:00Z".to_string(),
             raw_markdown: None,
             editor_blocks: None,
+            ai_blocks: None,
+            ai_entries: None,
             notes: vec![LiveNote {
                 id: "note-1".to_string(),
                 timestamp_seconds: 65.8,
@@ -214,6 +252,28 @@ mod tests {
         write_document(&path, &document).unwrap();
         assert_eq!(read_document(&path).unwrap(), Some(document));
         assert!(!path.with_extension("json.tmp").exists());
+    }
+
+    #[test]
+    fn ai_lines_are_not_the_users_notes() {
+        let mut document = sample_document();
+        document.notes.push(LiveNote {
+            id: "ai-1".to_string(),
+            timestamp_seconds: 90.0,
+            text: "Pricing at $40 per seat".to_string(),
+            important: false,
+        });
+        document.ai_blocks = Some(serde_json::json!({
+            "ai-1": { "entryId": "e1", "text": "Pricing at $40 per seat" }
+        }));
+        let notes = document.user_notes();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].ms, Some(65_800));
+        assert!(!notes_markdown(&document).contains("Pricing"));
+        // The provenance survives a save and a load.
+        let round_trip: LiveNotesDocument =
+            serde_json::from_str(&serde_json::to_string(&document).unwrap()).unwrap();
+        assert!(round_trip.is_ai_block("ai-1"));
     }
 
     #[test]

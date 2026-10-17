@@ -1,7 +1,9 @@
 import { useState, useEffect, useRef } from 'react';
 import { TranscriptSegmentData } from '@/types';
 
-const INTERVAL_MS = 15; // Character reveal interval
+// Character reveal interval. ~15 ticks/s: each tick re-renders the transcript
+// view, so a 60 fps typewriter cost a full list render per display frame.
+const INTERVAL_MS = 66;
 const DURATION_MS = 800; // Total streaming duration
 const INITIAL_CHARS = 5; // Show first N characters immediately
 

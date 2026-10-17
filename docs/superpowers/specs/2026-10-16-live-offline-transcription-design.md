@@ -51,7 +51,7 @@ are names and jargon, overall accuracy, and speaker attribution.
 | Setting | Storage | Default |
 | --- | --- | --- |
 | Live model (`nemotron-streaming` or `chunked`) | `store.json` key `liveTranscriptionModel` | `nemotron-streaming` when the key is absent |
-| Automatic final pass | `store.json` key `autoFinalTranscriptPass` | `true` when the key is absent |
+| When the final pass runs ("Improve transcript after meetings") | `store.json` key `finalTranscriptTiming`: `automatic`, `when-plugged-in` or `off` | `when-plugged-in`; without the key, an old `autoFinalTranscriptPass: false` means `off` |
 | Final model | the existing SQLite transcript config row (provider and model) | Whisper `large-v3-turbo-q5_0` |
 
 - **Live model.** Because an absent key means Nemotron, existing users get Nemotron without
@@ -106,8 +106,12 @@ an in-progress line, and they are never persisted.
 `start_final_transcript_pass(meetingId, meetingFolderPath, language, force)` decides
 whether to run and with which engine:
 
-1. If `autoFinalTranscriptPass` is off and `force` is not set (deferred mode sets it), it is
-   skipped.
+1. If the timing is `off` and `force` is not set (deferred mode and "Improve now" set it),
+   it is skipped. With `when-plugged-in` on battery or in Low Power Mode it waits instead: the row in
+   `pending_final_passes` gets `waiting_for_power = 1`, the live transcript is diarized and
+   summarized at once, and a watcher queues the pass once the Mac is on power, out of Low Power Mode and not
+   recording. The meeting header shows one line, "Transcript improves when plugged in ·
+   Improve now".
 2. If the meeting has `transcript_revisions` rows, it is skipped, so user edits are never
    clobbered. Speaker overrides survive anyway: they are resolved by time overlap when the
    transcript id no longer matches.
@@ -131,6 +135,18 @@ whether to run and with which engine:
 
 When the pass is queued, the frontend skips its immediate summary and diarization for the
 live transcript and lets the pass's `ready` drive them.
+
+## Running quietly
+
+- **Core ML encoder.** whisper.cpp runs the encoder on the Neural Engine when
+  `ggml-<model>-encoder.mlmodelc` sits next to the model. The app downloads it for the final
+  model in the background (pinned revision, size and SHA-256 checked, unpacked through a
+  staging folder) and compiles it once, since the first Core ML load takes minutes.
+- **Reused decoding state.** The engine keeps one Whisper state per loaded model instead of
+  creating one per segment, which reloaded the Core ML encoder and reallocated GPU buffers
+  every time.
+- **Utility QoS.** The final pass's decode, VAD and Whisper calls, and diarization, run on
+  threads at `QOS_CLASS_UTILITY` (`quiet_work.rs`), so macOS may slow them under load or heat.
 
 ## Failure modes
 

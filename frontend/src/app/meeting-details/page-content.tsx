@@ -19,8 +19,9 @@ import { MeetingAssistantPanel } from '@/components/MeetingDetails/MeetingAssist
 import { CopilotPanel } from '@/components/MeetingDetails/CopilotPanel';
 import { MeetingRawNotesEditor } from '@/components/MeetingDetails/MeetingRawNotesEditor';
 import { LiveTranscriptPanel } from '@/components/MeetingDetails/LiveTranscriptPanel';
+import { LiveEnhancedNotes } from '@/components/MeetingDetails/LiveEnhancedNotes';
+import { LiveRawNotes } from '@/components/MeetingDetails/LiveRawNotes';
 import { FloatingRecordingControls } from '@/components/MeetingDetails/FloatingRecordingControls';
-import { LiveNotesPad } from '@/components/LiveNotesPad';
 import { useMeetingActivity } from '@/contexts/MeetingActivityContext';
 import { liveNotesTarget, meetingNotesTarget, notePersistenceService } from '@/services/notePersistenceService';
 import { toast } from 'sonner';
@@ -28,6 +29,7 @@ import { toast } from 'sonner';
 // Custom hooks
 import { useMeetingData } from '@/hooks/meeting-details/useMeetingData';
 import { useSummaryGeneration } from '@/hooks/meeting-details/useSummaryGeneration';
+import { useFinalPassWaiting } from '@/hooks/useFinalPassWaiting';
 import { useTemplates } from '@/hooks/meeting-details/useTemplates';
 import { useCopyOperations } from '@/hooks/meeting-details/useCopyOperations';
 import { useTitleRegeneration } from '@/hooks/meeting-details/useTitleRegeneration';
@@ -80,6 +82,9 @@ export default function PageContent({
   // State
   const customPrompt = '';
   const [notesMode, setNotesMode] = useState<NotesMode>('enhanced');
+  // While recording: Raw (your notes) by default; Enhanced fills in as
+  // topics close.
+  const [liveNotesMode, setLiveNotesMode] = useState<NotesMode>('raw');
   // True when raw notes changed after the last enhancement, so the workspace can
   // nudge the user to re-enhance instead of regenerating automatically.
   const [notesDirtySinceSummary, setNotesDirtySinceSummary] = useState(false);
@@ -105,6 +110,7 @@ export default function PageContent({
     ? latestTerminalActivity.error
     : null;
   const summaryActivity = activity.getSummaryActivity(meeting.id);
+  const finalPass = useFinalPassWaiting(meeting.id);
   const [liveFolderPath, setLiveFolderPath] = useState<string | null>(null);
 
   // Ref to store the modal open function from SummaryGeneratorButtonGroup
@@ -313,7 +319,20 @@ export default function PageContent({
           : `${label} ${Math.round(inFlightActivity.progress_percentage)}%`;
       })()}
     </span>
-  ) : activityError ? <span role="alert" className="text-xs font-medium text-error">{activityError}</span> : null;
+  ) : activityError ? <span role="alert" className="text-xs font-medium text-error">{activityError}</span>
+  : finalPass.waiting ? (
+    <span className={`flex shrink-0 items-center gap-1.5 rounded-full px-3 py-1.5 text-[11px] font-medium ${badge.neutral}`} role="status" title="Waiting until your Mac is plugged in and out of Low Power Mode">
+      Transcript improves when plugged in ·
+      <button
+        type="button"
+        className="font-semibold text-ink underline-offset-2 hover:underline disabled:opacity-60"
+        disabled={finalPass.starting}
+        onClick={() => void finalPass.improveNow()}
+      >
+        Improve now
+      </button>
+    </span>
+  ) : null;
 
   const summaryToolbarActions = (
     <Popover>
@@ -399,11 +418,12 @@ export default function PageContent({
         <MeetingWorkspace
           title={meetingData.meetingTitle}
           createdAt={meeting.created_at}
-          notesMode="raw"
-          onNotesModeChange={() => {}}
-          canShowEnhanced={false}
-          summary={null}
-          rawNotes={<LiveNotesPad bare />}
+          notesMode={liveNotesMode}
+          onNotesModeChange={setLiveNotesMode}
+          canShowEnhanced
+          hasEnhancedContent={false}
+          summary={<LiveEnhancedNotes />}
+          rawNotes={<LiveRawNotes />}
           transcript={<LiveTranscriptPanel />}
           assistant={
             <CopilotPanel

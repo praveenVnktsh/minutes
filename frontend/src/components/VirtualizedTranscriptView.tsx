@@ -396,7 +396,7 @@ const TranscriptSegment = memo(function TranscriptSegment({
     );
 });
 
-export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps> = ({
+const VirtualizedTranscriptViewImpl: React.FC<VirtualizedTranscriptViewProps> = ({
     segments,
     isRecording = false,
     isPaused = false,
@@ -818,3 +818,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
         </div>
     );
 };
+
+// Memoized: during a recording the parent re-renders for the clock, streaming
+// partials and Copilot; the list only needs to when its own props change.
+export const VirtualizedTranscriptView = memo(VirtualizedTranscriptViewImpl);

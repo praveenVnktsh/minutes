@@ -512,6 +512,99 @@ impl Streamer for ProviderStreamer {
     }
 }
 
+/// Prompt budget for a proactive yes/no check on the live notes model: the
+/// question and the last minute or so of the meeting are enough to judge it,
+/// and a short prompt keeps each check a fraction of a second of GPU time.
+pub const CONFIRM_PROMPT_TOKENS: usize = 512;
+
+/// Copilot's proactive yes/no checks on the live notes model (Gemma 4 E2B,
+/// on its own helper) instead of the summary model. The check needs one word,
+/// so a model a third the size of the summary model does it, the summary model
+/// is not kept busy (or loaded) for it during the meeting, and answers the
+/// user asks for still go to the summary model.
+pub struct LiveNotesConfirmStreamer {
+    pub app_data_dir: PathBuf,
+    pub model: String,
+}
+
+#[async_trait]
+impl Streamer for LiveNotesConfirmStreamer {
+    fn provider(&self) -> &str {
+        "builtin-ai"
+    }
+
+    fn model(&self) -> &str {
+        &self.model
+    }
+
+    fn is_cloud(&self) -> bool {
+        false
+    }
+
+    fn prompt_token_limit(&self, _max_tokens: u32) -> Option<usize> {
+        Some(CONFIRM_PROMPT_TOKENS)
+    }
+
+    async fn stream(
+        &self,
+        parts: &PromptParts,
+        max_tokens: u32,
+        temperature: f32,
+        _interactive: bool,
+        deltas: UnboundedSender<String>,
+        cancel: &CancellationToken,
+    ) -> Result<StreamOutcome, StreamError> {
+        use crate::summary::summary_engine::client::{
+            generate_live_notes, BuiltinGenerateOptions, LiveNotesRequest,
+        };
+        use crate::summary::summary_engine::sidecar::OnAbandon;
+        let user = parts.user();
+        let result = generate_live_notes(
+            &self.app_data_dir,
+            LiveNotesRequest {
+                model_name: &self.model,
+                system_prompt: &parts.system,
+                user_prompt: &user,
+                grammar: None,
+                max_lines: Some(1),
+                own_helper: true,
+                options: BuiltinGenerateOptions {
+                    max_tokens: Some(max_tokens.max(1)),
+                    temperature: Some(temperature),
+                    seed: None,
+                    timeout: Some(HARD_TIMEOUT),
+                    // Never stop the helper under a live notes window.
+                    on_abandon: OnAbandon::LetFinish,
+                },
+            },
+            Some(cancel),
+        )
+        .await;
+        match result {
+            Ok(done) => {
+                let _ = deltas.send(done.text.clone());
+                Ok(StreamOutcome {
+                    text: done.text,
+                    truncated: done.truncated,
+                    prompt_tokens: None,
+                    completion_tokens: None,
+                    reused_tokens: None,
+                    tokens_per_second: None,
+                })
+            }
+            Err(error) => Err(match error.downcast_ref::<SidecarError>() {
+                Some(SidecarError::Cancelled) => StreamError::cancelled(),
+                Some(SidecarError::Busy(_)) => StreamError::new(
+                    StreamErrorKind::Busy,
+                    "The live notes model is busy with the meeting's notes.",
+                ),
+                _ if cancel.is_cancelled() => StreamError::cancelled(),
+                _ => StreamError::other(format!("The live notes model failed: {error:#}")),
+            }),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

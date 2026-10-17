@@ -58,9 +58,30 @@ export const liveTranscriptionApi = {
   deleteModel: () => invoke<void>('live_model_delete'),
 };
 
-/** `start_final_transcript_pass` result. */
+/** When the final pass ("Improve transcript after meetings") runs. */
+export type FinalPassTiming = 'automatic' | 'when-plugged-in' | 'off';
+
+export const finalPassApi = {
+  getTiming: () => invoke<FinalPassTiming>('get_final_pass_timing'),
+  setTiming: (timing: FinalPassTiming) => invoke<FinalPassTiming>('set_final_pass_timing', { timing }),
+  /** Whether the meeting's pass waits for the Mac to be plugged in. */
+  isWaiting: (meetingId: string) => invoke<boolean>('final_pass_waiting', { meetingId }),
+  /** Run a waiting pass now, on battery or not. */
+  runNow: (meetingId: string) => invoke<FinalPassStarted>('run_waiting_final_pass', { meetingId }),
+};
+
+/** `final-transcript-pass-waiting` payload. */
+export interface FinalPassWaitingEvent {
+  meeting_id: string;
+  waiting: boolean;
+}
+
+export const FINAL_PASS_WAITING_EVENT = 'final-transcript-pass-waiting';
+
+/** `start_final_transcript_pass` result. `waiting`: it runs once the Mac is
+ * plugged in; until then the live transcript is the meeting's transcript. */
 export interface FinalPassStarted {
-  status: 'queued' | 'skipped';
+  status: 'queued' | 'waiting' | 'skipped';
   taskId: string | null;
   skipReason: 'disabled' | 'edited' | 'no_engine' | null;
   message: string | null;

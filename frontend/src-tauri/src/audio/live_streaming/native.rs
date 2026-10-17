@@ -129,6 +129,41 @@ const DECODE_TIMEOUT: Duration = Duration::from_secs(30);
 /// First load of a model compiles it for the device; later loads hit the
 /// system's cache.
 const LOAD_TIMEOUT: Duration = Duration::from_secs(300);
+/// How often a blocking wait checks whether the worker was cancelled.
+const CANCEL_POLL: Duration = Duration::from_millis(200);
+
+/// Why a blocking wait on the helper ended without a line.
+#[derive(Debug, PartialEq)]
+enum WaitEnd {
+    Timeout,
+    Disconnected,
+    Cancelled,
+}
+
+/// Wait up to `timeout` for the helper's next line, in short steps, giving up
+/// as soon as the streaming worker is cancelled (Stop while a model compiles
+/// must not wait for it).
+fn recv_cancellable(
+    lines: &Receiver<String>,
+    timeout: Duration,
+    generation: u64,
+) -> std::result::Result<String, WaitEnd> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if super::worker::CANCEL_GENERATION.load(Ordering::SeqCst) != generation {
+            return Err(WaitEnd::Cancelled);
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(WaitEnd::Timeout);
+        }
+        match lines.recv_timeout(left.min(CANCEL_POLL)) {
+            Ok(line) => return Ok(line),
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => return Err(WaitEnd::Disconnected),
+        }
+    }
+}
 
 struct Io {
     stdin: std::io::BufWriter<ChildStdin>,
@@ -147,6 +182,9 @@ pub struct NativeRecognizer {
     io: Mutex<Io>,
     results: Mutex<HashMap<StreamId, Hypothesis>>,
     next_id: AtomicU32,
+    /// The cancel generation when this engine started; a newer one means the
+    /// worker using it was cancelled.
+    generation: u64,
 }
 
 impl NativeRecognizer {
@@ -199,6 +237,7 @@ impl NativeRecognizer {
             }),
             results: Mutex::new(HashMap::new()),
             next_id: AtomicU32::new(1),
+            generation: super::worker::CANCEL_GENERATION.load(Ordering::SeqCst),
         })
     }
 
@@ -210,7 +249,15 @@ impl NativeRecognizer {
             return;
         }
         let line = if wait {
-            io.lines.recv_timeout(LOAD_TIMEOUT).map_err(|_| ())
+            match recv_cancellable(&io.lines, LOAD_TIMEOUT, self.generation) {
+                Ok(line) => Ok(line),
+                Err(WaitEnd::Cancelled) => {
+                    // Leave the helper loading; dropping the engine kills it.
+                    io.broken = Some("live transcription was cancelled".to_string());
+                    return;
+                }
+                Err(_) => Err(()),
+            }
         } else {
             match io.lines.try_recv() {
                 Ok(line) => Ok(line),
@@ -279,15 +326,19 @@ impl NativeRecognizer {
             io.broken = Some(message.clone());
             return Err(anyhow!(message));
         }
-        match io.lines.recv_timeout(DECODE_TIMEOUT) {
+        match recv_cancellable(&io.lines, DECODE_TIMEOUT, self.generation) {
             Ok(line) => parse_reply(&line),
-            Err(RecvTimeoutError::Timeout) => {
+            Err(WaitEnd::Timeout) => {
                 io.broken = Some("nemotron-helper stopped answering".to_string());
                 Err(anyhow!("nemotron-helper stopped answering"))
             }
-            Err(RecvTimeoutError::Disconnected) => {
+            Err(WaitEnd::Disconnected) => {
                 io.broken = Some("nemotron-helper exited".to_string());
                 Err(anyhow!("nemotron-helper exited"))
+            }
+            Err(WaitEnd::Cancelled) => {
+                io.broken = Some("live transcription was cancelled".to_string());
+                Err(anyhow!("live transcription was cancelled"))
             }
         }
     }
@@ -420,6 +471,38 @@ pub fn prepare(helper: &Path, model_dir: &Path, compute: Compute) -> Result<f64>
     let line = String::from_utf8_lossy(&output.stdout);
     parse_reply(line.lines().next().unwrap_or(""))?;
     Ok(started.elapsed().as_secs_f64())
+}
+
+#[cfg(test)]
+mod cancel_tests {
+    use super::*;
+
+    #[test]
+    fn a_cancel_ends_a_long_wait_promptly() {
+        let (_sender, lines) = std::sync::mpsc::channel::<String>();
+        let generation = super::super::worker::CANCEL_GENERATION.load(Ordering::SeqCst);
+        let waiter = std::thread::spawn(move || {
+            let started = Instant::now();
+            let end = recv_cancellable(&lines, Duration::from_secs(60), generation);
+            (end, started.elapsed())
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        super::super::worker::CANCEL_GENERATION.fetch_add(1, Ordering::SeqCst);
+        let (end, took) = waiter.join().unwrap();
+        assert_eq!(end, Err(WaitEnd::Cancelled));
+        assert!(took < Duration::from_secs(2), "took {took:?}");
+    }
+
+    #[test]
+    fn a_line_still_arrives_through_the_cancellable_wait() {
+        let (sender, lines) = std::sync::mpsc::channel::<String>();
+        sender.send("{\"ready\":true}".to_string()).unwrap();
+        let generation = super::super::worker::CANCEL_GENERATION.load(Ordering::SeqCst);
+        assert_eq!(
+            recv_cancellable(&lines, Duration::from_secs(1), generation),
+            Ok("{\"ready\":true}".to_string())
+        );
+    }
 }
 
 #[cfg(test)]

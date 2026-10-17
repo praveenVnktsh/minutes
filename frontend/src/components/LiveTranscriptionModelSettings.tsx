@@ -4,7 +4,6 @@ import { useCallback, useEffect, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { toast } from 'sonner';
 import { Label } from '@/components/ui/label';
-import { Switch } from '@/components/ui/switch';
 import {
   Select,
   SelectContent,
@@ -18,8 +17,10 @@ import {
   LIVE_ENGINE_OPTIONS,
   LIVE_MODEL_DISPLAY_NAME,
   LIVE_MODEL_DOWNLOAD_PROGRESS_EVENT,
+  finalPassApi,
   liveTranscriptionApi,
   type LiveEngineChoice,
+  type FinalPassTiming,
   type LiveModelChoice,
   type LiveModelDownloadProgressEvent,
   type LiveTranscriptionSettings,
@@ -42,7 +43,7 @@ export function liveModelCardStatus(
 /**
  * Settings for the two transcription passes: the live model that streams text
  * while recording, and whether the final model re-transcribes the recording
- * afterwards (the final model itself is chosen below, in TranscriptSettings).
+ * afterwards, and when (the final model itself is chosen below, in TranscriptSettings).
  */
 export function LiveTranscriptionModelSettings() {
   const [settings, setSettings] = useState<LiveTranscriptionSettings | null>(null);
@@ -71,6 +72,31 @@ export function LiveTranscriptionModelSettings() {
       void unlisten.then((fn) => fn());
     };
   }, [refresh]);
+
+  const [timing, setTiming] = useState<FinalPassTiming | null>(null);
+  const [savingTiming, setSavingTiming] = useState(false);
+
+  useEffect(() => {
+    finalPassApi.getTiming().then(setTiming).catch((error) => {
+      console.error('Failed to load when transcripts are improved:', error);
+    });
+  }, []);
+
+  const saveTiming = useCallback(async (next: FinalPassTiming) => {
+    const previous = timing;
+    setTiming(next);
+    setSavingTiming(true);
+    try {
+      setTiming(await finalPassApi.setTiming(next));
+    } catch (error) {
+      setTiming(previous);
+      toast.error('Could not save transcription settings', {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setSavingTiming(false);
+    }
+  }, [timing]);
 
   const save = useCallback(async (changes: LiveTranscriptionSettingsChange) => {
     const previous = settings;
@@ -176,23 +202,29 @@ export function LiveTranscriptionModelSettings() {
         )}
       </div>
 
-      <div className="flex items-start justify-between gap-4 rounded-lg border border-hairline p-4">
-        <div>
-          <Label htmlFor="auto-final-transcript" className="text-sm font-medium text-ink">
-            Automatic final transcript
-          </Label>
-          <p className="mt-1 text-xs text-ink-muted">
-            When a meeting ends, re-transcribe the whole recording with the final model and identify
-            speakers again. Replaces the live transcript; edited transcripts are never replaced.
-          </p>
+      <div>
+        <Label className="mb-1 block text-sm font-medium text-ink">Improve transcript after meetings</Label>
+        <p className="mx-1 mb-2 text-xs text-ink-muted">
+          Re-transcribes the recording with the final model and identifies speakers again. It is the
+          heaviest work Minutes does, so by default it waits until your Mac is plugged in and out of Low Power Mode. Edited
+          transcripts are never replaced.
+        </p>
+        <div className="mx-1">
+          <Select
+            value={timing ?? 'when-plugged-in'}
+            disabled={timing === null || savingTiming}
+            onValueChange={(value) => void saveTiming(value as FinalPassTiming)}
+          >
+            <SelectTrigger aria-label="Improve transcript after meetings" className="focus:ring-2 focus:ring-focus">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="when-plugged-in">When plugged in (Recommended)</SelectItem>
+              <SelectItem value="automatic">Automatically</SelectItem>
+              <SelectItem value="off">Off</SelectItem>
+            </SelectContent>
+          </Select>
         </div>
-        <Switch
-          id="auto-final-transcript"
-          aria-label="Automatic final transcript"
-          checked={settings?.autoFinalPass ?? true}
-          disabled={!settings || saving}
-          onCheckedChange={(checked) => void save({ autoFinalPass: checked })}
-        />
       </div>
 
       {liveModel === 'nemotron-streaming' && (

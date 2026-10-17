@@ -101,11 +101,17 @@ impl Drop for ChunkedBacklog {
 /// Cancel flag of the running streaming worker, if any.
 static CURRENT_CANCEL: Mutex<Option<Arc<AtomicBool>>> = Mutex::new(None);
 
+/// Bumped on every cancel, so an engine blocked waiting for its models or a
+/// decode (see `native.rs`) can notice a cancel while it waits.
+pub static CANCEL_GENERATION: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 /// Ask the running streaming worker to stop now, without decoding what is
 /// still queued. It notices within `RECV_POLL` (or after the decode step in
 /// progress), drops its recognizer handle and ends. Returns whether a worker
 /// was running.
 pub fn cancel_current() -> bool {
+    CANCEL_GENERATION.fetch_add(1, Ordering::SeqCst);
     match CURRENT_CANCEL
         .lock()
         .unwrap_or_else(|e| e.into_inner())
