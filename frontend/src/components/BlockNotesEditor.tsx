@@ -17,6 +17,7 @@ import {
   remainingAiBlocks,
   type AiBlocks,
 } from '@/lib/aiRawNotes';
+import { useShowAiNotes } from '@/lib/aiNotes';
 import '@blocknote/shadcn/style.css';
 import '@blocknote/core/fonts/inter.css';
 
@@ -72,8 +73,8 @@ export function BlockNotesEditor({
   document: LiveNotesDocument;
   onChange?: (document: LiveNotesDocument) => void;
   editable?: boolean;
-  /** Live notes to write into the notes as AI lines ("Write live notes into
-   * my notes"); undefined when that is off. */
+  /** Live notes to write into the notes as AI lines while the meeting
+   * records; undefined after it. */
   aiEntries?: TimelineEntry[];
 }) {
   const startingBlocks = useRef(initialBlocks(document)).current;
@@ -89,7 +90,8 @@ export function BlockNotesEditor({
   const lastUserEditAt = useRef(0);
   const latestAiEntries = useRef(aiEntries);
   latestAiEntries.current = aiEntries;
-  const [aiCss, setAiCss] = useState(() => aiBlocksCss(aiBlocks.current));
+  const [, bumpAi] = useState(0);
+  const [showAi] = useShowAiNotes();
   const editor = useCreateBlockNote({
     initialContent: startingBlocks,
     placeholders: {
@@ -111,7 +113,7 @@ export function BlockNotesEditor({
     timestamps.current = new Map(document.notes.map((note) => [note.id, note.timestampSeconds]));
     aiBlocks.current = { ...(document.aiBlocks ?? {}) };
     aiInserted.current = new Set(document.aiEntries ?? []);
-    setAiCss(aiBlocksCss(aiBlocks.current));
+    bumpAi((value) => value + 1);
     editor.replaceBlocks(editor.document, initialBlocks(document));
     void Promise.resolve().then(() => {
       applyingExternalDocument.current = false;
@@ -144,7 +146,7 @@ export function BlockNotesEditor({
         aiBlocks.current,
         new Map(notes.map((note) => [note.id, note.text])),
       );
-      if (Object.keys(aiBlocks.current).length !== before) setAiCss(aiBlocksCss(aiBlocks.current));
+      if (Object.keys(aiBlocks.current).length !== before) bumpAi((value) => value + 1);
       const hasAi = Object.keys(aiBlocks.current).length > 0 || aiInserted.current.size > 0;
       const draft: LiveNotesDocument = {
         ...latestDocument.current,
@@ -230,11 +232,12 @@ export function BlockNotesEditor({
       } finally {
         writingAi.current = false;
       }
-      setAiCss(aiBlocksCss(aiBlocks.current));
+      bumpAi((value) => value + 1);
     }, 500);
     return () => window.clearInterval(timer);
   }, [aiOn, editor]);
 
+  const aiCss = aiBlocksCss(aiBlocks.current, showAi);
   return (
     <div className="raw-notes-editor min-h-full text-ink">
       {aiCss && <style>{aiCss}</style>}

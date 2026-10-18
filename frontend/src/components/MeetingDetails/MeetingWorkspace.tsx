@@ -1,19 +1,11 @@
 'use client';
 
 import { ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import {
-  FileText,
-  ListTree,
-  Loader2,
-  MessageCircle,
-  RotateCw,
-  Sparkles,
-} from 'lucide-react';
+import { FileText, Loader2, MessageCircle, Sparkles } from 'lucide-react';
 import { useShell, SIDEBAR_WIDTH, SIDEBAR_COLLAPSED_WIDTH } from '@/contexts/ShellContext';
 import { ResizeSeparator } from '@/components/ui/resize-separator';
-import { SegmentedControl } from '@/components/ui/segmented-control';
-
-export type NotesMode = 'enhanced' | 'raw';
+import { Switch } from '@/components/ui/switch';
+import { useShowAiNotes } from '@/lib/aiNotes';
 
 const DOCK_RATIO_KEY = 'meetily:workspace-dock-ratio';
 const DOCK_WIDTH_KEY = 'meetily:workspace-dock-width';
@@ -45,12 +37,8 @@ export function MeetingWorkspace({
   title,
   createdAt,
   statusBanner,
-  notesMode,
-  onNotesModeChange,
-  canShowEnhanced,
-  hasEnhancedContent = canShowEnhanced,
-  summary,
-  rawNotes,
+  notes,
+  notesNotice,
   transcript,
   assistant,
   showAssistant,
@@ -58,10 +46,6 @@ export function MeetingWorkspace({
   peopleCount,
   toolbarActions,
   onTitleChange,
-  onRegenerate,
-  onStopGeneration,
-  isGenerating = false,
-  notesDirty = false,
   titlePending = false,
   titleError,
   onRegenerateTitle,
@@ -71,12 +55,10 @@ export function MeetingWorkspace({
   title: string;
   createdAt: string;
   statusBanner?: ReactNode;
-  notesMode: NotesMode;
-  onNotesModeChange: (mode: NotesMode) => void;
-  canShowEnhanced: boolean;
-  hasEnhancedContent?: boolean;
-  summary: ReactNode;
-  rawNotes: ReactNode;
+  /** The notes document: the user's lines and the AI's. */
+  notes: ReactNode;
+  /** A short line beside the AI notes switch (why no AI notes are coming). */
+  notesNotice?: ReactNode;
   transcript: ReactNode;
   assistant: ReactNode;
   showAssistant: boolean;
@@ -85,10 +67,6 @@ export function MeetingWorkspace({
   peopleCount: number;
   toolbarActions?: ReactNode;
   onTitleChange?: (title: string) => void | Promise<void>;
-  onRegenerate?: () => void;
-  onStopGeneration?: () => void;
-  isGenerating?: boolean;
-  notesDirty?: boolean;
   titlePending?: boolean;
   titleError?: string | null;
   onRegenerateTitle?: () => void | Promise<void>;
@@ -97,6 +75,7 @@ export function MeetingWorkspace({
   initialAssistantOpen?: boolean;
 }) {
   const { collapsed } = useShell();
+  const [showAiNotes, setShowAiNotes] = useShowAiNotes();
   const sidebarWidth = collapsed ? SIDEBAR_COLLAPSED_WIDTH : SIDEBAR_WIDTH;
   const [transcriptOpen, setTranscriptOpen] = useState(true);
   const [chatOpen, setChatOpen] = useState(initialAssistantOpen);
@@ -385,43 +364,19 @@ export function MeetingWorkspace({
         {/* Center: notes document */}
         <section className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
           {/* Toolbar */}
-          <div className="flex shrink-0 flex-wrap items-center gap-1.5 px-8 pb-3">
-            {/* Enhanced / Raw segmented toggle */}
-            <div className="flex h-8 shrink-0 items-center rounded-full bg-surface-2 p-0.5">
-              <SegmentedControl
-                value={notesMode}
-                aria-label="Notes view"
-                className="h-8 rounded-full border-0 bg-transparent p-0"
-                options={[
-                  { value: 'raw', label: <span className="flex items-center gap-1.5"><ListTree className="h-3.5 w-3.5" /> Raw</span> },
-                  { value: 'enhanced', label: <span className="flex items-center gap-1.5"><Sparkles className="h-3.5 w-3.5" /> Enhanced</span> },
-                ]}
-                onValueChange={onNotesModeChange}
-              />
-              <div className="flex h-7 items-center rounded-full pr-1 text-ink-muted">
-                {hasEnhancedContent && (
-                  <button
-                    type="button"
-                    onClick={() => (isGenerating ? onStopGeneration?.() : onRegenerate?.())}
-                    title={isGenerating ? 'Stop generating' : notesDirty ? 'Your notes changed — re-enhance to include them' : 'Re-enhance notes'}
-                    aria-label={isGenerating ? 'Stop generating' : notesDirty ? 'Your notes changed — re-enhance' : 'Re-enhance notes'}
-                    className={`flex h-6 w-6 items-center justify-center rounded-full text-ink-muted hover:bg-surface-2 hover:text-ink ${notesDirty && !isGenerating ? 'animate-pulse text-warning ring-2 ring-warning/70' : ''}`}
-                  >
-                    {isGenerating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RotateCw className="h-3.5 w-3.5" />}
-                  </button>
-                )}
-              </div>
-            </div>
-
+          <div className="flex h-8 shrink-0 items-center gap-3 px-8">
+            <label className="flex shrink-0 cursor-pointer items-center gap-2 text-xs text-ink-muted">
+              <Switch checked={showAiNotes} onCheckedChange={setShowAiNotes} aria-label="Show AI notes" />
+              Show AI notes
+            </label>
+            {notesNotice && <span className="min-w-0 truncate text-xs text-ink-subtle">{notesNotice}</span>}
             {toolbarActions && (
-              <div className="ml-1 flex shrink-0 items-center gap-1.5">{toolbarActions}</div>
+              <div className="ml-auto flex shrink-0 items-center gap-1.5">{toolbarActions}</div>
             )}
           </div>
 
           {/* Document */}
-          <div className="min-h-0 flex-1 overflow-hidden">
-            {notesMode === 'enhanced' && canShowEnhanced ? summary : rawNotes}
-          </div>
+          <div className="min-h-0 flex-1 overflow-hidden">{notes}</div>
         </section>
 
         {/* Drag handle between the notes column and the side dock */}

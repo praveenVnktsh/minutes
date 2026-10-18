@@ -19,7 +19,7 @@ mock.module('@tauri-apps/api/core', () => ({ ...originalCore, invoke }));
 mock.module('@tauri-apps/api/event', () => ({ ...originalEvent, listen }));
 
 const { useCopilot } = await import('../../src/hooks/useCopilot');
-const { useLiveTimeline } = await import('../../src/components/MeetingDetails/LiveSummaryPanel');
+const { useLiveTimeline } = await import('../../src/hooks/useLiveTimeline');
 const { copilotApi, copilotApiFor } = await import('../../src/lib/copilot');
 const { LiveSourceProvider, tauriLiveSource, useLiveSource } = await import('../../src/lib/liveSource');
 

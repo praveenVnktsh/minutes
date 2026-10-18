@@ -3,7 +3,6 @@
 import { FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowUp, Copy, Minimize2, RotateCw, Sparkles, Square } from 'lucide-react';
 import { toast } from 'sonner';
-import { Switch } from '@/components/ui/switch';
 import { CitedMarkdown } from '@/components/MeetingDetails/CitedMarkdown';
 import { useCopilot } from '@/hooks/useCopilot';
 import { writeClipboardText } from '@/lib/clipboard';
@@ -87,7 +86,7 @@ function Reply({ message }: { message: CopilotMessage }) {
   return (
     <div>
       {message.reply ? (
-        <div className="prose prose-sm max-w-full text-xs leading-5 text-[var(--ink-muted)]">
+        <div className="prose prose-sm max-w-full text-xs leading-5 text-[var(--ink-muted)] [&_strong]:text-ink">
           <CitedMarkdown>{message.reply}</CitedMarkdown>
         </div>
       ) : working ? (
@@ -147,23 +146,21 @@ function SuggestionCard({ message }: { message: CopilotMessage }) {
 }
 
 /**
- * The dock's lower panel while recording: quick actions, questions and
- * proactive suggestions about the last few minutes, streamed from the model.
- * Laid out like the AI chat panel it replaces during the meeting.
+ * The dock's lower panel while recording: a title, the quick actions, the
+ * answers and suggestion cards, and a box to ask. The debug line shows only
+ * with Copilot's debug setting on.
  */
 export function CopilotPanel({ notesTarget }: { notesTarget?: NoteDocumentTarget }) {
   const copilotApi = useCopilotApi();
   const snapshot = useCopilot();
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
-  const [suggestions, setSuggestions] = useState<boolean | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
   useNotesForCopilot(notesTarget);
 
   const messages = snapshot?.messages ?? [];
   const active = snapshot?.active ?? false;
   const ready = active && (snapshot?.lineCount ?? 0) > 0;
-  const suggestionsOn = suggestions ?? snapshot?.suggestionsEnabled ?? true;
   const lastReplyLength = messages[messages.length - 1]?.reply.length ?? 0;
 
   useEffect(() => {
@@ -196,54 +193,32 @@ export function CopilotPanel({ notesTarget }: { notesTarget?: NoteDocumentTarget
     }
   };
 
-  const toggleSuggestions = async (enabled: boolean) => {
-    setSuggestions(enabled);
-    try {
-      const current = await copilotApi.getSettings();
-      const saved = await copilotApi.setSettings({ ...current, suggestionsEnabled: enabled });
-      setSuggestions(saved.suggestionsEnabled);
-    } catch (error) {
-      setSuggestions(!enabled);
-      toast.error('Could not change suggestions', { description: String(error) });
-    }
-  };
-
   return (
     <div className="flex h-full flex-col bg-[var(--surface-1)]">
-      <div className="flex items-start justify-between gap-3 px-5 pb-3 pt-5">
-        <div>
-          <h2 className="text-sm font-semibold text-ink">Copilot</h2>
-          <p className="mt-0.5 text-[11px] text-[var(--ink-subtle)]">Live · answers from the last few minutes and the live summary</p>
-        </div>
-        <label className="flex shrink-0 items-center gap-2 text-[11px] text-ink-muted" title="Suggest a reply when someone asks you something">
-          <Switch checked={suggestionsOn} onCheckedChange={(checked) => void toggleSuggestions(checked)} aria-label="Suggestions" />
-          Suggestions
-        </label>
-      </div>
-
-      <div className="flex flex-wrap gap-1.5 px-5 pb-2">
+      <div className="flex flex-wrap items-center gap-1.5 px-5 pb-2 pt-4">
+        <h2 className="mr-1 text-sm font-semibold text-ink">Copilot</h2>
         {QUICK_ACTIONS.map((action) => (
           <button
             key={action.id}
             type="button"
             disabled={!ready || sending}
             onClick={() => void ask(action.id, null)}
-            className="rounded-full bg-surface-2 px-3 py-1.5 text-[11px] text-ink-muted hover:bg-surface-raised disabled:opacity-40"
+            className="rounded-full bg-surface-2 px-2.5 py-1 text-[11px] text-ink-muted hover:bg-surface-raised hover:text-ink disabled:opacity-40"
           >
             {action.label}
           </button>
         ))}
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-5 py-3">
+      <div className="min-h-0 flex-1 overflow-y-auto px-5 py-2">
         <div className="space-y-4">
           {messages.length === 0 && (
-            <p className="py-6 text-xs leading-5 text-[var(--ink-muted)]">
+            <p className="py-4 text-xs text-[var(--ink-subtle)]">
               {!snapshot || !active
-                ? 'Copilot works while a meeting is recording.'
+                ? 'Works while a meeting is recording.'
                 : ready
-                  ? 'Ask about the last few minutes, or pick a quick action. When someone asks you something, a suggested reply appears here.'
-                  : 'Copilot starts once the first words are transcribed.'}
+                  ? 'Ask about the last few minutes.'
+                  : 'Starts once people speak.'}
             </p>
           )}
           {messages.map((message) =>
@@ -264,27 +239,25 @@ export function CopilotPanel({ notesTarget }: { notesTarget?: NoteDocumentTarget
         </div>
       </div>
 
-      <form onSubmit={submit} className="px-4 pb-5 pt-3">
-        <div className="flex items-end gap-2 rounded-2xl bg-surface-0 p-2 shadow-[0_6px_24px_rgba(45,43,37,0.08)]">
+      <form onSubmit={submit} className="px-4 pb-4 pt-2">
+        <div className="flex items-end gap-2 rounded-2xl bg-surface-0 p-1.5 shadow-[0_6px_24px_rgba(45,43,37,0.08)]">
           <textarea
             value={input}
             onChange={(event) => setInput(event.target.value)}
             onKeyDown={onKeyDown}
             rows={1}
             disabled={!ready}
-            placeholder="Ask about this meeting…"
-            className="max-h-32 min-h-10 flex-1 resize-none bg-transparent px-2 py-2 text-xs leading-5 text-ink outline-none placeholder:text-[var(--ink-subtle)] disabled:opacity-60"
+            placeholder="Ask Copilot…"
+            className="max-h-32 min-h-9 flex-1 resize-none bg-transparent px-2 py-2 text-xs leading-5 text-ink outline-none placeholder:text-[var(--ink-subtle)] disabled:opacity-60"
           />
-          <button type="submit" disabled={!ready || !input.trim() || sending} className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-brand text-brand-foreground disabled:opacity-40" aria-label="Ask Copilot">
+          <button type="submit" disabled={!ready || !input.trim() || sending} className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-brand text-brand-foreground disabled:opacity-40" aria-label="Ask Copilot">
             {sending ? <RotateCw className="h-4 w-4 animate-spin" /> : <ArrowUp className="h-4 w-4" />}
           </button>
         </div>
-        {snapshot?.debugEnabled ? (
+        {snapshot?.debugEnabled && (
           <p className="mt-2 break-words font-mono text-[10px] leading-4 text-[var(--ink-subtle)]" aria-label="Copilot debug">
             {debugLine(snapshot)}
           </p>
-        ) : (
-          <p className="mt-2 text-center text-[10px] text-[var(--ink-subtle)]">Saved to this meeting&apos;s AI chat.</p>
         )}
       </form>
     </div>

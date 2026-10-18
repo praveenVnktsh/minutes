@@ -46,7 +46,7 @@ model; its transcript and notes parsing, links, follow-up evidence and fallbacks
 - **Settings.** None new for this: it is the behaviour. Generation is deterministic (the live
   notes' temperature 0.2 and fixed seed, 448 output tokens, 8 lines at most).
 
-## Raw notes: "Write live notes into my notes" (Beta, off by default)
+## AI lines in the notes (always on since [one notes document](2026-10-17-one-notes-document.md))
 
 Live notes are added to the Raw notes under their topic heading, muted with a small "AI"
 tag, after the user has paused typing for 2 s, only ever below the cursor: under the topic's

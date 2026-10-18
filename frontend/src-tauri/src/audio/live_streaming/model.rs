@@ -378,7 +378,8 @@ pub async fn download<R: Runtime>(app: &AppHandle<R>) -> Result<()> {
         Ok(()) => {
             info!("Live model {} downloaded and verified", bundle.id);
             emit(app, terminal_event(bundle, "completed", None));
-            if std::ptr::eq(bundle, &COREML) {
+            // By id: `COREML` is a const, so its address is not stable.
+            if bundle.id == COREML.id {
                 super::engine::spawn_prepare(app.clone(), false);
             }
         }
@@ -472,7 +473,10 @@ mod tests {
             "joint.mlmodelc/",
         ] {
             assert!(
-                COREML.files.iter().any(|file| file.name.starts_with(needed)),
+                COREML
+                    .files
+                    .iter()
+                    .any(|file| file.name.starts_with(needed)),
                 "{needed}"
             );
         }
@@ -491,13 +495,13 @@ mod tests {
 
     #[test]
     fn the_cpu_runs_the_sherpa_bundle_and_everything_else_core_ml() {
-        assert!(std::ptr::eq(bundle_for(LiveEngineChoice::Cpu), &SHERPA));
+        assert_eq!(bundle_for(LiveEngineChoice::Cpu).id, SHERPA.id);
         for choice in [
             LiveEngineChoice::Auto,
             LiveEngineChoice::Gpu,
             LiveEngineChoice::NeuralEngine,
         ] {
-            assert!(std::ptr::eq(bundle_for(choice), &COREML));
+            assert_eq!(bundle_for(choice).id, COREML.id);
         }
     }
 

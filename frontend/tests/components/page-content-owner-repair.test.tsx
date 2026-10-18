@@ -66,7 +66,7 @@ mock.module('../../src/hooks/meeting-details/useTemplates', () => ({ useTemplate
   availableTemplates: [], selectedTemplate: 'standard_meeting', handleTemplateSelection() {},
 }) }));
 mock.module('../../src/hooks/meeting-details/useCopyOperations', () => ({ useCopyOperations: () => ({
-  handleCopyTranscript: async () => {}, handleCopySummary: async () => {}, handleExportMarkdown: async () => {},
+  handleCopyTranscript: async () => {}, handleCopyNotes: async () => {}, handleExportMarkdown: async () => {},
 }) }));
 mock.module('../../src/hooks/meeting-details/useMeetingOperations', () => ({ useMeetingOperations: () => ({
   handleOpenMeetingFolder: async () => {},
@@ -78,32 +78,28 @@ mock.module('../../src/components/ui/popover', () => ({
   PopoverTrigger: ({ children }: { children?: unknown }) => children,
 }));
 
+
 let workspaceProps: any;
-let summaryProps: any;
-let generatorProps: any;
+let notesProps: any;
 mock.module('../../src/components/MeetingDetails/MeetingWorkspace', () => ({
   MeetingWorkspace: (props: any) => {
     workspaceProps = props;
-    return <>{props.summary}{props.toolbarActions}</>;
+    return <>{props.statusBanner}{props.notesNotice}{props.notes}{props.toolbarActions}</>;
   },
 }));
-mock.module('../../src/components/MeetingDetails/SummaryPanel', () => ({
-  SummaryPanel: (props: any) => {
-    summaryProps = props;
-    return <output>{props.summaryStatus}:{JSON.stringify(props.aiSummary)}</output>;
+mock.module('../../src/components/MeetingDetails/MeetingNotesEditor', () => ({
+  MeetingNotesEditor: (props: any) => {
+    notesProps = props;
+    return <output>{props.legacyNotes}</output>;
   },
 }));
 mock.module('../../src/components/MeetingDetails/TranscriptPanel', () => ({ TranscriptPanel: () => null }));
-mock.module('../../src/components/MeetingDetails/SummaryGeneratorButtonGroup', () => ({
-  SummaryGeneratorButtonGroup: (props: any) => { generatorProps = props; return null; },
-}));
-mock.module('../../src/components/MeetingDetails/SummaryUpdaterButtonGroup', () => ({ SummaryUpdaterButtonGroup: () => null }));
-mock.module('../../src/components/MeetingDetails/SummaryLanguagePill', () => ({ SummaryLanguagePill: () => null }));
 mock.module('../../src/components/MeetingDetails/MeetingAssistantPanel', () => ({ MeetingAssistantPanel: () => null }));
-mock.module('../../src/components/MeetingDetails/MeetingRawNotesEditor', () => ({ MeetingRawNotesEditor: () => null }));
+mock.module('../../src/components/MeetingDetails/LiveNotes', () => ({ LiveNotes: () => null, LiveNotesNotice: () => null }));
 mock.module('../../src/components/MeetingDetails/LiveTranscriptPanel', () => ({ LiveTranscriptPanel: () => null }));
 mock.module('../../src/components/MeetingDetails/FloatingRecordingControls', () => ({ FloatingRecordingControls: () => null }));
 mock.module('../../src/components/LiveNotesPad', () => ({ LiveNotesPad: () => null }));
+
 
 const { SidebarProvider, useSidebar } = await import('../../src/components/Sidebar/SidebarProvider');
 const { meetingActivityStore } = await import('../../src/contexts/MeetingActivityContext');
@@ -140,8 +136,6 @@ beforeEach(() => {
   renamePromise = null;
   invocations.length = 0;
   workspaceProps = null;
-  summaryProps = null;
-  generatorProps = null;
   eventTarget = new EventTarget();
   Object.defineProperty(globalThis, 'window', {
     configurable: true,
@@ -173,14 +167,29 @@ async function show(onRefetchTranscripts = mock(async () => {}), initialSummaryE
   return onRefetchTranscripts;
 }
 
+
+/** A button in the notes menu (or banner), by its text. */
+function button(label: string) {
+  return renderer!.root.findAll((node) => node.type === 'button'
+    && node.children.some((child) => typeof child === 'string' && child.includes(label)))[0];
+}
+const rendered = () => JSON.stringify(renderer!.toJSON());
+
 describe('PageContent owner repair composition', () => {
-  test('fresh route document wins over retained terminal activity and is the save authority', async () => {
+  test('the fresh route document is the old AI notes shown below the notes', async () => {
     meetingActivityStore.hydrateSummary(response('Retained generated A'));
     await show();
-    expect(summaryProps.aiSummary).toEqual({ markdown: 'Fresh saved B' });
-    await act(async () => summaryProps.onSaveSummary({ markdown: 'Fresh saved B plus edit' }));
-    expect(invocations.find(([command]) => command === 'api_save_meeting_summary')?.[1]?.summary)
-      .toEqual({ markdown: 'Fresh saved B plus edit' });
+    expect(notesProps.meetingId).toBe('meeting-a');
+    expect(notesProps.legacyNotes).toBe('Fresh saved B');
+  });
+
+  test('no Raw/Enhanced split: the workspace gets one notes document', async () => {
+    await show();
+    expect(workspaceProps.notes).toBeDefined();
+    expect(workspaceProps.summary).toBeUndefined();
+    expect(workspaceProps.notesMode).toBeUndefined();
+    expect(button('Copy notes')).toBeDefined();
+    expect(button('Export')).toBeDefined();
   });
 
   test('a persistence-complete event refreshes only the current meeting', async () => {
@@ -191,26 +200,26 @@ describe('PageContent owner repair composition', () => {
     expect(refetch).toHaveBeenCalledTimes(1);
   });
 
-  test('disables the options generation action while the initial summary read is unavailable', async () => {
+  test('offers a retry, and no rewrite, while the initial summary read is unavailable', async () => {
     await show(undefined, 'database busy');
-    expect(generatorProps.summaryReadUnavailable).toBe(true);
+    expect(rendered()).toContain('Could not load AI notes');
+    expect(button('Rewrite AI notes')).toBeUndefined();
+    expect(button('Write AI notes')).toBeUndefined();
   });
 
-  test('pre-start hydration cannot replace regeneration with completed or hide Stop', async () => {
+  test('pre-start hydration cannot replace a rewrite with completed or hide Stop', async () => {
     let resolveStart!: (value: { process_id: string }) => void;
     startPromise = new Promise((resolve) => { resolveStart = resolve; });
     await show();
     await act(async () => {
-      void summaryProps.onRegenerateSummary();
+      button('Rewrite AI notes').props.onClick();
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
-    expect(summaryProps.summaryStatus).toBe('regenerating');
-    expect(workspaceProps.isGenerating).toBe(true);
+    expect(rendered()).toContain('Finishing notes');
 
-    let stop!: Promise<void>;
-    await act(async () => { stop = summaryProps.onStopGeneration(); });
+    await act(async () => { button('Stop').props.onClick(); });
     await act(async () => resolveStart({ process_id: '2026-09-19T11:00:00.000000000Z' }));
-    await act(async () => stop);
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
     expect(invocations.some(([command]) => command === 'api_cancel_summary')).toBe(true);
   });
 
@@ -231,8 +240,7 @@ describe('PageContent owner repair composition', () => {
       replaceExisting: true,
     });
     await act(async () => { await Promise.resolve(); });
-    expect(summaryProps.summaryStatus).toBe('regenerating');
-    expect(workspaceProps.isGenerating).toBe(true);
+    expect(rendered()).toContain('Finishing notes');
 
     nativeSummary = response('Externally generated C');
     nativeSummary.start = '2026-09-19T11:00:00.000000000Z';
@@ -241,8 +249,8 @@ describe('PageContent owner repair composition', () => {
       await starting;
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
-    expect(summaryProps.summaryStatus).toBe('completed');
-    expect(summaryProps.aiSummary).toEqual({ markdown: 'Externally generated C' });
+    expect(rendered()).not.toContain('Finishing notes');
+    expect(notesProps.legacyNotes).toBe('Externally generated C');
   });
 
   test('delayed title completion cannot restore an obsolete catalog or selection', async () => {

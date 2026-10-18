@@ -18,7 +18,6 @@ import { progress as progressBar, toneText } from '@/lib/theme-classes';
 import { FINAL_PASS_COMPLETE_EVENT, type FinalPassComplete } from '@/lib/liveTranscriptionModels';
 import { SpeakerStatusNotice } from './SpeakerStatusNotice';
 import { ModelProvenanceNote } from './ModelProvenanceNote';
-import { TimelineChapters } from './TimelineChapters';
 
 export function findSegmentIdAtTime(
   segments: Array<{ id: string; timestamp: number; endTime?: number }>,
@@ -549,9 +548,8 @@ export function TranscriptPanel({
         )}
         {meetingId && <ModelProvenanceNote meetingId={meetingId} />}
         {locked && convertedSegments.length > 0 && (
-          <p className="mt-2 text-[11px] text-[var(--ink-subtle)]">Transcript is locked while the summary is being generated.</p>
+          <p className="mt-2 text-[11px] text-[var(--ink-subtle)]">Transcript is locked while the AI notes are written.</p>
         )}
-        {!isRecording && convertedSegments.length > 0 && <TimelineChapters meetingId={meetingId} />}
       </div>
 
       {/* Transcript content - use virtualized view for better performance */}

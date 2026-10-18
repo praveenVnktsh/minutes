@@ -41,7 +41,7 @@ export function ModelProvenanceNote({ meetingId }: ModelProvenanceNoteProps) {
     parts.push(`Speakers by ${label(diarization.engine)}${detail}`);
   }
   if (summary) {
-    parts.push(`Enhanced by ${label(summary.provider)} ${summary.model}`);
+    parts.push(`AI notes by ${label(summary.provider)} ${summary.model}`);
   }
 
   if (parts.length === 0) return null;

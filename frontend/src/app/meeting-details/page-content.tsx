@@ -7,23 +7,25 @@ import { useSidebar } from '@/components/Sidebar/SidebarProvider';
 import Analytics from '@/lib/analytics';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { Download, Loader2, MoreHorizontal } from 'lucide-react';
+import { Copy, Download, Loader2, MoreHorizontal, Sparkles, Square } from 'lucide-react';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { TranscriptPanel } from '@/components/MeetingDetails/TranscriptPanel';
-import { SummaryPanel } from '@/components/MeetingDetails/SummaryPanel';
-import { SummaryGeneratorButtonGroup } from '@/components/MeetingDetails/SummaryGeneratorButtonGroup';
-import { SummaryUpdaterButtonGroup } from '@/components/MeetingDetails/SummaryUpdaterButtonGroup';
-import { SummaryLanguagePill } from '@/components/MeetingDetails/SummaryLanguagePill';
-import { MeetingWorkspace, type NotesMode } from '@/components/MeetingDetails/MeetingWorkspace';
+import { MeetingWorkspace } from '@/components/MeetingDetails/MeetingWorkspace';
 import { MeetingAssistantPanel } from '@/components/MeetingDetails/MeetingAssistantPanel';
 import { CopilotPanel } from '@/components/MeetingDetails/CopilotPanel';
-import { MeetingRawNotesEditor } from '@/components/MeetingDetails/MeetingRawNotesEditor';
+import { MeetingNotesEditor } from '@/components/MeetingDetails/MeetingNotesEditor';
 import { LiveTranscriptPanel } from '@/components/MeetingDetails/LiveTranscriptPanel';
-import { LiveEnhancedNotes } from '@/components/MeetingDetails/LiveEnhancedNotes';
-import { LiveRawNotes } from '@/components/MeetingDetails/LiveRawNotes';
+import { LiveNotes, LiveNotesNotice } from '@/components/MeetingDetails/LiveNotes';
 import { FloatingRecordingControls } from '@/components/MeetingDetails/FloatingRecordingControls';
 import { useMeetingActivity } from '@/contexts/MeetingActivityContext';
-import { liveNotesTarget, meetingNotesTarget, notePersistenceService } from '@/services/notePersistenceService';
+import {
+  liveNotesTarget,
+  meetingNotesTarget,
+  noteDocumentId,
+  notePersistenceService,
+} from '@/services/notePersistenceService';
+import { hasAiNotes, useShowAiNotes } from '@/lib/aiNotes';
+import { storedSummaryMarkdown } from '@/lib/meetingExport';
 import { toast } from 'sonner';
 
 // Custom hooks
@@ -80,14 +82,7 @@ export default function PageContent({
   });
 
   // State
-  const customPrompt = '';
-  const [notesMode, setNotesMode] = useState<NotesMode>('enhanced');
-  // While recording: Raw (your notes) by default; Enhanced fills in as
-  // topics close.
-  const [liveNotesMode, setLiveNotesMode] = useState<NotesMode>('raw');
-  // True when raw notes changed after the last enhancement, so the workspace can
-  // nudge the user to re-enhance instead of regenerating automatically.
-  const [notesDirtySinceSummary, setNotesDirtySinceSummary] = useState(false);
+  const [showAiNotes] = useShowAiNotes();
   const activity = useMeetingActivity();
   const meetingActivities = activity.getMeetingActivities(meeting.id);
   // A meeting accumulates activities over time (an import, then retranscriptions), so each
@@ -114,9 +109,6 @@ export default function PageContent({
   const [liveFolderPath, setLiveFolderPath] = useState<string | null>(null);
 
   // Ref to store the modal open function from SummaryGeneratorButtonGroup
-  const autoSwitchedSummaryMeetingIdsRef = useRef(new Set<string>());
-  const manuallySelectedViewMeetingIdsRef = useRef(new Set<string>());
-
   // Sidebar context
   const { renameMeeting, refetchMeetings, meetingMutations } = useSidebar();
   const router = useRouter();
@@ -187,7 +179,7 @@ export default function PageContent({
     transcripts: meetingData.transcripts,
     meetingTitle: meetingData.meetingTitle,
     aiSummary: meetingData.aiSummary,
-    blockNoteSummaryRef: meetingData.blockNoteSummaryRef,
+    showAiNotes,
     notesTarget: isRecordingThisMeeting && liveFolderPath ? liveNotesTarget(liveFolderPath) : undefined,
   });
 
@@ -195,21 +187,10 @@ export default function PageContent({
     meeting,
   });
 
-  const handleNotesModeChange = useCallback(async (mode: NotesMode) => {
-    if (mode === notesMode) return;
-    try {
-      if (notesMode === 'raw') {
-        await notePersistenceService.flushNotes(meetingNotesTarget(meeting.id));
-      } else if (meetingData.blockNoteSummaryRef.current?.isDirty) {
-        await meetingData.blockNoteSummaryRef.current.saveSummary();
-      }
-      setNotesMode(mode);
-    } catch (error) {
-      toast.error('Could not switch notes view', {
-        description: `Your current draft remains open. ${error instanceof Error ? error.message : String(error)}`,
-      });
-    }
-  }, [meeting.id, meetingData.blockNoteSummaryRef, notesMode]);
+  // Whether the notes document has AI lines; an old meeting without them
+  // shows its stored Enhanced notes below the notes instead.
+  const notesHaveAi = useNotesHaveAi(meeting.id);
+  const storedAiNotes = storedSummaryMarkdown(meetingData.aiSummary);
 
   useEffect(() => {
     if (!isRecordingThisMeeting) {
@@ -272,42 +253,23 @@ export default function PageContent({
     return () => window.removeEventListener('meetily:recording-finalized', handleFinalized);
   }, [meeting.id, onRefetchTranscripts]);
 
-  // Glow the re-enhance control when the user's notes changed after the last
-  // enhancement. Enhancement itself stays manual.
-  useEffect(() => {
-    const handler = (event: Event) => {
-      const id = (event as CustomEvent<{ meetingId?: string }>).detail?.meetingId;
-      if (id && id !== meeting.id) return;
-      setNotesDirtySinceSummary(true);
-    };
-    window.addEventListener('meetily:raw-notes-changed', handler);
-    return () => window.removeEventListener('meetily:raw-notes-changed', handler);
-  }, [meeting.id]);
-
-  useEffect(() => {
-    if (summaryGeneration.summaryStatus === 'completed') {
-      setNotesDirtySinceSummary(false);
-    }
-  }, [summaryGeneration.summaryStatus]);
-
   const isSummaryActive = summaryGeneration.summaryStatus === 'processing'
     || summaryGeneration.summaryStatus === 'summarizing'
     || summaryGeneration.summaryStatus === 'regenerating';
-  const canShowEnhanced = Boolean(meetingData.aiSummary) || summaryGeneration.summaryStatus === 'completed';
   const showAssistant = true;
-  const effectiveNotesMode: NotesMode = notesMode;
   const peopleCount = new Set(
     meetingData.transcripts.map((t: any) => t.speaker_id ?? t.speaker).filter(Boolean)
   ).size;
+  // The summary job after a meeting with AI lines only names the meeting, so
+  // its failures are not the notes'. Without AI lines it writes the AI notes.
+  const aiNotesFromSummary = !notesHaveAi;
   const statusBanner = isSummaryActive ? (
     <span className="flex shrink-0 items-center gap-1.5 rounded-full bg-surface-2 px-3 py-1.5 text-[11px] font-medium text-ink-muted">
-      <Loader2 className="h-3.5 w-3.5 animate-spin" /> Generating summary…
+      <Loader2 className="h-3.5 w-3.5 animate-spin" /> Finishing notes…
     </span>
-  ) : summaryActivity?.status === 'cancelled' ? (
-    <span className={`shrink-0 rounded-full px-3 py-1.5 text-[11px] font-medium ${badge.warning}`} role="status">Summary generation cancelled</span>
-  ) : summaryActivity?.status === 'failed' ? (
+  ) : aiNotesFromSummary && summaryActivity?.status === 'failed' ? (
     <span className={`shrink-0 rounded-full px-3 py-1.5 text-[11px] font-medium ${badge.error}`} role="alert">
-      {summaryActivity.error || 'Summary generation failed'}
+      {summaryActivity.error || 'AI notes failed'}
     </span>
   ) : isTranscribing ? (
     <span className={`flex shrink-0 items-center gap-1.5 rounded-full px-3 py-1.5 text-[11px] font-medium ${badge.info}`} role="status">
@@ -334,78 +296,55 @@ export default function PageContent({
     </span>
   ) : null;
 
-  const summaryToolbarActions = (
+  // "Write AI notes" (or rewrite them) maps onto the old summary only for a
+  // meeting whose notes have no AI lines; the result shows below the notes.
+  const canWriteAiNotes = aiNotesFromSummary
+    && meetingData.transcripts.length > 0
+    && !initialSummaryError
+    && !isModelConfigLoading;
+  const menuItem = 'flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-xs text-ink hover:bg-surface-2 disabled:opacity-50';
+  const notesMenu = (
     <Popover>
       <PopoverTrigger asChild>
         <button
           type="button"
-          title="Summary options"
-          aria-label="Summary options"
-          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-hairline text-ink-muted hover:bg-surface-2 hover:text-ink"
+          title="More"
+          aria-label="Notes options"
+          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-ink-muted hover:bg-surface-2 hover:text-ink"
         >
           <MoreHorizontal className="h-4 w-4" />
         </button>
       </PopoverTrigger>
-      <PopoverContent align="end" className="w-[340px] space-y-3 p-3">
-        <div className="flex items-center gap-2 text-[11px] text-ink-subtle">
-          <span>{new Date(meeting.created_at).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' })}</span>
-          {peopleCount > 0 && (
-            <>
-              <span>·</span>
-              <span>{peopleCount} {peopleCount === 1 ? 'person' : 'people'}</span>
-            </>
-          )}
-        </div>
-        <SummaryGeneratorButtonGroup
-          modelConfig={modelConfig}
-          onGenerateSummary={summaryGeneration.handleGenerateSummary}
-          onRegenerateSummary={summaryGeneration.handleRegenerateSummary}
-          onStopGeneration={summaryGeneration.handleStopGeneration}
-          customPrompt={customPrompt}
-          summaryStatus={summaryGeneration.summaryStatus}
-          availableTemplates={templates.availableTemplates}
-          selectedTemplate={templates.selectedTemplate}
-          onTemplateSelect={templates.handleTemplateSelection}
-          hasTranscripts={meetingData.transcripts.length > 0}
-          hasSummary={canShowEnhanced}
-          isModelConfigLoading={isModelConfigLoading}
-          summaryReadUnavailable={Boolean(initialSummaryError)}
-          languageSlot={<SummaryLanguagePill meetingId={meeting.id} />}
-        />
-        {canShowEnhanced && (
-          <SummaryUpdaterButtonGroup onCopy={copyOperations.handleCopySummary} />
-        )}
+      <PopoverContent align="end" className="w-48 p-1">
+        <button type="button" className={menuItem} onClick={() => void copyOperations.handleCopyNotes()}>
+          <Copy className="h-3.5 w-3.5 text-ink-muted" /> Copy notes
+        </button>
+        <button type="button" className={menuItem} onClick={() => void copyOperations.handleExportMarkdown()}>
+          <Download className="h-3.5 w-3.5 text-ink-muted" /> Export
+        </button>
+        {canWriteAiNotes && (isSummaryActive ? (
+          <button type="button" className={menuItem} onClick={() => void summaryGeneration.handleStopGeneration()}>
+            <Square className="h-3.5 w-3.5 text-ink-muted" /> Stop
+          </button>
+        ) : (
+          <button
+            type="button"
+            className={menuItem}
+            onClick={() => void (storedAiNotes
+              ? summaryGeneration.handleRegenerateSummary()
+              : summaryGeneration.handleGenerateSummary(''))}
+          >
+            <Sparkles className="h-3.5 w-3.5 text-ink-muted" /> {storedAiNotes ? 'Rewrite AI notes' : 'Write AI notes'}
+          </button>
+        ))}
       </PopoverContent>
     </Popover>
-  );
-
-  const exportButton = (
-    <button
-      type="button"
-      onClick={copyOperations.handleExportMarkdown}
-      title="Export meeting as Markdown"
-      aria-label="Export meeting as Markdown"
-      className="flex h-8 shrink-0 items-center gap-1.5 rounded-full border border-hairline px-3 text-xs text-ink-muted transition-colors hover:bg-surface-2 hover:text-ink"
-    >
-      <Download className="h-3.5 w-3.5" /> Export
-    </button>
   );
 
   // Track page view
   useEffect(() => {
     Analytics.trackPageView('meeting_details');
   }, []);
-
-  useEffect(() => {
-    if (
-      (meetingData.aiSummary || summaryGeneration.summaryStatus === 'completed')
-      && !autoSwitchedSummaryMeetingIdsRef.current.has(meeting.id)
-      && !manuallySelectedViewMeetingIdsRef.current.has(meeting.id)
-    ) {
-      autoSwitchedSummaryMeetingIdsRef.current.add(meeting.id);
-      setNotesMode('enhanced');
-    }
-  }, [meeting.id, meetingData.aiSummary, summaryGeneration.summaryStatus]);
 
   if (isRecordingThisMeeting) {
     return (
@@ -418,12 +357,8 @@ export default function PageContent({
         <MeetingWorkspace
           title={meetingData.meetingTitle}
           createdAt={meeting.created_at}
-          notesMode={liveNotesMode}
-          onNotesModeChange={setLiveNotesMode}
-          canShowEnhanced
-          hasEnhancedContent={false}
-          summary={<LiveEnhancedNotes />}
-          rawNotes={<LiveRawNotes />}
+          notes={<LiveNotes />}
+          notesNotice={<LiveNotesNotice />}
           transcript={<LiveTranscriptPanel />}
           assistant={
             <CopilotPanel
@@ -455,37 +390,28 @@ export default function PageContent({
         <MeetingWorkspace
           title={meetingData.meetingTitle}
           createdAt={meeting.created_at}
-          notesMode={effectiveNotesMode}
-          onNotesModeChange={(mode) => {
-            manuallySelectedViewMeetingIdsRef.current.add(meeting.id);
-            void handleNotesModeChange(mode);
-          }}
-          canShowEnhanced
-          hasEnhancedContent={canShowEnhanced}
           showAssistant={showAssistant}
           peopleCount={peopleCount}
           statusBanner={statusBanner}
-          toolbarActions={<>{summaryToolbarActions}{exportButton}</>}
+          toolbarActions={notesMenu}
           onTitleChange={handleTitleChange}
           onRegenerateTitle={titleRegeneration.regenerateTitle}
           titleRegenerating={titleRegeneration.isRegenerating}
           titlePending={meetingMutations[meeting.id]?.rename?.status === 'pending'}
           titleError={meetingMutations[meeting.id]?.rename?.error}
-          onRegenerate={() => {
-            setNotesDirtySinceSummary(false);
-            void summaryGeneration.handleRegenerateSummary();
-          }}
-          onStopGeneration={summaryGeneration.handleStopGeneration}
-          isGenerating={isSummaryActive}
-          notesDirty={notesDirtySinceSummary}
+          notesNotice={initialSummaryError ? (
+            <button type="button" className="underline-offset-2 hover:underline" onClick={() => onRetryInitialSummary?.()}>
+              Could not load AI notes · Retry
+            </button>
+          ) : undefined}
           transcript={
             <TranscriptPanel
               transcripts={meetingData.transcripts}
               onCopyTranscript={copyOperations.handleCopyTranscript}
               onOpenMeetingFolder={meetingOperations.handleOpenMeetingFolder}
-               isRecording={false}
+              isRecording={false}
               isTranscribing={isTranscribing}
-              locked={isSummaryActive}
+              locked={isSummaryActive && aiNotesFromSummary}
               disableAutoScroll={true}
               usePagination={true}
               segments={segments}
@@ -499,45 +425,32 @@ export default function PageContent({
               onRefetchTranscripts={onRefetchTranscripts}
             />
           }
-          rawNotes={<MeetingRawNotesEditor meetingId={meeting.id} />}
+          notes={<MeetingNotesEditor meetingId={meeting.id} legacyNotes={storedAiNotes} />}
           assistant={
             <MeetingAssistantPanel
               meetingId={meeting.id}
               modelConfig={modelConfig}
             />
           }
-          summary={
-            <SummaryPanel
-              meeting={meeting}
-              meetingTitle={meetingData.meetingTitle}
-              summaryRef={meetingData.blockNoteSummaryRef}
-              isSaving={meetingData.isSaving}
-              isSummaryDirty={meetingData.isSummaryDirty}
-              onCopySummary={copyOperations.handleCopySummary}
-              aiSummary={meetingData.aiSummary}
-              summaryStatus={summaryGeneration.summaryStatus}
-              transcripts={meetingData.transcripts}
-              modelConfig={modelConfig}
-              onGenerateSummary={summaryGeneration.handleGenerateSummary}
-              onStopGeneration={summaryGeneration.handleStopGeneration}
-              customPrompt={customPrompt}
-              onSaveSummary={meetingData.handleSaveSummary}
-              onSummaryChange={meetingData.handleSummaryChange}
-              onDirtyChange={meetingData.setIsSummaryDirty}
-              summaryError={summaryGeneration.summaryError}
-              summaryReadError={initialSummaryError}
-              onRetrySummaryRead={onRetryInitialSummary}
-              onRegenerateSummary={summaryGeneration.handleRegenerateSummary}
-              getSummaryStatusMessage={summaryGeneration.getSummaryStatusMessage}
-              availableTemplates={templates.availableTemplates}
-              selectedTemplate={templates.selectedTemplate}
-              onTemplateSelect={templates.handleTemplateSelection}
-              isModelConfigLoading={isModelConfigLoading}
-              onOpenModelSettings={() => void handleOpenModelSettings()}
-            />
-          }
         />
       </div>
     </motion.div>
   );
+}
+
+/** Whether the meeting's notes document has AI lines, kept current as the
+ * notes load and change. */
+function useNotesHaveAi(meetingId: string): boolean {
+  const target = meetingNotesTarget(meetingId);
+  const key = noteDocumentId(target);
+  const read = () => hasAiNotes(notePersistenceService.getSnapshot(meetingNotesTarget(meetingId)).document);
+  const [value, setValue] = useState(read);
+  useEffect(() => {
+    const target = meetingNotesTarget(meetingId);
+    const update = () => setValue(hasAiNotes(notePersistenceService.getSnapshot(target).document));
+    update();
+    return notePersistenceService.subscribeNotes(target, update);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
+  return value;
 }
