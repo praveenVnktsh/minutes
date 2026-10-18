@@ -1,8 +1,8 @@
 import type { TimelineEntry } from '@/lib/liveTimeline';
 
 /**
- * "Write live notes into my notes" (experimental): live notes are added to
- * the Raw notes under their topic, as AI text the user can tell apart. The
+ * Live notes written into the notes document (one doc: the user's lines and
+ * the AI's). AI lines sit under their topic and look different. The
  * rules, kept here so they can be tested without an editor:
  *
  * - nothing is added until the user has paused typing for `AI_NOTES_PAUSE_MS`;
@@ -117,11 +117,15 @@ export function remainingAiBlocks(aiBlocks: AiBlocks, textById: ReadonlyMap<stri
   return next;
 }
 
-/** CSS that marks AI lines: muted, with a small "AI" tag. Colours are theme
+/** CSS that marks AI lines: muted, with a small "AI" tag, or hidden when
+ * "Show AI notes" is off (hidden, never deleted). Colours are theme
  * variables, so the marks follow light and dark mode. */
-export function aiBlocksCss(aiBlocks: AiBlocks): string {
+export function aiBlocksCss(aiBlocks: AiBlocks, visible = true): string {
   const ids = Object.keys(aiBlocks).filter((id) => /^[\w-]+$/.test(id));
   if (ids.length === 0) return '';
+  if (!visible) {
+    return `${ids.map((id) => `.bn-block-outer[data-id="${id}"]`).join(',\n')} { display: none; }`;
+  }
   const content = ids.map((id) => `.bn-block[data-id="${id}"] > .bn-block-content`).join(',\n');
   const tag = ids.map((id) => `.bn-block[data-id="${id}"] > .bn-block-content::after`).join(',\n');
   return `${content} { color: var(--ink-muted); }\n${tag} { content: "AI"; margin-left: 6px; font-size: 10px; line-height: 1; color: var(--ink-subtle); align-self: center; }`;

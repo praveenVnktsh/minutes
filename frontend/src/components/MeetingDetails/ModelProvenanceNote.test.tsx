@@ -65,7 +65,7 @@ describe('ModelProvenanceNote', () => {
     }
     await render()
     expect(JSON.stringify(renderer?.toJSON())).toContain(
-      'Transcribed by Parakeet tdt-0.6b · Speakers by pyannote (segmentation-3.0) · Enhanced by Claude sonnet-5',
+      'Transcribed by Parakeet tdt-0.6b · Speakers by pyannote (segmentation-3.0) · AI notes by Claude sonnet-5',
     )
   })
 
@@ -76,6 +76,6 @@ describe('ModelProvenanceNote', () => {
       summary: { provider: 'some-new-provider', model: 'v1' },
     }
     await render()
-    expect(JSON.stringify(renderer?.toJSON())).toContain('Speakers by custom-engine · Enhanced by some-new-provider v1')
+    expect(JSON.stringify(renderer?.toJSON())).toContain('Speakers by custom-engine · AI notes by some-new-provider v1')
   })
 })

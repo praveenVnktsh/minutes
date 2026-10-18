@@ -21,6 +21,9 @@ import { RecordingStateValueProvider, RecordingStatus, type RecordingStateContex
 import { RecordingControllerValueProvider, type RecordingControllerValue } from '@/contexts/RecordingControllerContext';
 import { SIDEBAR_COLLAPSED_WIDTH, SIDEBAR_WIDTH, useShell } from '@/contexts/ShellContext';
 import { badge } from '@/lib/theme-classes';
+import { useLiveTimeline } from '@/hooks/useLiveTimeline';
+import { useShowAiNotes } from '@/lib/aiNotes';
+import { aiNoteText, pendingGroups } from '@/lib/aiRawNotes';
 import type { ReplaySource, ReplayView } from '@/lib/replay/replaySource';
 import type { Transcript } from '@/types';
 
@@ -52,15 +55,38 @@ const neverRecords = async () => {
   toast.info('Replays never record', { description: 'This is a recorded run playing back.' });
 };
 
-function ReplayNotes({ notes }: { notes: string }) {
+/** The notes column, read-only: the notes typed at this point of the run,
+ * then the live notes as AI lines under their topics (hidden with "Show AI
+ * notes" off), as the notes document shows them. */
+export function ReplayNotes({ notes }: { notes: string }) {
+  const timeline = useLiveTimeline();
+  const [showAi] = useShowAiNotes();
+  const groups = showAi ? pendingGroups(timeline?.entries ?? [], new Set()) : [];
   return (
-    <div data-replay-notes className="h-full overflow-y-auto px-8 pb-24">
-      <p className="mb-3 text-[11px] font-semibold uppercase tracking-[0.08em] text-ink-subtle">Notes Copilot was given</p>
-      {notes.trim() ? (
-        <pre className="whitespace-pre-wrap font-sans text-sm leading-6 text-ink">{notes}</pre>
-      ) : (
-        <p className="text-sm text-ink-subtle">No notes at this point of the run.</p>
-      )}
+    <div data-replay-notes className="h-full overflow-y-auto px-8 pb-24 pt-4">
+      <div className="mx-auto w-full max-w-[860px] text-sm leading-6">
+        {notes.trim() ? (
+          <pre className="whitespace-pre-wrap font-sans text-ink">{notes}</pre>
+        ) : groups.length === 0 ? (
+          <p className="text-ink-subtle">No notes at this point of the run.</p>
+        ) : null}
+        {groups.map((group) => (
+          <section key={group.topic} data-ai-topic={group.topic} className="mt-4 text-ink-muted">
+            <h3 className="font-semibold">
+              {group.topic}
+              <span className="ml-1.5 text-[10px] font-normal text-ink-subtle">AI</span>
+            </h3>
+            <ul className="list-disc pl-5">
+              {group.entries.map((entry) => (
+                <li key={entry.id}>
+                  {aiNoteText(entry)}
+                  <span className="ml-1.5 text-[10px] text-ink-subtle">AI</span>
+                </li>
+              ))}
+            </ul>
+          </section>
+        ))}
+      </div>
     </div>
   );
 }
@@ -72,11 +98,7 @@ const Workspace = memo(function Workspace({ title, createdAt, notes, phase }: { 
     <MeetingWorkspace
       title={title}
       createdAt={createdAt}
-      notesMode="raw"
-      onNotesModeChange={noop}
-      canShowEnhanced={false}
-      summary={null}
-      rawNotes={<ReplayNotes notes={notes} />}
+      notes={<ReplayNotes notes={notes} />}
       transcript={<LiveTranscriptPanel />}
       assistant={<CopilotPanel />}
       showAssistant

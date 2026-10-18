@@ -74,61 +74,6 @@ export function formatTimelineTime(ms: number): string {
   return hours > 0 ? `${hours}:${pad(minutes)}:${pad(seconds)}` : `${pad(minutes)}:${pad(seconds)}`;
 }
 
-/** The label and tone a kind is marked with; points are unmarked. */
-export function kindMarker(kind: TimelineKind): { label: string; tone: Tone } | null {
-  switch (kind) {
-    case 'decision':
-      return { label: 'Decision', tone: 'success' };
-    case 'action':
-      return { label: 'Action', tone: 'info' };
-    default:
-      return null;
-  }
-}
-
-/** A run of consecutive entries under one topic. `topic` is null for
- * entries made before topics existed, which render without a header. */
-export interface TimelineSection<T extends TimelineEntry = TimelineEntry> {
-  topic: string | null;
-  entries: T[];
-}
-
-/** Entries (in time order) grouped into sections: a new section starts when
- * an entry names a different topic. An entry without a topic stays in the
- * section before it. */
-export function groupByTopic<T extends TimelineEntry>(entries: T[]): TimelineSection<T>[] {
-  const sections: TimelineSection<T>[] = [];
-  for (const entry of entries) {
-    const topic = entry.topic?.trim() || null;
-    const last = sections[sections.length - 1];
-    if (last && (topic === null || topic === last.topic)) {
-      last.entries.push(entry);
-    } else {
-      sections.push({ topic, entries: [entry] });
-    }
-  }
-  return sections;
-}
-
-/** The speaker label an entry made before topics keeps ("· Others",
- * "· Priya"), as it was shown when it was written. Entries with a topic
- * never show one: their notes state what was said, not who said it. */
-export function legacySpeakerLabel(entry: Pick<TimelineEntry, 'kind' | 'text' | 'speaker' | 'topic'>): string | null {
-  if (entry.topic != null || !entry.speaker?.trim()) return null;
-  // Already shown as the owner: "You — task".
-  if (entryDisplayText(entry) !== entry.text) return null;
-  return entry.speaker.trim();
-}
-
-/** The text an entry shows: an action the user owns reads "You — task".
- * Other speakers are never shown; the note states what was said. */
-export function entryDisplayText(entry: Pick<TimelineEntry, 'kind' | 'text' | 'speaker'>): string {
-  if (entry.kind === 'action' && entry.speaker === 'You' && !/^you\b/i.test(entry.text)) {
-    return `You — ${entry.text}`;
-  }
-  return entry.text;
-}
-
 /** Whether a snapshot belongs on the panel showing `current`: a newer
  * session replaces it, an older one's late update is ignored. */
 export function acceptSnapshot(
@@ -140,26 +85,22 @@ export function acceptSnapshot(
   return next.status === 'stopped' ? current : next;
 }
 
-/** The notice the live panel shows for a status, if any. */
+/** Why no AI notes are coming while recording, if anything is wrong. */
 export function statusNotice(snapshot: TimelineSnapshot | null): { tone: Tone; text: string } | null {
   if (!snapshot) return null;
   switch (snapshot.status) {
     case 'failed':
-      return { tone: 'warning', text: 'Live summary paused. It will try again with the next minute of conversation.' };
+      return { tone: 'warning', text: 'AI notes paused. They try again with the next minute.' };
     case 'unavailable':
       // With an error, the provider refused the request (key, quota, rate
       // limit); without one, no summary model is set up.
       return snapshot.error
         ? { tone: 'warning', text: snapshot.error }
-        : { tone: 'neutral', text: 'Live summary needs a summary model. Choose one in Settings → Summary.' };
+        : { tone: 'neutral', text: 'AI notes need a summary model. Choose one in Settings → Summary.' };
     case 'disabled':
-      return { tone: 'neutral', text: 'Live summary is off. Turn it on in Settings → Summary.' };
+      return { tone: 'neutral', text: 'AI notes are off. Turn them on in Settings → Summary.' };
     default:
       return null;
   }
 }
 
-/** Ask the transcript view to scroll to a time. */
-export function jumpToTime(ms: number): void {
-  window.dispatchEvent(new CustomEvent(JUMP_TO_TIME_EVENT, { detail: { seconds: ms / 1000 } }));
-}

@@ -13,6 +13,24 @@ function document(text: string): LiveNotesDocument {
   };
 }
 
+/** A meeting whose notes the AI wrote into during the recording. */
+function aiDocument(): LiveNotesDocument {
+  const content = (text: string) => [{ type: 'text', text, styles: {} }];
+  return {
+    version: 2,
+    meetingStartedAtMs: 1,
+    updatedAt: 'with-ai',
+    notes: [],
+    rawMarkdown: 'with ai',
+    editorBlocks: [
+      { id: 'mine', type: 'bulletListItem', props: {}, content: content('My line'), children: [] },
+      { id: 'h', type: 'heading', props: { level: 3 }, content: content('Launch'), children: [] },
+    ],
+    aiBlocks: { h: { entryId: '', text: 'Launch', topic: 'Launch' } },
+    aiEntries: ['d1'],
+  };
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((resolvePromise) => { resolve = resolvePromise; });
@@ -44,6 +62,11 @@ const invoke = mock(async (command: string, args?: Record<string, unknown>): Pro
     if (args?.meetingId === 'identity-a') return document('meeting A notes');
     if (args?.meetingId === 'identity-b') return meetingB.promise;
   }
+  if (command === 'get_meeting_live_notes' && args?.meetingId === 'with-ai') return aiDocument();
+  if (command === 'get_meeting_live_notes' && args?.meetingId === 'old') return document('old meeting notes');
+  if (command === 'list_meeting_timeline_entries') return [
+    { id: 'd1', start_ms: 60_000, end_ms: 65_000, kind: 'decision', text: 'Launch on Nov 12', speaker: null, provider: 'p', model: 'm', created_at: '', topic: 'Launch', meeting_id: 'with-ai' },
+  ];
   if (command === 'get_meeting_folder_path') return '/live/retry-session';
   if (command === 'load_live_notes') {
     liveLoadAttempts += 1;
@@ -57,7 +80,8 @@ const invoke = mock(async (command: string, args?: Record<string, unknown>): Pro
 let recordingState = { isRecording: true, recordingDuration: 12 };
 const renderedRawDocuments: string[] = [];
 
-mock.module('@tauri-apps/api/core', () => ({ invoke }));
+const originalCore = { ...await import('@tauri-apps/api/core') };
+mock.module('@tauri-apps/api/core', () => ({ ...originalCore, invoke }));
 mock.module('../../src/contexts/RecordingStateContext', () => ({ useRecordingState: () => recordingState }));
 mock.module('../../src/components/BlockNotesEditor', () => ({
   BlockNotesEditor: ({ document: value }: { document: LiveNotesDocument }) => {
@@ -71,7 +95,7 @@ mock.module('next/dynamic', () => ({
   ),
 }));
 
-const { MeetingRawNotesEditor } = await import('../../src/components/MeetingDetails/MeetingRawNotesEditor');
+const { MeetingNotesEditor } = await import('../../src/components/MeetingDetails/MeetingNotesEditor');
 const { LiveNotesPad } = await import('../../src/components/LiveNotesPad');
 const TestLiveNotesPad = LiveNotesPad as ComponentType<{ bare?: boolean }>;
 
@@ -86,20 +110,51 @@ describe('note editor state boundaries', () => {
   test('never renders the previous meeting document under a new identity', async () => {
     let renderer!: ReactTestRenderer;
     await act(async () => {
-      renderer = create(createElement(MeetingRawNotesEditor, { meetingId: 'identity-a' }));
+      renderer = create(createElement(MeetingNotesEditor, { meetingId: 'identity-a' }));
     });
     await settle();
     expect(renderedRawDocuments).toContain('meeting A notes');
 
     renderedRawDocuments.length = 0;
     act(() => {
-      renderer.update(createElement(MeetingRawNotesEditor, { meetingId: 'identity-b' }));
+      renderer.update(createElement(MeetingNotesEditor, { meetingId: 'identity-b' }));
     });
     expect(renderedRawDocuments).not.toContain('meeting A notes');
 
     meetingB.resolve(document('meeting B notes'));
     await settle();
     expect(renderedRawDocuments).toContain('meeting B notes');
+    renderer.unmount();
+  });
+
+  test('after the meeting, adds Decisions to a document the AI wrote into, once', async () => {
+    renderedRawDocuments.length = 0;
+    let renderer!: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(createElement(MeetingNotesEditor, { meetingId: 'with-ai', legacyNotes: 'Stored summary' }));
+    });
+    await settle();
+    await settle();
+    const latest = renderedRawDocuments[renderedRawDocuments.length - 1];
+    expect(latest).toContain('### Decisions');
+    expect(latest).toContain('- Launch on Nov 12');
+    expect(invoke.mock.calls.filter(([command]) => command === 'list_meeting_timeline_entries')).toHaveLength(1);
+    // The doc has AI lines, so the stored summary is not shown as well.
+    expect(JSON.stringify(renderer.toJSON())).not.toContain('Stored summary');
+    renderer.unmount();
+  });
+
+  test('an old meeting shows its stored Enhanced notes below its notes, read-only', async () => {
+    const calls = invoke.mock.calls.length;
+    let renderer!: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(createElement(MeetingNotesEditor, { meetingId: 'old', legacyNotes: 'Old enhanced summary' }));
+    });
+    await settle();
+    expect(JSON.stringify(renderer.toJSON())).toContain('old meeting notes');
+    expect(JSON.stringify(renderer.toJSON())).toContain('Old enhanced summary');
+    // Nothing is written to an old meeting.
+    expect(invoke.mock.calls.slice(calls).some(([command]) => command === 'list_meeting_timeline_entries')).toBe(false);
     renderer.unmount();
   });
 

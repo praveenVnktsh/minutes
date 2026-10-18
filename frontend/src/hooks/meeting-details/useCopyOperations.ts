@@ -1,16 +1,15 @@
-import { useCallback, type RefObject } from 'react';
+import { useCallback } from 'react';
 import { invoke as invokeTauri } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
 import type { MeetingSummary, Transcript } from '@/types';
-import type { BlockNoteSummaryViewRef } from '@/components/AISummary/BlockNoteSummaryView';
 import type { LiveNotesDocument } from '@/lib/liveNotes';
 import Analytics from '@/lib/analytics';
 import { writeClipboardText } from '@/lib/clipboard';
+import { legacyAiNotes, notesMarkdown } from '@/lib/aiNotes';
 import {
   buildMeetingExport,
   exportFileName,
   fetchCompleteTranscripts,
-  originalNotesMarkdown,
   storedSummaryMarkdown,
   transcriptMarkdown,
   type TranscriptPage,
@@ -25,8 +24,11 @@ interface UseCopyOperationsProps {
   meeting: { id: string; title?: string; created_at?: string };
   transcripts: Transcript[];
   meetingTitle: string;
+  /** The stored Enhanced notes: shown, copied and exported only for a
+   * meeting whose notes have no AI lines. */
   aiSummary: MeetingSummary | null;
-  blockNoteSummaryRef: RefObject<BlockNoteSummaryViewRef>;
+  /** "Show AI notes": off copies and exports the user's lines only. */
+  showAiNotes: boolean;
   notesTarget?: NoteDocumentTarget;
   currentNotesDocument?: LiveNotesDocument | null;
 }
@@ -48,52 +50,28 @@ export function useCopyOperations({
   meeting,
   meetingTitle,
   aiSummary,
-  blockNoteSummaryRef,
+  showAiNotes,
   notesTarget,
   currentNotesDocument,
 }: UseCopyOperationsProps) {
   const title = meetingTitle || meeting.title || 'Untitled meeting';
 
-  const buildSummaryMarkdown = useCallback(async (): Promise<string> => {
-    const storedMarkdown = storedSummaryMarkdown(aiSummary);
-    let editor = blockNoteSummaryRef.current;
-    if (!editor) return storedMarkdown;
-
-    while (true) {
-      const capturedEditor: BlockNoteSummaryViewRef = editor;
-      if (editor.getMarkdownResult) {
-        const result = await editor.getMarkdownResult();
-        if (!result.ok) throw result.error;
-        editor = blockNoteSummaryRef.current;
-        if (!editor) throw new Error('Enhanced notes editor closed while preparing the document');
-        if (editor !== capturedEditor) continue;
-        if (editor.isDirty) {
-          await editor.saveSummary();
-          editor = blockNoteSummaryRef.current;
-          if (!editor) throw new Error('Enhanced notes editor closed while saving the document');
-          if (editor !== capturedEditor) continue;
-        }
-        return result.markdown;
-      }
-      if (editor.isDirty) await editor.saveSummary();
-      editor = blockNoteSummaryRef.current;
-      if (!editor) throw new Error('Enhanced notes editor closed while saving the document');
-      if (editor !== capturedEditor) continue;
-      const markdown = (await editor.getMarkdown()).trim();
-      if (blockNoteSummaryRef.current !== editor) {
-        editor = blockNoteSummaryRef.current;
-        if (!editor) throw new Error('Enhanced notes editor closed while preparing the document');
-        continue;
-      }
-      if (markdown) return markdown;
-      const isLegacySummary = aiSummary !== null
-        && !('markdown' in aiSummary)
-        && !('summary_json' in aiSummary);
-      if (isLegacySummary) return storedMarkdown;
-      if (!storedMarkdown) return '';
-      throw new Error('Could not convert the enhanced notes from the editor');
+  /** The notes as shown: the document (AI lines only when shown), and an old
+   * meeting's Enhanced notes when they are shown below it. */
+  const readNotes = useCallback(async (): Promise<{ notes: string; aiNotes: string }> => {
+    const target = notesTarget ?? meetingNotesTarget(meeting.id);
+    await notePersistenceService.flushNotes(target);
+    let document = currentNotesDocument;
+    if (document === undefined) {
+      const snapshot = await notePersistenceService.loadNotes(target);
+      if (snapshot.loadState === 'error') throw snapshot.loadError;
+      document = snapshot.document;
     }
-  }, [aiSummary, blockNoteSummaryRef]);
+    return {
+      notes: notesMarkdown(document, showAiNotes),
+      aiNotes: legacyAiNotes(document, storedSummaryMarkdown(aiSummary), showAiNotes),
+    };
+  }, [aiSummary, currentNotesDocument, meeting.id, notesTarget, showAiNotes]);
 
   const handleCopyTranscript = useCallback(async () => {
     try {
@@ -120,44 +98,28 @@ export function useCopyOperations({
     }
   }, [meeting.created_at, meeting.id, title]);
 
-  const handleCopySummary = useCallback(async () => {
+  const handleCopyNotes = useCallback(async () => {
     try {
-      const summaryMarkdown = await buildSummaryMarkdown();
-      if (!summaryMarkdown) {
-        toast.error('No enhanced notes available to copy');
+      const { notes, aiNotes } = await readNotes();
+      const body = [notes.trim(), aiNotes.trim()].filter(Boolean).join('\n\n');
+      if (!body) {
+        toast.error('No notes to copy');
         return;
       }
-
-      const date = meeting.created_at ? `\n\n_${new Date(meeting.created_at).toLocaleString()}_` : '';
-      await writeClipboardText(`# Enhanced notes: ${title}${date}\n\n${summaryMarkdown}\n`);
-      toast.success('Enhanced notes copied to clipboard');
-      trackCopy('summary', {
-        meeting_id: meeting.id,
-        has_markdown: String(Boolean(aiSummary && 'markdown' in aiSummary)),
-      });
+      await writeClipboardText(`# ${title}\n\n${body}\n`);
+      toast.success('Notes copied');
+      trackCopy('summary', { meeting_id: meeting.id, with_ai_notes: String(showAiNotes) });
     } catch (error) {
-      console.error('Failed to copy enhanced notes:', error);
-      toast.error('Failed to copy enhanced notes');
+      console.error('Failed to copy notes:', error);
+      toast.error('Failed to copy notes');
     }
-  }, [aiSummary, buildSummaryMarkdown, meeting.created_at, meeting.id, title]);
+  }, [meeting.id, readNotes, showAiNotes, title]);
 
   const handleExportMarkdown = useCallback(async () => {
     try {
-      const target = notesTarget ?? meetingNotesTarget(meeting.id);
-      await notePersistenceService.flushNotes(target);
-      let notesDocument = currentNotesDocument;
-      if (notesDocument === undefined) {
-        const notesSnapshot = await notePersistenceService.loadNotes(target);
-        if (notesSnapshot.loadState === 'error') throw notesSnapshot.loadError;
-        notesDocument = notesSnapshot.document;
-      }
-
-      const [enhancedNotes, allTranscripts] = await Promise.all([
-        buildSummaryMarkdown(),
-        readAllTranscripts(meeting.id),
-      ]);
-      const originalNotes = originalNotesMarkdown(notesDocument);
-      if (!originalNotes && !enhancedNotes && allTranscripts.length === 0) {
+      const { notes, aiNotes } = await readNotes();
+      const allTranscripts = await readAllTranscripts(meeting.id);
+      if (!notes && !aiNotes && allTranscripts.length === 0) {
         toast.error('Nothing to export yet');
         return;
       }
@@ -165,8 +127,8 @@ export function useCopyOperations({
       const contents = buildMeetingExport({
         title,
         createdAt: meeting.created_at,
-        originalNotes,
-        enhancedNotes,
+        notes,
+        aiNotes,
         transcripts: allTranscripts,
       });
       const path = await invokeTauri<string>('save_text_export', {
@@ -178,7 +140,7 @@ export function useCopyOperations({
       console.error('Failed to export meeting:', error);
       toast.error('Failed to export meeting');
     }
-  }, [buildSummaryMarkdown, currentNotesDocument, meeting.created_at, meeting.id, notesTarget, title]);
+  }, [meeting.created_at, meeting.id, readNotes, title]);
 
-  return { handleCopyTranscript, handleCopySummary, handleExportMarkdown };
+  return { handleCopyTranscript, handleCopyNotes, handleExportMarkdown };
 }

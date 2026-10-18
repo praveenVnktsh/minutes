@@ -31,7 +31,7 @@ incomplete), report pass/fail counts and date. The empty state explains how to c
 ## The viewer (`/replays?run=<name>`)
 
 The real recording workspace, as `meeting-details` renders it while recording:
-`MeetingWorkspace` with `LiveTranscriptPanel` (with `LiveSummaryPanel` inside it, partials,
+`MeetingWorkspace` with `LiveTranscriptPanel` (partials,
 You/Others chips and the "Question for you" tag), `CopilotPanel` and
 `FloatingRecordingControls` (the record pill). Only the notes column differs: a read-only view
 of the notes Copilot was given, because `LiveNotesPad` writes notes to disk.
@@ -50,7 +50,7 @@ still calls Tauri). The live components read it with `useLiveSource()`:
 | --- | --- |
 | `useCopilot` | `copilot_get_state`, `copilot-state`, `copilot-delta` |
 | `CopilotPanel` | `copilotApiFor(source)`: ask, stop, retry, shorter, dismiss, notes, settings |
-| `useLiveTimeline` (`LiveSummaryPanel`) | `get_live_timeline`, `live-timeline-update` |
+| `useLiveTimeline` (`hooks/useLiveTimeline`, the notes column) | `get_live_timeline`, `live-timeline-update` |
 | `LiveTranscriptPanel` | `transcript-partial`, `set_live_transcription_enabled` |
 | `RecordingWaveform` | `get_recording_level` |
 

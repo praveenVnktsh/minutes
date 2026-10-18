@@ -248,20 +248,22 @@ function formatTranscriptTimestamp(seconds: number | undefined, fallback: string
 export function buildMeetingExport({
   title,
   createdAt,
-  originalNotes,
-  enhancedNotes,
+  notes,
+  aiNotes = '',
   transcripts,
 }: {
   title: string;
   createdAt?: string;
-  originalNotes: string;
-  enhancedNotes: string;
+  /** The notes document as shown: AI lines only when "Show AI notes" is on. */
+  notes: string;
+  /** An old meeting's Enhanced notes, when they are shown below its notes. */
+  aiNotes?: string;
   transcripts: Transcript[];
 }): string {
   const lines = [`# ${title || 'Untitled meeting'}`, ''];
   if (createdAt) lines.push(`_${new Date(createdAt).toLocaleString()}_`, '');
-  if (originalNotes.trim()) lines.push('## Original notes', '', originalNotes.trim(), '');
-  if (enhancedNotes.trim()) lines.push('## Enhanced notes', '', enhancedNotes.trim(), '');
+  if (notes.trim()) lines.push('## Notes', '', notes.trim(), '');
+  if (aiNotes.trim()) lines.push('## AI notes', '', aiNotes.trim(), '');
   if (transcripts.length) lines.push('## Transcript', '', transcriptMarkdown(transcripts), '');
   return lines.join('\n').trimEnd() + '\n';
 }

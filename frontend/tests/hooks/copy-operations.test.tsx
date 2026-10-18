@@ -2,7 +2,6 @@ import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from 'b
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import type { LiveNotesDocument } from '../../src/lib/liveNotes';
 import type { MeetingSummary } from '../../src/types';
-import type { BlockNoteSummaryViewRef } from '../../src/components/AISummary/BlockNoteSummaryView';
 import type { NoteDocumentTarget } from '../../src/services/notePersistenceService';
 
 const originalTauri = { ...await import('@tauri-apps/api/core') };
@@ -25,7 +24,7 @@ const loadNotes = mock(async (): Promise<{
   document: null,
 }));
 
-mock.module('@tauri-apps/api/core', () => ({ invoke }));
+mock.module('@tauri-apps/api/core', () => ({ ...originalTauri, invoke }));
 mock.module('sonner', () => ({ toast: { success, error: errorToast } }));
 mock.module('../../src/services/notePersistenceService', () => ({
   meetingNotesTarget: (meetingId: string) => ({ kind: 'meeting', meetingId }),
@@ -37,15 +36,34 @@ mock.module('../../src/lib/analytics', () => ({
 
 const { useCopyOperations } = await import('../../src/hooks/meeting-details/useCopyOperations');
 
+const text = (value: string) => [{ type: 'text', text: value, styles: {} }];
+/** The user's line, then an AI topic heading and line. */
+const mixedDocument: LiveNotesDocument = {
+  version: 2,
+  meetingStartedAtMs: 0,
+  updatedAt: '2026-09-18T10:00:00Z',
+  notes: [],
+  editorBlocks: [
+    { id: 'mine', type: 'bulletListItem', content: text('My own line') },
+    { id: 'ai-h', type: 'heading', props: { level: 3 }, content: text('Pricing') },
+    { id: 'ai-1', type: 'bulletListItem', content: text('Free tier held back') },
+  ],
+  aiBlocks: {
+    'ai-h': { entryId: '', text: 'Pricing', topic: 'Pricing' },
+    'ai-1': { entryId: 'e1', text: 'Free tier held back', topic: 'Pricing' },
+  },
+  aiEntries: ['e1'],
+};
+
 let operations!: ReturnType<typeof useCopyOperations>;
 function Probe({
   summary = null,
-  summaryRef = null,
+  showAiNotes = true,
   notesTarget,
   currentNotesDocument,
 }: {
   summary?: MeetingSummary | null;
-  summaryRef?: BlockNoteSummaryViewRef | null;
+  showAiNotes?: boolean;
   notesTarget?: NoteDocumentTarget;
   currentNotesDocument?: LiveNotesDocument | null;
 }) {
@@ -54,11 +72,26 @@ function Probe({
     transcripts: [],
     meetingTitle: 'Planning',
     aiSummary: summary,
-    blockNoteSummaryRef: { current: summaryRef },
+    showAiNotes,
     notesTarget,
     currentNotesDocument,
   });
   return null;
+}
+
+function exported(): string {
+  const save = invoke.mock.calls.find(([command]) => command === 'save_text_export');
+  expect(save).toBeDefined();
+  return (save?.[1] as { contents: string }).contents;
+}
+
+function clipboard() {
+  const writeText = mock(async (_text: string) => {});
+  Object.defineProperty(globalThis, 'navigator', {
+    configurable: true,
+    value: { clipboard: { writeText } },
+  });
+  return writeText;
 }
 
 let renderer: ReactTestRenderer | undefined;
@@ -76,7 +109,7 @@ beforeEach(async () => {
       meetingStartedAtMs: 0,
       updatedAt: '2026-09-18T10:00:00Z',
       notes: [],
-      editorBlocks: [{ id: 'private', type: 'paragraph', content: [{ type: 'text', text: 'Only note', styles: {} }] }],
+      editorBlocks: [{ id: 'private', type: 'paragraph', content: text('Only note') }],
     },
   }));
   invoke.mockImplementation(async (command) => {
@@ -106,11 +139,55 @@ describe('useCopyOperations', () => {
 
     expect(flushNotes).toHaveBeenCalledTimes(1);
     expect(loadNotes).toHaveBeenCalledTimes(1);
-    const save = invoke.mock.calls.find(([command]) => command === 'save_text_export');
-    expect(save).toBeDefined();
-    expect((save?.[1] as { contents: string }).contents).toContain('## Original notes\n\nOnly note');
+    expect(exported()).toContain('## Notes\n\nOnly note');
     expect(success).toHaveBeenCalledTimes(1);
     expect(errorToast).not.toHaveBeenCalled();
+  });
+
+  test('export keeps AI lines when they are shown and leaves them out when hidden', async () => {
+    await act(async () => { renderer!.update(<Probe currentNotesDocument={mixedDocument} />); });
+    await act(async () => { await operations.handleExportMarkdown(); });
+    expect(exported()).toContain('- My own line\n\n### Pricing\n\n- Free tier held back');
+
+    invoke.mockClear();
+    await act(async () => { renderer!.update(<Probe currentNotesDocument={mixedDocument} showAiNotes={false} />); });
+    await act(async () => { await operations.handleExportMarkdown(); });
+    const contents = exported();
+    expect(contents).toContain('- My own line');
+    expect(contents).not.toContain('Pricing');
+    expect(contents).not.toContain('Free tier held back');
+  });
+
+  test('copy notes follows the toggle too', async () => {
+    const writeText = clipboard();
+    await act(async () => { renderer!.update(<Probe currentNotesDocument={mixedDocument} showAiNotes={false} />); });
+    await act(async () => { await operations.handleCopyNotes(); });
+    expect(writeText.mock.calls[0][0]).toBe('# Planning\n\n- My own line\n');
+
+    await act(async () => { renderer!.update(<Probe currentNotesDocument={mixedDocument} />); });
+    await act(async () => { await operations.handleCopyNotes(); });
+    expect(writeText.mock.calls[1][0]).toContain('Free tier held back');
+    expect(errorToast).not.toHaveBeenCalled();
+  });
+
+  test('an old meeting exports its Enhanced notes as AI notes only while they are shown', async () => {
+    const summary: MeetingSummary = { markdown: '## Decisions\n\n- Launch Friday' };
+    await act(async () => { renderer!.update(<Probe summary={summary} />); });
+    await act(async () => { await operations.handleExportMarkdown(); });
+    expect(exported()).toContain('## Notes\n\nOnly note\n\n## AI notes\n\n## Decisions\n\n- Launch Friday');
+
+    invoke.mockClear();
+    await act(async () => { renderer!.update(<Probe summary={summary} showAiNotes={false} />); });
+    await act(async () => { await operations.handleExportMarkdown(); });
+    expect(exported()).not.toContain('Launch Friday');
+  });
+
+  test('a meeting with AI lines never adds its stored summary', async () => {
+    await act(async () => {
+      renderer!.update(<Probe summary={{ markdown: 'Stored summary' }} currentNotesDocument={mixedDocument} />);
+    });
+    await act(async () => { await operations.handleExportMarkdown(); });
+    expect(exported()).not.toContain('Stored summary');
   });
 
   test('does not write or report success after a transcript read failure', async () => {
@@ -162,48 +239,6 @@ describe('useCopyOperations', () => {
     expect(errorToast).toHaveBeenCalledWith('Failed to copy transcript');
   });
 
-  test('uses stored legacy enhanced notes when the mounted legacy ref returns empty', async () => {
-    const writeText = mock(async (_text: string) => {});
-    Object.defineProperty(globalThis, 'navigator', {
-      configurable: true,
-      value: { clipboard: { writeText } },
-    });
-    const legacySummary: MeetingSummary = {
-      decisions: {
-        title: 'Decisions',
-        blocks: [{ id: 'legacy', type: 'bullet', content: 'Launch Friday', color: 'default' }],
-      },
-    };
-    await act(async () => {
-      renderer!.update(<Probe
-        summary={legacySummary}
-        summaryRef={{ isDirty: false, saveSummary: async () => {}, getMarkdown: async () => '' }}
-      />);
-    });
-
-    await act(async () => { await operations.handleCopySummary(); });
-    expect(writeText.mock.calls[0][0]).toContain('## Decisions\n\n- Launch Friday');
-    expect(success).toHaveBeenCalledTimes(1);
-    expect(errorToast).not.toHaveBeenCalled();
-  });
-
-  test('fails export when a mounted structured editor returns empty for known content', async () => {
-    const summary: MeetingSummary = {
-      summary_json: [{ id: 'one', type: 'paragraph', content: [{ type: 'text', text: 'Known content', styles: {} }] }],
-    };
-    await act(async () => {
-      renderer!.update(<Probe
-        summary={summary}
-        summaryRef={{ isDirty: false, saveSummary: async () => {}, getMarkdown: async () => '' }}
-      />);
-    });
-
-    await act(async () => { await operations.handleExportMarkdown(); });
-    expect(invoke.mock.calls.some(([command]) => command === 'save_text_export')).toBe(false);
-    expect(success).not.toHaveBeenCalled();
-    expect(errorToast).toHaveBeenCalledTimes(1);
-  });
-
   test('flushes an optional live target and exports its supplied current document', async () => {
     const liveTarget: NoteDocumentTarget = {
       kind: 'live',
@@ -215,7 +250,7 @@ describe('useCopyOperations', () => {
       meetingStartedAtMs: 0,
       updatedAt: '2026-09-18T10:00:00Z',
       notes: [],
-      editorBlocks: [{ id: 'live', type: 'paragraph', content: [{ type: 'text', text: 'Unsaved live note', styles: {} }] }],
+      editorBlocks: [{ id: 'live', type: 'paragraph', content: text('Unsaved live note') }],
     };
     await act(async () => {
       renderer!.update(<Probe notesTarget={liveTarget} currentNotesDocument={liveDocument} />);
@@ -224,53 +259,6 @@ describe('useCopyOperations', () => {
     await act(async () => { await operations.handleExportMarkdown(); });
     expect(flushNotes).toHaveBeenCalledWith(liveTarget);
     expect(loadNotes).not.toHaveBeenCalled();
-    const save = invoke.mock.calls.find(([command]) => command === 'save_text_export');
-    expect((save?.[1] as { contents: string }).contents).toContain('Unsaved live note');
-  });
-
-  test('exports an intentionally cleared current enhanced document without restoring stale content', async () => {
-    const staleSummary: MeetingSummary = { markdown: 'Stale enhanced content' };
-    const saveSummary = mock(async () => {});
-    await act(async () => {
-      renderer!.update(<Probe
-        summary={staleSummary}
-        summaryRef={{
-          isDirty: true,
-          saveSummary,
-          getMarkdown: async () => { throw new Error('legacy API should not be called'); },
-          getMarkdownResult: async () => ({ ok: true, markdown: '', empty: true }),
-          getCurrentBlocks: () => [],
-        }}
-      />);
-    });
-
-    await act(async () => { await operations.handleExportMarkdown(); });
-    const save = invoke.mock.calls.find(([command]) => command === 'save_text_export');
-    expect(save).toBeDefined();
-    expect((save?.[1] as { contents: string }).contents).not.toContain('Stale enhanced content');
-    expect(saveSummary).toHaveBeenCalledTimes(1);
-    expect(success).toHaveBeenCalledTimes(1);
-  });
-
-  test('aborts export when current enhanced document conversion fails', async () => {
-    const saveSummary = mock(async () => {});
-    await act(async () => {
-      renderer!.update(<Probe
-        summary={{ markdown: 'Stale enhanced content' }}
-        summaryRef={{
-          isDirty: false,
-          saveSummary,
-          getMarkdown: async () => 'stale',
-          getMarkdownResult: async () => ({ ok: false, error: new Error('conversion failed') }),
-          getCurrentBlocks: () => [],
-        }}
-      />);
-    });
-
-    await act(async () => { await operations.handleExportMarkdown(); });
-    expect(invoke.mock.calls.some(([command]) => command === 'save_text_export')).toBe(false);
-    expect(success).not.toHaveBeenCalled();
-    expect(saveSummary).not.toHaveBeenCalled();
-    expect(errorToast).toHaveBeenCalledWith('Failed to export meeting');
+    expect(exported()).toContain('Unsaved live note');
   });
 });

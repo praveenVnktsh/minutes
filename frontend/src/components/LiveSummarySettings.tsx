@@ -42,14 +42,14 @@ export function LiveSummarySettings() {
     <div className="rounded-lg border border-hairline bg-surface-raised p-6 shadow-sm">
       <div className="flex items-center justify-between gap-4">
         <div>
-          <h3 className="mb-2 text-lg font-semibold text-ink">Live summary</h3>
+          <h3 className="mb-2 text-lg font-semibold text-ink">AI notes while recording</h3>
           <p id="live-summary-description" className="text-sm text-ink-muted">
-            While recording, note key points, decisions and action items about once a minute, using
-            the summary model below. They become the meeting&apos;s chapters.
+            About once a minute, write key points, decisions and action items into your
+            notes under their topics.
           </p>
         </div>
         <Switch
-          aria-label="Live summary"
+          aria-label="AI notes while recording"
           aria-describedby="live-summary-description"
           checked={enabled ?? true}
           disabled={enabled === null || saving}
