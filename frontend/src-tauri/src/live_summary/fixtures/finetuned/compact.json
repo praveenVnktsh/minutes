@@ -1,0 +1,494 @@
+[
+ {
+  "text": "",
+  "next_id": 5,
+  "decoded": {
+   "topic_decision": {
+    "same": true
+   },
+   "ops": []
+  }
+ },
+ {
+  "text": ".",
+  "next_id": 5,
+  "decoded": {
+   "topic_decision": {
+    "same": true
+   },
+   "ops": []
+  }
+ },
+ {
+  "text": "  .\n",
+  "next_id": 5,
+  "decoded": {
+   "topic_decision": {
+    "same": true
+   },
+   "ops": []
+  }
+ },
+ {
+  "text": "T=Remote control design",
+  "next_id": 5,
+  "decoded": {
+   "topic_decision": {
+    "same": false,
+    "topic": "Remote control design"
+   },
+   "ops": []
+  }
+ },
+ {
+  "text": "T=Budget\n+p 01:05|Price set at 25 euros per unit",
+  "next_id": 5,
+  "decoded": {
+   "topic_decision": {
+    "same": false,
+    "topic": "Budget"
+   },
+   "ops": [
+    {
+     "op": "add",
+     "id": 5,
+     "start": "01:05",
+     "end": "01:05",
+     "kind": "point",
+     "owner": null,
+     "text": "Price set at 25 euros per unit"
+    }
+   ]
+  }
+ },
+ {
+  "text": "+p 02:53-03:17|~€25 price | mid-range; 25–35-year-olds",
+  "next_id": 5,
+  "decoded": {
+   "topic_decision": {
+    "same": true
+   },
+   "ops": [
+    {
+     "op": "add",
+     "id": 5,
+     "start": "02:53",
+     "end": "03:17",
+     "kind": "point",
+     "owner": null,
+     "text": "~€25 price | mid-range; 25–35-year-olds"
+    }
+   ]
+  }
+ },
+ {
+  "text": "+a 03:30-03:31 Industrial designer|write spec",
+  "next_id": 5,
+  "decoded": {
+   "topic_decision": {
+    "same": true
+   },
+   "ops": [
+    {
+     "op": "add",
+     "id": 5,
+     "start": "03:30",
+     "end": "03:31",
+     "kind": "action",
+     "owner": "Industrial designer",
+     "text": "write spec"
+    }
+   ]
+  }
+ },
+ {
+  "text": "+a 03:30|ask about it",
+  "next_id": 5,
+  "decoded": {
+   "topic_decision": {
+    "same": true
+   },
+   "ops": [
+    {
+     "op": "add",
+     "id": 5,
+     "start": "03:30",
+     "end": "03:30",
+     "kind": "action",
+     "owner": null,
+     "text": "ask about it"
+    }
+   ]
+  }
+ },
+ {
+  "text": "+d 04:00|Battery: rechargeable; dock included\n>7 p 04:10|Dock sold separately",
+  "next_id": 5,
+  "decoded": {
+   "topic_decision": {
+    "same": true
+   },
+   "ops": [
+    {
+     "op": "add",
+     "id": 5,
+     "start": "04:00",
+     "end": "04:00",
+     "kind": "decision",
+     "owner": null,
+     "text": "Battery: rechargeable; dock included"
+    },
+    {
+     "op": "child",
+     "parent": 7,
+     "id": 6,
+     "start": "04:10",
+     "end": "04:10",
+     "kind": "point",
+     "owner": null,
+     "text": "Dock sold separately"
+    }
+   ]
+  }
+ },
+ {
+  "text": ">u2 p 03:01-03:05|y",
+  "next_id": 5,
+  "decoded": {
+   "topic_decision": {
+    "same": true
+   },
+   "ops": [
+    {
+     "op": "child",
+     "parent": "u2",
+     "id": 5,
+     "start": "03:01",
+     "end": "03:05",
+     "kind": "point",
+     "owner": null,
+     "text": "y"
+    }
+   ]
+  }
+ },
+ {
+  "text": ">7 a 03:01 Craig|send the drawings",
+  "next_id": 5,
+  "decoded": {
+   "topic_decision": {
+    "same": true
+   },
+   "ops": [
+    {
+     "op": "child",
+     "parent": 7,
+     "id": 5,
+     "start": "03:01",
+     "end": "03:01",
+     "kind": "action",
+     "owner": "Craig",
+     "text": "send the drawings"
+    }
+   ]
+  }
+ },
+ {
+  "text": "~7|z",
+  "next_id": 5,
+  "decoded": {
+   "topic_decision": {
+    "same": true
+   },
+   "ops": [
+    {
+     "op": "edit",
+     "id": 7,
+     "text": "z"
+    }
+   ]
+  }
+ },
+ {
+  "text": "~7 k=d @04:00 o=Craig|z2",
+  "next_id": 5,
+  "decoded": {
+   "topic_decision": {
+    "same": true
+   },
+   "ops": [
+    {
+     "op": "edit",
+     "id": 7,
+     "text": "z2",
+     "kind": "decision",
+     "end": "04:00",
+     "owner": "Craig"
+    }
+   ]
+  }
+ },
+ {
+  "text": "~u1|edited user note",
+  "next_id": 5,
+  "decoded": {
+   "topic_decision": {
+    "same": true
+   },
+   "ops": [
+    {
+     "op": "edit",
+     "id": "u1",
+     "text": "edited user note"
+    }
+   ]
+  }
+ },
+ {
+  "text": "~7 k=p|back to a point",
+  "next_id": 5,
+  "decoded": {
+   "topic_decision": {
+    "same": true
+   },
+   "ops": [
+    {
+     "op": "edit",
+     "id": 7,
+     "text": "back to a point",
+     "kind": "point"
+    }
+   ]
+  }
+ },
+ {
+  "text": "-3",
+  "next_id": 5,
+  "decoded": {
+   "topic_decision": {
+    "same": true
+   },
+   "ops": [
+    {
+     "op": "drop",
+     "id": 3
+    }
+   ]
+  }
+ },
+ {
+  "text": "-u2",
+  "next_id": 5,
+  "decoded": {
+   "topic_decision": {
+    "same": true
+   },
+   "ops": [
+    {
+     "op": "drop",
+     "id": "u2"
+    }
+   ]
+  }
+ },
+ {
+  "text": "+p 01:00|a\n+p 01:05|b\n>8 p 01:06|c\n~2|d\n-1",
+  "next_id": 5,
+  "decoded": {
+   "topic_decision": {
+    "same": true
+   },
+   "ops": [
+    {
+     "op": "add",
+     "id": 5,
+     "start": "01:00",
+     "end": "01:00",
+     "kind": "point",
+     "owner": null,
+     "text": "a"
+    },
+    {
+     "op": "add",
+     "id": 6,
+     "start": "01:05",
+     "end": "01:05",
+     "kind": "point",
+     "owner": null,
+     "text": "b"
+    },
+    {
+     "op": "child",
+     "parent": 8,
+     "id": 7,
+     "start": "01:06",
+     "end": "01:06",
+     "kind": "point",
+     "owner": null,
+     "text": "c"
+    },
+    {
+     "op": "edit",
+     "id": 2,
+     "text": "d"
+    },
+    {
+     "op": "drop",
+     "id": 1
+    }
+   ]
+  }
+ },
+ {
+  "text": "hello",
+  "next_id": 5,
+  "error": "unparseable line 0: 'hello'"
+ },
+ {
+  "text": "+x 01:00|t",
+  "next_id": 5,
+  "error": "unparseable line 0: '+x 01:00|t'"
+ },
+ {
+  "text": "+p 1:00|t",
+  "next_id": 5,
+  "error": "unparseable line 0: '+p 1:00|t'"
+ },
+ {
+  "text": "~|t",
+  "next_id": 5,
+  "error": "unparseable line 0: '~|t'"
+ },
+ {
+  "text": "+p 01:00 oops",
+  "next_id": 5,
+  "error": "unparseable line 0: '+p 01:00 oops'"
+ },
+ {
+  "text": "+p 01:00 Craig|owner on a point",
+  "next_id": 5,
+  "error": "owner on non-action"
+ },
+ {
+  "text": "+p 01:00|a\nT=late topic",
+  "next_id": 5,
+  "error": "topic line must be first and non-empty: 'T=late topic'"
+ },
+ {
+  "text": "T=",
+  "next_id": 5,
+  "error": "topic line must be first and non-empty: 'T='"
+ },
+ {
+  "text": "T=   ",
+  "next_id": 5,
+  "error": "topic line must be first and non-empty: 'T='"
+ },
+ {
+  "text": "+p 100:00-101:30|long meeting",
+  "next_id": 5,
+  "decoded": {
+   "topic_decision": {
+    "same": true
+   },
+   "ops": [
+    {
+     "op": "add",
+     "id": 5,
+     "start": "100:00",
+     "end": "101:30",
+     "kind": "point",
+     "owner": null,
+     "text": "long meeting"
+    }
+   ]
+  }
+ },
+ {
+  "text": "- 3",
+  "next_id": 5,
+  "error": "unparseable line 0: '- 3'"
+ },
+ {
+  "text": "-3 ",
+  "next_id": 5,
+  "decoded": {
+   "topic_decision": {
+    "same": true
+   },
+   "ops": [
+    {
+     "op": "drop",
+     "id": 3
+    }
+   ]
+  }
+ },
+ {
+  "text": "+p 01:00|",
+  "next_id": 5,
+  "decoded": {
+   "topic_decision": {
+    "same": true
+   },
+   "ops": [
+    {
+     "op": "add",
+     "id": 5,
+     "start": "01:00",
+     "end": "01:00",
+     "kind": "point",
+     "owner": null,
+     "text": ""
+    }
+   ]
+  }
+ },
+ {
+  "text": ". \n+p 01:00|x",
+  "next_id": 5,
+  "error": "unparseable line 0: '. '"
+ },
+ {
+  "text": "T=Topic\n.",
+  "next_id": 5,
+  "error": "unparseable line 1: '.'"
+ },
+ {
+  "text": "+p 01:00|text with | a pipe",
+  "next_id": 5,
+  "decoded": {
+   "topic_decision": {
+    "same": true
+   },
+   "ops": [
+    {
+     "op": "add",
+     "id": 5,
+     "start": "01:00",
+     "end": "01:00",
+     "kind": "point",
+     "owner": null,
+     "text": "text with | a pipe"
+    }
+   ]
+  }
+ },
+ {
+  "text": "~7 o=Product manager|own it",
+  "next_id": 5,
+  "decoded": {
+   "topic_decision": {
+    "same": true
+   },
+   "ops": [
+    {
+     "op": "edit",
+     "id": 7,
+     "text": "own it",
+     "owner": "Product manager"
+    }
+   ]
+  }
+ }
+]

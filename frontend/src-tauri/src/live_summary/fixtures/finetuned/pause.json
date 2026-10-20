@@ -1,0 +1,385 @@
+{
+ "meeting": "ES2002a",
+ "segments": [
+  {
+   "start_ms": 50163,
+   "end_ms": 51198,
+   "speaker": "You",
+   "text": "Okay."
+  },
+  {
+   "start_ms": 53487,
+   "end_ms": 54269,
+   "speaker": "You",
+   "text": "Right."
+  },
+  {
+   "start_ms": 66942,
+   "end_ms": 67755,
+   "speaker": "Others",
+   "text": "Mm-hmm."
+  },
+  {
+   "start_ms": 74710,
+   "end_ms": 75413,
+   "speaker": "Others",
+   "text": "Great."
+  },
+  {
+   "start_ms": 77408,
+   "end_ms": 80955,
+   "speaker": "Others",
+   "text": "Hi, I'm David and I'm supposed to be an industrial designer."
+  },
+  {
+   "start_ms": 80736,
+   "end_ms": 81296,
+   "speaker": "You",
+   "text": "Okay."
+  },
+  {
+   "start_ms": 81575,
+   "end_ms": 84576,
+   "speaker": "Others",
+   "text": "And I'm Andrew and I'm uh our marketing"
+  },
+  {
+   "start_ms": 85509,
+   "end_ms": 88982,
+   "speaker": "Others",
+   "text": "Um I'm Craig and I'm User Interface."
+  },
+  {
+   "start_ms": 86048,
+   "end_ms": 86912,
+   "speaker": "Others",
+   "text": "expert."
+  },
+  {
+   "start_ms": 89280,
+   "end_ms": 102283,
+   "speaker": "You",
+   "text": "Great. Okay. Um so we're designing a new remote control and um Oh I have to record who's here actually. So that's David, Andrew and Craig, isn't it?"
+  },
+  {
+   "start_ms": 104864,
+   "end_ms": 106640,
+   "speaker": "You",
+   "text": "And you all arrived on time."
+  },
+  {
+   "start_ms": 108672,
+   "end_ms": 121345,
+   "speaker": "You",
+   "text": "Um yeah so des uh design a new remote control. Um, as you can see it's supposed to be original, trendy and user friendly. Um so that's kind of our our brief, as it were."
+  },
+  {
+   "start_ms": 121345,
+   "end_ms": 132570,
+   "speaker": "You",
+   "text": "Um and so there are three different stages to the design. Um I'm not really sure what what you guys have already received um in your emails. What did you get?"
+  },
+  {
+   "start_ms": 132380,
+   "end_ms": 142056,
+   "speaker": "Others",
+   "text": "Um, I just got the project announcement about what the project is. Designing a remote control. That's about it, didn't get anything else. Did you get the same thing?"
+  },
+  {
+   "start_ms": 135056,
+   "end_ms": 135472,
+   "speaker": "You",
+   "text": "Mm-hmm."
+  },
+  {
+   "start_ms": 136827,
+   "end_ms": 137648,
+   "speaker": "Others",
+   "text": "Mm-hmm."
+  },
+  {
+   "start_ms": 138631,
+   "end_ms": 140773,
+   "speaker": "Others",
+   "text": "Mm-hmm. Yeah, that's that's it."
+  },
+  {
+   "start_ms": 139896,
+   "end_ms": 156652,
+   "speaker": "You",
+   "text": "Is that what everybody got? Okay. Um. So we're gonna have like individual work and then a meeting about it. And repeat that process three times. Um and at this point we get try out the whiteboard over there."
+  },
+  {
+   "start_ms": 140216,
+   "end_ms": 141067,
+   "speaker": "Others",
+   "text": "Yeah."
+  },
+  {
+   "start_ms": 141776,
+   "end_ms": 142064,
+   "speaker": "Others",
+   "text": "Yeah."
+  },
+  {
+   "start_ms": 156652,
+   "end_ms": 167393,
+   "speaker": "You",
+   "text": "Um. So uh you get to draw your favourite animal and sum up your favourite characteristics of it. So who would like to go first?"
+  },
+  {
+   "start_ms": 166485,
+   "end_ms": 168368,
+   "speaker": "Others",
+   "text": "I will go. That's fine."
+  },
+  {
+   "start_ms": 181360,
+   "end_ms": 182576,
+   "speaker": "Others",
+   "text": "This one here, right?"
+  },
+  {
+   "start_ms": 182994,
+   "end_ms": 184513,
+   "speaker": "You",
+   "text": "Mm-hmm."
+  },
+  {
+   "start_ms": 183728,
+   "end_ms": 188384,
+   "speaker": "Others",
+   "text": "Okay. Very nice. Alright. My favourite animal"
+  },
+  {
+   "start_ms": 203230,
+   "end_ms": 204304,
+   "speaker": "Others",
+   "text": "A beagle."
+  },
+  {
+   "start_ms": 211712,
+   "end_ms": 229568,
+   "speaker": "Others",
+   "text": "Um charac favourite characteristics of it? Is that right? Uh, right, well basically um high priority for any animal for me is that they be willing to take a lot of physical affection from their family."
+  },
+  {
+   "start_ms": 215784,
+   "end_ms": 216968,
+   "speaker": "You",
+   "text": "Yeah. Yeah."
+  },
+  {
+   "start_ms": 229568,
+   "end_ms": 242464,
+   "speaker": "Others",
+   "text": "And, yeah that they have lots of personality and uh be fit and in robust good health. So this is blue. Blue beagle. My family's beagle."
+  },
+  {
+   "start_ms": 254613,
+   "end_ms": 257680,
+   "speaker": "Others",
+   "text": "Well, my favourite animal would be a monkey."
+  },
+  {
+   "start_ms": 267717,
+   "end_ms": 274048,
+   "speaker": "Others",
+   "text": "Then they're small cute and furry, and uh when planet of the apes becomes real, I'm gonna be up there with them."
+  },
+  {
+   "start_ms": 275648,
+   "end_ms": 276240,
+   "speaker": "You",
+   "text": "Right."
+  },
+  {
+   "start_ms": 275672,
+   "end_ms": 276227,
+   "speaker": "Others",
+   "text": "Cool."
+  },
+  {
+   "start_ms": 285936,
+   "end_ms": 293408,
+   "speaker": "You",
+   "text": "You can take as long over this as you like, because we haven't got an awful lot to discuss. Ok oh we do we do. Don't feel like you're in a rush, anyway."
+  },
+  {
+   "start_ms": 293138,
+   "end_ms": 294656,
+   "speaker": "Others",
+   "text": "Okay."
+  },
+  {
+   "start_ms": 297920,
+   "end_ms": 300658,
+   "speaker": "You",
+   "text": "Ach why not We might have to get you up again then."
+  },
+  {
+   "start_ms": 300658,
+   "end_ms": 303875,
+   "speaker": "You",
+   "text": "I don't know what mine is. I'm gonna have to think on the spot now."
+  },
+  {
+   "start_ms": 306976,
+   "end_ms": 307936,
+   "speaker": "Others",
+   "text": "Impressionist."
+  },
+  {
+   "start_ms": 311996,
+   "end_ms": 312950,
+   "speaker": "Others",
+   "text": "Um."
+  },
+  {
+   "start_ms": 312950,
+   "end_ms": 313579,
+   "speaker": "Others",
+   "text": "Yeah."
+  },
+  {
+   "start_ms": 318564,
+   "end_ms": 331677,
+   "speaker": "Others",
+   "text": "Um, well anyway, I don't know, it's just the first animal I can think off the top of my head. Um. Yes. Big reason is 'cause I'm allergic to most animals. Allergic to animal fur, so um fish was a natural choice."
+  },
+  {
+   "start_ms": 327744,
+   "end_ms": 328643,
+   "speaker": "You",
+   "text": "Ah."
+  },
+  {
+   "start_ms": 338036,
+   "end_ms": 341735,
+   "speaker": "Others",
+   "text": "And they're quite harmless and mild and interesting."
+  },
+  {
+   "start_ms": 341808,
+   "end_ms": 342256,
+   "speaker": "Others",
+   "text": "Mm."
+  },
+  {
+   "start_ms": 342400,
+   "end_ms": 346880,
+   "speaker": "You",
+   "text": "Okay. God, I still don't know what I'm gonna write about. Um."
+  },
+  {
+   "start_ms": 349632,
+   "end_ms": 350896,
+   "speaker": "Others",
+   "text": "Superb sketch, by the way."
+  },
+  {
+   "start_ms": 359600,
+   "end_ms": 360000,
+   "speaker": "Others",
+   "text": "Yep."
+  }
+ ],
+ "windows": [
+  {
+   "start_ms": 50163,
+   "end_ms": 80955,
+   "start": "00:50",
+   "end": "01:20",
+   "transcript": "[00:50] You: Okay.\n[00:53] You: Right.\n[01:06] Others: Mm-hmm.\n[01:14] Others: Great.\n[01:17] Others: Hi, I'm David and I'm supposed to be an industrial designer.",
+   "context": ""
+  },
+  {
+   "start_ms": 80736,
+   "end_ms": 102283,
+   "start": "01:20",
+   "end": "01:42",
+   "transcript": "[01:20] You: Okay.\n[01:21] Others: And I'm Andrew and I'm uh our marketing\n[01:25] Others: Um I'm Craig and I'm User Interface.\n[01:26] Others: expert.\n[01:29] You: Great. Okay. Um so we're designing a new remote control and um Oh I have to record who's here actually. So that's David, Andrew and Craig, isn't it?",
+   "context": "[01:06] Others: Mm-hmm.\n[01:14] Others: Great.\n[01:17] Others: Hi, I'm David and I'm supposed to be an industrial designer."
+  },
+  {
+   "start_ms": 104864,
+   "end_ms": 132570,
+   "start": "01:44",
+   "end": "02:12",
+   "transcript": "[01:44] You: And you all arrived on time.\n[01:48] You: Um yeah so des uh design a new remote control. Um, as you can see it's supposed to be original, trendy and user friendly. Um so that's kind of our our brief, as it were.\n[02:01] You: Um and so there are three different stages to the design. Um I'm not really sure what what you guys have already received um in your emails. What did you get?",
+   "context": "[01:21] Others: And I'm Andrew and I'm uh our marketing\n[01:25] Others: Um I'm Craig and I'm User Interface.\n[01:26] Others: expert.\n[01:29] You: Great. Okay. Um so we're designing a new remote control and um Oh I have to record who's here actually. So that's David, Andrew and Craig, isn't it?"
+  },
+  {
+   "start_ms": 132380,
+   "end_ms": 156652,
+   "start": "02:12",
+   "end": "02:36",
+   "transcript": "[02:12] Others: Um, I just got the project announcement about what the project is. Designing a remote control. That's about it, didn't get anything else. Did you get the same thing?\n[02:15] You: Mm-hmm.\n[02:16] Others: Mm-hmm.\n[02:18] Others: Mm-hmm. Yeah, that's that's it.\n[02:19] You: Is that what everybody got? Okay. Um. So we're gonna have like individual work and then a meeting about it. And repeat that process three times. Um and at this point we get try out the whiteboard over there.",
+   "context": "[01:48] You: Um yeah so des uh design a new remote control. Um, as you can see it's supposed to be original, trendy and user friendly. Um so that's kind of our our brief, as it were.\n[02:01] You: Um and so there are three different stages to the design. Um I'm not really sure what what you guys have already received um in your emails. What did you get?"
+  },
+  {
+   "start_ms": 140216,
+   "end_ms": 167393,
+   "start": "02:20",
+   "end": "02:47",
+   "transcript": "[02:20] Others: Yeah.\n[02:21] Others: Yeah.\n[02:36] You: Um. So uh you get to draw your favourite animal and sum up your favourite characteristics of it. So who would like to go first?",
+   "context": "[02:12] Others: Um, I just got the project announcement about what the project is. Designing a remote control. That's about it, didn't get anything else. Did you get the same thing?\n[02:16] Others: Mm-hmm.\n[02:18] Others: Mm-hmm. Yeah, that's that's it.\n[02:19] You: Is that what everybody got? Okay. Um. So we're gonna have like individual work and then a meeting about it. And repeat that process three times. Um and at this point we get try out the whiteboard over there."
+  },
+  {
+   "start_ms": 166485,
+   "end_ms": 188384,
+   "start": "02:46",
+   "end": "03:08",
+   "transcript": "[02:46] Others: I will go. That's fine.\n[03:01] Others: This one here, right?\n[03:02] You: Mm-hmm.\n[03:03] Others: Okay. Very nice. Alright. My favourite animal",
+   "context": "[02:36] You: Um. So uh you get to draw your favourite animal and sum up your favourite characteristics of it. So who would like to go first?"
+  },
+  {
+   "start_ms": 203230,
+   "end_ms": 229568,
+   "start": "03:23",
+   "end": "03:49",
+   "transcript": "[03:23] Others: A beagle.\n[03:31] Others: Um charac favourite characteristics of it? Is that right? Uh, right, well basically um high priority for any animal for me is that they be willing to take a lot of physical affection from their family.",
+   "context": "[03:01] Others: This one here, right?\n[03:02] You: Mm-hmm.\n[03:03] Others: Okay. Very nice. Alright. My favourite animal"
+  },
+  {
+   "start_ms": 215784,
+   "end_ms": 242464,
+   "start": "03:35",
+   "end": "04:02",
+   "transcript": "[03:35] You: Yeah. Yeah.\n[03:49] Others: And, yeah that they have lots of personality and uh be fit and in robust good health. So this is blue. Blue beagle. My family's beagle.",
+   "context": "[03:31] Others: Um charac favourite characteristics of it? Is that right? Uh, right, well basically um high priority for any animal for me is that they be willing to take a lot of physical affection from their family."
+  },
+  {
+   "start_ms": 254613,
+   "end_ms": 276240,
+   "start": "04:14",
+   "end": "04:36",
+   "transcript": "[04:14] Others: Well, my favourite animal would be a monkey.\n[04:27] Others: Then they're small cute and furry, and uh when planet of the apes becomes real, I'm gonna be up there with them.\n[04:35] You: Right.",
+   "context": "[03:49] Others: And, yeah that they have lots of personality and uh be fit and in robust good health. So this is blue. Blue beagle. My family's beagle."
+  },
+  {
+   "start_ms": 275672,
+   "end_ms": 303875,
+   "start": "04:35",
+   "end": "05:03",
+   "transcript": "[04:35] Others: Cool.\n[04:45] You: You can take as long over this as you like, because we haven't got an awful lot to discuss. Ok oh we do we do. Don't feel like you're in a rush, anyway.\n[04:53] Others: Okay.\n[04:57] You: Ach why not We might have to get you up again then.\n[05:00] You: I don't know what mine is. I'm gonna have to think on the spot now.",
+   "context": "[04:14] Others: Well, my favourite animal would be a monkey.\n[04:27] Others: Then they're small cute and furry, and uh when planet of the apes becomes real, I'm gonna be up there with them.\n[04:35] You: Right."
+  },
+  {
+   "start_ms": 306976,
+   "end_ms": 331677,
+   "start": "05:06",
+   "end": "05:31",
+   "transcript": "[05:06] Others: Impressionist.\n[05:11] Others: Um.\n[05:12] Others: Yeah.\n[05:18] Others: Um, well anyway, I don't know, it's just the first animal I can think off the top of my head. Um. Yes. Big reason is 'cause I'm allergic to most animals. Allergic to animal fur, so um fish was a natural choice.",
+   "context": "[04:45] You: You can take as long over this as you like, because we haven't got an awful lot to discuss. Ok oh we do we do. Don't feel like you're in a rush, anyway.\n[04:53] Others: Okay.\n[04:57] You: Ach why not We might have to get you up again then.\n[05:00] You: I don't know what mine is. I'm gonna have to think on the spot now."
+  },
+  {
+   "start_ms": 327744,
+   "end_ms": 350896,
+   "start": "05:27",
+   "end": "05:50",
+   "transcript": "[05:27] You: Ah.\n[05:38] Others: And they're quite harmless and mild and interesting.\n[05:41] Others: Mm.\n[05:42] You: Okay. God, I still don't know what I'm gonna write about. Um.\n[05:49] Others: Superb sketch, by the way.",
+   "context": "[05:11] Others: Um.\n[05:12] Others: Yeah.\n[05:18] Others: Um, well anyway, I don't know, it's just the first animal I can think off the top of my head. Um. Yes. Big reason is 'cause I'm allergic to most animals. Allergic to animal fur, so um fish was a natural choice."
+  }
+ ]
+}

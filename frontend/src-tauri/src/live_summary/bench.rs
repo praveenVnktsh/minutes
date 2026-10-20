@@ -656,6 +656,7 @@ pub async fn run_config(
                                     model: config.label.clone(),
                                     created_at: String::new(),
                                     topic,
+                                    parent: None,
                                 });
                             }
                             entries.sort_by_key(|e| e.start_ms);

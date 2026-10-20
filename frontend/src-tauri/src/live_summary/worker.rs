@@ -16,12 +16,13 @@ use tokio_util::sync::CancellationToken;
 
 use super::enhancer::{EnhancedSnapshot, Sections, UnsavedSection};
 use super::facts::Figures;
+use super::finetuned::{self, EntryChange, Session, WindowText};
 use super::glossary::Glossary;
 use super::llm::{FailureKind, GenerateError, Generated, Generator, REQUEST_TIMEOUT};
 use super::notes::{decide_topic, NoteContext, MIN_TOPIC_MS};
 use super::parse::{parse_notes, parse_topic_decision, ParsedEntry, TopicDecision};
 use super::prompt::{self, PreviousEntry, PromptContext};
-use super::scheduler::{Segment, Window, WindowScheduler, CADENCE};
+use super::scheduler::{Scheduler, Segment, Window, WindowScheduler, CADENCE};
 use crate::database::repositories::enhanced_sections::EnhancedSectionRow;
 use crate::database::repositories::timeline::TimelineEntryRow;
 use crate::summary::live_outline::{
@@ -76,6 +77,11 @@ pub struct TimelineEntry {
     /// existed, so readers must treat it as optional.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub topic: Option<String>,
+    /// A sub-bullet's note: the entry it details, or the user's line (its
+    /// notes document block id). Only the fine-tuned live notes model writes
+    /// sub-bullets; not stored with the entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
 }
 
 impl TimelineEntry {
@@ -168,6 +174,21 @@ pub trait WorkerHost: Send + Sync {
     /// The Enhanced notes as they stand, for the meeting page.
     fn publish_enhanced(&self, snapshot: &EnhancedSnapshot) {
         let _ = snapshot;
+    }
+    /// The user's notes document line by line, the AI's lines marked, for
+    /// the fine-tuned live notes model. `None` when it cannot be read.
+    async fn notes_document(&self) -> Option<Vec<finetuned::DocLine>> {
+        None
+    }
+    /// Store entries the fine-tuned model edited.
+    async fn update_entries(&self, rows: &[TimelineEntryRow]) -> Result<()> {
+        let _ = rows;
+        Ok(())
+    }
+    /// Remove entries whose notes the fine-tuned model or the user dropped.
+    async fn delete_entries(&self, meeting_id: &str, ids: &[String]) -> Result<()> {
+        let _ = (meeting_id, ids);
+        Ok(())
     }
 }
 
@@ -379,6 +400,9 @@ struct InFlight {
     cancel: CancellationToken,
 }
 
+/// How long a fine-tuned window may take (its one request).
+pub const FINETUNED_BUDGET: Duration = Duration::from_secs(30);
+
 /// The run, the section (or why not), and the provider and model.
 type SectionOutcome = (
     TopicRun,
@@ -397,7 +421,7 @@ struct Worker {
     config: WorkerConfig,
     /// On `crate::clock`: meeting time, which a replay runs faster than real.
     started: tokio::time::Instant,
-    scheduler: WindowScheduler,
+    scheduler: Scheduler,
     /// Requests started, for the replay trace.
     requests: u64,
     snapshot: TimelineSnapshot,
@@ -415,6 +439,14 @@ struct Worker {
     section_in_flight: Option<SectionInFlight>,
     /// The recording stopped: no new sections.
     stopping: bool,
+    /// The fine-tuned live notes model's notes, once it is the model in use.
+    finetuned: Option<Session>,
+    /// The request in flight is a fine-tuned window.
+    finetuned_request: bool,
+    /// Stored entries the fine-tuned model changed or dropped since, to
+    /// write once the meeting exists.
+    pending_updates: Vec<TimelineEntry>,
+    pending_deletes: Vec<String>,
 }
 
 impl Worker {
@@ -605,16 +637,18 @@ impl Worker {
     async fn persist_unsaved(&mut self) -> bool {
         self.refresh_meeting_id();
         let Some(meeting_id) = self.snapshot.meeting_id.clone() else {
-            return self.unsaved.is_empty();
+            return self.unsaved.is_empty()
+                && self.pending_updates.is_empty()
+                && self.pending_deletes.is_empty();
         };
         if self.unsaved.is_empty() {
-            return true;
+            return self.persist_edits(&meeting_id).await;
         }
         let rows: Vec<_> = self.unsaved.iter().map(|e| e.row(&meeting_id)).collect();
         match self.host.persist(&rows).await {
             Ok(()) => {
                 self.unsaved.clear();
-                true
+                self.persist_edits(&meeting_id).await
             }
             Err(error) => {
                 if matches!(self.host.meeting_exists(&meeting_id).await, Ok(false)) {
@@ -623,6 +657,8 @@ impl Worker {
                         rows.len()
                     );
                     self.unsaved.clear();
+                    self.pending_updates.clear();
+                    self.pending_deletes.clear();
                     return true;
                 }
                 warn!(
@@ -630,6 +666,156 @@ impl Worker {
                     rows.len()
                 );
                 false
+            }
+        }
+    }
+
+    /// Store the fine-tuned model's edits and drops of stored entries.
+    async fn persist_edits(&mut self, meeting_id: &str) -> bool {
+        if !self.pending_updates.is_empty() {
+            let rows: Vec<_> = self
+                .pending_updates
+                .iter()
+                .map(|e| e.row(meeting_id))
+                .collect();
+            if let Err(error) = self.host.update_entries(&rows).await {
+                warn!(
+                    "Live summary: could not store {} edited entries, will retry: {error:#}",
+                    rows.len()
+                );
+                return false;
+            }
+            self.pending_updates.clear();
+        }
+        if !self.pending_deletes.is_empty() {
+            if let Err(error) = self
+                .host
+                .delete_entries(meeting_id, &self.pending_deletes)
+                .await
+            {
+                warn!(
+                    "Live summary: could not remove {} entries, will retry: {error:#}",
+                    self.pending_deletes.len()
+                );
+                return false;
+            }
+            self.pending_deletes.clear();
+        }
+        true
+    }
+
+    /// Switch to the fine-tuned live notes model's format and windows.
+    fn use_finetuned(&mut self, segments: Vec<Segment>) {
+        info!("Live summary: the fine-tuned live notes model writes the notes");
+        self.scheduler.to_pauses(segments);
+        self.finetuned = Some(Session::default());
+    }
+
+    /// One fine-tuned window: the user's notes so far, then the request.
+    async fn start_finetuned(&mut self, generator: Arc<dyn Generator>, window: Window) {
+        let document = self.host.notes_document().await;
+        let Some(session) = self.finetuned.as_mut() else {
+            return;
+        };
+        let removed = document
+            .map(|lines| session.sync_document(&lines))
+            .unwrap_or_default();
+        let user = session.prompt(&WindowText::of(&window, &self.carryover));
+        self.remove_entries(removed);
+        let cancel = CancellationToken::new();
+        let token = cancel.clone();
+        self.requests += 1;
+        let request = self.requests;
+        crate::replay::trace::emit("timeline-request", || {
+            serde_json::json!({
+                "id": request,
+                "phase": "start",
+                "kind": "finetuned",
+                "start_ms": window.start_ms,
+                "end_ms": window.end_ms,
+                "words": window.words(),
+            })
+        });
+        let budget = self.config.window_budget.min(FINETUNED_BUDGET);
+        let handle = tokio::spawn(async move {
+            let provider = generator.provider().to_string();
+            let model = generator.model().to_string();
+            let (system, user) = finetuned::turns(&user);
+            let call = token.child_token();
+            let result = tokio::select! {
+                result = generator.generate_finetuned(system, &user, &call) => result,
+                _ = crate::clock::sleep(budget) => {
+                    call.cancel();
+                    Err(GenerateError::transient("the window ran out of time"))
+                }
+            };
+            (window, provider, model, result, None)
+        });
+        self.in_flight = Some(InFlight { handle, cancel });
+        self.finetuned_request = true;
+        self.set_status(TimelineStatus::Generating, None);
+    }
+
+    /// The fine-tuned model's answer: applied to its notes, then to the
+    /// entries. An answer cut off or unreadable changes nothing.
+    async fn finish_finetuned(&mut self, window: Window, provider: &str, model: &str, raw: &str) {
+        let Some(session) = self.finetuned.as_mut() else {
+            return;
+        };
+        // `_applied` only feeds debug builds' log (perf_debug).
+        let (changes, _applied) = session.apply_answer(raw, &window, provider, model);
+        perf_debug!(
+            "Live summary: fine-tuned answer, {} ops ({} rejected), {} entry changes",
+            _applied.len(),
+            _applied.iter().filter(|a| !a.rejected.is_empty()).count(),
+            changes.len()
+        );
+        self.carryover = window.segments;
+        self.failures = 0;
+        let changed = !changes.is_empty();
+        self.apply_changes(changes);
+        self.persist_unsaved().await;
+        self.snapshot.status = TimelineStatus::Listening;
+        self.snapshot.error = None;
+        self.host.publish(&self.snapshot);
+        if changed && !self.stopping {
+            self.enhance().await;
+        }
+    }
+
+    fn apply_changes(&mut self, changes: Vec<EntryChange>) {
+        for change in changes {
+            match change {
+                EntryChange::Add(entry) => {
+                    self.snapshot.entries.push(entry.clone());
+                    self.unsaved.push(entry);
+                }
+                EntryChange::Update(entry) => {
+                    if let Some(shown) = self.snapshot.entries.iter_mut().find(|e| e.id == entry.id)
+                    {
+                        *shown = entry.clone();
+                    }
+                    if let Some(unsaved) = self.unsaved.iter_mut().find(|e| e.id == entry.id) {
+                        *unsaved = entry;
+                    } else {
+                        self.pending_updates.retain(|e| e.id != entry.id);
+                        self.pending_updates.push(entry);
+                    }
+                }
+                EntryChange::Remove(id) => self.remove_entries(vec![id]),
+            }
+        }
+        self.snapshot.entries.sort_by_key(|e| e.start_ms);
+    }
+
+    fn remove_entries(&mut self, ids: Vec<String>) {
+        for id in ids {
+            self.snapshot.entries.retain(|e| e.id != id);
+            self.pending_updates.retain(|e| e.id != id);
+            let before = self.unsaved.len();
+            self.unsaved.retain(|e| e.id != id);
+            if self.unsaved.len() == before {
+                self.pending_deletes.push(id);
             }
         }
     }
@@ -672,6 +858,18 @@ impl Worker {
                 return;
             }
         };
+        if generator.live_notes_adapter().is_some() {
+            if self.finetuned.is_none() {
+                // The model became the fine-tuned one mid-recording: this
+                // text goes into pause-aligned windows instead.
+                self.scheduler.complete();
+                self.use_finetuned(window.segments);
+                return;
+            }
+            self.start_finetuned(generator, window).await;
+            return;
+        }
+        self.finetuned_request = false;
         if window.dropped_segments > 0 {
             warn!(
                 "Live summary fell behind: skipped {} older segments to catch up",
@@ -787,6 +985,16 @@ impl Worker {
                 return;
             }
         };
+        let result = match result {
+            // The closed loop reads a cut-off answer too: its complete lines
+            // may parse.
+            Ok(generated) if self.finetuned_request => {
+                self.finish_finetuned(window, &provider, &model, &generated.text)
+                    .await;
+                return;
+            }
+            result => result,
+        };
         let raw =
             match result {
                 Ok(generated) if generated.truncated => {
@@ -867,6 +1075,7 @@ impl Worker {
                         model: model.clone(),
                         created_at: created_at.clone(),
                         topic: entry.topic,
+                        parent: None,
                     })
                     .collect();
                 perf_debug!("Live summary: {} new entries", new.len());
@@ -956,11 +1165,20 @@ impl Worker {
         self.settle_in_flight(deadline).await;
         // A provider that just refused us is not asked again for the tail.
         let refused = self.snapshot.status == TimelineStatus::Unavailable;
-        if self.host.enabled() && !refused && crate::clock::now() < deadline {
-            let now = self.now();
-            if let Some(window) = self.scheduler.flush(now) {
+        if self.host.enabled() && !refused {
+            // Pause-aligned windows may be waiting: each goes out in order
+            // while the grace lasts, until one fails.
+            while crate::clock::now() < deadline {
+                let now = self.now();
+                let Some(window) = self.scheduler.flush(now) else {
+                    break;
+                };
                 self.start_request(window, true).await;
                 self.settle_in_flight(deadline).await;
+                if !self.scheduler.is_pauses() || self.snapshot.status != TimelineStatus::Listening
+                {
+                    break;
+                }
             }
         }
         // A section being written may finish within the grace; the rest, and
@@ -1031,7 +1249,10 @@ pub async fn run(
         host,
         config,
         started: crate::clock::now(),
-        scheduler: WindowScheduler::with_cadence(Duration::ZERO, config.cadence),
+        scheduler: Scheduler::Timed(WindowScheduler::with_cadence(
+            Duration::ZERO,
+            config.cadence,
+        )),
         requests: 0,
         unsaved: Vec::new(),
         carryover: Vec::new(),
@@ -1041,8 +1262,22 @@ pub async fn run(
         sections: Sections::default(),
         section_in_flight: None,
         stopping: false,
+        finetuned: None,
+        finetuned_request: false,
+        pending_updates: Vec::new(),
+        pending_deletes: Vec::new(),
     };
     worker.host.publish(&worker.snapshot);
+    // The fine-tuned live notes model gets its own windows from the start.
+    if enabled
+        && worker
+            .host
+            .generator()
+            .await
+            .is_ok_and(|generator| generator.live_notes_adapter().is_some())
+    {
+        worker.use_finetuned(Vec::new());
+    }
 
     // A deadline rather than a fresh sleep per loop, so frequent segments
     // never starve the tick.
@@ -1109,6 +1344,9 @@ mod tests {
         generator: Mutex<Option<Arc<dyn Generator>>>,
         sections: Mutex<Vec<EnhancedSectionRow>>,
         enhanced: Mutex<Vec<EnhancedSnapshot>>,
+        document: Mutex<Option<Vec<finetuned::DocLine>>>,
+        updated: Mutex<Vec<TimelineEntryRow>>,
+        deleted: Mutex<Vec<String>>,
     }
 
     #[async_trait]
@@ -1158,6 +1396,142 @@ mod tests {
         fn publish_enhanced(&self, snapshot: &EnhancedSnapshot) {
             self.enhanced.lock().unwrap().push(snapshot.clone());
         }
+        async fn notes_document(&self) -> Option<Vec<finetuned::DocLine>> {
+            self.document.lock().unwrap().clone()
+        }
+        async fn update_entries(&self, rows: &[TimelineEntryRow]) -> Result<()> {
+            self.updated.lock().unwrap().extend(rows.iter().cloned());
+            Ok(())
+        }
+        async fn delete_entries(&self, _: &str, ids: &[String]) -> Result<()> {
+            self.deleted.lock().unwrap().extend(ids.iter().cloned());
+            Ok(())
+        }
+    }
+
+    /// The fine-tuned live notes model: answers from a script, in order.
+    struct Finetuned {
+        answers: Mutex<std::collections::VecDeque<&'static str>>,
+        prompts: Mutex<Vec<(String, String)>>,
+    }
+
+    #[async_trait]
+    impl Generator for Finetuned {
+        fn provider(&self) -> &str {
+            "builtin-ai"
+        }
+        fn model(&self) -> &str {
+            crate::summary::summary_engine::models::LIVE_NOTES_MODEL
+        }
+        async fn generate(
+            &self,
+            _: &str,
+            _: &str,
+            _: &CancellationToken,
+        ) -> std::result::Result<Generated, GenerateError> {
+            panic!("the fine-tuned mode only asks for fine-tuned windows")
+        }
+        fn live_notes_adapter(&self) -> Option<&std::path::Path> {
+            Some(std::path::Path::new("/models/minutes-notes-lora.gguf"))
+        }
+        async fn generate_finetuned(
+            &self,
+            system: &str,
+            user: &str,
+            _: &CancellationToken,
+        ) -> std::result::Result<Generated, GenerateError> {
+            self.prompts
+                .lock()
+                .unwrap()
+                .push((system.to_string(), user.to_string()));
+            let text = self.answers.lock().unwrap().pop_front().unwrap_or(".");
+            Ok(Generated {
+                text: text.to_string(),
+                truncated: false,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn the_fine_tuned_model_gets_pause_windows_in_its_format_and_edits_its_notes() {
+        let generator = Arc::new(Finetuned {
+            answers: Mutex::new(
+                [
+                    "T=Launch plan\n+d 00:10|Launch moves to the second week of May",
+                    "~1|Launch moves to May 14\n+p 00:30|Venue booked in Lisbon for the launch event",
+                    "-2",
+                ]
+                .into(),
+            ),
+            prompts: Mutex::new(Vec::new()),
+        });
+        let host = Arc::new(FakeHost::default());
+        *host.generator.lock().unwrap() = Some(generator.clone());
+        *host.meeting_id.lock().unwrap() = Some("meeting-1".into());
+        *host.document.lock().unwrap() = Some(vec![finetuned::DocLine {
+            block_id: "b1".into(),
+            ms: Some(5_000),
+            text: "check catering".into(),
+            ai_entry: None,
+        }]);
+        let (tx, rx) = unbounded_channel();
+        let finish = CancellationToken::new();
+        let task = tokio::spawn(run(host.clone(), "s".into(), rx, finish.clone(), config()));
+        let said = |start: i64, end: i64, speaker| Segment {
+            start_ms: start,
+            end_ms: end,
+            speaker,
+            text: speech(0).text,
+            received_at: Duration::ZERO,
+        };
+        // A change of speaker after 20 s closes a window.
+        tx.send(said(0, 21_000, Speaker::You)).unwrap();
+        tx.send(said(21_500, 43_000, Speaker::Others)).unwrap();
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        tx.send(said(43_500, 66_000, Speaker::You)).unwrap();
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        // The last window goes out at stop.
+        finish.cancel();
+        let snapshot = task.await.unwrap();
+
+        let prompts = generator.prompts.lock().unwrap().clone();
+        assert_eq!(prompts.len(), 3);
+        assert!(prompts
+            .iter()
+            .all(|(system, _)| system == finetuned::SYSTEM_PROMPT));
+        let first = &prompts[0].1;
+        assert!(first.starts_with("WINDOW: 00:00 to 00:21   BUDGET: at most 1 new notes\nTOPIC: none yet\nNEXT ID: 1\nCURRENT NOTES:\n  (none)\nCONTEXT: (none)\nNEW TRANSCRIPT:\n[00:00] You: we went"), "{first}");
+        let second = &prompts[1].1;
+        assert!(
+            second.contains("TOPIC: Launch plan (since 00:00)\nNEXT ID: 2"),
+            "{second}"
+        );
+        assert!(second.contains("CURRENT NOTES:\n1 [ai] Launch moves to the second week of May (decision)\nu1 [you] check catering\n"), "{second}");
+        assert!(
+            second.contains("CONTEXT (already covered, never note it):\n[00:00] You: we went"),
+            "{second}"
+        );
+        assert!(prompts[2]
+            .1
+            .contains("2 [ai] Venue booked in Lisbon for the launch event"));
+
+        // One entry is left, edited; the dropped one is gone everywhere.
+        assert_eq!(snapshot.entries.len(), 1);
+        let entry = &snapshot.entries[0];
+        assert_eq!(
+            (entry.kind.as_str(), entry.text.as_str()),
+            ("decision", "Launch moves to May 14")
+        );
+        assert_eq!(entry.topic.as_deref(), Some("Launch plan"));
+        let persisted = host.persisted.lock().unwrap().clone();
+        assert_eq!(persisted.len(), 2);
+        let updated = host.updated.lock().unwrap().clone();
+        assert_eq!(updated.len(), 1);
+        assert_eq!(
+            (updated[0].id.as_str(), updated[0].text.as_str()),
+            (entry.id.as_str(), "Launch moves to May 14")
+        );
+        assert_eq!(*host.deleted.lock().unwrap(), vec![persisted[1].id.clone()]);
     }
 
     /// Replies with one entry per call, after `delay`; can fail the first calls

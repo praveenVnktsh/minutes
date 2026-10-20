@@ -247,6 +247,220 @@ impl WindowScheduler {
             dropped_segments,
         }
     }
+
+    /// Everything pending, for a scheduler of another kind.
+    fn take_pending(&mut self) -> Vec<Segment> {
+        self.trimmed_segments = 0;
+        std::mem::take(&mut self.pending)
+    }
+}
+
+/// Pause-aligned windows (the fine-tuned live notes model's): a window closes
+/// at the first pause in speech or change of speaker once it is
+/// `PAUSE_MIN_CLOSE_MS` long, and is closed before a segment would stretch it
+/// past `PAUSE_MAX_MS`. A port of the training data's windows
+/// (minutes-distill `simulate_scheduler.py --mode pause`, defaults).
+pub const PAUSE_MIN_CLOSE_MS: i64 = 20_000;
+pub const PAUSE_MAX_MS: i64 = 45_000;
+/// A gap between segments this long is a pause.
+pub const PAUSE_GAP_MS: i64 = 800;
+/// A window has at least this many words; shorter text waits for more.
+pub const PAUSE_MIN_WORDS: usize = 12;
+/// The next segment is not known yet, so a window long enough to close also
+/// closes when nothing new has arrived for this long (the speech paused).
+pub const PAUSE_IDLE: Duration = Duration::from_secs(3);
+/// Notes asked for from a pause-aligned window (the training data's budget).
+pub const ENTRIES_PER_PAUSE_WINDOW: usize = 1;
+
+/// The fine-tuned model's scheduler: closes pause-aligned windows as speech
+/// arrives and hands them out one at a time, in order. Windows closed while
+/// a request is in flight wait their turn rather than merge: the model
+/// learned on one window at a time.
+#[derive(Debug, Default)]
+pub struct PauseScheduler {
+    /// The window being collected, by audio time.
+    current: Vec<Segment>,
+    /// The speaker of the last segment pushed.
+    last_speaker: Option<Speaker>,
+    last_received: Duration,
+    ready: std::collections::VecDeque<Window>,
+    in_flight: bool,
+    not_before: Duration,
+}
+
+impl PauseScheduler {
+    pub fn push(&mut self, segment: Segment) {
+        if segment.text.trim().is_empty() {
+            return;
+        }
+        if !self.current.is_empty() {
+            let last_end = self.last_end();
+            let pause = segment.start_ms - last_end >= PAUSE_GAP_MS
+                || self.last_speaker != Some(segment.speaker);
+            let too_long = segment.end_ms - self.current[0].start_ms > PAUSE_MAX_MS;
+            if (self.closable() && pause) || (self.enough_words() && too_long) {
+                self.close();
+            }
+        }
+        self.last_speaker = Some(segment.speaker);
+        self.last_received = segment.received_at;
+        let at = self
+            .current
+            .partition_point(|s| (s.start_ms, s.end_ms) <= (segment.start_ms, segment.end_ms));
+        self.current.insert(at, segment);
+    }
+
+    fn last_end(&self) -> i64 {
+        self.current.iter().map(|s| s.end_ms).max().unwrap_or(0)
+    }
+
+    fn enough_words(&self) -> bool {
+        self.current.iter().map(Segment::words).sum::<usize>() >= PAUSE_MIN_WORDS
+    }
+
+    /// Long enough and wordy enough to close at the next pause.
+    fn closable(&self) -> bool {
+        !self.current.is_empty()
+            && self.last_end() - self.current[0].start_ms >= PAUSE_MIN_CLOSE_MS
+            && self.enough_words()
+    }
+
+    fn close(&mut self) {
+        let segments = std::mem::take(&mut self.current);
+        let start_ms = segments[0].start_ms;
+        let end_ms = segments
+            .iter()
+            .map(|s| s.end_ms.max(s.start_ms))
+            .max()
+            .unwrap_or(start_ms);
+        self.ready.push_back(Window {
+            segments,
+            start_ms,
+            end_ms,
+            max_entries: ENTRIES_PER_PAUSE_WINDOW,
+            dropped_segments: 0,
+        });
+    }
+
+    /// The next window, in order, once none is in flight.
+    pub fn poll(&mut self, now: Duration, paused: bool) -> Option<Window> {
+        if self.closable() && now.saturating_sub(self.last_received) >= PAUSE_IDLE {
+            self.close();
+        }
+        if self.in_flight || paused || now < self.not_before {
+            return None;
+        }
+        self.take()
+    }
+
+    /// At stop: the window being collected closes if it has the words, and
+    /// the windows still waiting go out one by one.
+    pub fn flush(&mut self, _now: Duration) -> Option<Window> {
+        if self.enough_words() {
+            self.close();
+        }
+        if self.in_flight {
+            return None;
+        }
+        self.take()
+    }
+
+    fn take(&mut self) -> Option<Window> {
+        let window = self.ready.pop_front()?;
+        self.in_flight = true;
+        Some(window)
+    }
+
+    /// The request for the last window finished (successfully or not).
+    pub fn complete(&mut self) {
+        self.in_flight = false;
+    }
+
+    /// A failed window goes back to the front of the line.
+    pub fn requeue(&mut self, window: Window) {
+        self.ready.push_front(window);
+    }
+
+    pub fn clear(&mut self) {
+        self.current.clear();
+        self.ready.clear();
+    }
+}
+
+/// The worker's scheduler: timed windows (`WindowScheduler`) for every model
+/// but the fine-tuned live notes model, which gets pause-aligned ones.
+#[derive(Debug)]
+pub enum Scheduler {
+    Timed(WindowScheduler),
+    Pauses(PauseScheduler),
+}
+
+impl Scheduler {
+    pub fn is_pauses(&self) -> bool {
+        matches!(self, Self::Pauses(_))
+    }
+
+    /// Switch to pause-aligned windows, keeping the text not yet sent.
+    pub fn to_pauses(&mut self, mut segments: Vec<Segment>) {
+        if let Self::Timed(timed) = self {
+            segments.extend(timed.take_pending());
+            let mut pauses = PauseScheduler::default();
+            segments.sort_by_key(|s| (s.start_ms, s.end_ms));
+            for segment in segments {
+                pauses.push(segment);
+            }
+            *self = Self::Pauses(pauses);
+        }
+    }
+
+    pub fn push(&mut self, segment: Segment) {
+        match self {
+            Self::Timed(s) => s.push(segment),
+            Self::Pauses(s) => s.push(segment),
+        }
+    }
+
+    pub fn poll(&mut self, now: Duration, paused: bool) -> Option<Window> {
+        match self {
+            Self::Timed(s) => s.poll(now, paused),
+            Self::Pauses(s) => s.poll(now, paused),
+        }
+    }
+
+    pub fn flush(&mut self, now: Duration) -> Option<Window> {
+        match self {
+            Self::Timed(s) => s.flush(now),
+            Self::Pauses(s) => s.flush(now),
+        }
+    }
+
+    pub fn complete(&mut self) {
+        match self {
+            Self::Timed(s) => s.complete(),
+            Self::Pauses(s) => s.complete(),
+        }
+    }
+
+    pub fn back_off(&mut self, now: Duration, delay: Duration) {
+        match self {
+            Self::Timed(s) => s.back_off(now, delay),
+            Self::Pauses(s) => s.not_before = now + delay,
+        }
+    }
+
+    pub fn requeue(&mut self, window: Window) {
+        match self {
+            Self::Timed(s) => s.requeue(window),
+            Self::Pauses(s) => s.requeue(window),
+        }
+    }
+
+    pub fn clear(&mut self) {
+        match self {
+            Self::Timed(s) => s.clear(),
+            Self::Pauses(s) => s.clear(),
+        }
+    }
 }
 
 #[cfg(test)]

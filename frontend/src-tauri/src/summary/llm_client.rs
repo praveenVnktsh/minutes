@@ -62,6 +62,40 @@ pub(crate) struct GenerationOptions {
     /// so a 150-token cap would cut every answer off: they are asked for low
     /// effort and given reasoning room on top of the cap.
     pub brief: bool,
+    /// GGUF LoRA adapter to run the built-in model with (see
+    /// `summary_engine::adapters`). Other providers ignore it.
+    pub lora_path: Option<PathBuf>,
+    /// First-token gate for the built-in model. Other providers ignore it.
+    pub gate: Option<Gate>,
+    /// Context window for this built-in request, instead of the model's own
+    /// (`ModelDef::context_size`). Ollama's equivalent is `num_ctx`.
+    pub context_size: Option<u32>,
+}
+
+/// A first-token gate on a built-in generation: when the first token of
+/// `token` has at least `threshold` probability right after the prompt, the
+/// answer is `token` without generating anything; otherwise that token is
+/// banned as the first one and generation runs as usual.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Gate {
+    pub token: String,
+    pub threshold: f32,
+}
+
+impl From<&GenerationOptions> for crate::summary::summary_engine::client::BuiltinGenerateOptions {
+    /// The built-in request settings `options` asks for.
+    fn from(options: &GenerationOptions) -> Self {
+        Self {
+            max_tokens: options.capped(options.max_tokens),
+            temperature: options.sampling_temperature,
+            seed: options.seed,
+            timeout: options.timeout,
+            on_abandon: options.on_abandon,
+            lora_path: options.lora_path.clone(),
+            gate: options.gate.clone(),
+            context_size: options.context_size,
+        }
+    }
 }
 
 /// Reasoning room added on top of a brief call's output cap for models that
@@ -810,13 +844,7 @@ pub(crate) async fn generate_completion(
             model_name,
             system_prompt,
             user_prompt,
-            crate::summary::summary_engine::client::BuiltinGenerateOptions {
-                max_tokens: options.capped(options.max_tokens),
-                temperature: options.sampling_temperature,
-                seed: options.seed,
-                timeout: options.timeout,
-                on_abandon: options.on_abandon,
-            },
+            options.into(),
             cancellation_token,
         )
         .await

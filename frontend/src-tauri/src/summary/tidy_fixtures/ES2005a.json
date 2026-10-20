@@ -1,0 +1,62 @@
+{
+ "meeting": "ES2005a",
+ "end_ms": 301010,
+ "transcript": "[00:00] [Others] Alright so twenty five.\n[00:03] [Others] Mm 'kay.\n[00:10] [You] Yeah. Yeah.\n[00:11] [Others] Mm-hmm.\n[00:13] [You] Yeah, I was thinking that as well, I think the the only ones that I've seen that you buy are the sort of one for all type things where they're, yeah. So presumably that might be an idea to\n[00:20] [Others] Yeah the universal ones. Yeah.\n[00:21] [Others] Mm.\n[00:25] [Others] But but to sell it for twenty five you need a lot of neat features. For sure.\n[00:26] [You] put into.\n[00:26] [Others] Slim.\n[00:30] [Others] Yeah.\n[00:30] [You] Yeah, yeah. Uh 'cause I mean, what uh twenty five Euros, that's about\n[00:35] [You] I dunno, fifteen Pounds or so?\n[00:38] [Others] Mm-hmm, it's about that.\n[00:38] [You] And that's quite a lot for a remote control.\n[00:40] [Others] Yeah, yeah.\n[00:40] [Others] Mm. Um well my first thoughts would be most remote controls are grey or black. As you said they come with the TV so it's normally just your basic grey black remote control functions, so maybe we could think about colour?\n[00:51] [You] Uh-huh.\n[00:55] [Others] Make that might make it a bit different from the rest at least. Um, and as you say, we need to have some kind of gimmick, so um I thought maybe something like if you lose it and you can whistle, you know those things?\n[00:56] [You] Mm-hmm.\n[01:05] [You] Okay.\n[01:12] [Others] Because we always lose our remote control.\n[01:14] [Others] Right.\n[01:39] [You] Okay.\n[01:46] [Others] So before deciding or before finalising this project, we must discuss all these things, like and apart from this, it should be having a good look also, because people really li uh like to play with it when they are watching movies or playing with or playing with their CD player, MP three player like any electronic devices.\n[01:52] [Others] Okay.\n[02:00] [Others] Mm.\n[02:05] [Others] Mm-hmm.\n[02:07] [Others] Mm-hmm.\n[02:07] [Others] They really want to have something good, having a good design in their hands, so, yes, all this.\n[02:10] [Others] Yeah.\n[02:10] [You] Okay.\n[02:12] [You] 'Kay.\n[02:28] [Others] Yeah.\n[02:29] [You] Mm-hmm.\n[02:30] [You] Mm-hmm.\n[02:31] [Others] Yeah.\n[02:34] [You] Okay.\n[02:47] [Others] Yeah. No, I wasn't, no sorry I wasn't thinking of the screen of like a PDA but\n[02:50] [You] Okay well right we'll have to um I'll we're k having another meeting in half an hour so um we should all look into a bit\n[02:55] [Others] Okay.\n[03:00] [You] uh, oh actually, no, we'll allocate. So you do the looking around at other remote controls. Um, if you could maybe come up with sort of shapes and suggested shades or whatever, and you could look into um\n[03:06] [Others] Yeah.\n[03:21] [You] basically how how it's made IE like how you make it all in one, how what sort of materials are available to you whatever. And obviously, other instructions will come from the personal coach.\n[03:34] [Others] Right.\n[03:37] [Others] So you want me to look at shapes and everything you said? Yep.\n[03:39] [You] Shapes and colours and um basically how to make it attractive.\n[03:40] [Others] Okay.\n[03:45] [You] Uh.\n[03:45] [Others] Mm-hmm.\n[03:50] [Others] Yep.\n[03:55] [Others] Okay.\n[03:59] [Others] Wait for emails?\n[04:01] [Others] Uh.\n[04:15] [Others] Hmm.\n[04:43] [Others] Oh no,. Sorry it's okay.\n[04:45] [You] Sorry. We'll get um warnings for next meetings as well. Okay. I shall I can't imagine these are worth much.",
+ "notes": [
+  {
+   "topic": "One-size-fits-all buyers",
+   "since": "00:00",
+   "notes": [
+    {
+     "child": false,
+     "by": "ai",
+     "kind": "point",
+     "owner": null,
+     "t": "00:25",
+     "text": "Selling at €25 needs many neat features; about fifteen pounds"
+    },
+    {
+     "child": true,
+     "by": "ai",
+     "kind": "point",
+     "owner": null,
+     "t": "00:40",
+     "text": "Grey or black remotes; colour could set it apart; whistle-to-find gimmick"
+    },
+    {
+     "child": true,
+     "by": "ai",
+     "kind": "point",
+     "owner": null,
+     "t": "01:12",
+     "text": "Remotes always lost; people like to play with them"
+    },
+    {
+     "child": false,
+     "by": "you",
+     "kind": "point",
+     "owner": null,
+     "t": "03:02",
+     "text": "thinking screen pda?"
+    },
+    {
+     "child": false,
+     "by": "ai",
+     "kind": "action",
+     "owner": "You",
+     "t": "03:00",
+     "text": "look into other remote controls, suggest shapes and shades"
+    },
+    {
+     "child": true,
+     "by": "ai",
+     "kind": "point",
+     "owner": null,
+     "t": "03:21",
+     "text": "Look into how remotes are made and available materials"
+    }
+   ]
+  }
+ ],
+ "expected": "MEETING LENGTH: 5 min\nLIVE NOTES:\n## One-size-fits-all buyers (from 00:00)\n- [ai] Selling at €25 needs many neat features; about fifteen pounds\n  - [ai] Grey or black remotes; colour could set it apart; whistle-to-find gimmick\n  - [ai] Remotes always lost; people like to play with them\n- [you] thinking screen pda?\n- [ai] look into other remote controls, suggest shapes and shades (action, You)\n  - [ai] Look into how remotes are made and available materials\nTRANSCRIPT:\n[00:00] Others: Alright so twenty five.\n[00:03] Others: Mm 'kay.\n[00:10] You: Yeah. Yeah.\n[00:11] Others: Mm-hmm.\n[00:13] You: Yeah, I was thinking that as well, I think the the only ones that I've seen that you buy are the sort of one for all type things where they're, yeah. So presumably that might be an idea to\n[00:20] Others: Yeah the universal ones. Yeah.\n[00:21] Others: Mm.\n[00:25] Others: But but to sell it for twenty five you need a lot of neat features. For sure.\n[00:26] You: put into.\n[00:26] Others: Slim.\n[00:30] Others: Yeah.\n[00:30] You: Yeah, yeah. Uh 'cause I mean, what uh twenty five Euros, that's about\n[00:35] You: I dunno, fifteen Pounds or so?\n[00:38] Others: Mm-hmm, it's about that.\n[00:38] You: And that's quite a lot for a remote control.\n[00:40] Others: Yeah, yeah.\n[00:40] Others: Mm. Um well my first thoughts would be most remote controls are grey or black. As you said they come with the TV so it's normally just your basic grey black remote control functions, so maybe we could think about colour?\n[00:51] You: Uh-huh.\n[00:55] Others: Make that might make it a bit different from the rest at least. Um, and as you say, we need to have some kind of gimmick, so um I thought maybe something like if you lose it and you can whistle, you know those things?\n[00:56] You: Mm-hmm.\n[01:05] You: Okay.\n[01:12] Others: Because we always lose our remote control.\n[01:14] Others: Right.\n[01:39] You: Okay.\n[01:46] Others: So before deciding or before finalising this project, we must discuss all these things, like and apart from this, it should be having a good look also, because people really li uh like to play with it when they are watching movies or playing with or playing with their CD player, MP three player like any electronic devices.\n[01:52] Others: Okay.\n[02:00] Others: Mm.\n[02:05] Others: Mm-hmm.\n[02:07] Others: Mm-hmm.\n[02:07] Others: They really want to have something good, having a good design in their hands, so, yes, all this.\n[02:10] Others: Yeah.\n[02:10] You: Okay.\n[02:12] You: 'Kay.\n[02:28] Others: Yeah.\n[02:29] You: Mm-hmm.\n[02:30] You: Mm-hmm.\n[02:31] Others: Yeah.\n[02:34] You: Okay.\n[02:47] Others: Yeah. No, I wasn't, no sorry I wasn't thinking of the screen of like a PDA but\n[02:50] You: Okay well right we'll have to um I'll we're k having another meeting in half an hour so um we should all look into a bit\n[02:55] Others: Okay.\n[03:00] You: uh, oh actually, no, we'll allocate. So you do the looking around at other remote controls. Um, if you could maybe come up with sort of shapes and suggested shades or whatever, and you could look into um\n[03:06] Others: Yeah.\n[03:21] You: basically how how it's made IE like how you make it all in one, how what sort of materials are available to you whatever. And obviously, other instructions will come from the personal coach.\n[03:34] Others: Right.\n[03:37] Others: So you want me to look at shapes and everything you said? Yep.\n[03:39] You: Shapes and colours and um basically how to make it attractive.\n[03:40] Others: Okay.\n[03:45] You: Uh.\n[03:45] Others: Mm-hmm.\n[03:50] Others: Yep.\n[03:55] Others: Okay.\n[03:59] Others: Wait for emails?\n[04:01] Others: Uh.\n[04:15] Others: Hmm.\n[04:43] Others: Oh no,. Sorry it's okay.\n[04:45] You: Sorry. We'll get um warnings for next meetings as well. Okay. I shall I can't imagine these are worth much."
+}

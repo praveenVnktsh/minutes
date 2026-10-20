@@ -54,6 +54,7 @@ fn output(finish_reason: FinishReason) -> GenerationOutput {
         reused_tokens: None,
         first_token_ms: Some(80),
         tokens_per_second: 25.0,
+        gate_prob: None,
     }
 }
 
@@ -71,6 +72,7 @@ fn success_response_reports_finish_reason_and_token_counts() {
         "old callers see no new fields they did not ask for"
     );
     assert!(json.get("reused_tokens").is_none());
+    assert!(json.get("gate_prob").is_none());
 }
 
 #[test]
@@ -370,4 +372,75 @@ fn metal_offloads_every_layer_only_within_the_memory_budget() {
     assert_eq!(layers, gpu::layers_that_fit(2.55, 33, GB8, 32_768));
     // An unreadable file never gets every layer.
     assert_eq!(gpu::metal_gpu_layers(0.0, GB16, 32_768, 33), 0);
+}
+
+#[test]
+fn lora_and_gate_fields_parse_and_old_requests_have_none() {
+    let request: Request = serde_json::from_str(
+        r#"{"type":"generate","prompt":"p","lora_path":"/m/notes-lora.gguf","gate_token":".","gate_threshold":0.9}"#,
+    )
+    .unwrap();
+    let Request::Generate {
+        lora_path,
+        gate_token,
+        gate_threshold,
+        ..
+    } = request
+    else {
+        panic!("expected generate request");
+    };
+    assert_eq!(lora_path.as_deref(), Some("/m/notes-lora.gguf"));
+    assert_eq!(
+        Gate::from_request(gate_token, gate_threshold),
+        Some(Gate {
+            token: ".".to_string(),
+            threshold: 0.9
+        })
+    );
+    let request: Request = serde_json::from_str(r#"{"type":"generate","prompt":"p"}"#).unwrap();
+    let Request::Generate {
+        lora_path,
+        gate_token,
+        gate_threshold,
+        ..
+    } = request
+    else {
+        panic!("expected generate request");
+    };
+    assert_eq!(lora_path, None);
+    assert_eq!(Gate::from_request(gate_token, gate_threshold), None);
+}
+
+#[test]
+fn a_gate_needs_a_token_and_without_a_threshold_only_bans_it() {
+    assert_eq!(Gate::from_request(Some(String::new()), Some(0.9)), None);
+    assert_eq!(Gate::from_request(None, Some(0.9)), None);
+    let ban_only = Gate::from_request(Some(".".into()), None).unwrap();
+    assert!(1.0 < ban_only.threshold);
+    let nan = Gate::from_request(Some(".".into()), Some(f32::NAN)).unwrap();
+    assert!(1.0 < nan.threshold);
+}
+
+#[test]
+fn gate_probability_is_the_softmax_over_the_whole_vocabulary() {
+    let logits = [0.0_f32, 0.0, 0.0, 0.0];
+    assert!((token_probability(&logits, 2) - 0.25).abs() < 1e-6);
+    // Large logits do not overflow.
+    let logits = [1000.0_f32, 1000.0 + 2.0_f32.ln()];
+    assert!((token_probability(&logits, 1) - 2.0 / 3.0).abs() < 1e-5);
+    // Masked (-inf) logits count for nothing; out-of-range is zero.
+    let logits = [f32::NEG_INFINITY, 1.0, 1.0];
+    assert!((token_probability(&logits, 1) - 0.5).abs() < 1e-6);
+    assert_eq!(token_probability(&logits, 0), 0.0);
+    assert_eq!(token_probability(&logits, 9), 0.0);
+}
+
+#[test]
+fn a_gated_response_reports_its_probability() {
+    let mut gated = output(FinishReason::Stop);
+    gated.text = ".".to_string();
+    gated.gate_prob = Some(0.97);
+    let json = serde_json::to_value(Response::from_generation(Ok(gated), Some(3))).unwrap();
+    assert_eq!(json["text"], ".");
+    assert!((json["gate_prob"].as_f64().unwrap() - 0.97).abs() < 1e-6);
 }

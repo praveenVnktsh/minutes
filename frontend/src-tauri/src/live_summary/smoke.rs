@@ -176,6 +176,7 @@ async fn live_summary_smoke() {
                         model: model.clone(),
                         created_at: String::new(),
                         topic: entry.topic,
+                        parent: None,
                     });
                 }
             }

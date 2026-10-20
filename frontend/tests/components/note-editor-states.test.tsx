@@ -74,6 +74,7 @@ const invoke = mock(async (command: string, args?: Record<string, unknown>): Pro
     return document('recovered live notes');
   }
   if (command === 'save_meeting_live_notes' || command === 'save_live_notes') return undefined;
+  if (command === 'api_get_summary') return null;
   throw new Error(`Unexpected command: ${command}`);
 });
 
@@ -82,6 +83,7 @@ const renderedRawDocuments: string[] = [];
 
 const originalCore = { ...await import('@tauri-apps/api/core') };
 mock.module('@tauri-apps/api/core', () => ({ ...originalCore, invoke }));
+mock.module('@tauri-apps/api/event', () => ({ listen: async () => () => {} }));
 mock.module('../../src/contexts/RecordingStateContext', () => ({ useRecordingState: () => recordingState }));
 mock.module('../../src/components/BlockNotesEditor', () => ({
   BlockNotesEditor: ({ document: value }: { document: LiveNotesDocument }) => {

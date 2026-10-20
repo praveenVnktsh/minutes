@@ -1047,7 +1047,7 @@ impl ModelManager {
 }
 
 /// Hex SHA-256 of a file, read in 1 MiB blocks.
-fn sha256_file(path: &Path) -> Result<String> {
+pub(crate) fn sha256_file(path: &Path) -> Result<String> {
     use sha2::{Digest, Sha256};
     use std::io::Read;
     let mut file = std::fs::File::open(path)?;

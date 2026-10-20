@@ -1,6 +1,7 @@
 // Built-in AI summary engine module
 // Provides local LLM inference via llama-helper sidecar
 
+pub mod adapters;
 pub mod client;
 pub mod commands;
 pub mod model_manager;
@@ -8,6 +9,7 @@ pub mod models;
 pub mod sidecar;
 
 // Re-export commonly used types
+pub use adapters::{adapter_path, Adapter};
 pub use client::{
     count_builtin_tokens, force_shutdown_sidecar, format_builtin_prompt, generate_with_builtin,
     is_sidecar_healthy, shutdown_sidecar_gracefully, BuiltinCompletion, BuiltinError,

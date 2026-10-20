@@ -1,6 +1,7 @@
+use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
 use std::num::NonZeroU32;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
@@ -14,7 +15,7 @@ use llama_cpp_2::context::LlamaContext;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
-use llama_cpp_2::model::LlamaModel;
+use llama_cpp_2::model::{LlamaLoraAdapter, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
 use llama_cpp_2::token::data::LlamaTokenData;
 use llama_cpp_2::token::data_array::LlamaTokenDataArray;
@@ -84,6 +85,15 @@ enum Request {
         /// live notes answer: its topic line and the notes the app keeps),
         /// instead of generating lines the app would drop.
         max_lines: Option<u32>,
+        /// GGUF LoRA adapter (llama.cpp format) applied at scale 1.0 to this
+        /// request only. Loaded once per path and kept with the model.
+        lora_path: Option<String>,
+        /// First-token gate: when the first token of `gate_token` has at least
+        /// `gate_threshold` probability right after the prompt, the answer is
+        /// `gate_token` and nothing is generated. Otherwise that token is
+        /// banned as the first one. Without a threshold it is only banned.
+        gate_token: Option<String>,
+        gate_threshold: Option<f32>,
     },
     /// Counts the tokens `text` produces with the loaded model's tokenizer,
     /// using exactly the tokenization `generate` applies to a prompt.
@@ -129,6 +139,9 @@ enum Response {
         first_token_ms: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         tokens_per_second: Option<f64>,
+        /// The gate token's probability, for gated requests.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        gate_prob: Option<f32>,
     },
     Token {
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -158,6 +171,7 @@ impl Response {
             reused_tokens: None,
             first_token_ms: None,
             tokens_per_second: None,
+            gate_prob: None,
         }
     }
 
@@ -177,6 +191,7 @@ impl Response {
                 reused_tokens: output.reused_tokens,
                 first_token_ms: output.first_token_ms,
                 tokens_per_second: Some(output.tokens_per_second),
+                gate_prob: output.gate_prob,
             },
             Err(error) => {
                 let kind = matches!(error, GenerateError::ContextOverflow { .. })
@@ -219,6 +234,7 @@ struct GenerationOutput {
     reused_tokens: Option<u32>,
     first_token_ms: Option<u64>,
     tokens_per_second: f64,
+    gate_prob: Option<f32>,
 }
 
 #[derive(Debug)]
@@ -418,6 +434,48 @@ struct GenerateParams {
     context: ContextOptions,
     grammar: Option<String>,
     max_lines: Option<u32>,
+    /// LoRA adapter for this request; `None` runs the base model.
+    lora: Option<PathBuf>,
+    gate: Option<Gate>,
+}
+
+/// A first-token gate (see `Request::Generate::gate_token`).
+#[derive(Debug, Clone, PartialEq)]
+struct Gate {
+    token: String,
+    threshold: f32,
+}
+
+impl Gate {
+    /// A gate needs a non-empty token; a missing threshold never answers.
+    fn from_request(token: Option<String>, threshold: Option<f32>) -> Option<Self> {
+        let token = token.filter(|t| !t.is_empty())?;
+        Some(Self {
+            token,
+            threshold: threshold.filter(|t| !t.is_nan()).unwrap_or(f32::INFINITY),
+        })
+    }
+}
+
+/// Softmax probability of `logits[index]` over the whole vocabulary.
+fn token_probability(logits: &[f32], index: usize) -> f32 {
+    let Some(&target) = logits.get(index) else {
+        return 0.0;
+    };
+    let max = logits
+        .iter()
+        .copied()
+        .filter(|l| l.is_finite())
+        .fold(f32::NEG_INFINITY, f32::max);
+    if !target.is_finite() || !max.is_finite() {
+        return 0.0;
+    }
+    let sum: f64 = logits
+        .iter()
+        .filter(|l| l.is_finite())
+        .map(|l| f64::from(l - max).exp())
+        .sum();
+    (f64::from(target - max).exp() / sum) as f32
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -472,6 +530,8 @@ trait GenerationSink {
 struct Checkpoint {
     tokens: Vec<LlamaToken>,
     state: Vec<u8>,
+    /// The LoRA adapter the state was computed with: it changes the KV values.
+    adapter: Option<PathBuf>,
 }
 
 struct ModelState {
@@ -484,10 +544,15 @@ struct ModelState {
     max_checkpoints: usize,
     /// Smaller cached context on low-memory machines.
     cache_context_cap: Option<u32>,
+    /// LoRA adapters loaded on `model`, by path. llama.cpp frees them with
+    /// the model, so they are cleared whenever it is.
+    adapters: HashMap<PathBuf, LlamaLoraAdapter>,
     /// Boxed so its address stays put while `cache_ctx` borrows it.
     model: Option<Box<LlamaModel>>,
     model_path: Option<PathBuf>,
     context_size: u32,
+    /// Layers offloaded when the model was loaded.
+    gpu_layers: u32,
     last_activity: Arc<AtomicU64>,
     backend: LlamaBackend,
 }
@@ -514,9 +579,11 @@ impl ModelState {
             checkpoints: Vec::new(),
             max_checkpoints,
             cache_context_cap,
+            adapters: HashMap::new(),
             model: None,
             model_path: None,
             context_size: 2048,
+            gpu_layers: 0,
             last_activity: Arc::new(AtomicU64::new(Self::current_timestamp())),
             backend,
         })
@@ -540,23 +607,36 @@ impl ModelState {
 
     fn load_model_if_needed(&mut self, model_path: PathBuf, context_size: u32) -> Result<()> {
         // Check if model is already loaded
-        if let Some(ref loaded_path) = self.model_path {
-            if loaded_path == &model_path && self.context_size == context_size {
-                eprintln!("✓ Model already loaded");
-                self.update_activity();
-                return Ok(());
-            }
+        let loaded = self.model.is_some() && self.model_path.as_ref() == Some(&model_path);
+        if loaded && self.context_size == context_size {
+            eprintln!("✓ Model already loaded");
+            self.update_activity();
+            return Ok(());
+        }
+
+        // Detect GPU layers
+        let gpu_layers = gpu::get_default_gpu_layers(&model_path, context_size);
+        // The context size only sizes the offload: a request with another
+        // one (live notes and the end-of-meeting tidy pass alternate) keeps
+        // the loaded model when the offload stays the same. Contexts are
+        // created per request (or keyed by n_ctx), so nothing else changes.
+        if loaded && gpu_layers == self.gpu_layers {
+            eprintln!(
+                "✓ Model already loaded; context {} -> {}",
+                self.context_size, context_size
+            );
+            self.context_size = context_size;
+            self.update_activity();
+            return Ok(());
         }
 
         eprintln!("📥 Loading model: {}", model_path.display());
         // Anything tied to the old model goes before it does.
         self.cache_ctx = None;
         self.checkpoints.clear();
+        self.adapters.clear();
         self.model = None;
         self.model_path = None;
-
-        // Detect GPU layers
-        let gpu_layers = gpu::get_default_gpu_layers(&model_path, context_size);
 
         // Configure model parameters with GPU offload
         let model_params = LlamaModelParams::default().with_n_gpu_layers(gpu_layers);
@@ -568,6 +648,7 @@ impl ModelState {
         self.model = Some(Box::new(model));
         self.model_path = Some(model_path);
         self.context_size = context_size;
+        self.gpu_layers = gpu_layers;
         self.update_activity();
 
         eprintln!("✅ Model loaded successfully");
@@ -599,10 +680,31 @@ impl ModelState {
         params: GenerateParams,
         sink: &mut dyn GenerationSink,
     ) -> std::result::Result<GenerationOutput, GenerateError> {
+        if let Some(path) = params.lora.as_deref() {
+            self.load_adapter(path)?;
+        }
         match params.cache {
             Some(cache) => self.generate_cached(params, cache, sink),
             None => self.generate_fresh(params, sink),
         }
+    }
+
+    /// Loads the LoRA adapter at `path` on first use. Loading needs the model
+    /// mutably, so the cached context (which borrows it) is dropped first;
+    /// the prefix checkpoints live in host memory and survive.
+    fn load_adapter(&mut self, path: &Path) -> Result<()> {
+        if self.adapters.contains_key(path) {
+            return Ok(());
+        }
+        anyhow::ensure!(path.is_file(), "LoRA adapter not found: {}", path.display());
+        eprintln!("📥 Loading LoRA adapter: {}", path.display());
+        self.cache_ctx = None;
+        let model = self.model.as_deref_mut().context("Model not loaded")?;
+        let adapter = model
+            .lora_adapter_init(path)
+            .with_context(|| format!("unable to load LoRA adapter at {:?}", path))?;
+        self.adapters.insert(path.to_path_buf(), adapter);
+        Ok(())
     }
 
     /// The original path: a fresh context per request.
@@ -630,6 +732,7 @@ impl ModelState {
         let mut ctx = model
             .new_context(&self.backend, ctx_params)
             .context("unable to create the llama_context")?;
+        set_adapter(&mut ctx, &mut self.adapters, params.lora.as_deref())?;
 
         // Use context size for batch capacity to handle long prompts
         let mut batch = LlamaBatch::new(self.context_size as usize, 1);
@@ -711,11 +814,21 @@ impl ModelState {
             }
         };
         ctx.clear_kv_cache();
+        set_adapter(&mut ctx, &mut self.adapters, params.lora.as_deref())?;
 
+        // Only checkpoints computed with this request's adapter can be
+        // restored; the others stay in the list as empty (unusable) entries
+        // so the plan's index still points into `checkpoints`.
         let saved: Vec<&[LlamaToken]> = self
             .checkpoints
             .iter()
-            .map(|c| c.tokens.as_slice())
+            .map(|c| {
+                if c.adapter == params.lora {
+                    c.tokens.as_slice()
+                } else {
+                    &[]
+                }
+            })
             .collect();
         let mut plan = plan_prefix(&tokens, &boundary_refs, &saved);
         if let Some(index) = plan.restore {
@@ -746,8 +859,10 @@ impl ModelState {
         for end in plan.save_at.clone() {
             decode_range(&mut ctx, &mut batch, &tokens, position, end, false)?;
             position = end;
-            if let Some(checkpoint) = save_checkpoint(&ctx, &tokens[..end]) {
-                self.checkpoints.retain(|c| c.tokens != checkpoint.tokens);
+            if let Some(checkpoint) = save_checkpoint(&ctx, &tokens[..end], params.lora.as_deref())
+            {
+                self.checkpoints
+                    .retain(|c| c.tokens != checkpoint.tokens || c.adapter != checkpoint.adapter);
                 self.checkpoints.insert(0, checkpoint);
                 self.checkpoints.truncate(self.max_checkpoints);
             }
@@ -824,7 +939,36 @@ fn decode_range(
     Ok(())
 }
 
-fn save_checkpoint(ctx: &LlamaContext<'_>, tokens: &[LlamaToken]) -> Option<Checkpoint> {
+/// Puts the adapter at `lora` on `ctx`, or takes any adapter off it. llama.cpp
+/// only rebuilds its graph when the set of adapters changes.
+fn set_adapter(
+    ctx: &mut LlamaContext<'_>,
+    adapters: &mut HashMap<PathBuf, LlamaLoraAdapter>,
+    lora: Option<&Path>,
+) -> Result<()> {
+    match lora {
+        Some(path) => {
+            let adapter = adapters.get_mut(path).context("LoRA adapter not loaded")?;
+            ctx.lora_adapter_set(adapter, 1.0)
+                .context("unable to apply the LoRA adapter")?;
+        }
+        // A context can only carry an adapter once one has been loaded.
+        // `lora_adapter_remove` clears every adapter; its argument is unused.
+        None => {
+            if let Some(adapter) = adapters.values_mut().next() {
+                ctx.lora_adapter_remove(adapter)
+                    .context("unable to remove the LoRA adapter")?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn save_checkpoint(
+    ctx: &LlamaContext<'_>,
+    tokens: &[LlamaToken],
+    adapter: Option<&Path>,
+) -> Option<Checkpoint> {
     let flags = LlamaStateSeqFlags::empty();
     let size = ctx.state_seq_get_size_ext(0, flags);
     if size == 0 {
@@ -846,6 +990,7 @@ fn save_checkpoint(ctx: &LlamaContext<'_>, tokens: &[LlamaToken]) -> Option<Chec
     Some(Checkpoint {
         tokens: tokens.to_vec(),
         state,
+        adapter: adapter.map(Path::to_path_buf),
     })
 }
 
@@ -858,6 +1003,7 @@ fn cancelled_output(prompt_tokens: usize, reused: usize) -> GenerationOutput {
         reused_tokens: Some(reused as u32),
         first_token_ms: None,
         tokens_per_second: 0.0,
+        gate_prob: None,
     }
 }
 
@@ -866,6 +1012,7 @@ struct SampledOutput {
     finish_reason: FinishReason,
     completion_tokens: u32,
     first_token_at: Option<Duration>,
+    gate_prob: Option<f32>,
 }
 
 fn finish_output(
@@ -904,6 +1051,7 @@ fn finish_output(
             .first_token_at
             .map(|at| u64::try_from(at.as_millis()).unwrap_or(u64::MAX)),
         tokens_per_second,
+        gate_prob: output.gate_prob,
     }
 }
 
@@ -978,6 +1126,35 @@ fn run_sampling(
     let mut sampler = pin!(sampler);
     let mut finish_reason = FinishReason::Stop;
 
+    // The first-token gate, on the logits of the last prompt position.
+    let mut banned = None;
+    let mut gate_prob = None;
+    if let Some(gate) = &params.gate {
+        let gate_token = model
+            .vocab()
+            .tokenize(gate.token.as_bytes(), false, true)
+            .first()
+            .copied();
+        if let Some(gate_token) = gate_token {
+            let index = batch.n_tokens() - 1;
+            let logits = ctx.get_logits_ith(index);
+            let p = usize::try_from(gate_token.0).map_or(0.0, |i| token_probability(logits, i));
+            eprintln!("🚪 Gate {:?}: p = {:.4}", gate.token, p);
+            gate_prob = Some(p);
+            if p >= gate.threshold {
+                sink.on_text(&gate.token);
+                return Ok(SampledOutput {
+                    text: gate.token.clone(),
+                    finish_reason: FinishReason::Stop,
+                    completion_tokens: 1,
+                    first_token_at: Some(start_time.elapsed()),
+                    gate_prob,
+                });
+            }
+            banned = Some(gate_token);
+        }
+    }
+
     loop {
         if sink.is_cancelled() {
             eprintln!("✋ Generation cancelled");
@@ -992,12 +1169,14 @@ fn run_sampling(
         }
 
         let index = batch.n_tokens() - 1;
-        let token = match grammar.as_mut() {
+        let token = match (banned.take(), grammar.as_mut()) {
+            // The gate token is banned for the first token only.
+            (Some(banned), grammar) => sample_banned(ctx, index, &mut sampler, grammar, banned)?,
             // `sample` also accepts the token into every sampler of the chain
             // (llama_sampler_sample does): accepting it again counted each
             // token twice in the repeat penalty.
-            None => sampler.as_mut().sample(ctx, index),
-            Some(grammar) => sample_with_grammar(ctx, index, &mut sampler, grammar)?,
+            (None, None) => sampler.as_mut().sample(ctx, index),
+            (None, Some(grammar)) => sample_with_grammar(ctx, index, &mut sampler, grammar)?,
         };
         if first_token_at.is_none() {
             first_token_at = Some(start_time.elapsed());
@@ -1067,7 +1246,36 @@ fn run_sampling(
         finish_reason,
         completion_tokens: u32::try_from(n_cur - n_prompt_tokens).unwrap_or(0),
         first_token_at,
+        gate_prob,
     })
+}
+
+/// Samples one token with `banned`'s logit at -inf (and through `grammar`,
+/// over the whole vocabulary, when there is one). Accepts the token into the
+/// samplers, like `sample` does.
+fn sample_banned(
+    ctx: &LlamaContext<'_>,
+    index: i32,
+    sampler: &mut LlamaSampler,
+    mut grammar: Option<&mut LlamaSampler>,
+    banned: LlamaToken,
+) -> Result<LlamaToken> {
+    let mut candidates = ctx.token_data_array_ith(index);
+    if let Some(data) = candidates.data.iter_mut().find(|d| d.id() == banned) {
+        data.set_logit(f32::NEG_INFINITY);
+    }
+    if let Some(grammar) = grammar.as_deref_mut() {
+        candidates.apply_sampler(grammar);
+    }
+    candidates.apply_sampler(sampler);
+    let token = candidates
+        .selected_token()
+        .context("the sampler selected no token")?;
+    if let Some(grammar) = grammar {
+        grammar.accept(token);
+    }
+    sampler.accept(token);
+    Ok(token)
 }
 
 /// Complete (newline-terminated) lines of `output` with text on them.
@@ -1233,6 +1441,9 @@ fn main() -> Result<()> {
                 n_ubatch,
                 grammar,
                 max_lines,
+                lora_path,
+                gate_token,
+                gate_threshold,
             }) => {
                 let max_tokens = max_tokens.unwrap_or(512);
                 let context_size = context_size.unwrap_or(2048);
@@ -1285,6 +1496,8 @@ fn main() -> Result<()> {
                     },
                     grammar,
                     max_lines: max_lines.filter(|n| *n > 0),
+                    lora: lora_path.filter(|p| !p.is_empty()).map(PathBuf::from),
+                    gate: Gate::from_request(gate_token, gate_threshold),
                 };
                 let mut sink = StdoutSink {
                     id: params.id,

@@ -10,6 +10,7 @@
 
 pub mod enhancer;
 pub mod facts;
+pub mod finetuned;
 pub mod glossary;
 pub mod llm;
 pub mod model_choice;
@@ -223,34 +224,49 @@ impl<R: Runtime> WorkerHost for AppHost<R> {
     }
 
     async fn user_notes(&self) -> Vec<crate::summary::live_outline::UserNote> {
-        let cached = self
-            .folder
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        let folder = match cached {
-            Some(folder) => folder,
-            None => match crate::audio::recording_commands::get_meeting_folder_path().await {
-                Ok(Some(folder)) => {
-                    *self.folder.lock().unwrap_or_else(|e| e.into_inner()) = Some(folder.clone());
-                    folder
-                }
-                _ => return Vec::new(),
-            },
-        };
-        let read = tauri::async_runtime::spawn_blocking(move || {
-            crate::live_notes::read_folder_document(&folder)
-        })
-        .await;
-        match read {
-            Ok(Ok(Some(document))) => document.user_notes(),
-            Ok(Ok(None)) => Vec::new(),
-            Ok(Err(error)) => {
-                log::debug!("Enhanced notes: could not read the user's notes: {error}");
-                Vec::new()
-            }
-            Err(_) => Vec::new(),
+        match self.document().await {
+            Some(document) => document.user_notes(),
+            None => Vec::new(),
         }
+    }
+
+    async fn notes_document(&self) -> Option<Vec<finetuned::DocLine>> {
+        self.document().await.map(|document| doc_lines(&document))
+    }
+
+    async fn update_entries(&self, rows: &[TimelineEntryRow]) -> Result<()> {
+        let pool = self.pool()?;
+        let mut transaction = pool.begin().await?;
+        for row in rows {
+            sqlx::query(
+                "UPDATE meeting_timeline_entries SET end_ms = ?, kind = ?, text = ?, speaker = ?
+                 WHERE id = ? AND meeting_id = ?",
+            )
+            .bind(row.end_ms)
+            .bind(&row.kind)
+            .bind(&row.text)
+            .bind(&row.speaker)
+            .bind(&row.id)
+            .bind(&row.meeting_id)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    async fn delete_entries(&self, meeting_id: &str, ids: &[String]) -> Result<()> {
+        let pool = self.pool()?;
+        let mut transaction = pool.begin().await?;
+        for id in ids {
+            sqlx::query("DELETE FROM meeting_timeline_entries WHERE id = ? AND meeting_id = ?")
+                .bind(id)
+                .bind(meeting_id)
+                .execute(&mut *transaction)
+                .await?;
+        }
+        transaction.commit().await?;
+        Ok(())
     }
 
     async fn persist_section(&self, row: &EnhancedSectionRow) -> Result<()> {
@@ -284,6 +300,65 @@ impl<R: Runtime> WorkerHost for AppHost<R> {
             warn!("Live summary: could not emit an update: {error}");
         }
     }
+}
+
+impl<R: Runtime> AppHost<R> {
+    /// The recording's notes document, if it can be read.
+    async fn document(&self) -> Option<crate::live_notes::LiveNotesDocument> {
+        let cached = self
+            .folder
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let folder = match cached {
+            Some(folder) => folder,
+            None => match crate::audio::recording_commands::get_meeting_folder_path().await {
+                Ok(Some(folder)) => {
+                    *self.folder.lock().unwrap_or_else(|e| e.into_inner()) = Some(folder.clone());
+                    folder
+                }
+                _ => return None,
+            },
+        };
+        let read = tauri::async_runtime::spawn_blocking(move || {
+            crate::live_notes::read_folder_document(&folder)
+        })
+        .await;
+        match read {
+            Ok(Ok(document)) => document,
+            Ok(Err(error)) => {
+                log::debug!("Live summary: could not read the user's notes: {error}");
+                None
+            }
+            Err(_) => None,
+        }
+    }
+}
+
+/// The notes document's lines for the fine-tuned model: the user's, and the
+/// AI's with the entry each shows (`aiBlocks`).
+fn doc_lines(document: &crate::live_notes::LiveNotesDocument) -> Vec<finetuned::DocLine> {
+    let ai_blocks = document
+        .ai_blocks
+        .as_ref()
+        .and_then(serde_json::Value::as_object);
+    document
+        .notes
+        .iter()
+        .map(|note| finetuned::DocLine {
+            block_id: note.id.clone(),
+            ms: Some((note.timestamp_seconds.max(0.0) * 1000.0).round() as i64),
+            text: note.text.clone(),
+            ai_entry: ai_blocks
+                .and_then(|blocks| blocks.get(&note.id))
+                .map(|info| {
+                    info.get("entryId")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_string()
+                }),
+        })
+        .collect()
 }
 
 fn active_session_id() -> Option<String> {

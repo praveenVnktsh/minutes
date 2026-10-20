@@ -1,0 +1,1509 @@
+{
+ "meeting": "ES2002a",
+ "system_prompt": "Live meeting notetaker. Given NEW TRANSCRIPT (CONTEXT is already covered), the topic and CURRENT NOTES, output only the changes, one per line:\nT=<topic> new topic (2-5 words; only if the subject really changed, >=90 s after the last)\n+<k> <start>[-<end>]|<note> new note; k = p point, d decision, a action (owner after the time)\n><id> <k> <start>[-<end>]|<note> sub-bullet: a detail of note <id> itself (max 3, never an action)\n~<id>|<note> rewrite an [ai] note\n-<id> drop an [ai] note\n. nothing to note (normal)\nNew notes take NEXT ID in order and carry no id.\nStyle: 6-14 word headlines, facts and numbers first, firm wording, \";\" merges facts. No narration, process, small talk or unsaid figures. Edit, don't re-add. Lists: parent plus children. Decision = explicit agreement; action = a task taken on. Never edit/drop [you] notes; expand their shorthand with sub-bullets.",
+ "windows": [
+  {
+   "window": {
+    "window_index": 0,
+    "start_ms": 50163,
+    "end_ms": 80955,
+    "start": "00:50",
+    "end": "01:20",
+    "max_entries": 1,
+    "segments": [
+     {
+      "t": "00:50",
+      "speaker": "You",
+      "text": "Okay."
+     },
+     {
+      "t": "00:53",
+      "speaker": "You",
+      "text": "Right."
+     },
+     {
+      "t": "01:06",
+      "speaker": "Others",
+      "text": "Mm-hmm."
+     },
+     {
+      "t": "01:14",
+      "speaker": "Others",
+      "text": "Great."
+     },
+     {
+      "t": "01:17",
+      "speaker": "Others",
+      "text": "Hi, I'm David and I'm supposed to be an industrial designer."
+     }
+    ],
+    "context_segments": [],
+    "transcript": "[00:50] You: Okay.\n[00:53] You: Right.\n[01:06] Others: Mm-hmm.\n[01:14] Others: Great.\n[01:17] Others: Hi, I'm David and I'm supposed to be an industrial designer.",
+    "context": ""
+   },
+   "events": [],
+   "user": "WINDOW: 00:50 to 01:20   BUDGET: at most 1 new notes\nTOPIC: none yet\nNEXT ID: 1\nCURRENT NOTES:\n  (none)\nCONTEXT: (none)\nNEW TRANSCRIPT:\n[00:50] You: Okay.\n[00:53] You: Right.\n[01:06] Others: Mm-hmm.\n[01:14] Others: Great.\n[01:17] Others: Hi, I'm David and I'm supposed to be an industrial designer.",
+   "ops": "T=Team roles",
+   "reasons": [],
+   "notes_after": []
+  },
+  {
+   "window": {
+    "window_index": 1,
+    "start_ms": 80736,
+    "end_ms": 102283,
+    "start": "01:20",
+    "end": "01:42",
+    "max_entries": 1,
+    "segments": [
+     {
+      "t": "01:20",
+      "speaker": "You",
+      "text": "Okay."
+     },
+     {
+      "t": "01:21",
+      "speaker": "Others",
+      "text": "And I'm Andrew and I'm uh our marketing"
+     },
+     {
+      "t": "01:25",
+      "speaker": "Others",
+      "text": "Um I'm Craig and I'm User Interface."
+     },
+     {
+      "t": "01:26",
+      "speaker": "Others",
+      "text": "expert."
+     },
+     {
+      "t": "01:29",
+      "speaker": "You",
+      "text": "Great. Okay. Um so we're designing a new remote control and um Oh I have to record who's here actually. So that's David, Andrew and Craig, isn't it?"
+     }
+    ],
+    "context_segments": [
+     {
+      "t": "01:06",
+      "speaker": "Others",
+      "text": "Mm-hmm."
+     },
+     {
+      "t": "01:14",
+      "speaker": "Others",
+      "text": "Great."
+     },
+     {
+      "t": "01:17",
+      "speaker": "Others",
+      "text": "Hi, I'm David and I'm supposed to be an industrial designer."
+     }
+    ],
+    "transcript": "[01:20] You: Okay.\n[01:21] Others: And I'm Andrew and I'm uh our marketing\n[01:25] Others: Um I'm Craig and I'm User Interface.\n[01:26] Others: expert.\n[01:29] You: Great. Okay. Um so we're designing a new remote control and um Oh I have to record who's here actually. So that's David, Andrew and Craig, isn't it?",
+    "context": "[01:06] Others: Mm-hmm.\n[01:14] Others: Great.\n[01:17] Others: Hi, I'm David and I'm supposed to be an industrial designer."
+   },
+   "events": [],
+   "user": "WINDOW: 01:20 to 01:42   BUDGET: at most 1 new notes\nTOPIC: Team roles (since 00:50)\nNEXT ID: 1\nCURRENT NOTES:\n  (none)\nCONTEXT (already covered, never note it):\n[01:06] Others: Mm-hmm.\n[01:14] Others: Great.\n[01:17] Others: Hi, I'm David and I'm supposed to be an industrial designer.\nNEW TRANSCRIPT:\n[01:20] You: Okay.\n[01:21] Others: And I'm Andrew and I'm uh our marketing\n[01:25] Others: Um I'm Craig and I'm User Interface.\n[01:26] Others: expert.\n[01:29] You: Great. Okay. Um so we're designing a new remote control and um Oh I have to record who's here actually. So that's David, Andrew and Craig, isn't it?",
+   "ops": "+p 01:21-01:29|Team: David industrial designer; Andrew marketing; Craig user interface; new remote control",
+   "reasons": [
+    []
+   ],
+   "notes_after": [
+    "1 [ai] Team: David industrial designer; Andrew marketing; Craig user interface; new remote control"
+   ]
+  },
+  {
+   "window": {
+    "window_index": 2,
+    "start_ms": 104864,
+    "end_ms": 132570,
+    "start": "01:44",
+    "end": "02:12",
+    "max_entries": 1,
+    "segments": [
+     {
+      "t": "01:44",
+      "speaker": "You",
+      "text": "And you all arrived on time."
+     },
+     {
+      "t": "01:48",
+      "speaker": "You",
+      "text": "Um yeah so des uh design a new remote control. Um, as you can see it's supposed to be original, trendy and user friendly. Um so that's kind of our our brief, as it were."
+     },
+     {
+      "t": "02:01",
+      "speaker": "You",
+      "text": "Um and so there are three different stages to the design. Um I'm not really sure what what you guys have already received um in your emails. What did you get?"
+     }
+    ],
+    "context_segments": [
+     {
+      "t": "01:21",
+      "speaker": "Others",
+      "text": "And I'm Andrew and I'm uh our marketing"
+     },
+     {
+      "t": "01:25",
+      "speaker": "Others",
+      "text": "Um I'm Craig and I'm User Interface."
+     },
+     {
+      "t": "01:26",
+      "speaker": "Others",
+      "text": "expert."
+     },
+     {
+      "t": "01:29",
+      "speaker": "You",
+      "text": "Great. Okay. Um so we're designing a new remote control and um Oh I have to record who's here actually. So that's David, Andrew and Craig, isn't it?"
+     }
+    ],
+    "transcript": "[01:44] You: And you all arrived on time.\n[01:48] You: Um yeah so des uh design a new remote control. Um, as you can see it's supposed to be original, trendy and user friendly. Um so that's kind of our our brief, as it were.\n[02:01] You: Um and so there are three different stages to the design. Um I'm not really sure what what you guys have already received um in your emails. What did you get?",
+    "context": "[01:21] Others: And I'm Andrew and I'm uh our marketing\n[01:25] Others: Um I'm Craig and I'm User Interface.\n[01:26] Others: expert.\n[01:29] You: Great. Okay. Um so we're designing a new remote control and um Oh I have to record who's here actually. So that's David, Andrew and Craig, isn't it?"
+   },
+   "events": [],
+   "user": "WINDOW: 01:44 to 02:12   BUDGET: at most 1 new notes\nTOPIC: Team roles (since 00:50)\nNEXT ID: 2\nGLOSSARY: David, Andrew, Craig\nCURRENT NOTES:\n1 [ai] Team: David industrial designer; Andrew marketing; Craig user interface; new remote control\nCONTEXT (already covered, never note it):\n[01:21] Others: And I'm Andrew and I'm uh our marketing\n[01:25] Others: Um I'm Craig and I'm User Interface.\n[01:26] Others: expert.\n[01:29] You: Great. Okay. Um so we're designing a new remote control and um Oh I have to record who's here actually. So that's David, Andrew and Craig, isn't it?\nNEW TRANSCRIPT:\n[01:44] You: And you all arrived on time.\n[01:48] You: Um yeah so des uh design a new remote control. Um, as you can see it's supposed to be original, trendy and user friendly. Um so that's kind of our our brief, as it were.\n[02:01] You: Um and so there are three different stages to the design. Um I'm not really sure what what you guys have already received um in your emails. What did you get?",
+   "ops": "~1|Team: David industrial designer; Andrew marketing; Craig user interface expert\n+p 01:48-02:01|Brief: new remote control, original, trendy and user-friendly; three design stages",
+   "reasons": [
+    [],
+    []
+   ],
+   "notes_after": [
+    "1 [ai] Team: David industrial designer; Andrew marketing; Craig user interface expert",
+    "2 [ai] Brief: new remote control, original, trendy and user-friendly; three design stages"
+   ]
+  },
+  {
+   "window": {
+    "window_index": 3,
+    "start_ms": 132380,
+    "end_ms": 156652,
+    "start": "02:12",
+    "end": "02:36",
+    "max_entries": 1,
+    "segments": [
+     {
+      "t": "02:12",
+      "speaker": "Others",
+      "text": "Um, I just got the project announcement about what the project is. Designing a remote control. That's about it, didn't get anything else. Did you get the same thing?"
+     },
+     {
+      "t": "02:15",
+      "speaker": "You",
+      "text": "Mm-hmm."
+     },
+     {
+      "t": "02:16",
+      "speaker": "Others",
+      "text": "Mm-hmm."
+     },
+     {
+      "t": "02:18",
+      "speaker": "Others",
+      "text": "Mm-hmm. Yeah, that's that's it."
+     },
+     {
+      "t": "02:19",
+      "speaker": "You",
+      "text": "Is that what everybody got? Okay. Um. So we're gonna have like individual work and then a meeting about it. And repeat that process three times. Um and at this point we get try out the whiteboard over there."
+     }
+    ],
+    "context_segments": [
+     {
+      "t": "01:48",
+      "speaker": "You",
+      "text": "Um yeah so des uh design a new remote control. Um, as you can see it's supposed to be original, trendy and user friendly. Um so that's kind of our our brief, as it were."
+     },
+     {
+      "t": "02:01",
+      "speaker": "You",
+      "text": "Um and so there are three different stages to the design. Um I'm not really sure what what you guys have already received um in your emails. What did you get?"
+     }
+    ],
+    "transcript": "[02:12] Others: Um, I just got the project announcement about what the project is. Designing a remote control. That's about it, didn't get anything else. Did you get the same thing?\n[02:15] You: Mm-hmm.\n[02:16] Others: Mm-hmm.\n[02:18] Others: Mm-hmm. Yeah, that's that's it.\n[02:19] You: Is that what everybody got? Okay. Um. So we're gonna have like individual work and then a meeting about it. And repeat that process three times. Um and at this point we get try out the whiteboard over there.",
+    "context": "[01:48] You: Um yeah so des uh design a new remote control. Um, as you can see it's supposed to be original, trendy and user friendly. Um so that's kind of our our brief, as it were.\n[02:01] You: Um and so there are three different stages to the design. Um I'm not really sure what what you guys have already received um in your emails. What did you get?"
+   },
+   "events": [],
+   "user": "WINDOW: 02:12 to 02:36   BUDGET: at most 1 new notes\nTOPIC: Team roles (since 00:50)\nNEXT ID: 3\nGLOSSARY: David, Andrew, Craig\nCURRENT NOTES:\n1 [ai] Team: David industrial designer; Andrew marketing; Craig user interface expert\n2 [ai] Brief: new remote control, original, trendy and user-friendly; three design stages\nCONTEXT (already covered, never note it):\n[01:48] You: Um yeah so des uh design a new remote control. Um, as you can see it's supposed to be original, trendy and user friendly. Um so that's kind of our our brief, as it were.\n[02:01] You: Um and so there are three different stages to the design. Um I'm not really sure what what you guys have already received um in your emails. What did you get?\nNEW TRANSCRIPT:\n[02:12] Others: Um, I just got the project announcement about what the project is. Designing a remote control. That's about it, didn't get anything else. Did you get the same thing?\n[02:15] You: Mm-hmm.\n[02:16] Others: Mm-hmm.\n[02:18] Others: Mm-hmm. Yeah, that's that's it.\n[02:19] You: Is that what everybody got? Okay. Um. So we're gonna have like individual work and then a meeting about it. And repeat that process three times. Um and at this point we get try out the whiteboard over there.",
+   "ops": "~2 @02:19|Brief: new remote control, original, trendy, user-friendly; three stages of individual work, then meeting",
+   "reasons": [
+    []
+   ],
+   "notes_after": [
+    "1 [ai] Team: David industrial designer; Andrew marketing; Craig user interface expert",
+    "2 [ai] Brief: new remote control, original, trendy, user-friendly; three stages of individual work, then meeting"
+   ]
+  },
+  {
+   "window": {
+    "window_index": 4,
+    "start_ms": 140216,
+    "end_ms": 167393,
+    "start": "02:20",
+    "end": "02:47",
+    "max_entries": 1,
+    "segments": [
+     {
+      "t": "02:20",
+      "speaker": "Others",
+      "text": "Yeah."
+     },
+     {
+      "t": "02:21",
+      "speaker": "Others",
+      "text": "Yeah."
+     },
+     {
+      "t": "02:36",
+      "speaker": "You",
+      "text": "Um. So uh you get to draw your favourite animal and sum up your favourite characteristics of it. So who would like to go first?"
+     }
+    ],
+    "context_segments": [
+     {
+      "t": "02:12",
+      "speaker": "Others",
+      "text": "Um, I just got the project announcement about what the project is. Designing a remote control. That's about it, didn't get anything else. Did you get the same thing?"
+     },
+     {
+      "t": "02:16",
+      "speaker": "Others",
+      "text": "Mm-hmm."
+     },
+     {
+      "t": "02:18",
+      "speaker": "Others",
+      "text": "Mm-hmm. Yeah, that's that's it."
+     },
+     {
+      "t": "02:19",
+      "speaker": "You",
+      "text": "Is that what everybody got? Okay. Um. So we're gonna have like individual work and then a meeting about it. And repeat that process three times. Um and at this point we get try out the whiteboard over there."
+     }
+    ],
+    "transcript": "[02:20] Others: Yeah.\n[02:21] Others: Yeah.\n[02:36] You: Um. So uh you get to draw your favourite animal and sum up your favourite characteristics of it. So who would like to go first?",
+    "context": "[02:12] Others: Um, I just got the project announcement about what the project is. Designing a remote control. That's about it, didn't get anything else. Did you get the same thing?\n[02:16] Others: Mm-hmm.\n[02:18] Others: Mm-hmm. Yeah, that's that's it.\n[02:19] You: Is that what everybody got? Okay. Um. So we're gonna have like individual work and then a meeting about it. And repeat that process three times. Um and at this point we get try out the whiteboard over there."
+   },
+   "events": [],
+   "user": "WINDOW: 02:20 to 02:47   BUDGET: at most 1 new notes\nTOPIC: Team roles (since 00:50)\nNEXT ID: 3\nGLOSSARY: David, Andrew, Craig\nCURRENT NOTES:\n1 [ai] Team: David industrial designer; Andrew marketing; Craig user interface expert\n2 [ai] Brief: new remote control, original, trendy, user-friendly; three stages of individual work, then meeting\nCONTEXT (already covered, never note it):\n[02:12] Others: Um, I just got the project announcement about what the project is. Designing a remote control. That's about it, didn't get anything else. Did you get the same thing?\n[02:16] Others: Mm-hmm.\n[02:18] Others: Mm-hmm. Yeah, that's that's it.\n[02:19] You: Is that what everybody got? Okay. Um. So we're gonna have like individual work and then a meeting about it. And repeat that process three times. Um and at this point we get try out the whiteboard over there.\nNEW TRANSCRIPT:\n[02:20] Others: Yeah.\n[02:21] Others: Yeah.\n[02:36] You: Um. So uh you get to draw your favourite animal and sum up your favourite characteristics of it. So who would like to go first?",
+   "ops": ".",
+   "reasons": [],
+   "notes_after": [
+    "1 [ai] Team: David industrial designer; Andrew marketing; Craig user interface expert",
+    "2 [ai] Brief: new remote control, original, trendy, user-friendly; three stages of individual work, then meeting"
+   ]
+  },
+  {
+   "window": {
+    "window_index": 5,
+    "start_ms": 166485,
+    "end_ms": 188384,
+    "start": "02:46",
+    "end": "03:08",
+    "max_entries": 1,
+    "segments": [
+     {
+      "t": "02:46",
+      "speaker": "Others",
+      "text": "I will go. That's fine."
+     },
+     {
+      "t": "03:01",
+      "speaker": "Others",
+      "text": "This one here, right?"
+     },
+     {
+      "t": "03:02",
+      "speaker": "You",
+      "text": "Mm-hmm."
+     },
+     {
+      "t": "03:03",
+      "speaker": "Others",
+      "text": "Okay. Very nice. Alright. My favourite animal"
+     }
+    ],
+    "context_segments": [
+     {
+      "t": "02:36",
+      "speaker": "You",
+      "text": "Um. So uh you get to draw your favourite animal and sum up your favourite characteristics of it. So who would like to go first?"
+     }
+    ],
+    "transcript": "[02:46] Others: I will go. That's fine.\n[03:01] Others: This one here, right?\n[03:02] You: Mm-hmm.\n[03:03] Others: Okay. Very nice. Alright. My favourite animal",
+    "context": "[02:36] You: Um. So uh you get to draw your favourite animal and sum up your favourite characteristics of it. So who would like to go first?"
+   },
+   "events": [],
+   "user": "WINDOW: 02:46 to 03:08   BUDGET: at most 1 new notes\nTOPIC: Team roles (since 00:50)\nNEXT ID: 3\nGLOSSARY: David, Andrew, Craig\nCURRENT NOTES:\n1 [ai] Team: David industrial designer; Andrew marketing; Craig user interface expert\n2 [ai] Brief: new remote control, original, trendy, user-friendly; three stages of individual work, then meeting\nCONTEXT (already covered, never note it):\n[02:36] You: Um. So uh you get to draw your favourite animal and sum up your favourite characteristics of it. So who would like to go first?\nNEW TRANSCRIPT:\n[02:46] Others: I will go. That's fine.\n[03:01] Others: This one here, right?\n[03:02] You: Mm-hmm.\n[03:03] Others: Okay. Very nice. Alright. My favourite animal",
+   "ops": ".",
+   "reasons": [],
+   "notes_after": [
+    "1 [ai] Team: David industrial designer; Andrew marketing; Craig user interface expert",
+    "2 [ai] Brief: new remote control, original, trendy, user-friendly; three stages of individual work, then meeting"
+   ]
+  },
+  {
+   "window": {
+    "window_index": 6,
+    "start_ms": 203230,
+    "end_ms": 229568,
+    "start": "03:23",
+    "end": "03:49",
+    "max_entries": 1,
+    "segments": [
+     {
+      "t": "03:23",
+      "speaker": "Others",
+      "text": "A beagle."
+     },
+     {
+      "t": "03:31",
+      "speaker": "Others",
+      "text": "Um charac favourite characteristics of it? Is that right? Uh, right, well basically um high priority for any animal for me is that they be willing to take a lot of physical affection from their family."
+     }
+    ],
+    "context_segments": [
+     {
+      "t": "03:01",
+      "speaker": "Others",
+      "text": "This one here, right?"
+     },
+     {
+      "t": "03:02",
+      "speaker": "You",
+      "text": "Mm-hmm."
+     },
+     {
+      "t": "03:03",
+      "speaker": "Others",
+      "text": "Okay. Very nice. Alright. My favourite animal"
+     }
+    ],
+    "transcript": "[03:23] Others: A beagle.\n[03:31] Others: Um charac favourite characteristics of it? Is that right? Uh, right, well basically um high priority for any animal for me is that they be willing to take a lot of physical affection from their family.",
+    "context": "[03:01] Others: This one here, right?\n[03:02] You: Mm-hmm.\n[03:03] Others: Okay. Very nice. Alright. My favourite animal"
+   },
+   "events": [],
+   "user": "WINDOW: 03:23 to 03:49   BUDGET: at most 1 new notes\nTOPIC: Team roles (since 00:50)\nNEXT ID: 3\nGLOSSARY: David, Andrew, Craig\nCURRENT NOTES:\n1 [ai] Team: David industrial designer; Andrew marketing; Craig user interface expert\n2 [ai] Brief: new remote control, original, trendy, user-friendly; three stages of individual work, then meeting\nCONTEXT (already covered, never note it):\n[03:01] Others: This one here, right?\n[03:02] You: Mm-hmm.\n[03:03] Others: Okay. Very nice. Alright. My favourite animal\nNEW TRANSCRIPT:\n[03:23] Others: A beagle.\n[03:31] Others: Um charac favourite characteristics of it? Is that right? Uh, right, well basically um high priority for any animal for me is that they be willing to take a lot of physical affection from their family.",
+   "ops": ".",
+   "reasons": [],
+   "notes_after": [
+    "1 [ai] Team: David industrial designer; Andrew marketing; Craig user interface expert",
+    "2 [ai] Brief: new remote control, original, trendy, user-friendly; three stages of individual work, then meeting"
+   ]
+  },
+  {
+   "window": {
+    "window_index": 7,
+    "start_ms": 215784,
+    "end_ms": 242464,
+    "start": "03:35",
+    "end": "04:02",
+    "max_entries": 1,
+    "segments": [
+     {
+      "t": "03:35",
+      "speaker": "You",
+      "text": "Yeah. Yeah."
+     },
+     {
+      "t": "03:49",
+      "speaker": "Others",
+      "text": "And, yeah that they have lots of personality and uh be fit and in robust good health. So this is blue. Blue beagle. My family's beagle."
+     }
+    ],
+    "context_segments": [
+     {
+      "t": "03:31",
+      "speaker": "Others",
+      "text": "Um charac favourite characteristics of it? Is that right? Uh, right, well basically um high priority for any animal for me is that they be willing to take a lot of physical affection from their family."
+     }
+    ],
+    "transcript": "[03:35] You: Yeah. Yeah.\n[03:49] Others: And, yeah that they have lots of personality and uh be fit and in robust good health. So this is blue. Blue beagle. My family's beagle.",
+    "context": "[03:31] Others: Um charac favourite characteristics of it? Is that right? Uh, right, well basically um high priority for any animal for me is that they be willing to take a lot of physical affection from their family."
+   },
+   "events": [
+    {
+     "type": "user_add",
+     "id": "u1",
+     "ms": 228531,
+     "t": "03:48",
+     "text": "physical affection"
+    }
+   ],
+   "user": "WINDOW: 03:35 to 04:02   BUDGET: at most 1 new notes\nTOPIC: Team roles (since 00:50)\nNEXT ID: 3\nGLOSSARY: David, Andrew, Craig\nCURRENT NOTES:\n1 [ai] Team: David industrial designer; Andrew marketing; Craig user interface expert\n2 [ai] Brief: new remote control, original, trendy, user-friendly; three stages of individual work, then meeting\nu1 [you] physical affection\nCONTEXT (already covered, never note it):\n[03:31] Others: Um charac favourite characteristics of it? Is that right? Uh, right, well basically um high priority for any animal for me is that they be willing to take a lot of physical affection from their family.\nNEW TRANSCRIPT:\n[03:35] You: Yeah. Yeah.\n[03:49] Others: And, yeah that they have lots of personality and uh be fit and in robust good health. So this is blue. Blue beagle. My family's beagle.",
+   "ops": ">u1 p 03:49|David's beagle: welcomes affection, lots of personality, fit and robust health",
+   "reasons": [
+    []
+   ],
+   "notes_after": [
+    "1 [ai] Team: David industrial designer; Andrew marketing; Craig user interface expert",
+    "2 [ai] Brief: new remote control, original, trendy, user-friendly; three stages of individual work, then meeting",
+    "u1 [you] physical affection",
+    "  3 [ai] David's beagle: welcomes affection, lots of personality, fit and robust health"
+   ]
+  },
+  {
+   "window": {
+    "window_index": 8,
+    "start_ms": 254613,
+    "end_ms": 276240,
+    "start": "04:14",
+    "end": "04:36",
+    "max_entries": 1,
+    "segments": [
+     {
+      "t": "04:14",
+      "speaker": "Others",
+      "text": "Well, my favourite animal would be a monkey."
+     },
+     {
+      "t": "04:27",
+      "speaker": "Others",
+      "text": "Then they're small cute and furry, and uh when planet of the apes becomes real, I'm gonna be up there with them."
+     },
+     {
+      "t": "04:35",
+      "speaker": "You",
+      "text": "Right."
+     }
+    ],
+    "context_segments": [
+     {
+      "t": "03:49",
+      "speaker": "Others",
+      "text": "And, yeah that they have lots of personality and uh be fit and in robust good health. So this is blue. Blue beagle. My family's beagle."
+     }
+    ],
+    "transcript": "[04:14] Others: Well, my favourite animal would be a monkey.\n[04:27] Others: Then they're small cute and furry, and uh when planet of the apes becomes real, I'm gonna be up there with them.\n[04:35] You: Right.",
+    "context": "[03:49] Others: And, yeah that they have lots of personality and uh be fit and in robust good health. So this is blue. Blue beagle. My family's beagle."
+   },
+   "events": [],
+   "user": "WINDOW: 04:14 to 04:36   BUDGET: at most 1 new notes\nTOPIC: Team roles (since 00:50)\nNEXT ID: 4\nGLOSSARY: David, Andrew, Craig\nCURRENT NOTES:\n1 [ai] Team: David industrial designer; Andrew marketing; Craig user interface expert\n2 [ai] Brief: new remote control, original, trendy, user-friendly; three stages of individual work, then meeting\nu1 [you] physical affection\n  3 [ai] David's beagle: welcomes affection, lots of personality, fit and robust health\nCONTEXT (already covered, never note it):\n[03:49] Others: And, yeah that they have lots of personality and uh be fit and in robust good health. So this is blue. Blue beagle. My family's beagle.\nNEW TRANSCRIPT:\n[04:14] Others: Well, my favourite animal would be a monkey.\n[04:27] Others: Then they're small cute and furry, and uh when planet of the apes becomes real, I'm gonna be up there with them.\n[04:35] You: Right.",
+   "ops": ".",
+   "reasons": [],
+   "notes_after": [
+    "1 [ai] Team: David industrial designer; Andrew marketing; Craig user interface expert",
+    "2 [ai] Brief: new remote control, original, trendy, user-friendly; three stages of individual work, then meeting",
+    "u1 [you] physical affection",
+    "  3 [ai] David's beagle: welcomes affection, lots of personality, fit and robust health"
+   ]
+  },
+  {
+   "window": {
+    "window_index": 9,
+    "start_ms": 275672,
+    "end_ms": 303875,
+    "start": "04:35",
+    "end": "05:03",
+    "max_entries": 1,
+    "segments": [
+     {
+      "t": "04:35",
+      "speaker": "Others",
+      "text": "Cool."
+     },
+     {
+      "t": "04:45",
+      "speaker": "You",
+      "text": "You can take as long over this as you like, because we haven't got an awful lot to discuss. Ok oh we do we do. Don't feel like you're in a rush, anyway."
+     },
+     {
+      "t": "04:53",
+      "speaker": "Others",
+      "text": "Okay."
+     },
+     {
+      "t": "04:57",
+      "speaker": "You",
+      "text": "Ach why not We might have to get you up again then."
+     },
+     {
+      "t": "05:00",
+      "speaker": "You",
+      "text": "I don't know what mine is. I'm gonna have to think on the spot now."
+     }
+    ],
+    "context_segments": [
+     {
+      "t": "04:14",
+      "speaker": "Others",
+      "text": "Well, my favourite animal would be a monkey."
+     },
+     {
+      "t": "04:27",
+      "speaker": "Others",
+      "text": "Then they're small cute and furry, and uh when planet of the apes becomes real, I'm gonna be up there with them."
+     },
+     {
+      "t": "04:35",
+      "speaker": "You",
+      "text": "Right."
+     }
+    ],
+    "transcript": "[04:35] Others: Cool.\n[04:45] You: You can take as long over this as you like, because we haven't got an awful lot to discuss. Ok oh we do we do. Don't feel like you're in a rush, anyway.\n[04:53] Others: Okay.\n[04:57] You: Ach why not We might have to get you up again then.\n[05:00] You: I don't know what mine is. I'm gonna have to think on the spot now.",
+    "context": "[04:14] Others: Well, my favourite animal would be a monkey.\n[04:27] Others: Then they're small cute and furry, and uh when planet of the apes becomes real, I'm gonna be up there with them.\n[04:35] You: Right."
+   },
+   "events": [],
+   "user": "WINDOW: 04:35 to 05:03   BUDGET: at most 1 new notes\nTOPIC: Team roles (since 00:50)\nNEXT ID: 4\nGLOSSARY: David, Andrew, Craig\nCURRENT NOTES:\n1 [ai] Team: David industrial designer; Andrew marketing; Craig user interface expert\n2 [ai] Brief: new remote control, original, trendy, user-friendly; three stages of individual work, then meeting\nu1 [you] physical affection\n  3 [ai] David's beagle: welcomes affection, lots of personality, fit and robust health\nCONTEXT (already covered, never note it):\n[04:14] Others: Well, my favourite animal would be a monkey.\n[04:27] Others: Then they're small cute and furry, and uh when planet of the apes becomes real, I'm gonna be up there with them.\n[04:35] You: Right.\nNEW TRANSCRIPT:\n[04:35] Others: Cool.\n[04:45] You: You can take as long over this as you like, because we haven't got an awful lot to discuss. Ok oh we do we do. Don't feel like you're in a rush, anyway.\n[04:53] Others: Okay.\n[04:57] You: Ach why not We might have to get you up again then.\n[05:00] You: I don't know what mine is. I'm gonna have to think on the spot now.",
+   "ops": ".",
+   "reasons": [],
+   "notes_after": [
+    "1 [ai] Team: David industrial designer; Andrew marketing; Craig user interface expert",
+    "2 [ai] Brief: new remote control, original, trendy, user-friendly; three stages of individual work, then meeting",
+    "u1 [you] physical affection",
+    "  3 [ai] David's beagle: welcomes affection, lots of personality, fit and robust health"
+   ]
+  },
+  {
+   "window": {
+    "window_index": 10,
+    "start_ms": 306976,
+    "end_ms": 331677,
+    "start": "05:06",
+    "end": "05:31",
+    "max_entries": 1,
+    "segments": [
+     {
+      "t": "05:06",
+      "speaker": "Others",
+      "text": "Impressionist."
+     },
+     {
+      "t": "05:11",
+      "speaker": "Others",
+      "text": "Um."
+     },
+     {
+      "t": "05:12",
+      "speaker": "Others",
+      "text": "Yeah."
+     },
+     {
+      "t": "05:18",
+      "speaker": "Others",
+      "text": "Um, well anyway, I don't know, it's just the first animal I can think off the top of my head. Um. Yes. Big reason is 'cause I'm allergic to most animals. Allergic to animal fur, so um fish was a natural choice."
+     }
+    ],
+    "context_segments": [
+     {
+      "t": "04:45",
+      "speaker": "You",
+      "text": "You can take as long over this as you like, because we haven't got an awful lot to discuss. Ok oh we do we do. Don't feel like you're in a rush, anyway."
+     },
+     {
+      "t": "04:53",
+      "speaker": "Others",
+      "text": "Okay."
+     },
+     {
+      "t": "04:57",
+      "speaker": "You",
+      "text": "Ach why not We might have to get you up again then."
+     },
+     {
+      "t": "05:00",
+      "speaker": "You",
+      "text": "I don't know what mine is. I'm gonna have to think on the spot now."
+     }
+    ],
+    "transcript": "[05:06] Others: Impressionist.\n[05:11] Others: Um.\n[05:12] Others: Yeah.\n[05:18] Others: Um, well anyway, I don't know, it's just the first animal I can think off the top of my head. Um. Yes. Big reason is 'cause I'm allergic to most animals. Allergic to animal fur, so um fish was a natural choice.",
+    "context": "[04:45] You: You can take as long over this as you like, because we haven't got an awful lot to discuss. Ok oh we do we do. Don't feel like you're in a rush, anyway.\n[04:53] Others: Okay.\n[04:57] You: Ach why not We might have to get you up again then.\n[05:00] You: I don't know what mine is. I'm gonna have to think on the spot now."
+   },
+   "events": [],
+   "user": "WINDOW: 05:06 to 05:31   BUDGET: at most 1 new notes\nTOPIC: Team roles (since 00:50)\nNEXT ID: 4\nGLOSSARY: David, Andrew, Craig\nCURRENT NOTES:\n1 [ai] Team: David industrial designer; Andrew marketing; Craig user interface expert\n2 [ai] Brief: new remote control, original, trendy, user-friendly; three stages of individual work, then meeting\nu1 [you] physical affection\n  3 [ai] David's beagle: welcomes affection, lots of personality, fit and robust health\nCONTEXT (already covered, never note it):\n[04:45] You: You can take as long over this as you like, because we haven't got an awful lot to discuss. Ok oh we do we do. Don't feel like you're in a rush, anyway.\n[04:53] Others: Okay.\n[04:57] You: Ach why not We might have to get you up again then.\n[05:00] You: I don't know what mine is. I'm gonna have to think on the spot now.\nNEW TRANSCRIPT:\n[05:06] Others: Impressionist.\n[05:11] Others: Um.\n[05:12] Others: Yeah.\n[05:18] Others: Um, well anyway, I don't know, it's just the first animal I can think off the top of my head. Um. Yes. Big reason is 'cause I'm allergic to most animals. Allergic to animal fur, so um fish was a natural choice.",
+   "ops": ".",
+   "reasons": [],
+   "notes_after": [
+    "1 [ai] Team: David industrial designer; Andrew marketing; Craig user interface expert",
+    "2 [ai] Brief: new remote control, original, trendy, user-friendly; three stages of individual work, then meeting",
+    "u1 [you] physical affection",
+    "  3 [ai] David's beagle: welcomes affection, lots of personality, fit and robust health"
+   ]
+  },
+  {
+   "window": {
+    "window_index": 11,
+    "start_ms": 327744,
+    "end_ms": 350896,
+    "start": "05:27",
+    "end": "05:50",
+    "max_entries": 1,
+    "segments": [
+     {
+      "t": "05:27",
+      "speaker": "You",
+      "text": "Ah."
+     },
+     {
+      "t": "05:38",
+      "speaker": "Others",
+      "text": "And they're quite harmless and mild and interesting."
+     },
+     {
+      "t": "05:41",
+      "speaker": "Others",
+      "text": "Mm."
+     },
+     {
+      "t": "05:42",
+      "speaker": "You",
+      "text": "Okay. God, I still don't know what I'm gonna write about. Um."
+     },
+     {
+      "t": "05:49",
+      "speaker": "Others",
+      "text": "Superb sketch, by the way."
+     }
+    ],
+    "context_segments": [
+     {
+      "t": "05:11",
+      "speaker": "Others",
+      "text": "Um."
+     },
+     {
+      "t": "05:12",
+      "speaker": "Others",
+      "text": "Yeah."
+     },
+     {
+      "t": "05:18",
+      "speaker": "Others",
+      "text": "Um, well anyway, I don't know, it's just the first animal I can think off the top of my head. Um. Yes. Big reason is 'cause I'm allergic to most animals. Allergic to animal fur, so um fish was a natural choice."
+     }
+    ],
+    "transcript": "[05:27] You: Ah.\n[05:38] Others: And they're quite harmless and mild and interesting.\n[05:41] Others: Mm.\n[05:42] You: Okay. God, I still don't know what I'm gonna write about. Um.\n[05:49] Others: Superb sketch, by the way.",
+    "context": "[05:11] Others: Um.\n[05:12] Others: Yeah.\n[05:18] Others: Um, well anyway, I don't know, it's just the first animal I can think off the top of my head. Um. Yes. Big reason is 'cause I'm allergic to most animals. Allergic to animal fur, so um fish was a natural choice."
+   },
+   "events": [],
+   "user": "WINDOW: 05:27 to 05:50   BUDGET: at most 1 new notes\nTOPIC: Team roles (since 00:50)\nNEXT ID: 4\nGLOSSARY: David, Andrew, Craig\nCURRENT NOTES:\n1 [ai] Team: David industrial designer; Andrew marketing; Craig user interface expert\n2 [ai] Brief: new remote control, original, trendy, user-friendly; three stages of individual work, then meeting\nu1 [you] physical affection\n  3 [ai] David's beagle: welcomes affection, lots of personality, fit and robust health\nCONTEXT (already covered, never note it):\n[05:11] Others: Um.\n[05:12] Others: Yeah.\n[05:18] Others: Um, well anyway, I don't know, it's just the first animal I can think off the top of my head. Um. Yes. Big reason is 'cause I'm allergic to most animals. Allergic to animal fur, so um fish was a natural choice.\nNEW TRANSCRIPT:\n[05:27] You: Ah.\n[05:38] Others: And they're quite harmless and mild and interesting.\n[05:41] Others: Mm.\n[05:42] You: Okay. God, I still don't know what I'm gonna write about. Um.\n[05:49] Others: Superb sketch, by the way.",
+   "ops": ".",
+   "reasons": [],
+   "notes_after": [
+    "1 [ai] Team: David industrial designer; Andrew marketing; Craig user interface expert",
+    "2 [ai] Brief: new remote control, original, trendy, user-friendly; three stages of individual work, then meeting",
+    "u1 [you] physical affection",
+    "  3 [ai] David's beagle: welcomes affection, lots of personality, fit and robust health"
+   ]
+  },
+  {
+   "window": {
+    "window_index": 12,
+    "start_ms": 359600,
+    "end_ms": 380176,
+    "start": "05:59",
+    "end": "06:20",
+    "max_entries": 1,
+    "segments": [
+     {
+      "t": "05:59",
+      "speaker": "Others",
+      "text": "Yep."
+     },
+     {
+      "t": "06:06",
+      "speaker": "You",
+      "text": "That doesn't really look like him, actually."
+     },
+     {
+      "t": "06:12",
+      "speaker": "You",
+      "text": "He looks more like a pig, actually."
+     },
+     {
+      "t": "06:15",
+      "speaker": "You",
+      "text": "Ah well."
+     },
+     {
+      "t": "06:18",
+      "speaker": "Others",
+      "text": "I see a dog in there. Yep."
+     }
+    ],
+    "context_segments": [
+     {
+      "t": "05:38",
+      "speaker": "Others",
+      "text": "And they're quite harmless and mild and interesting."
+     },
+     {
+      "t": "05:41",
+      "speaker": "Others",
+      "text": "Mm."
+     },
+     {
+      "t": "05:42",
+      "speaker": "You",
+      "text": "Okay. God, I still don't know what I'm gonna write about. Um."
+     },
+     {
+      "t": "05:49",
+      "speaker": "Others",
+      "text": "Superb sketch, by the way."
+     }
+    ],
+    "transcript": "[05:59] Others: Yep.\n[06:06] You: That doesn't really look like him, actually.\n[06:12] You: He looks more like a pig, actually.\n[06:15] You: Ah well.\n[06:18] Others: I see a dog in there. Yep.",
+    "context": "[05:38] Others: And they're quite harmless and mild and interesting.\n[05:41] Others: Mm.\n[05:42] You: Okay. God, I still don't know what I'm gonna write about. Um.\n[05:49] Others: Superb sketch, by the way."
+   },
+   "events": [],
+   "user": "WINDOW: 05:59 to 06:20   BUDGET: at most 1 new notes\nTOPIC: Team roles (since 00:50)\nNEXT ID: 4\nGLOSSARY: David, Andrew, Craig\nCURRENT NOTES:\n1 [ai] Team: David industrial designer; Andrew marketing; Craig user interface expert\n2 [ai] Brief: new remote control, original, trendy, user-friendly; three stages of individual work, then meeting\nu1 [you] physical affection\n  3 [ai] David's beagle: welcomes affection, lots of personality, fit and robust health\nCONTEXT (already covered, never note it):\n[05:38] Others: And they're quite harmless and mild and interesting.\n[05:41] Others: Mm.\n[05:42] You: Okay. God, I still don't know what I'm gonna write about. Um.\n[05:49] Others: Superb sketch, by the way.\nNEW TRANSCRIPT:\n[05:59] Others: Yep.\n[06:06] You: That doesn't really look like him, actually.\n[06:12] You: He looks more like a pig, actually.\n[06:15] You: Ah well.\n[06:18] Others: I see a dog in there. Yep.",
+   "ops": ".",
+   "reasons": [],
+   "notes_after": [
+    "1 [ai] Team: David industrial designer; Andrew marketing; Craig user interface expert",
+    "2 [ai] Brief: new remote control, original, trendy, user-friendly; three stages of individual work, then meeting",
+    "u1 [you] physical affection",
+    "  3 [ai] David's beagle: welcomes affection, lots of personality, fit and robust health"
+   ]
+  },
+  {
+   "window": {
+    "window_index": 13,
+    "start_ms": 379504,
+    "end_ms": 422256,
+    "start": "06:19",
+    "end": "07:02",
+    "max_entries": 1,
+    "segments": [
+     {
+      "t": "06:19",
+      "speaker": "You",
+      "text": "Do you? Oh that's very good of you."
+     },
+     {
+      "t": "06:22",
+      "speaker": "Others",
+      "text": "Now I see a rooster."
+     },
+     {
+      "t": "06:28",
+      "speaker": "You",
+      "text": "Uh."
+     },
+     {
+      "t": "06:33",
+      "speaker": "Others",
+      "text": "What kind is it?"
+     },
+     {
+      "t": "06:53",
+      "speaker": "You",
+      "text": "uh and he's quite quite wee as well so you know he can doesn't take up too much space. Um"
+     }
+    ],
+    "context_segments": [
+     {
+      "t": "06:06",
+      "speaker": "You",
+      "text": "That doesn't really look like him, actually."
+     },
+     {
+      "t": "06:12",
+      "speaker": "You",
+      "text": "He looks more like a pig, actually."
+     },
+     {
+      "t": "06:15",
+      "speaker": "You",
+      "text": "Ah well."
+     },
+     {
+      "t": "06:18",
+      "speaker": "Others",
+      "text": "I see a dog in there. Yep."
+     }
+    ],
+    "transcript": "[06:19] You: Do you? Oh that's very good of you.\n[06:22] Others: Now I see a rooster.\n[06:28] You: Uh.\n[06:33] Others: What kind is it?\n[06:53] You: uh and he's quite quite wee as well so you know he can doesn't take up too much space. Um",
+    "context": "[06:06] You: That doesn't really look like him, actually.\n[06:12] You: He looks more like a pig, actually.\n[06:15] You: Ah well.\n[06:18] Others: I see a dog in there. Yep."
+   },
+   "events": [],
+   "user": "WINDOW: 06:19 to 07:02   BUDGET: at most 1 new notes\nTOPIC: Team roles (since 00:50)\nNEXT ID: 4\nGLOSSARY: David, Andrew, Craig\nCURRENT NOTES:\n1 [ai] Team: David industrial designer; Andrew marketing; Craig user interface expert\n2 [ai] Brief: new remote control, original, trendy, user-friendly; three stages of individual work, then meeting\nu1 [you] physical affection\n  3 [ai] David's beagle: welcomes affection, lots of personality, fit and robust health\nCONTEXT (already covered, never note it):\n[06:06] You: That doesn't really look like him, actually.\n[06:12] You: He looks more like a pig, actually.\n[06:15] You: Ah well.\n[06:18] Others: I see a dog in there. Yep.\nNEW TRANSCRIPT:\n[06:19] You: Do you? Oh that's very good of you.\n[06:22] Others: Now I see a rooster.\n[06:28] You: Uh.\n[06:33] Others: What kind is it?\n[06:53] You: uh and he's quite quite wee as well so you know he can doesn't take up too much space. Um",
+   "ops": ".",
+   "reasons": [],
+   "notes_after": [
+    "1 [ai] Team: David industrial designer; Andrew marketing; Craig user interface expert",
+    "2 [ai] Brief: new remote control, original, trendy, user-friendly; three stages of individual work, then meeting",
+    "u1 [you] physical affection",
+    "  3 [ai] David's beagle: welcomes affection, lots of personality, fit and robust health"
+   ]
+  },
+  {
+   "window": {
+    "window_index": 14,
+    "start_ms": 431248,
+    "end_ms": 453696,
+    "start": "07:11",
+    "end": "07:33",
+    "max_entries": 1,
+    "segments": [
+     {
+      "t": "07:11",
+      "speaker": "Others",
+      "text": "Is he aware that th it's his own cha tail he's chasing?"
+     },
+     {
+      "t": "07:13",
+      "speaker": "You",
+      "text": "It is. I think it is. He only does it after he's had his dinner and um he'll just all of a sudden just get up and start chasing his tail 'round the living room."
+     },
+     {
+      "t": "07:20",
+      "speaker": "Others",
+      "text": "Hmm."
+     },
+     {
+      "t": "07:24",
+      "speaker": "Others",
+      "text": "Probably when he was little he got lots of attention for doing it and has forever been conditioned."
+     },
+     {
+      "t": "07:27",
+      "speaker": "You",
+      "text": "Yeah, maybe."
+     },
+     {
+      "t": "07:28",
+      "speaker": "You",
+      "text": "Maybe. Right, um where did you find this? Just down here? Yeah."
+     }
+    ],
+    "context_segments": [
+     {
+      "t": "06:53",
+      "speaker": "You",
+      "text": "uh and he's quite quite wee as well so you know he can doesn't take up too much space. Um"
+     }
+    ],
+    "transcript": "[07:11] Others: Is he aware that th it's his own cha tail he's chasing?\n[07:13] You: It is. I think it is. He only does it after he's had his dinner and um he'll just all of a sudden just get up and start chasing his tail 'round the living room.\n[07:20] Others: Hmm.\n[07:24] Others: Probably when he was little he got lots of attention for doing it and has forever been conditioned.\n[07:27] You: Yeah, maybe.\n[07:28] You: Maybe. Right, um where did you find this? Just down here? Yeah.",
+    "context": "[06:53] You: uh and he's quite quite wee as well so you know he can doesn't take up too much space. Um"
+   },
+   "events": [],
+   "user": "WINDOW: 07:11 to 07:33   BUDGET: at most 1 new notes\nTOPIC: Team roles (since 00:50)\nNEXT ID: 4\nGLOSSARY: David, Andrew, Craig\nCURRENT NOTES:\n1 [ai] Team: David industrial designer; Andrew marketing; Craig user interface expert\n2 [ai] Brief: new remote control, original, trendy, user-friendly; three stages of individual work, then meeting\nu1 [you] physical affection\n  3 [ai] David's beagle: welcomes affection, lots of personality, fit and robust health\nCONTEXT (already covered, never note it):\n[06:53] You: uh and he's quite quite wee as well so you know he can doesn't take up too much space. Um\nNEW TRANSCRIPT:\n[07:11] Others: Is he aware that th it's his own cha tail he's chasing?\n[07:13] You: It is. I think it is. He only does it after he's had his dinner and um he'll just all of a sudden just get up and start chasing his tail 'round the living room.\n[07:20] Others: Hmm.\n[07:24] Others: Probably when he was little he got lots of attention for doing it and has forever been conditioned.\n[07:27] You: Yeah, maybe.\n[07:28] You: Maybe. Right, um where did you find this? Just down here? Yeah.",
+   "ops": ".",
+   "reasons": [],
+   "notes_after": [
+    "1 [ai] Team: David industrial designer; Andrew marketing; Craig user interface expert",
+    "2 [ai] Brief: new remote control, original, trendy, user-friendly; three stages of individual work, then meeting",
+    "u1 [you] physical affection",
+    "  3 [ai] David's beagle: welcomes affection, lots of personality, fit and robust health"
+   ]
+  },
+  {
+   "window": {
+    "window_index": 15,
+    "start_ms": 455424,
+    "end_ms": 495072,
+    "start": "07:35",
+    "end": "08:15",
+    "max_entries": 1,
+    "segments": [
+     {
+      "t": "07:35",
+      "speaker": "You",
+      "text": "Okay."
+     },
+     {
+      "t": "07:45",
+      "speaker": "You",
+      "text": "Okay, uh we now need to discuss the project finance. Um"
+     },
+     {
+      "t": "07:52",
+      "speaker": "You",
+      "text": "so according to the brief um we're gonna be selling this remote control for twenty five Euro, um and we're aiming to make fifty million Euro. Um so we're gonna be selling this on an international scale."
+     },
+     {
+      "t": "08:06",
+      "speaker": "You",
+      "text": "And uh we don't want it to cost any more than uh twelve fifty Euros, so fifty percent of the selling price."
+     }
+    ],
+    "context_segments": [
+     {
+      "t": "07:13",
+      "speaker": "You",
+      "text": "It is. I think it is. He only does it after he's had his dinner and um he'll just all of a sudden just get up and start chasing his tail 'round the living room."
+     },
+     {
+      "t": "07:20",
+      "speaker": "Others",
+      "text": "Hmm."
+     },
+     {
+      "t": "07:24",
+      "speaker": "Others",
+      "text": "Probably when he was little he got lots of attention for doing it and has forever been conditioned."
+     },
+     {
+      "t": "07:27",
+      "speaker": "You",
+      "text": "Yeah, maybe."
+     },
+     {
+      "t": "07:28",
+      "speaker": "You",
+      "text": "Maybe. Right, um where did you find this? Just down here? Yeah."
+     }
+    ],
+    "transcript": "[07:35] You: Okay.\n[07:45] You: Okay, uh we now need to discuss the project finance. Um\n[07:52] You: so according to the brief um we're gonna be selling this remote control for twenty five Euro, um and we're aiming to make fifty million Euro. Um so we're gonna be selling this on an international scale.\n[08:06] You: And uh we don't want it to cost any more than uh twelve fifty Euros, so fifty percent of the selling price.",
+    "context": "[07:13] You: It is. I think it is. He only does it after he's had his dinner and um he'll just all of a sudden just get up and start chasing his tail 'round the living room.\n[07:20] Others: Hmm.\n[07:24] Others: Probably when he was little he got lots of attention for doing it and has forever been conditioned.\n[07:27] You: Yeah, maybe.\n[07:28] You: Maybe. Right, um where did you find this? Just down here? Yeah."
+   },
+   "events": [],
+   "user": "WINDOW: 07:35 to 08:15   BUDGET: at most 1 new notes\nTOPIC: Team roles (since 00:50)\nNEXT ID: 4\nGLOSSARY: David, Andrew, Craig\nCURRENT NOTES:\n1 [ai] Team: David industrial designer; Andrew marketing; Craig user interface expert\n2 [ai] Brief: new remote control, original, trendy, user-friendly; three stages of individual work, then meeting\nu1 [you] physical affection\n  3 [ai] David's beagle: welcomes affection, lots of personality, fit and robust health\nCONTEXT (already covered, never note it):\n[07:13] You: It is. I think it is. He only does it after he's had his dinner and um he'll just all of a sudden just get up and start chasing his tail 'round the living room.\n[07:20] Others: Hmm.\n[07:24] Others: Probably when he was little he got lots of attention for doing it and has forever been conditioned.\n[07:27] You: Yeah, maybe.\n[07:28] You: Maybe. Right, um where did you find this? Just down here? Yeah.\nNEW TRANSCRIPT:\n[07:35] You: Okay.\n[07:45] You: Okay, uh we now need to discuss the project finance. Um\n[07:52] You: so according to the brief um we're gonna be selling this remote control for twenty five Euro, um and we're aiming to make fifty million Euro. Um so we're gonna be selling this on an international scale.\n[08:06] You: And uh we don't want it to cost any more than uh twelve fifty Euros, so fifty percent of the selling price.",
+   "ops": "T=Project finance\n+p 07:52-08:06|€25 selling price; aim to make €50 million internationally; cost max €12.50 (50%)",
+   "reasons": [
+    []
+   ],
+   "notes_after": [
+    "4 [ai] €25 selling price; aim to make €50 million internationally; cost max €12.50 (50%)"
+   ]
+  },
+  {
+   "window": {
+    "window_index": 16,
+    "start_ms": 488347,
+    "end_ms": 514032,
+    "start": "08:08",
+    "end": "08:34",
+    "max_entries": 1,
+    "segments": [
+     {
+      "t": "08:08",
+      "speaker": "Others",
+      "text": "'Kay."
+     },
+     {
+      "t": "08:16",
+      "speaker": "Others",
+      "text": "Um, can we just go over that again?"
+     },
+     {
+      "t": "08:17",
+      "speaker": "You",
+      "text": "Sure."
+     },
+     {
+      "t": "08:19",
+      "speaker": "Others",
+      "text": "Uh, so bas at twel Alright, yeah. Okay."
+     },
+     {
+      "t": "08:25",
+      "speaker": "Others",
+      "text": "So cost like production cost is twelve fifty, but selling price is is that wholesale or retail? Like on the shelf."
+     }
+    ],
+    "context_segments": [
+     {
+      "t": "07:52",
+      "speaker": "You",
+      "text": "so according to the brief um we're gonna be selling this remote control for twenty five Euro, um and we're aiming to make fifty million Euro. Um so we're gonna be selling this on an international scale."
+     },
+     {
+      "t": "08:06",
+      "speaker": "You",
+      "text": "And uh we don't want it to cost any more than uh twelve fifty Euros, so fifty percent of the selling price."
+     }
+    ],
+    "transcript": "[08:08] Others: 'Kay.\n[08:16] Others: Um, can we just go over that again?\n[08:17] You: Sure.\n[08:19] Others: Uh, so bas at twel Alright, yeah. Okay.\n[08:25] Others: So cost like production cost is twelve fifty, but selling price is is that wholesale or retail? Like on the shelf.",
+    "context": "[07:52] You: so according to the brief um we're gonna be selling this remote control for twenty five Euro, um and we're aiming to make fifty million Euro. Um so we're gonna be selling this on an international scale.\n[08:06] You: And uh we don't want it to cost any more than uh twelve fifty Euros, so fifty percent of the selling price."
+   },
+   "events": [],
+   "user": "WINDOW: 08:08 to 08:34   BUDGET: at most 1 new notes\nTOPIC: Project finance (since 07:35)\nNEXT ID: 5\nGLOSSARY: David, Andrew, Craig\nEARLIER TOPICS, last notes: Team: David industrial designer; Andrew marketing; Craig user interface expert | Brief: new remote control, original, trendy, user-friendly; three stages of individual work, then meeting | physical affection | David's beagle: welcomes affection, lots of personality, fit and robust health\nCURRENT NOTES:\n4 [ai] €25 selling price; aim to make €50 million internationally; cost max €12.50 (50%)\nCONTEXT (already covered, never note it):\n[07:52] You: so according to the brief um we're gonna be selling this remote control for twenty five Euro, um and we're aiming to make fifty million Euro. Um so we're gonna be selling this on an international scale.\n[08:06] You: And uh we don't want it to cost any more than uh twelve fifty Euros, so fifty percent of the selling price.\nNEW TRANSCRIPT:\n[08:08] Others: 'Kay.\n[08:16] Others: Um, can we just go over that again?\n[08:17] You: Sure.\n[08:19] Others: Uh, so bas at twel Alright, yeah. Okay.\n[08:25] Others: So cost like production cost is twelve fifty, but selling price is is that wholesale or retail? Like on the shelf.",
+   "ops": ".",
+   "reasons": [],
+   "notes_after": [
+    "4 [ai] €25 selling price; aim to make €50 million internationally; cost max €12.50 (50%)"
+   ]
+  },
+  {
+   "window": {
+    "window_index": 17,
+    "start_ms": 508000,
+    "end_ms": 530240,
+    "start": "08:28",
+    "end": "08:50",
+    "max_entries": 1,
+    "segments": [
+     {
+      "t": "08:28",
+      "speaker": "You",
+      "text": "All together."
+     },
+     {
+      "t": "08:34",
+      "speaker": "You",
+      "text": "Um I dunno. I imagine That's a good question."
+     },
+     {
+      "t": "08:38",
+      "speaker": "Others",
+      "text": "Our sale our sale anyway. Yeah, okay okay."
+     },
+     {
+      "t": "08:39",
+      "speaker": "You",
+      "text": "I imagine it probably is our sale actually because it's probably up to the"
+     },
+     {
+      "t": "08:44",
+      "speaker": "You",
+      "text": "the um the retailer to uh sell it for whatever price they want. Um."
+     }
+    ],
+    "context_segments": [
+     {
+      "t": "08:16",
+      "speaker": "Others",
+      "text": "Um, can we just go over that again?"
+     },
+     {
+      "t": "08:17",
+      "speaker": "You",
+      "text": "Sure."
+     },
+     {
+      "t": "08:19",
+      "speaker": "Others",
+      "text": "Uh, so bas at twel Alright, yeah. Okay."
+     },
+     {
+      "t": "08:25",
+      "speaker": "Others",
+      "text": "So cost like production cost is twelve fifty, but selling price is is that wholesale or retail? Like on the shelf."
+     }
+    ],
+    "transcript": "[08:28] You: All together.\n[08:34] You: Um I dunno. I imagine That's a good question.\n[08:38] Others: Our sale our sale anyway. Yeah, okay okay.\n[08:39] You: I imagine it probably is our sale actually because it's probably up to the\n[08:44] You: the um the retailer to uh sell it for whatever price they want. Um.",
+    "context": "[08:16] Others: Um, can we just go over that again?\n[08:17] You: Sure.\n[08:19] Others: Uh, so bas at twel Alright, yeah. Okay.\n[08:25] Others: So cost like production cost is twelve fifty, but selling price is is that wholesale or retail? Like on the shelf."
+   },
+   "events": [],
+   "user": "WINDOW: 08:28 to 08:50   BUDGET: at most 1 new notes\nTOPIC: Project finance (since 07:35)\nNEXT ID: 5\nGLOSSARY: David, Andrew, Craig\nEARLIER TOPICS, last notes: Team: David industrial designer; Andrew marketing; Craig user interface expert | Brief: new remote control, original, trendy, user-friendly; three stages of individual work, then meeting | physical affection | David's beagle: welcomes affection, lots of personality, fit and robust health\nCURRENT NOTES:\n4 [ai] €25 selling price; aim to make €50 million internationally; cost max €12.50 (50%)\nCONTEXT (already covered, never note it):\n[08:16] Others: Um, can we just go over that again?\n[08:17] You: Sure.\n[08:19] Others: Uh, so bas at twel Alright, yeah. Okay.\n[08:25] Others: So cost like production cost is twelve fifty, but selling price is is that wholesale or retail? Like on the shelf.\nNEW TRANSCRIPT:\n[08:28] You: All together.\n[08:34] You: Um I dunno. I imagine That's a good question.\n[08:38] Others: Our sale our sale anyway. Yeah, okay okay.\n[08:39] You: I imagine it probably is our sale actually because it's probably up to the\n[08:44] You: the um the retailer to uh sell it for whatever price they want. Um.",
+   "ops": ">4 p 08:38-08:44|Selling price is likely ours; retailers set the shelf price",
+   "reasons": [
+    []
+   ],
+   "notes_after": [
+    "4 [ai] €25 selling price; aim to make €50 million internationally; cost max €12.50 (50%)",
+    "  5 [ai] Selling price is likely ours; retailers set the shelf price"
+   ]
+  },
+  {
+   "window": {
+    "window_index": 18,
+    "start_ms": 526768,
+    "end_ms": 565629,
+    "start": "08:46",
+    "end": "09:25",
+    "max_entries": 1,
+    "segments": [
+     {
+      "t": "08:46",
+      "speaker": "Others",
+      "text": "Okay."
+     },
+     {
+      "t": "08:48",
+      "speaker": "Others",
+      "text": "Mm-hmm."
+     },
+     {
+      "t": "08:51",
+      "speaker": "Others",
+      "text": "Alright."
+     },
+     {
+      "t": "08:51",
+      "speaker": "You",
+      "text": "But I I don't know, I mean do you think the fact that it's going to be sold internationally will have a bearing on how we design it at all?"
+     },
+     {
+      "t": "08:59",
+      "speaker": "You",
+      "text": "Think it will? Um."
+     },
+     {
+      "t": "09:00",
+      "speaker": "Others",
+      "text": "Mm-hmm."
+     },
+     {
+      "t": "09:03",
+      "speaker": "Others",
+      "text": "Mm-hmm."
+     },
+     {
+      "t": "09:08",
+      "speaker": "Others",
+      "text": "Well right away I'm wondering if there's um th th uh, like with DVD players, if there are zones. Um f frequencies or something um as well as uh characters, um different uh keypad styles and s symbols."
+     }
+    ],
+    "context_segments": [
+     {
+      "t": "08:34",
+      "speaker": "You",
+      "text": "Um I dunno. I imagine That's a good question."
+     },
+     {
+      "t": "08:38",
+      "speaker": "Others",
+      "text": "Our sale our sale anyway. Yeah, okay okay."
+     },
+     {
+      "t": "08:39",
+      "speaker": "You",
+      "text": "I imagine it probably is our sale actually because it's probably up to the"
+     },
+     {
+      "t": "08:44",
+      "speaker": "You",
+      "text": "the um the retailer to uh sell it for whatever price they want. Um."
+     }
+    ],
+    "transcript": "[08:46] Others: Okay.\n[08:48] Others: Mm-hmm.\n[08:51] Others: Alright.\n[08:51] You: But I I don't know, I mean do you think the fact that it's going to be sold internationally will have a bearing on how we design it at all?\n[08:59] You: Think it will? Um.\n[09:00] Others: Mm-hmm.\n[09:03] Others: Mm-hmm.\n[09:08] Others: Well right away I'm wondering if there's um th th uh, like with DVD players, if there are zones. Um f frequencies or something um as well as uh characters, um different uh keypad styles and s symbols.",
+    "context": "[08:34] You: Um I dunno. I imagine That's a good question.\n[08:38] Others: Our sale our sale anyway. Yeah, okay okay.\n[08:39] You: I imagine it probably is our sale actually because it's probably up to the\n[08:44] You: the um the retailer to uh sell it for whatever price they want. Um."
+   },
+   "events": [],
+   "user": "WINDOW: 08:46 to 09:25   BUDGET: at most 1 new notes\nTOPIC: Project finance (since 07:35)\nNEXT ID: 6\nGLOSSARY: David, Andrew, Craig\nEARLIER TOPICS, last notes: Team: David industrial designer; Andrew marketing; Craig user interface expert | Brief: new remote control, original, trendy, user-friendly; three stages of individual work, then meeting | physical affection | David's beagle: welcomes affection, lots of personality, fit and robust health\nCURRENT NOTES:\n4 [ai] €25 selling price; aim to make €50 million internationally; cost max €12.50 (50%)\n  5 [ai] Selling price is likely ours; retailers set the shelf price\nCONTEXT (already covered, never note it):\n[08:34] You: Um I dunno. I imagine That's a good question.\n[08:38] Others: Our sale our sale anyway. Yeah, okay okay.\n[08:39] You: I imagine it probably is our sale actually because it's probably up to the\n[08:44] You: the um the retailer to uh sell it for whatever price they want. Um.\nNEW TRANSCRIPT:\n[08:46] Others: Okay.\n[08:48] Others: Mm-hmm.\n[08:51] Others: Alright.\n[08:51] You: But I I don't know, I mean do you think the fact that it's going to be sold internationally will have a bearing on how we design it at all?\n[08:59] You: Think it will? Um.\n[09:00] Others: Mm-hmm.\n[09:03] Others: Mm-hmm.\n[09:08] Others: Well right away I'm wondering if there's um th th uh, like with DVD players, if there are zones. Um f frequencies or something um as well as uh characters, um different uh keypad styles and s symbols.",
+   "ops": "+p 08:51-09:08|International sales may mean regional zones/frequencies and different keypad characters and symbols",
+   "reasons": [
+    []
+   ],
+   "notes_after": [
+    "4 [ai] €25 selling price; aim to make €50 million internationally; cost max €12.50 (50%)",
+    "  5 [ai] Selling price is likely ours; retailers set the shelf price",
+    "6 [ai] International sales may mean regional zones/frequencies and different keypad characters and symbols"
+   ]
+  },
+  {
+   "window": {
+    "window_index": 19,
+    "start_ms": 553712,
+    "end_ms": 580249,
+    "start": "09:13",
+    "end": "09:40",
+    "max_entries": 1,
+    "segments": [
+     {
+      "t": "09:13",
+      "speaker": "You",
+      "text": "Oh yeah, regions and stuff, yeah. Yeah. Okay."
+     },
+     {
+      "t": "09:24",
+      "speaker": "You",
+      "text": "Yeah. Well for a remote control, do you think that will be I suppose it's depends on how complicated our remote control is."
+     },
+     {
+      "t": "09:24",
+      "speaker": "Others",
+      "text": "Hmm."
+     },
+     {
+      "t": "09:25",
+      "speaker": "Others",
+      "text": "Um."
+     },
+     {
+      "t": "09:28",
+      "speaker": "Others",
+      "text": "I don't know."
+     },
+     {
+      "t": "09:31",
+      "speaker": "Others",
+      "text": "Yeah."
+     },
+     {
+      "t": "09:31",
+      "speaker": "Others",
+      "text": "It does make sense from maybe the design point of view 'cause you have more complicated characters like European languages, then you need more buttons."
+     }
+    ],
+    "context_segments": [
+     {
+      "t": "09:08",
+      "speaker": "Others",
+      "text": "Well right away I'm wondering if there's um th th uh, like with DVD players, if there are zones. Um f frequencies or something um as well as uh characters, um different uh keypad styles and s symbols."
+     }
+    ],
+    "transcript": "[09:13] You: Oh yeah, regions and stuff, yeah. Yeah. Okay.\n[09:24] You: Yeah. Well for a remote control, do you think that will be I suppose it's depends on how complicated our remote control is.\n[09:24] Others: Hmm.\n[09:25] Others: Um.\n[09:28] Others: I don't know.\n[09:31] Others: Yeah.\n[09:31] Others: It does make sense from maybe the design point of view 'cause you have more complicated characters like European languages, then you need more buttons.",
+    "context": "[09:08] Others: Well right away I'm wondering if there's um th th uh, like with DVD players, if there are zones. Um f frequencies or something um as well as uh characters, um different uh keypad styles and s symbols."
+   },
+   "events": [],
+   "user": "WINDOW: 09:13 to 09:40   BUDGET: at most 1 new notes\nTOPIC: Project finance (since 07:35)\nNEXT ID: 7\nGLOSSARY: David, Andrew, Craig\nEARLIER TOPICS, last notes: Team: David industrial designer; Andrew marketing; Craig user interface expert | Brief: new remote control, original, trendy, user-friendly; three stages of individual work, then meeting | physical affection | David's beagle: welcomes affection, lots of personality, fit and robust health\nCURRENT NOTES:\n4 [ai] €25 selling price; aim to make €50 million internationally; cost max €12.50 (50%)\n  5 [ai] Selling price is likely ours; retailers set the shelf price\n6 [ai] International sales may mean regional zones/frequencies and different keypad characters and symbols\nCONTEXT (already covered, never note it):\n[09:08] Others: Well right away I'm wondering if there's um th th uh, like with DVD players, if there are zones. Um f frequencies or something um as well as uh characters, um different uh keypad styles and s symbols.\nNEW TRANSCRIPT:\n[09:13] You: Oh yeah, regions and stuff, yeah. Yeah. Okay.\n[09:24] You: Yeah. Well for a remote control, do you think that will be I suppose it's depends on how complicated our remote control is.\n[09:24] Others: Hmm.\n[09:25] Others: Um.\n[09:28] Others: I don't know.\n[09:31] Others: Yeah.\n[09:31] Others: It does make sense from maybe the design point of view 'cause you have more complicated characters like European languages, then you need more buttons.",
+   "ops": ">6 p 09:24-09:31|Depends on remote complexity; European language characters need more buttons",
+   "reasons": [
+    []
+   ],
+   "notes_after": [
+    "4 [ai] €25 selling price; aim to make €50 million internationally; cost max €12.50 (50%)",
+    "  5 [ai] Selling price is likely ours; retailers set the shelf price",
+    "6 [ai] International sales may mean regional zones/frequencies and different keypad characters and symbols",
+    "  7 [ai] Depends on remote complexity; European language characters need more buttons"
+   ]
+  },
+  {
+   "window": {
+    "window_index": 20,
+    "start_ms": 580400,
+    "end_ms": 603794,
+    "start": "09:40",
+    "end": "10:03",
+    "max_entries": 1,
+    "segments": [
+     {
+      "t": "09:40",
+      "speaker": "You",
+      "text": "Yeah, yeah. Okay."
+     },
+     {
+      "t": "09:40",
+      "speaker": "Others",
+      "text": "Yeah."
+     },
+     {
+      "t": "09:41",
+      "speaker": "Others",
+      "text": "So, possibly."
+     },
+     {
+      "t": "09:42",
+      "speaker": "Others",
+      "text": "Yeah. And then a and then al the other thing international is on top of the price. I'm thinking"
+     },
+     {
+      "t": "09:57",
+      "speaker": "You",
+      "text": "What, just like in terms of like the wealth of the country? Like how much money people have to spend on things like?"
+     }
+    ],
+    "context_segments": [
+     {
+      "t": "09:24",
+      "speaker": "You",
+      "text": "Yeah. Well for a remote control, do you think that will be I suppose it's depends on how complicated our remote control is."
+     },
+     {
+      "t": "09:24",
+      "speaker": "Others",
+      "text": "Hmm."
+     },
+     {
+      "t": "09:25",
+      "speaker": "Others",
+      "text": "Um."
+     },
+     {
+      "t": "09:28",
+      "speaker": "Others",
+      "text": "I don't know."
+     },
+     {
+      "t": "09:31",
+      "speaker": "Others",
+      "text": "Yeah."
+     },
+     {
+      "t": "09:31",
+      "speaker": "Others",
+      "text": "It does make sense from maybe the design point of view 'cause you have more complicated characters like European languages, then you need more buttons."
+     }
+    ],
+    "transcript": "[09:40] You: Yeah, yeah. Okay.\n[09:40] Others: Yeah.\n[09:41] Others: So, possibly.\n[09:42] Others: Yeah. And then a and then al the other thing international is on top of the price. I'm thinking\n[09:57] You: What, just like in terms of like the wealth of the country? Like how much money people have to spend on things like?",
+    "context": "[09:24] You: Yeah. Well for a remote control, do you think that will be I suppose it's depends on how complicated our remote control is.\n[09:24] Others: Hmm.\n[09:25] Others: Um.\n[09:28] Others: I don't know.\n[09:31] Others: Yeah.\n[09:31] Others: It does make sense from maybe the design point of view 'cause you have more complicated characters like European languages, then you need more buttons."
+   },
+   "events": [
+    {
+     "type": "user_add",
+     "id": "u2",
+     "ms": 592304,
+     "t": "09:52",
+     "text": "characters european languages?"
+    }
+   ],
+   "user": "WINDOW: 09:40 to 10:03   BUDGET: at most 1 new notes\nTOPIC: Project finance (since 07:35)\nNEXT ID: 8\nGLOSSARY: David, Andrew, Craig, European\nEARLIER TOPICS, last notes: Team: David industrial designer; Andrew marketing; Craig user interface expert | Brief: new remote control, original, trendy, user-friendly; three stages of individual work, then meeting | physical affection | David's beagle: welcomes affection, lots of personality, fit and robust health\nCURRENT NOTES:\n4 [ai] €25 selling price; aim to make €50 million internationally; cost max €12.50 (50%)\n  5 [ai] Selling price is likely ours; retailers set the shelf price\n6 [ai] International sales may mean regional zones/frequencies and different keypad characters and symbols\n  7 [ai] Depends on remote complexity; European language characters need more buttons\nu2 [you] characters european languages?\nCONTEXT (already covered, never note it):\n[09:24] You: Yeah. Well for a remote control, do you think that will be I suppose it's depends on how complicated our remote control is.\n[09:24] Others: Hmm.\n[09:25] Others: Um.\n[09:28] Others: I don't know.\n[09:31] Others: Yeah.\n[09:31] Others: It does make sense from maybe the design point of view 'cause you have more complicated characters like European languages, then you need more buttons.\nNEW TRANSCRIPT:\n[09:40] You: Yeah, yeah. Okay.\n[09:40] Others: Yeah.\n[09:41] Others: So, possibly.\n[09:42] Others: Yeah. And then a and then al the other thing international is on top of the price. I'm thinking\n[09:57] You: What, just like in terms of like the wealth of the country? Like how much money people have to spend on things like?",
+   "ops": ".",
+   "reasons": [],
+   "notes_after": [
+    "4 [ai] €25 selling price; aim to make €50 million internationally; cost max €12.50 (50%)",
+    "  5 [ai] Selling price is likely ours; retailers set the shelf price",
+    "6 [ai] International sales may mean regional zones/frequencies and different keypad characters and symbols",
+    "  7 [ai] Depends on remote complexity; European language characters need more buttons",
+    "u2 [you] characters european languages?"
+   ]
+  },
+  {
+   "window": {
+    "window_index": 21,
+    "start_ms": 602848,
+    "end_ms": 625024,
+    "start": "10:02",
+    "end": "10:25",
+    "max_entries": 1,
+    "segments": [
+     {
+      "t": "10:02",
+      "speaker": "Others",
+      "text": "Or just like, basic product podi positioning, the twenty five Euro remote control might be a big hit in London, might not be such a big hit in Greece, who knows, something like that, yeah."
+     },
+     {
+      "t": "10:15",
+      "speaker": "You",
+      "text": "Aye, I see what you mean, yeah."
+     },
+     {
+      "t": "10:18",
+      "speaker": "You",
+      "text": "Marketing. Good marketing thoughts. Oh gosh, I should be writing all this down. Um."
+     }
+    ],
+    "context_segments": [
+     {
+      "t": "09:40",
+      "speaker": "You",
+      "text": "Yeah, yeah. Okay."
+     },
+     {
+      "t": "09:42",
+      "speaker": "Others",
+      "text": "Yeah. And then a and then al the other thing international is on top of the price. I'm thinking"
+     },
+     {
+      "t": "09:57",
+      "speaker": "You",
+      "text": "What, just like in terms of like the wealth of the country? Like how much money people have to spend on things like?"
+     }
+    ],
+    "transcript": "[10:02] Others: Or just like, basic product podi positioning, the twenty five Euro remote control might be a big hit in London, might not be such a big hit in Greece, who knows, something like that, yeah.\n[10:15] You: Aye, I see what you mean, yeah.\n[10:18] You: Marketing. Good marketing thoughts. Oh gosh, I should be writing all this down. Um.",
+    "context": "[09:40] You: Yeah, yeah. Okay.\n[09:42] Others: Yeah. And then a and then al the other thing international is on top of the price. I'm thinking\n[09:57] You: What, just like in terms of like the wealth of the country? Like how much money people have to spend on things like?"
+   },
+   "events": [],
+   "user": "WINDOW: 10:02 to 10:25   BUDGET: at most 1 new notes\nTOPIC: Project finance (since 07:35)\nNEXT ID: 8\nGLOSSARY: David, Andrew, Craig, European\nEARLIER TOPICS, last notes: Team: David industrial designer; Andrew marketing; Craig user interface expert | Brief: new remote control, original, trendy, user-friendly; three stages of individual work, then meeting | physical affection | David's beagle: welcomes affection, lots of personality, fit and robust health\nCURRENT NOTES:\n4 [ai] €25 selling price; aim to make €50 million internationally; cost max €12.50 (50%)\n  5 [ai] Selling price is likely ours; retailers set the shelf price\n6 [ai] International sales may mean regional zones/frequencies and different keypad characters and symbols\n  7 [ai] Depends on remote complexity; European language characters need more buttons\nu2 [you] characters european languages?\nCONTEXT (already covered, never note it):\n[09:40] You: Yeah, yeah. Okay.\n[09:42] Others: Yeah. And then a and then al the other thing international is on top of the price. I'm thinking\n[09:57] You: What, just like in terms of like the wealth of the country? Like how much money people have to spend on things like?\nNEW TRANSCRIPT:\n[10:02] Others: Or just like, basic product podi positioning, the twenty five Euro remote control might be a big hit in London, might not be such a big hit in Greece, who knows, something like that, yeah.\n[10:15] You: Aye, I see what you mean, yeah.\n[10:18] You: Marketing. Good marketing thoughts. Oh gosh, I should be writing all this down. Um.",
+   "ops": ">4 p 10:02|€25 positioning may vary by country: hit in London, maybe not Greece",
+   "reasons": [
+    []
+   ],
+   "notes_after": [
+    "4 [ai] €25 selling price; aim to make €50 million internationally; cost max €12.50 (50%)",
+    "  5 [ai] Selling price is likely ours; retailers set the shelf price",
+    "  8 [ai] €25 positioning may vary by country: hit in London, maybe not Greece",
+    "6 [ai] International sales may mean regional zones/frequencies and different keypad characters and symbols",
+    "  7 [ai] Depends on remote complexity; European language characters need more buttons",
+    "u2 [you] characters european languages?"
+   ]
+  },
+  {
+   "window": {
+    "window_index": 22,
+    "start_ms": 620167,
+    "end_ms": 668743,
+    "start": "10:20",
+    "end": "11:08",
+    "max_entries": 1,
+    "segments": [
+     {
+      "t": "10:20",
+      "speaker": "Others",
+      "text": "Yep."
+     },
+     {
+      "t": "10:55",
+      "speaker": "Others",
+      "text": "Right away I'm making some kind of assumptions about what what information we're given here, thinking, 'kay trendy probably means something other than just basic, something other than just standard."
+     }
+    ],
+    "context_segments": [
+     {
+      "t": "10:02",
+      "speaker": "Others",
+      "text": "Or just like, basic product podi positioning, the twenty five Euro remote control might be a big hit in London, might not be such a big hit in Greece, who knows, something like that, yeah."
+     },
+     {
+      "t": "10:15",
+      "speaker": "You",
+      "text": "Aye, I see what you mean, yeah."
+     },
+     {
+      "t": "10:18",
+      "speaker": "You",
+      "text": "Marketing. Good marketing thoughts. Oh gosh, I should be writing all this down. Um."
+     }
+    ],
+    "transcript": "[10:20] Others: Yep.\n[10:55] Others: Right away I'm making some kind of assumptions about what what information we're given here, thinking, 'kay trendy probably means something other than just basic, something other than just standard.",
+    "context": "[10:02] Others: Or just like, basic product podi positioning, the twenty five Euro remote control might be a big hit in London, might not be such a big hit in Greece, who knows, something like that, yeah.\n[10:15] You: Aye, I see what you mean, yeah.\n[10:18] You: Marketing. Good marketing thoughts. Oh gosh, I should be writing all this down. Um."
+   },
+   "events": [],
+   "user": "WINDOW: 10:20 to 11:08   BUDGET: at most 1 new notes\nTOPIC: Project finance (since 07:35)\nNEXT ID: 9\nGLOSSARY: David, Andrew, Craig, European, London, Greece\nEARLIER TOPICS, last notes: Team: David industrial designer; Andrew marketing; Craig user interface expert | Brief: new remote control, original, trendy, user-friendly; three stages of individual work, then meeting | physical affection | David's beagle: welcomes affection, lots of personality, fit and robust health\nCURRENT NOTES:\n4 [ai] €25 selling price; aim to make €50 million internationally; cost max €12.50 (50%)\n  5 [ai] Selling price is likely ours; retailers set the shelf price\n  8 [ai] €25 positioning may vary by country: hit in London, maybe not Greece\n6 [ai] International sales may mean regional zones/frequencies and different keypad characters and symbols\n  7 [ai] Depends on remote complexity; European language characters need more buttons\nu2 [you] characters european languages?\nCONTEXT (already covered, never note it):\n[10:02] Others: Or just like, basic product podi positioning, the twenty five Euro remote control might be a big hit in London, might not be such a big hit in Greece, who knows, something like that, yeah.\n[10:15] You: Aye, I see what you mean, yeah.\n[10:18] You: Marketing. Good marketing thoughts. Oh gosh, I should be writing all this down. Um.\nNEW TRANSCRIPT:\n[10:20] Others: Yep.\n[10:55] Others: Right away I'm making some kind of assumptions about what what information we're given here, thinking, 'kay trendy probably means something other than just basic, something other than just standard.",
+   "ops": ".",
+   "reasons": [],
+   "notes_after": [
+    "4 [ai] €25 selling price; aim to make €50 million internationally; cost max €12.50 (50%)",
+    "  5 [ai] Selling price is likely ours; retailers set the shelf price",
+    "  8 [ai] €25 positioning may vary by country: hit in London, maybe not Greece",
+    "6 [ai] International sales may mean regional zones/frequencies and different keypad characters and symbols",
+    "  7 [ai] Depends on remote complexity; European language characters need more buttons",
+    "u2 [you] characters european languages?"
+   ]
+  },
+  {
+   "window": {
+    "window_index": 23,
+    "start_ms": 660634,
+    "end_ms": 680848,
+    "start": "11:00",
+    "end": "11:20",
+    "max_entries": 1,
+    "segments": [
+     {
+      "t": "11:00",
+      "speaker": "You",
+      "text": "Mm."
+     },
+     {
+      "t": "11:05",
+      "speaker": "You",
+      "text": "Yeah."
+     },
+     {
+      "t": "11:08",
+      "speaker": "Others",
+      "text": "Um"
+     },
+     {
+      "t": "11:16",
+      "speaker": "You",
+      "text": "Yeah, yeah. Like how much does, you know, a remote control cost."
+     },
+     {
+      "t": "11:20",
+      "speaker": "Others",
+      "text": "Uh-huh."
+     }
+    ],
+    "context_segments": [
+     {
+      "t": "10:55",
+      "speaker": "Others",
+      "text": "Right away I'm making some kind of assumptions about what what information we're given here, thinking, 'kay trendy probably means something other than just basic, something other than just standard."
+     }
+    ],
+    "transcript": "[11:00] You: Mm.\n[11:05] You: Yeah.\n[11:08] Others: Um\n[11:16] You: Yeah, yeah. Like how much does, you know, a remote control cost.\n[11:20] Others: Uh-huh.",
+    "context": "[10:55] Others: Right away I'm making some kind of assumptions about what what information we're given here, thinking, 'kay trendy probably means something other than just basic, something other than just standard."
+   },
+   "events": [],
+   "user": "WINDOW: 11:00 to 11:20   BUDGET: at most 1 new notes\nTOPIC: Project finance (since 07:35)\nNEXT ID: 9\nGLOSSARY: David, Andrew, Craig, European, London, Greece\nEARLIER TOPICS, last notes: Team: David industrial designer; Andrew marketing; Craig user interface expert | Brief: new remote control, original, trendy, user-friendly; three stages of individual work, then meeting | physical affection | David's beagle: welcomes affection, lots of personality, fit and robust health\nCURRENT NOTES:\n4 [ai] €25 selling price; aim to make €50 million internationally; cost max €12.50 (50%)\n  5 [ai] Selling price is likely ours; retailers set the shelf price\n  8 [ai] €25 positioning may vary by country: hit in London, maybe not Greece\n6 [ai] International sales may mean regional zones/frequencies and different keypad characters and symbols\n  7 [ai] Depends on remote complexity; European language characters need more buttons\nu2 [you] characters european languages?\nCONTEXT (already covered, never note it):\n[10:55] Others: Right away I'm making some kind of assumptions about what what information we're given here, thinking, 'kay trendy probably means something other than just basic, something other than just standard.\nNEW TRANSCRIPT:\n[11:00] You: Mm.\n[11:05] You: Yeah.\n[11:08] Others: Um\n[11:16] You: Yeah, yeah. Like how much does, you know, a remote control cost.\n[11:20] Others: Uh-huh.",
+   "ops": ".",
+   "reasons": [],
+   "notes_after": [
+    "4 [ai] €25 selling price; aim to make €50 million internationally; cost max €12.50 (50%)",
+    "  5 [ai] Selling price is likely ours; retailers set the shelf price",
+    "  8 [ai] €25 positioning may vary by country: hit in London, maybe not Greece",
+    "6 [ai] International sales may mean regional zones/frequencies and different keypad characters and symbols",
+    "  7 [ai] Depends on remote complexity; European language characters need more buttons",
+    "u2 [you] characters european languages?"
+   ]
+  }
+ ]
+}
