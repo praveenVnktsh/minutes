@@ -134,7 +134,7 @@
       }
     },
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEVFMTcxMjYwM0FERjZCODQKUldTRWE5ODZZQklYN3UzZ0FUQWxsU1NZUDRvWlZhWU5aU0c3V0VvQ0F6SXRTd1dhN3hYTHFuQmYK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDUwNzY5MTExNDJFMDEwMEUKUldRT0VPQkNFWkYyVUErcFJsWTVHUTFTY2pzMThITE9sS1h6K1RhVmJxRzNjdjNYMkFKRnh3ZHQK",
       "endpoints": [
         "https://github.com/praveenVnktsh/minutes/releases/download/canary/latest.json"
       ]
