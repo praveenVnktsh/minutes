@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <b>Minutes</b> records your meetings, transcribes them locally, and writes clean notes that build on the notes you already took.<br/>
+  <b>Minutes</b> records your meetings, transcribes them locally, and writes notes while people talk, in the same document as yours.<br/>
   Audio, transcripts, notes, and summaries stay on your machine unless you explicitly configure an external AI provider.
 </p>
 
@@ -35,8 +35,8 @@
 
 ## Why Minutes
 
-- **Notes-first, not a report generator.** You jot down what matters; Minutes enriches those exact notes from the transcript instead of dumping a generic template on you.
-- **Everything on-device.** Whisper/Parakeet transcription, speaker diarization, and local summary models. No account, no cloud.
+- **Notes while it happens, not a report after.** A model fine-tuned for meeting notes adds topics, points, decisions and owners as people talk, next to your own lines, which it never rewrites. When the meeting ends, a second fine-tuned model writes the wrap-up: summary, decisions, action items, open questions.
+- **Everything on-device.** Whisper/Parakeet transcription, speaker diarization, and the note models run on your Mac. No account, no cloud.
 - **One screen from start to finish.** Hit record and the meeting workspace opens immediately — notes, live transcript, and chat live together with a floating record bar.
 
 ## Features
@@ -50,31 +50,31 @@
 
 ### The meeting workspace
 - A single workspace from the moment you hit record — with a **floating record bar**.
-- **Live notes** you can type during the call, persisted continuously.
-- **Raw notes stayed editable** after the meeting, side by side with the transcript.
+- **One notes document**: type during the call; the AI's notes land in the same document, marked as its own. A **Show AI notes** switch hides them (copy and export follow it).
+- Notes stay editable after the meeting, side by side with the transcript.
 - **Live transcript dock** with search and color-coded speaker chips.
 - **Ask your meeting**: a chat that can reference the transcript and your notes.
 - **Collapsible** navigation rail and transcript/chat dock.
 - **Responsive**: narrow windows collapse the rail and dock the transcript/chat at the bottom.
 - **Light and dark** themes.
 
-### Notes and summaries
-- **Enhanced notes** as concise, skimmable bullet points that **build on your own notes** — keeping your wording and order while adding specifics from the transcript.
-- **No templates**, no rigid sections. Free-form notes that read like yours.
-- The model **names the meeting** from the notes; the title stays inline editable.
-- **Re-enhance** any time with one click; stop an in-flight generation.
-- Optional per-meeting **summary language**.
+### Notes
+- **Live AI notes** from Gemma 4 E2B with a LoRA trained for this job: every pause in the conversation it updates the notes with a few compact edits (new topic, point, decision, action with owner, sub-bullet, fix or drop its own earlier note), so it keeps up with live transcription on the same Mac.
+- **The wrap-up** when the meeting ends, from a second LoRA on the same model: a short summary, decisions, action items with owners, and open questions, checked against the transcript (numbers must be grounded) before it is used.
+- Your own lines are never rewritten.
+- The model **names the meeting**; the title stays inline editable.
+- Both adapters are open: [live notes](https://huggingface.co/praveenvnktsh00/minutes-notes-gemma4-e2b) and [wrap-up](https://huggingface.co/praveenvnktsh00/minutes-tidy-gemma4-e2b) on Hugging Face (Apache 2.0, trained on the AMI Meeting Corpus). The app downloads them with the Gemma 4 E2B model.
 
 ### Transcription and models
 - **Whisper.cpp / whisper-rs** and **NVIDIA Parakeet** paths, running locally.
 - **GPU acceleration**: Metal + CoreML on Apple Silicon.
-- **Built-in AI** summary models plus **Ollama** for local summarization.
+- **Built-in AI** models (Gemma 4 E2B for live notes, Qwen 3.5 for chat and summaries) plus **Ollama**.
 - Optional external providers (**Claude, Groq, OpenRouter**) when you configure them.
 - **Speaker diarization** with an editable speaker manager and reassignment.
 - **Import audio** and retranscribe; background transcription queue.
 
 ### Data
-- Meetings, transcripts, and summaries stored locally in **SQLite**.
+- Meetings, transcripts, and notes stored locally in **SQLite**.
 - Full-text transcript search and a meetings list with dates.
 - Signed desktop updates.
 

@@ -14,6 +14,8 @@ Minutes can connect to external AI providers only when you choose one and provid
 
 The updater contacts GitHub Releases at `praveenvnktsh/minutes` to check for signed application updates. GitHub may receive ordinary network metadata associated with that request.
 
+Local models are downloaded from Hugging Face when you choose or accept them, including the live notes and wrap-up adapters (`praveenvnktsh00/minutes-notes-gemma4-e2b`, `praveenvnktsh00/minutes-tidy-gemma4-e2b`), which are fetched once the Gemma 4 E2B model is on disk. Hugging Face may receive ordinary network metadata associated with those downloads. No meeting content is sent.
+
 ## Your control
 
 You control where recordings are saved, which models and providers are used, and when local meeting data is deleted. Back up or remove local data using normal filesystem and application controls.

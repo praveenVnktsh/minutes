@@ -4,12 +4,12 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Minutes — the meeting recorder that never leaves the room</title>
-<meta name="description" content="Minutes records your meetings, transcribes them on your own machine, and turns the notes you jotted into notes worth keeping. No bot in the call. No cloud. No account. Free and open source for Apple Silicon Macs." />
+<meta name="description" content="Minutes records your meetings, transcribes them on your own machine, and writes notes while people talk, right next to yours. When the meeting ends it writes the wrap-up. No bot in the call. No cloud. No account. Free and open source for Apple Silicon Macs." />
 <meta name="theme-color" content="#121211" media="(prefers-color-scheme: dark)" />
 <meta name="theme-color" content="#fbfaf7" media="(prefers-color-scheme: light)" />
 <meta property="og:type" content="website" />
 <meta property="og:title" content="Minutes — every word kept, nothing sent" />
-<meta property="og:description" content="Local-first AI meeting notes. Records mic + system audio, transcribes on-device, and enhances the notes you actually took." />
+<meta property="og:description" content="Local-first AI meeting notes. Records mic + system audio, transcribes on-device, and writes notes live with a model trained for meetings." />
 <meta property="og:url" content="https://praveenvnktsh.github.io/minutes/" />
 <meta property="og:image" content="https://praveenvnktsh.github.io/minutes/screens/workspace.png" />
 <meta name="twitter:card" content="summary_large_image" />
@@ -223,7 +223,7 @@ section { position: relative; }
 .m-list li::before { content: ""; position: absolute; left: 2px; top: .62em; width: 5px; height: 5px; border-radius: 50%; background: var(--ink); }
 .m-list .own { font-weight: 400; transition: font-weight .4s; }
 .enhanced .m-list .own { font-weight: 650; }
-.enhanced .m-list .sub { display: block; }
+.m-list li.ai .sub, .enhanced .m-list .sub { display: block; }
 .m-list .add { color: var(--ink-muted); }
 .m-list .add .w { opacity: 0; filter: blur(6px); transition: opacity .5s ease, filter .5s ease; }
 .m-list .add .w.in { opacity: 1; filter: blur(0); }
@@ -320,6 +320,8 @@ section { position: relative; }
 .jot { font-family: var(--serif); font-size: 17px; padding: 0 22px; width: 100%; line-height: 1.6; }
 .jot div::before { content: "– "; color: var(--ink-subtle); }
 .jot .hl { background: linear-gradient(transparent 60%, var(--rec-glow) 60%); }
+.jot .ai { color: var(--ink-muted); font-family: var(--sans); font-size: 15px; }
+.jot .ai::before { content: "✦ "; color: var(--ink-subtle); }
 .enh { font-size: 13.5px; padding: 0 20px; width: 100%; line-height: 1.5; }
 .enh b { font-weight: 650; }
 .enh span { color: var(--info); }
@@ -534,10 +536,10 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
     <div class="wrap">
       <div class="hero-copy">
         <a class="pill reveal" href="https://github.com/praveenvnktsh/minutes/releases/latest">
-          <span class="dot"><span class="rec-dot"></span>New</span> Free &amp; open source for Apple Silicon Macs
+          <span class="dot"><span class="rec-dot"></span>New</span> Live notes from a model trained for meetings
         </a>
         <h1 class="reveal d1"><span style="white-space:nowrap">Every word, kept.</span><br /><span class="soft">Nothing sent.</span></h1>
-        <p class="lede reveal d2">Minutes records your meetings, transcribes them on your own machine, and turns the notes you jotted into notes worth keeping. No bot in the call. No cloud. No account.</p>
+        <p class="lede reveal d2">Minutes records your meetings, transcribes them on your own machine, and writes notes while people talk, right next to the ones you type. When it ends, you get the summary, the decisions and who owes what. No bot in the call. No cloud. No account.</p>
         <div class="hero-ctas reveal d3">
           <a class="btn btn-primary dl-primary" href="#download">
             <svg class="os-icon"><use href="#i-down"/></svg><span class="dl-label">Download Minutes</span>
@@ -553,7 +555,7 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
 
       <!-- Live product mock -->
       <div class="stage">
-        <div class="mock" id="mock" role="img" aria-label="Animated demo of Minutes: a meeting is recorded, transcribed live, and your jotted notes are enhanced with details from the transcript.">
+        <div class="mock" id="mock" role="img" aria-label="Animated demo of Minutes: a meeting is recorded and transcribed live, AI notes appear next to the notes you type, and a wrap-up with action items is written when it ends.">
           <div class="mock-chrome"><i></i><i></i><i></i><b>minutes</b></div>
           <div class="mock-body">
             <aside class="m-rail" aria-hidden="true">
@@ -573,8 +575,7 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
               <div class="m-title" id="mTitle">Meeting 25_09_26_10_02</div>
               <div class="m-date">Today, 10:02 AM · 3 speakers</div>
               <div class="m-seg" aria-hidden="true">
-                <span id="segRaw" class="on"><svg><use href="#i-list"/></svg>Raw</span>
-                <span id="segEnh"><svg><use href="#i-spark"/></svg>Enhanced</span>
+                <span class="on"><svg><use href="#i-spark"/></svg>Show AI notes</span>
               </div>
               <ul class="m-list" id="mList"></ul>
               <div class="m-actions" id="mActions"></div>
@@ -599,7 +600,7 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
               <span class="ctl"><svg><use href="#i-pause"/></svg></span>
               <span class="ctl stop" id="stopBtn"><svg><use href="#i-stop"/></svg></span>
             </span>
-            <span class="state"><svg class="spark"><use href="#i-spark"/></svg><span class="shimmer" id="stateText">Enhancing your notes…</span></span>
+            <span class="state"><svg class="spark"><use href="#i-spark"/></svg><span class="shimmer" id="stateText">Writing the wrap-up…</span></span>
           </div>
         </div>
       </div>
@@ -614,6 +615,7 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
         <span class="ticker-item"><b>Whisper</b> &amp; <b>Parakeet</b> on-device</span><i>✦</i>
         <span class="ticker-item"><b>Metal · Core ML</b> acceleration</span><i>✦</i>
         <span class="ticker-item"><b>Works</b> in airplane mode</span><i>✦</i>
+        <span class="ticker-item"><b>Notes</b> written as people talk</span><i>✦</i>
         <span aria-hidden="true" class="ticker-item"><b>0 bytes</b> of audio uploaded</span><i aria-hidden="true">✦</i>
         <span aria-hidden="true" class="ticker-item"><b>0 bots</b> joining your calls</span><i aria-hidden="true">✦</i>
         <span aria-hidden="true" class="ticker-item"><b>$0</b> per month, forever</span><i aria-hidden="true">✦</i>
@@ -621,6 +623,7 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
         <span aria-hidden="true" class="ticker-item"><b>Whisper</b> &amp; <b>Parakeet</b> on-device</span><i aria-hidden="true">✦</i>
         <span aria-hidden="true" class="ticker-item"><b>Metal · Core ML</b> acceleration</span><i aria-hidden="true">✦</i>
         <span aria-hidden="true" class="ticker-item"><b>Works</b> in airplane mode</span><i aria-hidden="true">✦</i>
+        <span aria-hidden="true" class="ticker-item"><b>Notes</b> written as people talk</span><i aria-hidden="true">✦</i>
       </div>
     </div>
   </section>
@@ -630,8 +633,8 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
     <div class="wrap">
       <div class="section-head">
         <span class="eyebrow reveal">How it works</span>
-        <h2 class="reveal d1">Your notes, finished for you.</h2>
-        <p class="lede reveal d2">Most AI notetakers throw away what you wrote and hand you a generic report. Minutes starts from your notes — your words, your order — and fills in what you didn't have time to type.</p>
+        <h2 class="reveal d1">Notes that keep up with the meeting.</h2>
+        <p class="lede reveal d2">Most AI notetakers hand you a generic report an hour later. Minutes writes notes while the meeting happens, in the same document you're typing in, and never rewrites a line you wrote.</p>
       </div>
       <div class="steps">
         <article class="step reveal">
@@ -645,21 +648,21 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
         </article>
         <article class="step reveal d1">
           <span class="n">02</span>
-          <h3>Jot what matters.</h3>
-          <p>Type a few words whenever something important happens. Fragments are fine. That's the whole point.</p>
+          <h3>Notes appear as people talk.</h3>
+          <p>Every few seconds of conversation, Minutes adds topics, points, decisions and owners, marked as its own. Type a few words whenever you like; your lines stay exactly as you wrote them.</p>
           <div class="step-vis"><div class="jot">
             <div>offline mode <span class="hl">first</span></div>
+            <div class="ai">Offline is ~2 sprints, reusing the sync engine</div>
             <div>pricing??</div>
-            <div>dev → spec</div>
           </div></div>
         </article>
         <article class="step reveal d2">
           <span class="n">03</span>
-          <h3>Enhance.</h3>
-          <p>A local model rewrites nothing you said. It keeps your bullets and adds names, numbers and decisions from the transcript.</p>
+          <h3>The wrap-up writes itself.</h3>
+          <p>When you stop, a second model reads the whole transcript and your notes, and adds the summary, decisions, action items with owners, and open questions.</p>
           <div class="step-vis"><div class="enh">
-            <div><b>Offline mode first</b> <span>— unblocks October pilots; ~2 sprints.</span></div>
-            <div><b>Pricing??</b> <span>Keep free tier; Priya drafts by Fri.</span></div>
+            <div><b>Decided</b> <span>Offline mode first, for the October pilots.</span></div>
+            <div><b>Priya</b> <span>Pricing draft by Friday.</span></div>
           </div></div>
         </article>
       </div>
@@ -686,14 +689,17 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
             <div class="tile bot"><span>AI Notetaker<br />(Recording)</span></div>
           </div>
         </article>
-
         <article class="card reveal d1">
           <h3>Live, or later.</h3>
           <p>Watch the transcript stream in, or transcribe after the call to keep your laptop cool.</p>
           <div class="vis"><div class="modes" id="modes"><span class="on">Live</span><span>After the call</span></div></div>
         </article>
-
-        <article class="card reveal">
+        <article class="card w4 wide-sm reveal">
+          <h3>A model trained for meetings.</h3>
+          <p>The live notes come from Gemma 4 E2B fine-tuned for one job: keeping a meeting's notes current in a few tokens at a time, so it keeps up with live transcription on your Mac. A second adapter writes the wrap-up. Both are open on <a href="https://huggingface.co/praveenvnktsh00/minutes-notes-gemma4-e2b">Hugging Face</a>.</p>
+          <div class="vis gpu" aria-hidden="true"><span class="hot">Gemma 4 E2B</span><span>Live notes LoRA</span><span>Wrap-up LoRA</span><span>On-device</span></div>
+        </article>
+        <article class="card reveal d1">
           <h3>Knows who said it.</h3>
           <p>On-device speaker diarization, with a speaker manager to name and reassign.</p>
           <div class="vis speakers" aria-hidden="true">
@@ -702,16 +708,19 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
             <div class="row"><span class="spk s3">Priya</span><span class="bar" style="width:47%;background:var(--spk-3)"></span></div>
           </div>
         </article>
-
-        <article class="card w4 wide-sm reveal d1">
+        <article class="card w4 wide-sm reveal">
           <h3>Ask your meeting anything.</h3>
-          <p>Chat across the transcript and your notes. Ask what was decided, have it tighten a section, or pull out every action item.</p>
+          <p>Chat across the transcript and your notes, during the call or after. Ask what was decided, what you missed, or pull out every action item.</p>
           <div class="vis chat" aria-hidden="true">
             <div class="bubble me">What did we promise the pilot customers?</div>
             <div class="bubble ai">An offline-capable build for the October pilots, about two sprints of work. Dev owns the spec. <cite>00:19</cite></div>
           </div>
         </article>
-
+        <article class="card reveal d1">
+          <h3>Fast on your hardware.</h3>
+          <p>Metal and Core ML put transcription on the Apple Silicon GPU.</p>
+          <div class="vis gpu" aria-hidden="true"><span class="hot">Metal</span><span>Core ML</span><span>Apple Silicon</span></div>
+        </article>
         <article class="card w3 reveal">
           <h3>Starts when your meeting does.</h3>
           <p>Minutes notices when a supported meeting begins and offers to record. One click, and it lives in your menu bar.</p>
@@ -719,7 +728,6 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
             <div class="toast"><span class="ic"><svg><use href="#logo"/></svg></span><div><b>Meeting detected</b><small>Start recording with Minutes?</small></div><span class="go">Record</span></div>
           </div>
         </article>
-
         <article class="card w3 reveal d1">
           <h3>Find any word you ever heard.</h3>
           <p>Full-text search across every transcript, stored in a local SQLite database you own.</p>
@@ -729,23 +737,20 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
             <div class="r"><span>Enterprise <mark>pilot</mark> kickoff</span><small>14:40</small></div>
           </div>
         </article>
-
         <article class="card reveal">
-          <h3>Fast on your hardware.</h3>
-          <p>Metal and Core ML put transcription on the Apple Silicon GPU.</p>
-          <div class="vis gpu" aria-hidden="true"><span class="hot">Metal</span><span>Core ML</span><span>Apple Silicon</span></div>
-        </article>
-
-        <article class="card reveal d1">
           <h3>Bring old recordings.</h3>
           <p>Import any audio file and Minutes transcribes it in a background queue.</p>
           <div class="vis gpu" aria-hidden="true"><span>.wav</span><span>.mp3</span><span>.m4a</span><span>…</span></div>
         </article>
-
-        <article class="card reveal d2">
+        <article class="card reveal d1">
           <h3>Your models, your call.</h3>
           <p>Built-in local models or Ollama. Claude, Groq and OpenRouter only if you add a key.</p>
           <div class="vis gpu" aria-hidden="true"><span class="hot">Built-in</span><span>Ollama</span><span>Bring your own key</span></div>
+        </article>
+        <article class="card reveal d2">
+          <h3>Your lines and the AI's, apart.</h3>
+          <p>AI lines are marked in your notes. One switch hides them, and copy and export follow it.</p>
+          <div class="vis"><div class="modes"><span class="on">Show AI notes</span></div></div>
         </article>
       </div>
     </div>
@@ -773,7 +778,7 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
 
           <g transform="translate(40 60)"><rect class="box" width="300" height="70" rx="14"/><text class="lbl" x="22" y="31">Mic + system audio</text><text class="sub" x="22" y="51">Mixed, ducked, clipping-safe</text></g>
           <g transform="translate(40 160)"><rect class="box" width="300" height="70" rx="14"/><text class="lbl" x="22" y="31">Whisper / Parakeet</text><text class="sub" x="22" y="51">Voice-activity filtered, GPU-accelerated</text></g>
-          <g transform="translate(40 260)"><rect class="box" width="300" height="70" rx="14"/><text class="lbl" x="22" y="31">Local LLM</text><text class="sub" x="22" y="51">Enhances your notes, names the meeting</text></g>
+          <g transform="translate(40 260)"><rect class="box" width="300" height="70" rx="14"/><text class="lbl" x="22" y="31">Local LLM</text><text class="sub" x="22" y="51">Writes live notes and the wrap-up</text></g>
           <g transform="translate(40 360)"><rect class="box" width="300" height="70" rx="14"/><text class="lbl" x="22" y="31">SQLite on your disk</text><text class="sub" x="22" y="51">Meetings, transcripts, notes</text></g>
 
           <path class="flow" d="M190 130v30M190 230v30M190 330v30"/>
@@ -807,7 +812,8 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
             <tr><td>Bot joins the call</td><td class="us">Never</td><td class="them">Usually</td></tr>
             <tr><td>Account required</td><td class="us">No</td><td class="them">Yes</td></tr>
             <tr><td>Works offline</td><td class="us">Yes</td><td class="them">No</td></tr>
-            <tr><td>Starts from your own notes</td><td class="us">Yes, keeps your wording</td><td class="them">Fixed summary templates</td></tr>
+            <tr><td>Notes during the meeting</td><td class="us">Yes, as people talk</td><td class="them">A report after the call</td></tr>
+            <tr><td>Your own notes</td><td class="us">Kept word for word</td><td class="them">Replaced by a template</td></tr>
             <tr><td>Price</td><td class="us">Free, forever</td><td class="them">Monthly per-seat subscription</td></tr>
             <tr><td>Source code</td><td class="us">Open, MIT licensed</td><td class="them">Closed</td></tr>
           </tbody>
@@ -829,11 +835,11 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
         <button role="tab" aria-selected="false" data-shot="2">Light theme</button>
       </div>
       <div class="frame reveal d1">
-        <img class="on" src="screens/workspace.png" alt="The Minutes workspace: enhanced notes on the left, the transcript with speaker chips on the right." loading="lazy" />
+        <img class="on" src="screens/workspace.png" alt="The Minutes workspace: notes on the left, the transcript with speaker chips on the right." loading="lazy" />
         <img src="screens/chat.png" alt="Minutes with the AI chat open beside the transcript." loading="lazy" />
         <img src="screens/workspace-light.png" alt="The Minutes workspace in the light theme." loading="lazy" />
       </div>
-      <p class="caption" id="caption">Notes on the left, the live transcript docked on the right. Raw and Enhanced are one click apart.</p>
+      <p class="caption" id="caption">Your notes and the AI's in one document, the live transcript docked on the right. One switch hides the AI's lines.</p>
     </div>
   </section>
 
@@ -847,7 +853,7 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
       <div class="stack reveal">
         <div><small>CORE</small><b>Rust</b><span>Audio capture, mixing, inference and storage in a Tauri 2 core.</span></div>
         <div><small>SPEECH</small><b>whisper.cpp · Parakeet</b><span>Two local speech engines, voice-activity filtered.</span></div>
-        <div><small>ACCELERATION</small><b>Metal · Core ML</b><span>Transcription and summaries on the Apple Silicon GPU.</span></div>
+        <div><small>ACCELERATION</small><b>Metal · Core ML</b><span>Transcription and live notes on the Apple Silicon GPU.</span></div>
         <div><small>STORAGE</small><b>SQLite</b><span>One local database file. Yours to back up, move or delete.</span></div>
       </div>
     </div>
@@ -1002,7 +1008,7 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
 
   /* ---------- gallery ---------- */
   const caps = [
-    'Notes on the left, the live transcript docked on the right. Raw and Enhanced are one click apart.',
+    "Your notes and the AI's in one document, the live transcript docked on the right. One switch hides the AI's lines.",
     'Ask your meeting: chat across the transcript and your notes with a local model.',
     'Light and dark themes, following your system.'
   ];
@@ -1048,8 +1054,8 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
     feed.innerHTML = ''; list.innerHTML = ''; acts.innerHTML = '';
     title.textContent = 'Meeting 25_09_26_10_02'; $('#railTitle').textContent = title.textContent;
     mock.classList.remove('enhanced'); bar.classList.remove('enhancing', 'done');
-    $('#segRaw').classList.add('on'); $('#segEnh').classList.remove('on'); $('#mLive').style.opacity = 1;
-    $('#stateText').textContent = 'Enhancing your notes…'; $('#stateText').classList.add('shimmer');
+    $('#mLive').style.opacity = 1;
+    $('#stateText').textContent = 'Writing the wrap-up…'; $('#stateText').classList.add('shimmer');
     sec = 0; $('#timer').textContent = fmt(0);
   }
 
@@ -1065,6 +1071,13 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
     for (const ch of n.own) { await waitVisible(); own.textContent += ch; await sleep(70 + Math.random() * 90); }
     await sleep(300);
     $('.typing-caret', li).remove();
+    return li;
+  }
+
+  // The live notes model adds to the note while the meeting goes on.
+  async function liveNote(li) {
+    li.classList.add('ai');
+    for (const w of $$('.w', li)) { await waitVisible(); w.classList.add('in'); await sleep(45); }
   }
 
   async function sayLine(l) {
@@ -1083,9 +1096,9 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
     NOTES.forEach(n => { const li = addNote(n); $('.own', li).textContent = n.own; $('.typing-caret', li).remove(); });
     $$('.w', mock).forEach(w => w.classList.add('in'));
     title.textContent = TITLE; $('#railTitle').textContent = TITLE;
-    mock.classList.add('enhanced'); $('#segRaw').classList.remove('on'); $('#segEnh').classList.add('on');
+    mock.classList.add('enhanced'); $$('li', list).forEach(li => li.classList.add('ai'));
     ACTIONS.forEach(a => acts.insertAdjacentHTML('beforeend', `<span class="m-chip in"><svg><use href="#i-check"/></svg>${a}</span>`));
-    bar.classList.add('enhancing', 'done'); $('#stateText').textContent = 'Notes enhanced'; $('#stateText').classList.remove('shimmer');
+    bar.classList.add('enhancing', 'done'); $('#stateText').textContent = 'Wrap-up written'; $('#stateText').classList.remove('shimmer');
     $('#mLive').style.opacity = 0; $('#timer').textContent = '00:47';
   }
 
@@ -1097,24 +1110,22 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
       clearInterval(timerId);
       timerId = setInterval(() => { if (!document.hidden) $('#timer').textContent = fmt(++sec); }, 1000);
       speaking = .15;
+      let pending = null;
       for (const l of LINES) {
         await sayLine(l);
-        if (l.note !== undefined) { await sleep(250); await typeNote(NOTES[l.note]); }
+        if (pending) { await sleep(200); await liveNote(pending); pending = null; }
+        if (l.note !== undefined) { await sleep(250); pending = await typeNote(NOTES[l.note]); }
         await sleep(450);
       }
+      if (pending) await liveNote(pending);
       await sleep(600);
-      // Stop → enhance
+      // Stop → the wrap-up
       clearInterval(timerId); speaking = 0;
       $('#stopBtn').animate([{ transform: 'scale(1)' }, { transform: 'scale(.85)' }, { transform: 'scale(1)' }], { duration: 260 });
       await sleep(300);
       bar.classList.add('enhancing'); $('#mLive').style.opacity = 0;
-      $('#segRaw').classList.remove('on'); $('#segEnh').classList.add('on');
       await sleep(1400);
       mock.classList.add('enhanced');
-      for (const li of $$('li', list)) {
-        for (const w of $$('.w', li)) { w.classList.add('in'); await sleep(45); }
-        await sleep(200);
-      }
       // The model names the meeting.
       title.innerHTML = '<span class="caret"></span>';
       for (let i = 1; i <= TITLE.length; i++) { title.innerHTML = TITLE.slice(0, i).replace(/&/g, '&amp;') + '<span class="caret"></span>'; await sleep(38); }
@@ -1124,7 +1135,7 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
         const chip = acts.lastElementChild; requestAnimationFrame(() => requestAnimationFrame(() => chip.classList.add('in')));
         await sleep(260);
       }
-      bar.classList.add('done'); $('#stateText').textContent = 'Notes enhanced'; $('#stateText').classList.remove('shimmer');
+      bar.classList.add('done'); $('#stateText').textContent = 'Wrap-up written'; $('#stateText').classList.remove('shimmer');
       await sleep(7000);
     }
   }
