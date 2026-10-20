@@ -21,6 +21,8 @@ export interface AiBlockInfo {
   /** The text as written: a block whose text changed is the user's. */
   text: string;
   topic: string;
+  /** A line of the meeting-end wrap-up. */
+  wrapUp?: true;
 }
 
 export type AiBlocks = Record<string, AiBlockInfo>;

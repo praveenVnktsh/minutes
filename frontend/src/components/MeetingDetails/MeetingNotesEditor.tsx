@@ -2,12 +2,25 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { BlockNotesEditor } from '@/components/BlockNotesEditor';
 import { CitedMarkdown } from '@/components/MeetingDetails/CitedMarkdown';
 import { SaveFeedback, StatusFeedback } from '@/components/ui/status-feedback';
-import { completeAiNotes, hasAiNotes, legacyAiNotes, useShowAiNotes, WRAP_UP_ENTRY } from '@/lib/aiNotes';
+import {
+  applyTidyWrapUp,
+  completeAiNotes,
+  hasAiNotes,
+  legacyAiNotes,
+  LIVE_WRAP_UP_ENTRY,
+  tidyWrapUpOf,
+  TIDY_WRAP_UP_ENTRY,
+  useShowAiNotes,
+  WRAP_UP_ENTRY,
+  type TidyWrapUp,
+} from '@/lib/aiNotes';
 import { createEmptyLiveNotesDocument, type LiveNotesDocument } from '@/lib/liveNotes';
 import type { StoredTimelineEntry } from '@/lib/liveTimeline';
+import type { SummaryProcessResponse } from '@/types';
 import {
   meetingNotesTarget,
   noteDocumentId,
@@ -29,12 +42,27 @@ export function LegacyAiNotes({ markdown }: { markdown: string }) {
   );
 }
 
+/** The tidy pass's wrap-up stored with the meeting's summary, if any. */
+async function readTidyWrapUp(meetingId: string): Promise<TidyWrapUp | null> {
+  try {
+    const response = await invoke<SummaryProcessResponse>('api_get_summary', { meetingId });
+    return tidyWrapUpOf(response?.data);
+  } catch {
+    return null;
+  }
+}
+
+/** Sent by the summary job when a meeting's tidy pass result is stored. */
+const TIDY_NOTES_READY_EVENT = 'tidy-notes-ready';
+
 /**
  * The meeting's notes after recording: the same document the user typed in
  * during the meeting, AI lines included. When the meeting has ended, the
- * live notes not written yet and its Decisions and Action items are added
- * once (no model). An old meeting without AI lines shows its old Enhanced
- * notes below, read-only.
+ * live notes not written yet and a wrap-up are added once: the tidy pass's
+ * Summary, Decisions, Action items and Open questions when it is stored,
+ * else Decisions and Action items from the live notes (no model), replaced
+ * by the tidy pass's when it lands later. An old meeting without AI lines
+ * shows its old Enhanced notes below, read-only.
  */
 export function MeetingNotesEditor({
   meetingId,
@@ -88,20 +116,50 @@ export function MeetingNotesEditor({
     };
   }, [meetingId, loadNotes]);
 
-  // The meeting has ended: finish the AI lines once (Decisions, Action items).
+  // The meeting has ended: finish the AI lines once (the wrap-up).
   const document = visibleSnapshot.document;
   const needsWrapUp = Boolean(document && hasAiNotes(document) && !document.aiEntries?.includes(WRAP_UP_ENTRY));
   useEffect(() => {
     if (!needsWrapUp || visibleSnapshot.loadState !== 'ready' || wrapUpStarted.current === meetingId) return;
     wrapUpStarted.current = meetingId;
-    void invoke<StoredTimelineEntry[]>('list_meeting_timeline_entries', { meetingId })
-      .then((entries) => {
+    void Promise.all([
+      invoke<StoredTimelineEntry[]>('list_meeting_timeline_entries', { meetingId }),
+      readTidyWrapUp(meetingId),
+    ])
+      .then(([entries, tidy]) => {
         const current = notePersistenceService.getSnapshot(target).document;
-        const completed = current ? completeAiNotes(current, entries ?? []) : null;
+        const completed = current ? completeAiNotes(current, entries ?? [], undefined, tidy) : null;
         if (completed) notePersistenceService.saveNotes(target, completed);
       })
       .catch((error) => console.warn('Could not add decisions and action items:', error));
   }, [meetingId, needsWrapUp, target, visibleSnapshot.loadState]);
+
+  // A wrap-up from the live notes gives way to the tidy pass's, now or when
+  // the summary job stores it.
+  const awaitsTidy = Boolean(
+    document?.aiEntries?.some((entry) => entry.startsWith(`${LIVE_WRAP_UP_ENTRY}:`))
+      && !document?.aiEntries?.includes(TIDY_WRAP_UP_ENTRY),
+  );
+  useEffect(() => {
+    if (!awaitsTidy || visibleSnapshot.loadState !== 'ready') return;
+    let active = true;
+    const upgrade = async () => {
+      const tidy = await readTidyWrapUp(meetingId);
+      const current = notePersistenceService.getSnapshot(target).document;
+      if (!active || !tidy || !current) return;
+      const upgraded = applyTidyWrapUp(current, tidy);
+      if (upgraded) notePersistenceService.saveNotes(target, upgraded);
+    };
+    void upgrade();
+    // Without the event the wrap-up still upgrades on the next open.
+    const unlisten = listen<{ meetingId?: string }>(TIDY_NOTES_READY_EVENT, (event) => {
+      if (event.payload?.meetingId === meetingId) void upgrade();
+    }).catch(() => null);
+    return () => {
+      active = false;
+      void unlisten.then((stop) => stop?.());
+    };
+  }, [awaitsTidy, meetingId, target, visibleSnapshot.loadState]);
 
   const handleChange = useCallback((next: LiveNotesDocument) => {
     notePersistenceService.saveNotes(target, next);

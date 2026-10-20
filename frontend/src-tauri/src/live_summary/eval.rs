@@ -528,6 +528,7 @@ async fn run_variant(variant: Variant, segments: &[Segment], model: &Model) -> R
                                     model: model.name.clone(),
                                     created_at: String::new(),
                                     topic: entry.topic,
+                                    parent: None,
                                 });
                             }
                             entries.sort_by_key(|e| e.start_ms);
@@ -805,6 +806,7 @@ fn parse_rendered(block: &str) -> Vec<TimelineEntry> {
             model: String::new(),
             created_at: String::new(),
             topic: topic.clone(),
+            parent: None,
         });
     }
     entries

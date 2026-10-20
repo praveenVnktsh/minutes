@@ -3,7 +3,7 @@
 //! short output cap, a low temperature, the fixed seed and a timeout of our
 //! own. The same options reach every provider.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::anyhow;
@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::database::repositories::setting::SettingsRepository;
 use crate::summary::budget::SUMMARY_SEED;
-use crate::summary::llm_client::{generate_summary, GenerationOptions};
+use crate::summary::llm_client::{generate_summary, Gate, GenerationOptions};
 use crate::summary::service::{load_llm_config, LlmConfig};
 use crate::summary::summary_engine::sidecar::OnAbandon;
 
@@ -142,6 +142,25 @@ pub trait Generator: Send + Sync {
         self.generate(system_prompt, user_prompt, cancel).await
     }
 
+    /// The live notes LoRA adapter when this is the fine-tuned live notes
+    /// model (the built-in Gemma 4 E2B with the adapter on disk): the worker
+    /// then speaks its trained format (`finetuned`). `None` for every other
+    /// model, and without the adapter.
+    fn live_notes_adapter(&self) -> Option<&Path> {
+        None
+    }
+
+    /// A fine-tuned window (`finetuned`): greedy, "." gated, the adapter
+    /// applied. The default is [`Generator::generate`].
+    async fn generate_finetuned(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+        cancel: &CancellationToken,
+    ) -> Result<Generated, GenerateError> {
+        self.generate(system_prompt, user_prompt, cancel).await
+    }
+
     /// An Enhanced notes section (or its title): a longer answer than a
     /// window's notes, of at most `max_lines` lines on a model that can stop
     /// there. The default is [`Generator::generate`].
@@ -186,6 +205,26 @@ pub(crate) fn section_generation_options() -> GenerationOptions {
     }
 }
 
+/// The generation settings of a fine-tuned window: the adapter, greedy (the
+/// closed-loop evaluation's decoding), "." answered without generating when
+/// the model is sure of it, a small context.
+pub(crate) fn finetuned_generation_options(adapter: &Path) -> GenerationOptions {
+    use super::finetuned::{CONTEXT_SIZE, GATE_THRESHOLD, GATE_TOKEN, MAX_OUTPUT_TOKENS};
+    GenerationOptions {
+        max_tokens: Some(MAX_OUTPUT_TOKENS),
+        output_cap: Some(MAX_OUTPUT_TOKENS),
+        temperature: Some(0.0),
+        sampling_temperature: Some(0.0),
+        lora_path: Some(adapter.to_path_buf()),
+        gate: Some(Gate {
+            token: GATE_TOKEN.to_string(),
+            threshold: GATE_THRESHOLD,
+        }),
+        context_size: Some(CONTEXT_SIZE),
+        ..generation_options()
+    }
+}
+
 /// The summary model setting, resolved for live summary calls.
 pub struct SummaryModelGenerator {
     provider_id: String,
@@ -198,6 +237,9 @@ pub struct SummaryModelGenerator {
     /// whether it runs on its own helper. `None` keeps the summary model's
     /// path (the JSON prompt, a fresh context on the shared helper).
     builtin: Option<(String, bool)>,
+    /// The live notes LoRA adapter, when `builtin` is the live notes model
+    /// and the adapter is on disk.
+    adapter: Option<PathBuf>,
 }
 
 /// Providers that run the built-in model.
@@ -301,6 +343,15 @@ pub fn live_notes_model(
         .then(|| (LIVE_NOTES_MODEL.to_string(), true))
 }
 
+/// The live notes adapter for `model`, when it is the live notes model and
+/// the adapter is on disk.
+pub fn live_notes_adapter(models_dir: &Path, model: &str) -> Option<PathBuf> {
+    use crate::summary::summary_engine::adapters::{adapter_path, Adapter};
+    (model == crate::summary::summary_engine::models::LIVE_NOTES_MODEL)
+        .then(|| adapter_path(models_dir, Adapter::LiveNotes))
+        .flatten()
+}
+
 impl SummaryModelGenerator {
     /// The user's summary model, or why there is none to use.
     pub async fn from_settings(
@@ -336,11 +387,20 @@ impl SummaryModelGenerator {
                     choice,
                     crate::summary::summary_engine::client::total_memory_bytes(),
                 )
+                .map(|builtin| (builtin, models_dir))
             })
             .flatten();
+        let (builtin, adapter) = match builtin {
+            Some((builtin, models_dir)) => {
+                let adapter = live_notes_adapter(&models_dir, &builtin.0);
+                (Some(builtin), adapter)
+            }
+            None => (None, None),
+        };
         Ok(Self {
             num_ctx,
             builtin,
+            adapter,
             provider_id: settings.provider,
             config,
             app_data_dir,
@@ -371,6 +431,7 @@ impl SummaryModelGenerator {
             client: reqwest::Client::new(),
             num_ctx: None,
             builtin: Some((model.to_string(), own_helper)),
+            adapter: None,
         }
     }
 }
@@ -437,6 +498,29 @@ impl Generator for SummaryModelGenerator {
         )
         .await
     }
+
+    fn live_notes_adapter(&self) -> Option<&Path> {
+        self.adapter.as_deref()
+    }
+
+    async fn generate_finetuned(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+        cancel: &CancellationToken,
+    ) -> Result<Generated, GenerateError> {
+        let Some(adapter) = self.adapter.as_deref() else {
+            return self.generate(system_prompt, user_prompt, cancel).await;
+        };
+        self.generate_with_limit(
+            system_prompt,
+            user_prompt,
+            None,
+            finetuned_generation_options(adapter),
+            cancel,
+        )
+        .await
+    }
 }
 
 /// The line limit only applies to the live notes model's compact one-note-
@@ -482,13 +566,8 @@ impl SummaryModelGenerator {
                     grammar,
                     max_lines,
                     own_helper: *own_helper,
-                    options: BuiltinGenerateOptions {
-                        max_tokens: options.max_tokens,
-                        temperature: options.sampling_temperature,
-                        seed: options.seed,
-                        timeout: options.timeout,
-                        on_abandon: options.on_abandon,
-                    },
+                    one_off: false,
+                    options: BuiltinGenerateOptions::from(&options),
                 },
                 Some(cancel),
             )
@@ -630,6 +709,37 @@ mod tests {
         assert!(live_notes_model_by_default(Some(16 * GB)));
         assert!(!live_notes_model_by_default(Some(8 * GB)));
         assert!(!live_notes_model_by_default(None));
+    }
+
+    #[test]
+    fn the_adapter_is_only_for_the_live_notes_model_and_runs_greedy_and_gated() {
+        use crate::summary::summary_engine::client::BuiltinGenerateOptions;
+        use crate::summary::summary_engine::models::LIVE_NOTES_MODEL;
+        let dir = tempfile::tempdir().unwrap();
+        // Without the adapter: today's live notes, unchanged.
+        assert_eq!(live_notes_adapter(dir.path(), LIVE_NOTES_MODEL), None);
+        let adapter = dir.path().join("minutes-notes-lora.gguf");
+        std::fs::write(&adapter, b"GGUF").unwrap();
+        assert_eq!(
+            live_notes_adapter(dir.path(), LIVE_NOTES_MODEL),
+            Some(adapter.clone())
+        );
+        assert_eq!(live_notes_adapter(dir.path(), "qwen3.5:4b"), None);
+
+        let options = BuiltinGenerateOptions::from(&finetuned_generation_options(&adapter));
+        assert_eq!(options.max_tokens, Some(300));
+        assert_eq!(options.temperature, Some(0.0));
+        assert_eq!(options.lora_path.as_deref(), Some(adapter.as_path()));
+        let gate = options.gate.unwrap();
+        assert_eq!((gate.token.as_str(), gate.threshold), (".", 0.9));
+        assert_eq!(options.context_size, Some(4096));
+        assert_eq!(options.on_abandon, OnAbandon::Yield);
+        // Every other live notes call keeps the base model.
+        let plain = BuiltinGenerateOptions::from(&generation_options());
+        assert_eq!(
+            (plain.lora_path, plain.gate, plain.context_size),
+            (None, None, None)
+        );
     }
 
     use crate::summary::llm_client::LLMProvider;

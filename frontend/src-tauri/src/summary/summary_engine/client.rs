@@ -15,6 +15,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::models;
 use super::sidecar::{OnAbandon, Priority, SidecarError, SidecarManager, SidecarRequest};
+use crate::summary::llm_client::Gate;
 
 // ============================================================================
 // Request/Response Types
@@ -66,6 +67,14 @@ enum Request {
         /// Stop after this many complete non-empty lines.
         #[serde(skip_serializing_if = "Option::is_none")]
         max_lines: Option<u32>,
+        /// GGUF LoRA adapter for this request only.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        lora_path: Option<String>,
+        /// First-token gate (see [`Gate`]).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        gate_token: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        gate_threshold: Option<f32>,
     },
     Tokenize {
         text: String,
@@ -94,6 +103,8 @@ enum Response {
         reused_tokens: Option<u32>,
         #[serde(default)]
         tokens_per_second: Option<f64>,
+        #[serde(default)]
+        gate_prob: Option<f32>,
     },
     TokenCount {
         count: u32,
@@ -124,12 +135,15 @@ pub enum BuiltinError {
 }
 
 /// A built-in generation result.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct BuiltinCompletion {
     pub text: String,
     /// True when generation stopped at `max_tokens` rather than at end-of-turn.
     pub truncated: bool,
     pub prompt_tokens: Option<u32>,
+    /// The gate token's probability, when the request had a gate. The text
+    /// is exactly the gate token when it passed.
+    pub gate_prob: Option<f32>,
 }
 
 fn parse_generate_response(response_json: &str) -> Result<BuiltinCompletion> {
@@ -142,6 +156,7 @@ fn parse_generate_response(response_json: &str) -> Result<BuiltinCompletion> {
             finish_reason,
             prompt_tokens,
             error_kind,
+            gate_prob,
             ..
         } => {
             if let Some(err_msg) = error {
@@ -159,6 +174,7 @@ fn parse_generate_response(response_json: &str) -> Result<BuiltinCompletion> {
                 text,
                 truncated: finish_reason.as_deref() == Some("length"),
                 prompt_tokens,
+                gate_prob,
             })
         }
         Response::TokenCount { .. } => Err(anyhow!("Unexpected token count response")),
@@ -334,8 +350,9 @@ pub async fn count_builtin_tokens(
 const TOKENIZE_TIMEOUT_SECS: u64 = 120;
 
 /// Per-call overrides for [`generate_with_builtin`]. `None` keeps the model's
-/// own sampling defaults, the fixed seed and the standard timeout.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+/// own sampling defaults, the fixed seed and the standard timeout. Built from
+/// a `GenerationOptions` with `BuiltinGenerateOptions::from(&options)`.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct BuiltinGenerateOptions {
     /// Output budget; `None` uses `models::DEFAULT_MAX_TOKENS`.
     pub max_tokens: Option<u32>,
@@ -348,6 +365,35 @@ pub struct BuiltinGenerateOptions {
     pub timeout: Option<Duration>,
     /// What a timeout or cancellation does to the shared sidecar.
     pub on_abandon: OnAbandon,
+    /// GGUF LoRA adapter applied to this request only.
+    pub lora_path: Option<PathBuf>,
+    /// First-token gate.
+    pub gate: Option<Gate>,
+    /// Context window; `None` uses the model's (`ModelDef::context_size`).
+    pub context_size: Option<u32>,
+}
+
+impl BuiltinGenerateOptions {
+    /// The request's n_ctx: the override, else the model's own. Every
+    /// request names one, and llama-helper only reloads the model for a new
+    /// one when its GPU offload would change (on Apple Silicon it never does
+    /// for a model that fits), so live notes and the tidy pass can alternate.
+    fn context_size(&self, model_def: &models::ModelDef) -> u32 {
+        self.context_size
+            .filter(|n| *n > 0)
+            .unwrap_or(model_def.context_size)
+    }
+
+    /// The request's `lora_path`, `gate_token` and `gate_threshold`.
+    fn adapter_fields(&self) -> (Option<String>, Option<String>, Option<f32>) {
+        (
+            self.lora_path
+                .as_ref()
+                .map(|path| path.to_string_lossy().to_string()),
+            self.gate.as_ref().map(|gate| gate.token.clone()),
+            self.gate.as_ref().map(|gate| gate.threshold),
+        )
+    }
 }
 
 /// Generate text using built-in AI
@@ -392,10 +438,11 @@ pub async fn generate_with_builtin(
         .filter(|value| *value > 0)
         .unwrap_or(models::DEFAULT_MAX_TOKENS);
     let id = next_request_id();
+    let (lora_path, gate_token, gate_threshold) = options.adapter_fields();
     let request = Request::Generate {
         prompt: formatted_prompt,
         max_tokens: Some(max_tokens),
-        context_size: Some(model_def.context_size),
+        context_size: Some(options.context_size(&model_def)),
         model_path: Some(model_path.to_string_lossy().to_string()),
         temperature: Some(options.temperature.unwrap_or(sampling.temperature)),
         top_k: Some(sampling.top_k),
@@ -417,6 +464,9 @@ pub async fn generate_with_builtin(
         kv_cache_type: None,
         grammar: None,
         max_lines: None,
+        lora_path,
+        gate_token,
+        gate_threshold,
     };
 
     let request_json = serde_json::to_string(&request)?;
@@ -479,7 +529,7 @@ pub async fn generate_with_builtin(
 pub const LIVE_NOTES_CACHE_CONTEXT: u32 = 8192;
 
 /// One live notes request.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct LiveNotesRequest<'a> {
     pub model_name: &'a str,
     pub system_prompt: &'a str,
@@ -491,6 +541,9 @@ pub struct LiveNotesRequest<'a> {
     pub max_lines: Option<u32>,
     /// Run on the live notes helper (another model than the main helper's).
     pub own_helper: bool,
+    /// A single call (the tidy pass) rather than a window: no prompt cache,
+    /// so it gets its whole `context_size` instead of the cache's 8192.
+    pub one_off: bool,
     pub options: BuiltinGenerateOptions,
 }
 
@@ -563,6 +616,7 @@ pub async fn generate_live_notes(
         grammar,
         max_lines,
         own_helper,
+        one_off,
         options,
     } = request;
     let (prompt, prefix_chars) =
@@ -571,7 +625,9 @@ pub async fn generate_live_notes(
         live_notes_manager(app_data_dir, model_name, own_helper).await?;
     let sampling = model_def.sampling.sanitize_for_llama_helper();
     let id = next_request_id();
-    let cache = live_notes_cache(own_helper, prefix_chars, model_def.context_size);
+    let context_size = options.context_size(&model_def);
+    let cache = live_notes_cache(own_helper && !one_off, prefix_chars, context_size);
+    let (lora_path, gate_token, gate_threshold) = options.adapter_fields();
     let request = Request::Generate {
         prompt,
         max_tokens: Some(
@@ -581,7 +637,7 @@ pub async fn generate_live_notes(
                 .filter(|value| *value > 0)
                 .unwrap_or(models::DEFAULT_MAX_TOKENS),
         ),
-        context_size: Some(model_def.context_size),
+        context_size: Some(context_size),
         model_path: Some(model_path.to_string_lossy().to_string()),
         temperature: Some(options.temperature.unwrap_or(sampling.temperature)),
         top_k: Some(sampling.top_k),
@@ -603,6 +659,9 @@ pub async fn generate_live_notes(
         kv_cache_type: None,
         grammar,
         max_lines,
+        lora_path,
+        gate_token,
+        gate_threshold,
     };
     let timeout = options
         .timeout
@@ -909,6 +968,9 @@ pub async fn generate_with_builtin_stream(
         kv_cache_type: None,
         grammar: None,
         max_lines: None,
+        lora_path: None,
+        gate_token: None,
+        gate_threshold: None,
     };
     let response_json = manager
         .send(SidecarRequest {
@@ -1168,6 +1230,9 @@ mod tests {
             kv_cache_type: None,
             grammar: None,
             max_lines: None,
+            lora_path: None,
+            gate_token: None,
+            gate_threshold: None,
         };
 
         let json = serde_json::to_string(&request).unwrap();
@@ -1194,6 +1259,7 @@ mod tests {
                 text: "ok".to_string(),
                 truncated: false,
                 prompt_tokens: Some(10),
+                gate_prob: None,
             }
         );
         let cut = parse_generate_response(
@@ -1297,6 +1363,43 @@ mod tests {
     }
 
     #[test]
+    fn adapter_options_reach_the_request_and_the_gate_probability_comes_back() {
+        let model = models::get_model_by_name(models::LIVE_NOTES_MODEL).unwrap();
+        let options = BuiltinGenerateOptions {
+            lora_path: Some(PathBuf::from("/m/minutes-notes-lora.gguf")),
+            gate: Some(Gate {
+                token: ".".into(),
+                threshold: 0.9,
+            }),
+            context_size: Some(20_480),
+            ..Default::default()
+        };
+        assert_eq!(options.context_size(&model), 20_480);
+        assert_eq!(
+            BuiltinGenerateOptions::default().context_size(&model),
+            model.context_size
+        );
+        let (lora_path, gate_token, gate_threshold) = options.adapter_fields();
+        assert_eq!(lora_path.as_deref(), Some("/m/minutes-notes-lora.gguf"));
+        assert_eq!(gate_token.as_deref(), Some("."));
+        assert_eq!(gate_threshold, Some(0.9));
+        assert_eq!(
+            BuiltinGenerateOptions::default().adapter_fields(),
+            (None, None, None)
+        );
+
+        let gated = parse_generate_response(
+            r#"{"type":"response","text":".","error":null,"finish_reason":"stop","gate_prob":0.97}"#,
+        )
+        .unwrap();
+        assert_eq!(gated.text, ".");
+        assert_eq!(gated.gate_prob, Some(0.97));
+        let plain =
+            parse_generate_response(r#"{"type":"response","text":"x","error":null}"#).unwrap();
+        assert_eq!(plain.gate_prob, None);
+    }
+
+    #[test]
     fn a_preempted_background_reply_is_a_typed_error_not_partial_text() {
         let error = parse_generate_response(
             r#"{"type":"response","text":"half","error":null,"finish_reason":"cancelled","id":3}"#,
@@ -1335,6 +1438,9 @@ mod tests {
             kv_cache_type: None,
             grammar: None,
             max_lines: None,
+            lora_path: None,
+            gate_token: None,
+            gate_threshold: None,
         })
         .unwrap();
         assert!(json.contains("\"id\":4"));
@@ -1343,6 +1449,9 @@ mod tests {
             "cache_prompt",
             "cache_prefix_chars",
             "cache_context_size",
+            "lora_path",
+            "gate_token",
+            "gate_threshold",
         ] {
             assert!(!json.contains(field), "{field} leaked into {json}");
         }

@@ -6,11 +6,15 @@ import { buildMeetingExport } from '@/lib/meetingExport';
 import { parseBetaFeatures, DEFAULT_BETA_FEATURES } from '@/types/betaFeatures';
 import {
   actionItemText,
+  applyTidyWrapUp,
   completeAiNotes,
   hasAiNotes,
   legacyAiNotes,
   notesMarkdown,
+  tidyWrapUpOf,
+  TIDY_WRAP_UP_ENTRY,
   WRAP_UP_ENTRY,
+  type TidyWrapUp,
 } from './aiNotes';
 
 function entry(id: string, startMs: number, kind: TimelineEntry['kind'], text: string, topic: string, speaker: string | null = null): TimelineEntry {
@@ -114,7 +118,7 @@ describe('Decisions and Action items when the meeting ends', () => {
   test('a meeting without decisions or actions only gets the marker', () => {
     const after = completeAiNotes(meetingDocument(), [entries[0]], ids())!;
     expect(blockTexts(after)).toEqual(blockTexts(meetingDocument()));
-    expect(after.aiEntries).toEqual(['e1', WRAP_UP_ENTRY]);
+    expect(after.aiEntries).toEqual(['e1', WRAP_UP_ENTRY, 'wrap-up:live:0']);
   });
 
   test('never rewrites a document the AI did not write into (an old meeting)', () => {
@@ -133,6 +137,87 @@ describe('Decisions and Action items when the meeting ends', () => {
   test('action items read "Owner — task", or just the task without an owner', () => {
     expect(actionItemText({ text: 'Ship it', speaker: 'You' })).toBe('You — Ship it');
     expect(actionItemText({ text: 'Ship it', speaker: null })).toBe('Ship it');
+  });
+});
+
+const tidy: TidyWrapUp = {
+  summary: 'Launch planning: the launch is set for Nov 12.',
+  decisions: ['Launch on Nov 12'],
+  action_items: ['Priya — Draft the launch email'],
+  open_questions: ['Who books the room?'],
+};
+
+const TIDY_TEXTS = [
+  'Summary',
+  'Launch planning: the launch is set for Nov 12.',
+  'Decisions',
+  'Launch on Nov 12',
+  'Action items',
+  'Priya — Draft the launch email',
+  'Open questions',
+  'Who books the room?',
+];
+
+describe('the wrap-up from the tidy pass', () => {
+  test('a stored tidy result is the wrap-up: Summary, Decisions, Action items, Open questions', () => {
+    const after = completeAiNotes(meetingDocument(), entries, ids(), tidy)!;
+    expect(blockTexts(after).slice(7)).toEqual([...TIDY_TEXTS, '']);
+    const summary = (after.editorBlocks as { type: string }[])[8];
+    expect(summary.type).toBe('paragraph');
+    expect(after.aiEntries).toEqual(expect.arrayContaining([WRAP_UP_ENTRY, TIDY_WRAP_UP_ENTRY]));
+    expect(applyTidyWrapUp(after, tidy, ids())).toBeNull();
+  });
+
+  test('replaces the wrap-up from the live notes when it lands later', () => {
+    const live = completeAiNotes(meetingDocument(), entries, ids())!;
+    let next = 100;
+    const after = applyTidyWrapUp(live, tidy, () => `tidy-${++next}`)!;
+    expect(blockTexts(after)).toEqual([
+      'Ask about budget',
+      'Pricing',
+      'Free tier held back',
+      'Launch',
+      'Decision: Launch on Nov 12',
+      'Action: Priya — Draft the launch email',
+      'Action: Others — Book the room',
+      ...TIDY_TEXTS,
+      '',
+    ]);
+    // The replaced lines are gone from the AI's lines and the notes list.
+    const ids_ = (after.editorBlocks as { id: string }[]).map((block) => block.id);
+    expect(Object.keys(after.aiBlocks!).every((id) => ids_.includes(id))).toBe(true);
+    expect(after.notes.map((note) => note.id)).toEqual(ids_);
+    expect(after.aiEntries).toContain(TIDY_WRAP_UP_ENTRY);
+    expect(applyTidyWrapUp(after, tidy, ids())).toBeNull();
+  });
+
+  test('a meeting whose live wrap-up was empty gets the tidy one appended', () => {
+    const live = completeAiNotes(meetingDocument(), [entries[0]], ids())!;
+    const after = applyTidyWrapUp(live, tidy, ids())!;
+    expect(blockTexts(after)).toEqual([...blockTexts(meetingDocument()).slice(0, 3), ...TIDY_TEXTS, '']);
+  });
+
+  test('a wrap-up the user edited stays, and is not replaced again', () => {
+    const live = completeAiNotes(meetingDocument(), entries, ids())!;
+    const edited = live.editorBlocks as { id: string }[];
+    const decision = edited.find((block) => live.aiBlocks?.[block.id]?.text === 'Launch on Nov 12')!;
+    const aiBlocks = { ...live.aiBlocks };
+    delete aiBlocks[decision.id];
+    const after = applyTidyWrapUp({ ...live, aiBlocks }, tidy, ids())!;
+    expect(blockTexts(after)).toEqual(blockTexts(live));
+    expect(after.aiEntries).toContain(TIDY_WRAP_UP_ENTRY);
+  });
+
+  test('an old wrap-up (before the tidy pass) is never replaced', () => {
+    const old = { ...meetingDocument(), aiEntries: ['e1', WRAP_UP_ENTRY] };
+    expect(applyTidyWrapUp(old, tidy, ids())).toBeNull();
+  });
+
+  test('reads the tidy result stored with the summary, and nothing else', () => {
+    expect(tidyWrapUpOf({ markdown: '#', tidy_wrap_up: tidy })).toEqual(tidy);
+    expect(tidyWrapUpOf({ markdown: '#' })).toBeNull();
+    expect(tidyWrapUpOf({ tidy_wrap_up: { ...tidy, decisions: 'x' } })).toBeNull();
+    expect(tidyWrapUpOf(null)).toBeNull();
   });
 });
 

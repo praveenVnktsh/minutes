@@ -300,6 +300,11 @@ fn push_line(prompt: &mut String, segment: &Segment) {
 /// newest kept), before `before_ms`. Segments are kept whole, except that a
 /// single long segment is cut to its last words.
 pub fn carryover_segments(segments: &[Segment], before_ms: i64) -> Vec<Segment> {
+    carryover_within(segments, before_ms, CARRYOVER_MS)
+}
+
+/// [`carryover_segments`] over the last `carry_ms` instead of `CARRYOVER_MS`.
+pub fn carryover_within(segments: &[Segment], before_ms: i64, carry_ms: i64) -> Vec<Segment> {
     let Some(last_end) = segments
         .iter()
         .filter(|s| s.start_ms < before_ms)
@@ -308,7 +313,7 @@ pub fn carryover_segments(segments: &[Segment], before_ms: i64) -> Vec<Segment> 
     else {
         return Vec::new();
     };
-    let from = last_end - CARRYOVER_MS;
+    let from = last_end - carry_ms;
     let mut kept: Vec<Segment> = Vec::new();
     let mut words = 0;
     for segment in segments

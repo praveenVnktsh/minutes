@@ -775,6 +775,20 @@ pub fn run() {
                 });
             });
 
+            // The fine-tuned adapters for the live notes model, when it is
+            // downloaded and they are not (users who had it before they shipped).
+            optional_setup_step("live notes adapters", || {
+                let Ok(app_data_dir) = _app.path().app_data_dir() else {
+                    return;
+                };
+                let models_dir = summary::summary_engine::models::get_models_directory(&app_data_dir);
+                if live_summary::llm::live_notes_model_downloaded(&models_dir) {
+                    tauri::async_runtime::spawn(async move {
+                        summary::summary_engine::adapters::ensure_downloaded(&models_dir).await;
+                    });
+                }
+            });
+
             // Finish speaker identification and final passes that were cut off
             // when the app last quit.
             optional_setup_step("resume workers", || {

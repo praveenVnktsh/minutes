@@ -265,6 +265,24 @@ fn build_summary_result_json(
     }))
 }
 
+/// Tells the notes editor a meeting's tidy pass result is stored.
+pub const TIDY_NOTES_READY_EVENT: &str = "tidy-notes-ready";
+/// The result field holding the tidy pass's wrap-up.
+pub const TIDY_WRAP_UP_FIELD: &str = "tidy_wrap_up";
+
+/// The stored result with the tidy pass's wrap-up, when it wrote the notes.
+fn with_tidy_wrap_up(
+    mut result: serde_json::Value,
+    wrap_up: Option<&crate::summary::tidy::TidyWrapUp>,
+) -> serde_json::Value {
+    if let (Some(wrap_up), Some(object)) = (wrap_up, result.as_object_mut()) {
+        if let Ok(value) = serde_json::to_value(wrap_up) {
+            object.insert(TIDY_WRAP_UP_FIELD.to_string(), value);
+        }
+    }
+    result
+}
+
 /// Parses a `summary_processes.result` JSON blob and extracts a cached English
 /// summary only when it was produced from exactly the same source inputs and
 /// the user is switching to a different non-English target language.
@@ -740,6 +758,11 @@ impl SummaryService {
             app_data_dir: app_data_dir.as_ref(),
             cancellation_token: Some(&cancellation_token),
         };
+        // The notes document's wrap-up from the tidy pass, stored with the
+        // summary for the notes editor (`completeAiNotes`).
+        let tidy_wrap_up = from_live_notes
+            .as_ref()
+            .and_then(|notes| notes.tidy.clone());
         let result = match from_live_notes {
             Some(notes) => Ok(crate::summary::processor::GeneratedMeetingSummary {
                 final_markdown: notes.markdown.clone(),
@@ -790,7 +813,7 @@ impl SummaryService {
                     generated.reasoning_stripped,
                     generated.normalization_fallback,
                 ) {
-                    Ok(result) => result,
+                    Ok(result) => with_tidy_wrap_up(result, tidy_wrap_up.as_ref()),
                     Err(error) => {
                         Self::update_process_failed(&pool, &meeting_id, started_at, &error).await;
                         Self::cleanup_cancellation_token(&meeting_id, started_at);
@@ -831,6 +854,13 @@ impl SummaryService {
                             }
                         }
                         info!("Summary saved successfully for meeting_id: {}", meeting_id);
+                        if tidy_wrap_up.is_some() {
+                            use tauri::Emitter;
+                            let _ = app.emit(
+                                TIDY_NOTES_READY_EVENT,
+                                serde_json::json!({ "meetingId": meeting_id }),
+                            );
+                        }
                     }
                     Ok(false) => warn!(
                         "Skipped stale summary completion for meeting_id: {}",
@@ -1522,6 +1552,41 @@ mod tests {
         assert_eq!(
             result["english_cache"]["markdown"],
             "# English Title\n## Decisions\nDone"
+        );
+    }
+
+    #[test]
+    fn result_json_carries_the_tidy_wrap_up_only_when_the_tidy_pass_wrote_the_notes() {
+        let result = || {
+            build_summary_result_json(
+                "# Title\n## Summary\nDone",
+                "# Title\n## Summary\nDone",
+                sample_cache_source(),
+                None,
+                false,
+                false,
+            )
+            .unwrap()
+        };
+        assert!(with_tidy_wrap_up(result(), None)
+            .get(TIDY_WRAP_UP_FIELD)
+            .is_none());
+        let wrap_up = crate::summary::tidy::TidyWrapUp {
+            summary: "Done".into(),
+            decisions: vec!["Ship it".into()],
+            action_items: vec!["Priya — Send the deck".into()],
+            open_questions: Vec::new(),
+        };
+        let stored = with_tidy_wrap_up(result(), Some(&wrap_up));
+        assert_eq!(stored["markdown"], "## Summary\nDone");
+        assert_eq!(
+            stored[TIDY_WRAP_UP_FIELD],
+            serde_json::json!({
+                "summary": "Done",
+                "decisions": ["Ship it"],
+                "action_items": ["Priya — Send the deck"],
+                "open_questions": [],
+            })
         );
     }
 

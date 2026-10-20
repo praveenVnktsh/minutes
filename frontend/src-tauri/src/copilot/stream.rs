@@ -568,6 +568,7 @@ impl Streamer for LiveNotesConfirmStreamer {
                 grammar: None,
                 max_lines: Some(1),
                 own_helper: true,
+                one_off: false,
                 options: BuiltinGenerateOptions {
                     max_tokens: Some(max_tokens.max(1)),
                     temperature: Some(temperature),
@@ -575,6 +576,7 @@ impl Streamer for LiveNotesConfirmStreamer {
                     timeout: Some(HARD_TIMEOUT),
                     // Never stop the helper under a live notes window.
                     on_abandon: OnAbandon::LetFinish,
+                    ..Default::default()
                 },
             },
             Some(cancel),

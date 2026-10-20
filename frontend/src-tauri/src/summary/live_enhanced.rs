@@ -102,6 +102,8 @@ pub trait SectionSink: Send + Sync {
 pub struct FinishedNotes {
     pub markdown: String,
     pub calls: usize,
+    /// The notes document's wrap-up, when the tidy pass wrote the notes.
+    pub tidy: Option<crate::summary::tidy::TidyWrapUp>,
 }
 
 /// Everything the finished notes are made from.
@@ -174,24 +176,77 @@ pub async fn finish_notes(
         sink.save(&section, run.end_ms).await;
         written.push(section);
     }
-    let fallback_title = runs
-        .iter()
-        .find(|r| !r.is_small())
-        .or(runs.first())
-        .map_or_else(|| "Meeting notes".to_string(), |r| r.title.clone());
-    let title = match write_title(generator, &runs, inputs.user_notes_markdown, cancel).await {
-        Some(title) => {
-            calls += 1;
-            title
-        }
-        None => fallback_title,
-    };
+    let (title, title_calls) =
+        meeting_title(generator, &runs, inputs.user_notes_markdown, cancel).await;
+    calls += title_calls;
     if cancel.is_cancelled() {
         return Err("Summary generation was cancelled".to_string());
     }
     Ok(FinishedNotes {
         markdown: assemble(&title, &runs, &written, inputs.notes, &lines),
         calls,
+        tidy: None,
+    })
+}
+
+/// The meeting's title, or its first written topic when the model gives
+/// nothing usable; and the calls it took.
+async fn meeting_title(
+    generator: &dyn Generator,
+    runs: &[TopicRun],
+    user_notes_markdown: &str,
+    cancel: &CancellationToken,
+) -> (String, usize) {
+    match write_title(generator, runs, user_notes_markdown, cancel).await {
+        Some(title) => (title, 1),
+        None => (
+            runs.iter()
+                .find(|r| !r.is_small())
+                .or(runs.first())
+                .map_or_else(|| "Meeting notes".to_string(), |r| r.title.clone()),
+            0,
+        ),
+    }
+}
+
+/// The notes from the tidy pass (see `summary::tidy`) and a title, or
+/// `None` when the pass does not run or its answer is not kept: the notes
+/// are then written as before.
+pub async fn tidy_notes(
+    tidy_model: &dyn crate::summary::tidy::TidyModel,
+    generator: &dyn Generator,
+    inputs: &NotesInputs<'_>,
+    cancel: &CancellationToken,
+) -> Option<FinishedNotes> {
+    let (lines, _) = parse_transcript(inputs.transcript_text);
+    let end_ms = lines
+        .iter()
+        .map(|l| l.ms)
+        .chain(inputs.notes.iter().map(|n| n.end_ms))
+        .max()
+        .unwrap_or(0);
+    let runs = topic_runs(inputs.notes, end_ms);
+    let user_notes = place_user_notes(&runs, &lines, inputs.user_notes.clone());
+    let tidy = crate::summary::tidy::run(
+        tidy_model,
+        crate::summary::tidy::TidyInputs {
+            runs: &runs,
+            user_notes: &user_notes,
+            transcript_text: inputs.transcript_text,
+            end_ms,
+        },
+        cancel,
+    )
+    .await?;
+    let (title, title_calls) =
+        meeting_title(generator, &runs, inputs.user_notes_markdown, cancel).await;
+    if cancel.is_cancelled() {
+        return None;
+    }
+    Some(FinishedNotes {
+        markdown: format!("# {title}\n\n{}\n", tidy.markdown),
+        calls: 1 + title_calls,
+        tidy: Some(tidy.wrap_up),
     })
 }
 
@@ -216,6 +271,21 @@ pub fn old_path_reason(
     crate::summary::live_outline::check(notes, &lines, timed)
         .err()
         .map(|reason| reason.to_string())
+}
+
+/// Whether the built-in summary model is the live notes model (then both
+/// run on the one helper).
+async fn summary_model_is_live_notes_model(pool: &sqlx::SqlitePool) -> bool {
+    use crate::database::repositories::setting::SettingsRepository;
+    use crate::summary::summary_engine::models::LIVE_NOTES_MODEL;
+    SettingsRepository::get_model_config(pool)
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|settings| {
+            crate::live_summary::llm::is_builtin(&settings.provider)
+                && settings.model == LIVE_NOTES_MODEL
+        })
 }
 
 struct DbSink<'a> {
@@ -328,26 +398,47 @@ pub async fn notes_from_live_notes<R: tauri::Runtime>(
         provider: generator.provider().to_string(),
         model: generator.model().to_string(),
     };
+    let inputs = NotesInputs {
+        notes: &notes,
+        transcript_text,
+        user_notes,
+        user_notes_markdown,
+        stored,
+        regenerate,
+    };
+    // The tidy pass, when its adapter and model are on disk.
+    if let Some((app_data_dir, adapter)) = app
+        .path()
+        .app_data_dir()
+        .ok()
+        .and_then(|dir| crate::summary::tidy::available(&dir).map(|adapter| (dir, adapter)))
+    {
+        info!(
+            "Enhanced notes for {meeting_id}: tidy pass with {}",
+            adapter.display()
+        );
+        // E2B runs on its own helper unless it is the summary model.
+        let own_helper = !summary_model_is_live_notes_model(pool).await;
+        let tidy_model = crate::summary::tidy::BuiltinTidyModel {
+            app_data_dir,
+            adapter,
+            own_helper,
+        };
+        if let Some(finished) = tidy_notes(&tidy_model, &generator, &inputs, cancel).await {
+            return Ok(Some(finished));
+        }
+        if cancel.is_cancelled() {
+            return Err("Summary generation was cancelled".to_string());
+        }
+    }
     info!(
         "Enhanced notes for {meeting_id} from {} live notes with {}",
         notes.len(),
         generator.model()
     );
-    finish_notes(
-        &generator,
-        NotesInputs {
-            notes: &notes,
-            transcript_text,
-            user_notes,
-            user_notes_markdown,
-            stored,
-            regenerate,
-        },
-        &sink,
-        cancel,
-    )
-    .await
-    .map(Some)
+    finish_notes(&generator, inputs, &sink, cancel)
+        .await
+        .map(Some)
 }
 
 #[cfg(test)]
@@ -484,6 +575,93 @@ mod tests {
         assert_eq!(
             finished.markdown,
             "# Pricing and Hiring\n\n## Pricing\n\n- Stored pricing bullet [00:30]\n\n## Hiring\n\n- ask about remote\n- Written bullet about Hiring here [05:00]\n"
+        );
+    }
+
+    struct Tidy(String);
+
+    #[async_trait]
+    impl crate::summary::tidy::TidyModel for Tidy {
+        async fn generate(
+            &self,
+            _: &str,
+            user: &str,
+            _: &CancellationToken,
+        ) -> Result<(String, bool), String> {
+            assert!(
+                user.starts_with("MEETING LENGTH: 10 min\nLIVE NOTES:\n## Pricing (from 00:00)\n")
+            );
+            Ok((self.0.clone(), false))
+        }
+    }
+
+    const TIDY_ANSWER: &str = "## Summary
+Pricing and hiring review: the plan is forty per seat, annual first, and two engineers to hire with interviews next week.
+
+## Decisions
+- Annual plan first
+
+## Action items
+- **Team**: Run the interviews next week
+
+## Pricing
+- Per-seat pricing; annual plan first
+
+## Hiring
+- Engineers to hire; backend role first";
+
+    fn tidy_inputs<'a>(notes: &'a [LiveNote], transcript: &'a str) -> NotesInputs<'a> {
+        NotesInputs {
+            notes,
+            transcript_text: transcript,
+            user_notes: Vec::new(),
+            user_notes_markdown: "",
+            stored: Vec::new(),
+            regenerate: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn the_tidy_pass_writes_the_notes_under_a_title() {
+        let generator = FakeGenerator::default();
+        let (notes, transcript) = (notes(), transcript());
+        let finished = tidy_notes(
+            &Tidy(TIDY_ANSWER.into()),
+            &generator,
+            &tidy_inputs(&notes, &transcript),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            finished.markdown,
+            format!("# Pricing and Hiring\n\n{TIDY_ANSWER}\n")
+        );
+        assert_eq!(finished.calls, 2);
+        let wrap_up = finished.tidy.unwrap();
+        assert_eq!(wrap_up.decisions, ["Annual plan first"]);
+        assert_eq!(
+            wrap_up.action_items,
+            ["Team — Run the interviews next week"]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rejected_tidy_answer_leaves_the_notes_to_the_sections() {
+        let generator = FakeGenerator::default();
+        let (notes, transcript) = (notes(), transcript());
+        let broken = TIDY_ANSWER.replace("## Decisions", "## Choices");
+        assert!(tidy_notes(
+            &Tidy(broken),
+            &generator,
+            &tidy_inputs(&notes, &transcript),
+            &CancellationToken::new(),
+        )
+        .await
+        .is_none());
+        assert!(
+            generator.prompts.lock().unwrap().is_empty(),
+            "no title call"
         );
     }
 

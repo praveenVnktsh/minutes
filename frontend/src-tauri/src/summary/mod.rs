@@ -44,6 +44,7 @@ pub mod service;
 pub mod summary_engine;
 pub mod template_commands;
 pub mod templates;
+pub(crate) mod tidy;
 
 // Re-export Tauri commands (with their generated __cmd__ variants)
 pub use commands::{
