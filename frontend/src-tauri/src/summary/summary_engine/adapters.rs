@@ -36,7 +36,7 @@ impl Adapter {
         match self {
             Adapter::LiveNotes => (
                 "https://huggingface.co/praveenvnktsh00/minutes-notes-gemma4-e2b/resolve/main/minutes-notes-lora-v3.gguf",
-                "STAGE3_SHA256",
+                "5f7d625017112df3c18df7bc1bd5a5ffe3b017946345c59aa6337eba8754d2c9",
             ),
             Adapter::Tidy => (
                 "https://huggingface.co/praveenvnktsh00/minutes-tidy-gemma4-e2b/resolve/main/minutes-tidy-lora.gguf",
