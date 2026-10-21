@@ -26,7 +26,7 @@ Date: 2026-10-20. Branch: `praveenVnktsh/finetuned-live-notes`. Mac-only. Builds
   20k context instead of the cache's 8k.
 - **The notes document** shows the tidy pass's wrap-up when it is stored, else the live notes'
   Decisions and Action items, upgraded when `tidy-notes-ready` arrives or on the next open.
-- **Adapters** (`summary_engine/adapters.rs`): `minutes-notes-lora.gguf` and
+- **Adapters** (`summary_engine/adapters.rs`): `minutes-notes-lora-v3.gguf` (stage 3, no action items; v1 `minutes-notes-lora.gguf` is deleted) and
   `minutes-tidy-lora.gguf` in the summary models folder, downloaded from Hugging Face
   (`praveenvnktsh00/minutes-notes-gemma4-e2b`, `.../minutes-tidy-gemma4-e2b`, SHA-256 pinned)
   after the E2B download and at startup when E2B is on disk. `MEETILY_NOTES_LORA` /

@@ -28,7 +28,7 @@ from validate_labels import Living, load_events, dup_checks  # noqa: E402
 OUT = os.path.dirname(os.path.abspath(__file__))
 MEETING = sys.argv[1] if len(sys.argv) > 1 else "ES2002a"
 N = int(sys.argv[2]) if len(sys.argv) > 2 else 24
-STAGE = f"{HOME}/data/stage2"
+STAGE = f"{HOME}/data/stage3"  # stage 3: no action items (scripts/drop_actions.py)
 REPAIRABLE = {"too_many_children", "parent_unknown", "nested_child", "parent_in_closed_topic"}
 
 
@@ -64,7 +64,7 @@ def replay():
                                                  "segments", "context_segments", "transcript", "context")},
                     "events": [{k: v for k, v in e.items() if k != "src"} for e in evs],
                     "user": user, "ops": ops, "reasons": reasons, "notes_after": living.render()})
-    dump("replay.json", {"meeting": MEETING, "system_prompt": RT.SYSTEM_PROMPT, "windows": out})
+    dump("replay.json", {"meeting": MEETING, "system_prompt": RT.SYSTEM_PROMPT_NO_ACTIONS, "windows": out})
 
 
 COMPACT = [
@@ -215,8 +215,8 @@ def template():
     tok = AutoTokenizer.from_pretrained(f"{HOME}/train/models/gemma-4-E2B-it")
     rep = json.load(open(os.path.join(OUT, "replay.json")))
     user = rep["windows"][3]["user"] + "\n"  # a trailing newline: the template trims it
-    msgs = [{"role": "system", "content": RT.SYSTEM_PROMPT}, {"role": "user", "content": user}]
-    dump("template.json", {"system": RT.SYSTEM_PROMPT, "user": user,
+    msgs = [{"role": "system", "content": RT.SYSTEM_PROMPT_NO_ACTIONS}, {"role": "user", "content": user}]
+    dump("template.json", {"system": RT.SYSTEM_PROMPT_NO_ACTIONS, "user": user,
                            "rendered": tok.apply_chat_template(msgs, add_generation_prompt=True, tokenize=False),
                            "dot_token_ids": tok.encode(".", add_special_tokens=False)})
 

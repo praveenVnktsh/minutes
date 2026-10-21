@@ -718,7 +718,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // Without the adapter: today's live notes, unchanged.
         assert_eq!(live_notes_adapter(dir.path(), LIVE_NOTES_MODEL), None);
-        let adapter = dir.path().join("minutes-notes-lora.gguf");
+        let adapter = dir.path().join("minutes-notes-lora-v3.gguf");
         std::fs::write(&adapter, b"GGUF").unwrap();
         assert_eq!(
             live_notes_adapter(dir.path(), LIVE_NOTES_MODEL),
