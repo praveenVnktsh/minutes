@@ -37,10 +37,14 @@ describe('AI lines in the Raw notes', () => {
     ]);
   });
 
-  test('lines read as notes: decisions and actions say so, actions name their owner', () => {
+  test('lines read as notes: decisions say so', () => {
     expect(aiNoteText(entry('a', 0, 'X'))).toBe('note a');
     expect(aiNoteText(entry('b', 0, 'X', 'decision'))).toBe('Decision: note b');
-    expect(aiNoteText(entry('c', 0, 'X', 'action'))).toBe('Action: You — note c');
+  });
+
+  test('action items are not written as live notes', () => {
+    const groups = pendingGroups([entry('a', 100, 'Launch', 'action'), entry('b', 200, 'Launch'), entry('c', 300, 'Hiring', 'action')], new Set());
+    expect(groups.map((group) => [group.topic, group.entries.map((e) => e.id)])).toEqual([['Launch', ['b']]]);
   });
 
   const ai: AiBlocks = {

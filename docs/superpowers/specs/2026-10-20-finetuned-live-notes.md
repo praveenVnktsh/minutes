@@ -11,13 +11,17 @@ Date: 2026-10-20. Branch: `praveenVnktsh/finetuned-live-notes`. Mac-only. Builds
   the user's lines as `[you]`), the topic and the window's transcript, and answers with compact
   ops: `T=` topic, `+` note, `>` sub-bullet, `~` edit, `-` drop, `.` nothing. The first token is
   gated: `.` only when P(`.`) >= 0.9, else `.` is banned for that token. A sub-bullet that cannot
-  attach becomes a note; near-duplicates of existing or user notes are dropped. Without the
+  attach becomes a note; near-duplicates of existing or user notes are dropped. Action items stay in the
+  timeline (the model keeps them in its notes, as trained, and the wrap-up reads them) but are
+  never written into the notes document (`pendingGroups`); the wrap-up lists them when the meeting
+  ends. Without the
   adapter, live notes use the prompt they used before.
 - **The tidy pass** (`summary/tidy.rs`) runs once when a meeting ends, with the second adapter on
   the same E2B: the live notes and the full transcript in, final notes out (Summary, Decisions,
   Action items, 3-7 subject sections, Open questions). The answer is checked (sections, length
   cap with 15% slack, grounded numbers, action format); a stray `- None` next to real bullets is
-  dropped. A failed check, a cut-off answer or a prompt over ~18.5k tokens keeps the wrap-up from
+  dropped, and an action owner the meeting never names is left out (the adapter otherwise invents
+  AMI roles such as "Marketing expert"). A failed check, a cut-off answer or a prompt over ~18.5k tokens keeps the wrap-up from
   the live notes. The call skips the live notes prompt cache (`one_off`), so it gets its own
   20k context instead of the cache's 8k.
 - **The notes document** shows the tidy pass's wrap-up when it is stored, else the live notes'
