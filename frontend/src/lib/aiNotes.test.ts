@@ -87,8 +87,6 @@ describe('Decisions and Action items when the meeting ends', () => {
       'Free tier held back',
       'Launch',
       'Decision: Launch on Nov 12',
-      'Action: Priya — Draft the launch email',
-      'Action: Others — Book the room',
       'Decisions',
       'Launch on Nov 12',
       'Action items',
@@ -98,11 +96,13 @@ describe('Decisions and Action items when the meeting ends', () => {
     ]);
     // Every added line is the AI's; the user's lines are untouched and not AI.
     const added = (after.editorBlocks as { id: string }[]).map((block) => block.id).filter((id) => id.startsWith('new-'));
-    expect(added).toHaveLength(9);
+    expect(added).toHaveLength(7);
     for (const id of added) expect(after.aiBlocks?.[id]).toBeDefined();
     expect(after.aiBlocks?.mine).toBeUndefined();
     expect(after.aiEntries).toContain(WRAP_UP_ENTRY);
-    expect(after.aiEntries).toEqual(expect.arrayContaining(['e1', 'e2', 'e3', 'e4']));
+    expect(after.aiEntries).toEqual(expect.arrayContaining(['e1', 'e2']));
+    // Action items are not live notes; the wrap-up lists them.
+    expect(after.aiEntries).not.toContain('e3');
     // The notes list follows the blocks, so the user's notes stay theirs.
     expect(after.notes.map((note) => note.id)).toEqual((after.editorBlocks as { id: string }[]).map((block) => block.id));
     expect(after.rawMarkdown).toContain('### Action items');
@@ -161,8 +161,8 @@ const TIDY_TEXTS = [
 describe('the wrap-up from the tidy pass', () => {
   test('a stored tidy result is the wrap-up: Summary, Decisions, Action items, Open questions', () => {
     const after = completeAiNotes(meetingDocument(), entries, ids(), tidy)!;
-    expect(blockTexts(after).slice(7)).toEqual([...TIDY_TEXTS, '']);
-    const summary = (after.editorBlocks as { type: string }[])[8];
+    expect(blockTexts(after).slice(5)).toEqual([...TIDY_TEXTS, '']);
+    const summary = (after.editorBlocks as { type: string }[])[6];
     expect(summary.type).toBe('paragraph');
     expect(after.aiEntries).toEqual(expect.arrayContaining([WRAP_UP_ENTRY, TIDY_WRAP_UP_ENTRY]));
     expect(applyTidyWrapUp(after, tidy, ids())).toBeNull();
@@ -178,8 +178,6 @@ describe('the wrap-up from the tidy pass', () => {
       'Free tier held back',
       'Launch',
       'Decision: Launch on Nov 12',
-      'Action: Priya — Draft the launch email',
-      'Action: Others — Book the room',
       ...TIDY_TEXTS,
       '',
     ]);

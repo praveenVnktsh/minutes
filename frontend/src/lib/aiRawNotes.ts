@@ -35,25 +35,20 @@ export function entryTopic(entry: Pick<TimelineEntry, 'topic'>): string {
 
 /** The line an entry becomes in the notes. */
 export function aiNoteText(entry: Pick<TimelineEntry, 'kind' | 'text' | 'speaker'>): string {
-  switch (entry.kind) {
-    case 'decision':
-      return `Decision: ${entry.text}`;
-    case 'action':
-      return `Action: ${entry.speaker?.trim() || 'Others'} — ${entry.text}`;
-    default:
-      return entry.text;
-  }
+  return entry.kind === 'decision' ? `Decision: ${entry.text}` : entry.text;
 }
 
 /** Entries not written into the notes yet, oldest first, grouped by topic
- * in the order the topics come. */
+ * in the order the topics come. Action items never become live notes: they
+ * stay in the timeline for the wrap-up, which lists them when the meeting
+ * ends. */
 export function pendingGroups(
   entries: TimelineEntry[],
   inserted: ReadonlySet<string>,
 ): { topic: string; entries: TimelineEntry[] }[] {
   const groups: { topic: string; entries: TimelineEntry[] }[] = [];
   const pending = entries
-    .filter((entry) => !inserted.has(entry.id))
+    .filter((entry) => entry.kind !== 'action' && !inserted.has(entry.id))
     .sort((left, right) => left.start_ms - right.start_ms);
   for (const entry of pending) {
     const topic = entryTopic(entry);

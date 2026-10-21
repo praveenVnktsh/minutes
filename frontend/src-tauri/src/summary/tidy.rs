@@ -507,7 +507,11 @@ pub fn drop_stray_none(text: &str) -> String {
         let others = section
             .iter()
             .any(|line| line.starts_with("- ") && line.trim() != "- None");
-        out.extend(section.drain(..).filter(|line| !(others && line.trim() == "- None")));
+        out.extend(
+            section
+                .drain(..)
+                .filter(|line| !(others && line.trim() == "- None")),
+        );
     }
     let mut out: Vec<&str> = Vec::new();
     let mut section: Vec<&str> = Vec::new();
@@ -519,6 +523,48 @@ pub fn drop_stray_none(text: &str) -> String {
     }
     flush(&mut section, &mut out);
     out.join("\n")
+}
+
+/// The answer with each action owner the meeting never names left out
+/// (`- **Owner**: task` becomes `- task`). The adapter learned owners from
+/// AMI's role-labelled meetings and, when the transcript has no names, makes
+/// up roles such as "Marketing expert" (2026-10-20). An owner is kept when a
+/// word of it (3+ letters) is in the transcript or the user's notes; "You",
+/// "Team", "Everyone" and "All" always are.
+pub fn drop_unnamed_owners(text: &str, transcript: &[String], user_notes: &[UserNote]) -> String {
+    let mut known = transcript
+        .iter()
+        .map(|line| TRANSCRIPT_PREFIX.replace(line, "").to_lowercase())
+        .collect::<Vec<_>>()
+        .join(" ");
+    for note in user_notes {
+        known.push(' ');
+        known.push_str(&note.text.to_lowercase());
+    }
+    let words: HashSet<&str> = known
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    let named = |owner: &str| {
+        ["you", "team", "everyone", "all"]
+            .iter()
+            .any(|generic| owner.eq_ignore_ascii_case(generic))
+            || owner
+                .split(|c: char| !c.is_alphanumeric())
+                .any(|w| w.chars().count() >= 3 && words.contains(w.to_lowercase().as_str()))
+    };
+    text.lines()
+        .map(|line| {
+            match line
+                .strip_prefix("- ")
+                .and_then(|item| OWNER.captures(item))
+            {
+                Some(c) if !named(c[1].trim()) => format!("- {}", c[2].trim()),
+                _ => line.to_string(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// The wrap-up parts of checked final notes.
@@ -617,6 +663,7 @@ pub async fn run(
         );
         return None;
     }
+    let markdown = drop_unnamed_owners(&markdown, &transcript, inputs.user_notes);
     info!(
         "Tidy pass wrote the final notes in {:.1}s",
         started.elapsed().as_secs_f64()
@@ -893,15 +940,42 @@ Kickoff for a new remote control that sells for 25 Euro, with production cost ca
     }
 
     #[test]
+    fn owners_the_meeting_never_names_are_left_out() {
+        let transcript =
+            vec!["[01:52] Others: Great. Dev, can you also own the offline spec?".to_string()];
+        let notes = [UserNote {
+            ms: None,
+            text: "Priya: pricing draft Fri".into(),
+        }];
+        let text = "## Action items\n- **Marketing expert**: Write the offline spec\n- **Dev**: Build the sample workspace\n- **Priya**: Pricing draft by Friday\n- **You**: Send the deck";
+        assert_eq!(
+            drop_unnamed_owners(text, &transcript, &notes),
+            "## Action items\n- Write the offline spec\n- **Dev**: Build the sample workspace\n- **Priya**: Pricing draft by Friday\n- **You**: Send the deck"
+        );
+    }
+
+    #[test]
     fn the_app_allows_a_little_over_the_length_cap() {
         // 17 minutes: cap 373 words, the app's 428
         let words = |n: usize| vec!["word"; n].join(" ");
-        let text = |n: usize| format!("## Summary\n{}\n\n## Decisions\n- None\n\n## Action items\n- None\n\n## A\n- a\n\n## B\n- b", words(n));
+        let text = |n: usize| {
+            format!("## Summary\n{}\n\n## Decisions\n- None\n\n## Action items\n- None\n\n## A\n- a\n\n## B\n- b", words(n))
+        };
         let over = |errors: Vec<String>| errors.iter().any(|e| e.contains("cap"));
         let transcript = vec!["[00:00] A: hi".to_string()];
         assert!(over(check(&text(400), &transcript, 17 * 60_000)));
-        assert!(!over(check_with_slack(&text(400), &transcript, 17 * 60_000, LENGTH_SLACK)));
-        assert!(over(check_with_slack(&text(440), &transcript, 17 * 60_000, LENGTH_SLACK)));
+        assert!(!over(check_with_slack(
+            &text(400),
+            &transcript,
+            17 * 60_000,
+            LENGTH_SLACK
+        )));
+        assert!(over(check_with_slack(
+            &text(440),
+            &transcript,
+            17 * 60_000,
+            LENGTH_SLACK
+        )));
     }
 
     /// Developer check: the checker against minutes-distill's teacher
@@ -949,7 +1023,8 @@ Kickoff for a new remote control that sells for 25 Euro, with production cost ca
             end_ms: i64,
         }
         let long: Long = serde_json::from_str(
-            &std::fs::read_to_string(std::env::var("TIDY_LONG_INPUT").expect("TIDY_LONG_INPUT")).unwrap(),
+            &std::fs::read_to_string(std::env::var("TIDY_LONG_INPUT").expect("TIDY_LONG_INPUT"))
+                .unwrap(),
         )
         .unwrap();
         let app_data_dir = dirs::home_dir()
@@ -1016,7 +1091,8 @@ Kickoff for a new remote control that sells for 25 Euro, with production cost ca
     #[tokio::test]
     async fn the_pass_keeps_a_checked_answer_and_drops_the_rest() {
         let (kept, prompts) = run_with(Ok((format!("\n{GOOD}\n"), false))).await;
-        assert_eq!(kept.unwrap().markdown, GOOD);
+        // David is never named in this transcript, so his name goes.
+        assert_eq!(kept.unwrap().markdown, GOOD.replace("**David**: ", ""));
         assert!(prompts[0].starts_with("MEETING LENGTH: 5 min\nLIVE NOTES:\n## Pricing (from 00:00)\n- [ai] Price at 25 Euro\n"));
         assert!(prompts[0].ends_with("TRANSCRIPT:\n[00:10] Others: It will sell for twenty five Euro.\n[00:20] Others: Production cost is twelve fifty."));
         assert!(

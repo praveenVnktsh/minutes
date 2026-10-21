@@ -35,7 +35,7 @@
 
 ## Why Minutes
 
-- **Notes while it happens, not a report after.** A model fine-tuned for meeting notes adds topics, points, decisions and owners as people talk, next to your own lines, which it never rewrites. When the meeting ends, a second fine-tuned model writes the wrap-up: summary, decisions, action items, open questions.
+- **Notes while it happens, not a report after.** A model fine-tuned for meeting notes adds topics, points and decisions as people talk, next to your own lines, which it never rewrites. When the meeting ends, a second fine-tuned model writes the wrap-up: summary, decisions, action items, open questions.
 - **Everything on-device.** Whisper/Parakeet transcription, speaker diarization, and the note models run on your Mac. No account, no cloud.
 - **One screen from start to finish.** Hit record and the meeting workspace opens immediately — notes, live transcript, and chat live together with a floating record bar.
 
@@ -59,8 +59,8 @@
 - **Light and dark** themes.
 
 ### Notes
-- **Live AI notes** from Gemma 4 E2B with a LoRA trained for this job: every pause in the conversation it updates the notes with a few compact edits (new topic, point, decision, action with owner, sub-bullet, fix or drop its own earlier note), so it keeps up with live transcription on the same Mac.
-- **The wrap-up** when the meeting ends, from a second LoRA on the same model: a short summary, decisions, action items with owners, and open questions, checked against the transcript (numbers must be grounded) before it is used.
+- **Live AI notes** from Gemma 4 E2B with a LoRA trained for this job: every pause in the conversation it updates the notes with a few compact edits (new topic, point, decision, sub-bullet, fix or drop its own earlier note). Action items are left for the wrap-up, so it keeps up with live transcription on the same Mac.
+- **The wrap-up** when the meeting ends, from a second LoRA on the same model: a short summary, decisions, action items with owners, and open questions, checked against the transcript (numbers must be grounded) before it is used. An owner the meeting never names is left out rather than guessed.
 - Your own lines are never rewritten.
 - The model **names the meeting**; the title stays inline editable.
 - Both adapters are open: [live notes](https://huggingface.co/praveenvnktsh00/minutes-notes-gemma4-e2b) and [wrap-up](https://huggingface.co/praveenvnktsh00/minutes-tidy-gemma4-e2b) on Hugging Face (Apache 2.0, trained on the AMI Meeting Corpus). The app downloads them with the Gemma 4 E2B model.
