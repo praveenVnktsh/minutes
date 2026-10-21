@@ -29,16 +29,17 @@ use super::scheduler::{Segment, Window};
 use super::worker::TimelineEntry;
 
 /// The system prompt the adapter is trained with (`render_training.py`
-/// `SYSTEM_PROMPT`).
+/// `SYSTEM_PROMPT_NO_ACTIONS`, stage 3: no action items in the live notes;
+/// the wrap-up lists them).
 pub const SYSTEM_PROMPT: &str = "Live meeting notetaker. Given NEW TRANSCRIPT (CONTEXT is already covered), the topic and CURRENT NOTES, output only the changes, one per line:
 T=<topic> new topic (2-5 words; only if the subject really changed, >=90 s after the last)
-+<k> <start>[-<end>]|<note> new note; k = p point, d decision, a action (owner after the time)
-><id> <k> <start>[-<end>]|<note> sub-bullet: a detail of note <id> itself (max 3, never an action)
++<k> <start>[-<end>]|<note> new note; k = p point, d decision
+><id> <k> <start>[-<end>]|<note> sub-bullet: a detail of note <id> itself (max 3)
 ~<id>|<note> rewrite an [ai] note
 -<id> drop an [ai] note
 . nothing to note (normal)
 New notes take NEXT ID in order and carry no id.
-Style: 6-14 word headlines, facts and numbers first, firm wording, \";\" merges facts. No narration, process, small talk or unsaid figures. Edit, don't re-add. Lists: parent plus children. Decision = explicit agreement; action = a task taken on. Never edit/drop [you] notes; expand their shorthand with sub-bullets.";
+Style: 6-14 word headlines, facts and numbers first, firm wording, \";\" merges facts. No narration, process, small talk or unsaid figures. No tasks or to-dos: they are listed after the meeting. Edit, don't re-add. Lists: parent plus children. Decision = explicit agreement. Never edit/drop [you] notes; expand their shorthand with sub-bullets.";
 
 /// "." (nothing to note) is answered without generating when the model gives
 /// it at least this probability as the first token; below it, "." is banned

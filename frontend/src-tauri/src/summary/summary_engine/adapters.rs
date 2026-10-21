@@ -24,7 +24,9 @@ impl Adapter {
     /// The file name in the models folder.
     fn file_name(self) -> &'static str {
         match self {
-            Adapter::LiveNotes => "minutes-notes-lora.gguf",
+            // v3: stage 3, trained without action items (its prompt is
+            // `live_summary::finetuned::SYSTEM_PROMPT`).
+            Adapter::LiveNotes => "minutes-notes-lora-v3.gguf",
             Adapter::Tidy => "minutes-tidy-lora.gguf",
         }
     }
@@ -33,8 +35,8 @@ impl Adapter {
     fn download(self) -> (&'static str, &'static str) {
         match self {
             Adapter::LiveNotes => (
-                "https://huggingface.co/praveenvnktsh00/minutes-notes-gemma4-e2b/resolve/main/minutes-notes-lora.gguf",
-                "01b0ad372d3d8ded8514d0a5a428c67d9ebe3d959dd3b926a4086c5414fc1931",
+                "https://huggingface.co/praveenvnktsh00/minutes-notes-gemma4-e2b/resolve/main/minutes-notes-lora-v3.gguf",
+                "STAGE3_SHA256",
             ),
             Adapter::Tidy => (
                 "https://huggingface.co/praveenvnktsh00/minutes-tidy-gemma4-e2b/resolve/main/minutes-tidy-lora.gguf",
@@ -44,11 +46,19 @@ impl Adapter {
     }
 }
 
+/// Adapter files earlier versions used.
+const RETIRED: [&str; 1] = ["minutes-notes-lora.gguf"];
+
 /// Downloads whichever adapter is missing from `models_dir` (52 MB each),
 /// checking its SHA-256. Run once the live notes model is on disk: after its
 /// download and at startup. Failures are logged; the base model runs until a
 /// later attempt succeeds.
 pub async fn ensure_downloaded(models_dir: &Path) {
+    // Adapters replaced by a newer version: each was trained with another
+    // prompt, so it is only taking space.
+    for old in RETIRED {
+        let _ = tokio::fs::remove_file(models_dir.join(old)).await;
+    }
     for which in [Adapter::LiveNotes, Adapter::Tidy] {
         let path = models_dir.join(which.file_name());
         if path.is_file() {
@@ -115,7 +125,7 @@ mod tests {
         std::fs::create_dir_all(&models).unwrap();
         assert_eq!(resolve(None, &models, Adapter::LiveNotes), None);
 
-        let bundled = models.join("minutes-notes-lora.gguf");
+        let bundled = models.join("minutes-notes-lora-v3.gguf");
         std::fs::write(&bundled, b"gguf").unwrap();
         assert_eq!(
             resolve(None, &models, Adapter::LiveNotes),
