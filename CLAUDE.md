@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**Meetily** is a privacy-first AI meeting assistant that captures, transcribes, and summarizes meetings entirely on local infrastructure. The supported application is the Tauri desktop app with a Rust core.
+**Minutes** (formerly Meetily; the crate is still named `meetily`) is a privacy-first AI meeting assistant that captures, transcribes, and summarizes meetings entirely on local infrastructure. The supported application is the Tauri desktop app with a Rust core.
 
 **Mac-only**: Minutes runs on Apple Silicon Macs with macOS 13+. Windows and Linux support has been removed; the Rust crate refuses to compile for other targets. Do not add Windows/Linux code paths, `cfg(target_os = ...)` branches for them, or non-Apple GPU backends.
 
@@ -36,11 +36,9 @@ pnpm install                # Install dependencies
 pnpm run dev                # Next.js dev server (port 3118)
 pnpm run tauri:dev          # Full Tauri development mode
 pnpm run tauri:build        # Production build
-
-# Explicit GPU feature builds (Metal + CoreML are already on by default)
-pnpm run tauri:dev:metal    # Metal GPU
-pnpm run tauri:dev:coreml   # CoreML
 ```
+
+Metal and CoreML are always on; there are no separate GPU scripts.
 
 ### Service Endpoints
 - **Frontend Dev**: http://localhost:3118
@@ -86,7 +84,7 @@ Raw Audio (Mic + System)
 
 ### Audio Device Modularization (Recently Completed)
 
-**Context**: The audio system was refactored from a monolithic 1028-line `core.rs` file into focused modules. See [AUDIO_MODULARIZATION_PLAN.md](AUDIO_MODULARIZATION_PLAN.md) for details.
+**Context**: The audio system was refactored from a monolithic 1028-line `core.rs` file into focused modules.
 
 ```
 audio/
@@ -121,7 +119,7 @@ audio/
 // Frontend: src/app/page.tsx
 await invoke('start_recording', {
   mic_device_name: "Built-in Microphone",
-  system_device_name: "BlackHole 2ch",
+  system_device_name: "MacBook Pro Speakers",
   meeting_name: "Team Standup"
 });
 ```
@@ -292,7 +290,7 @@ RUST_LOG=debug ./clean_run.sh
 - **Audio Capture**: Uses ScreenCaptureKit for system audio (macOS 13+)
 - **GPU**: Metal + CoreML automatically enabled
 - **Permissions**: Requires microphone + screen recording permissions
-- **System Audio**: Requires virtual audio device (BlackHole) for system capture
+- **System Audio**: Captured natively (Core Audio taps or ScreenCaptureKit); no virtual audio device is needed
 
 ## Performance Optimization Guidelines
 
@@ -307,7 +305,6 @@ RUST_LOG=debug ./clean_run.sh
   - Development: `base` or `small` (fast iteration)
   - Production: `medium` or `large-v3` (best quality)
 - **GPU Acceleration**: 5-10x faster than CPU
-- **Parallel Processing**: Available in `whisper_engine/parallel_processor.rs` for batch workloads
 
 ### Frontend Performance
 - React state updates batched via Sidebar context
@@ -338,7 +335,6 @@ RUST_LOG=debug ./clean_run.sh
   - `main`: Stable releases
   - `fix/*`: Bug fixes
   - `enhance/*`: Feature enhancements
-  - Current: `fix/audio-mixing` (working on audio pipeline improvements)
 
 ## Key Files Reference
 
