@@ -3,6 +3,7 @@
 import { useEffect } from 'react';
 import { ArrowLeft, Wrench, Database, FlaskConical, Mic, Settings2, Sparkles, Webhook } from 'lucide-react';
 import { useRouter, useSearchParams } from 'next/navigation';
+import { AppearanceSetting } from '@/components/AppearanceSetting';
 import { BetaSettings } from '@/components/BetaSettings';
 import { CalendarSettings } from '@/components/CalendarSettings';
 import { DeveloperSettings } from '@/components/DeveloperSettings';
@@ -76,7 +77,7 @@ export function SettingsPageContent() {
               </TabsList>
             </div>
 
-            <TabsContent value="general" className="mt-6"><PreferenceSettings /></TabsContent>
+            <TabsContent value="general" className="mt-6 space-y-6"><AppearanceSetting /><PreferenceSettings /></TabsContent>
             <TabsContent value="recording" className="mt-6"><RecordingSettings /></TabsContent>
             <TabsContent value="transcription" className="mt-6">
               <TranscriptLanguageSettings />
