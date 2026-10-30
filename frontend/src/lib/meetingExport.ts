@@ -2,6 +2,7 @@ import type { MeetingSummary, Transcript } from '@/types';
 import type { LiveNotesDocument } from '@/lib/liveNotes';
 import { formatNoteTimestamp } from '@/lib/liveNotes';
 import { citationHrefSeconds } from '@/lib/copilot';
+import { bracketedClock } from '@/lib/format';
 
 export interface TranscriptPage {
   transcripts: Transcript[];
@@ -236,13 +237,7 @@ export function transcriptMarkdown(transcripts: Transcript[]): string {
 
 function formatTranscriptTimestamp(seconds: number | undefined, fallback: string): string {
   if (seconds === undefined) return fallback.startsWith('[') ? fallback : `[${fallback}]`;
-  const totalSeconds = Math.max(0, Math.floor(seconds));
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const remainder = totalSeconds % 60;
-  return hours > 0
-    ? `[${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${remainder.toString().padStart(2, '0')}]`
-    : `[${minutes.toString().padStart(2, '0')}:${remainder.toString().padStart(2, '0')}]`;
+  return bracketedClock(seconds, undefined, { padHours: true });
 }
 
 export function buildMeetingExport({

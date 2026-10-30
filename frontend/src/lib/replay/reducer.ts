@@ -12,6 +12,8 @@
  * seeking anywhere, backwards too, is exact and fast.
  */
 
+import { formatClock } from '@/lib/format';
+
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 export const SNAPSHOT_EVERY = 400;
@@ -102,12 +104,7 @@ export function parseLine(line: string): ReplayRecord | null {
 
 /** "MM:SS" or "H:MM:SS" from milliseconds, as the app formats times. */
 export function clock(ms: number): string {
-  const total = Math.max(0, Math.floor((Number(ms) || 0) / 1000));
-  const h = Math.floor(total / 3600);
-  const m = Math.floor((total % 3600) / 60);
-  const s = total % 60;
-  const pad = (n: number) => String(n).padStart(2, '0');
-  return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`;
+  return formatClock((Number(ms) || 0) / 1000, { hours: true });
 }
 
 const encoder = typeof TextEncoder !== 'undefined' ? new TextEncoder() : null;

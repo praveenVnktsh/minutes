@@ -15,6 +15,7 @@ import { relaunch } from '@tauri-apps/plugin-process';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
 import { panel, progress as progressBar, toneText } from '@/lib/theme-classes';
+import { formatBytes } from '@/lib/format';
 
 interface UpdateDialogProps {
   open: boolean;
@@ -299,10 +300,3 @@ export function UpdateDialog({ open, onOpenChange, updateInfo }: UpdateDialogPro
   );
 }
 
-function formatBytes(bytes: number): string {
-  if (bytes === 0) return '0 Bytes';
-  const k = 1024;
-  const sizes = ['Bytes', 'KB', 'MB', 'GB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
-}

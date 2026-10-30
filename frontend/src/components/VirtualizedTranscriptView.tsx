@@ -12,6 +12,7 @@ import { TranscriptSegmentData } from "@/types";
 import { isWholesaleReplacement, nearestSegmentIndex } from "@/lib/transcriptAnchor";
 import { JUMP_TO_TIME_EVENT } from "@/lib/liveTimeline";
 import { badge, jumpFlashKeyframes, recordingFill, speakerPalette, transcriptHighlight } from "@/lib/theme-classes";
+import { bracketedClock } from '@/lib/format';
 
 export interface VirtualizedTranscriptViewProps {
     /** Transcript segments to display */
@@ -74,16 +75,6 @@ function speakerChipClass(key: string): string {
 }
 
 // Helper function to format seconds as recording-relative time [MM:SS]
-function formatRecordingTime(seconds: number | undefined): string {
-    if (seconds === undefined) return '[--:--]';
-
-    const totalSeconds = Math.floor(seconds);
-    const minutes = Math.floor(totalSeconds / 60);
-    const secs = totalSeconds % 60;
-
-    return `[${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}]`;
-}
-
 // Helper function to remove filler words and repetitions
 function cleanStopWords(text: string): string {
     const stopWords = ['uh', 'um', 'er', 'ah', 'hmm', 'hm', 'eh', 'oh'];
@@ -348,11 +339,11 @@ const TranscriptSegment = memo(function TranscriptSegment({
                         title="Play from here"
                         className="mt-1 min-w-[50px] flex-shrink-0 text-left font-mono text-[11.5px] tabular-nums text-ink-subtle hover:text-ink"
                     >
-                        {formatRecordingTime(timestamp)}
+                        {bracketedClock(timestamp)}
                     </button>
                 ) : (
                     <span className="mt-1 min-w-[50px] flex-shrink-0 font-mono text-[11.5px] tabular-nums text-ink-subtle">
-                        {formatRecordingTime(timestamp)}
+                        {bracketedClock(timestamp)}
                     </span>
                 )}
                 <div className="flex-1">

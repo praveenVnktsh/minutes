@@ -1,4 +1,5 @@
 import type { Transcript } from '@/types';
+import { bracketedClock } from '@/lib/format';
 
 /**
  * The speaker label the summary prompts explain: `You` is the person recording
@@ -14,10 +15,7 @@ export function summarySpeakerLabel(speaker: string | undefined): string | null 
 
 function formatAudioTime(seconds: number | undefined): string | null {
   if (seconds === undefined || !Number.isFinite(seconds) || seconds < 0) return null;
-  const total = Math.floor(seconds);
-  const minutes = Math.floor(total / 60).toString().padStart(2, '0');
-  const secs = (total % 60).toString().padStart(2, '0');
-  return `[${minutes}:${secs}]`;
+  return bracketedClock(seconds);
 }
 
 /**
