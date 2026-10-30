@@ -7,6 +7,7 @@ import { useConfig } from '@/contexts/ConfigContext';
 import { SaveFeedback, type SaveFeedbackState } from '@/components/ui/status-feedback';
 import { SetupCheckPanel } from '@/components/SetupCheckPanel';
 import { MeetingDetectionIgnoreList } from '@/components/MeetingDetectionIgnoreList';
+import { AudioBackendSelector } from '@/components/AudioBackendSelector';
 import {
   CHANNEL_OUTCOMES,
   MODEL_CHECK_OUTCOMES,
@@ -96,6 +97,7 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
   const [setupCheckRecord, setSetupCheckRecord] = useState<SetupCheckRecord | null>(null);
   const [setupCheckLoading, setSetupCheckLoading] = useState(true);
   const [showSetupCheck, setShowSetupCheck] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(false);
 
   // Load recording preferences on component mount
   useEffect(() => {
@@ -260,139 +262,129 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h3 className="text-lg font-semibold mb-4">Recording Settings</h3>
-        <p className="text-sm text-ink-muted mb-6">
-          Configure how your audio recordings are saved during meetings.
-        </p>
-        {preferenceSaveState && (
-          <SaveFeedback
-            state={preferenceSaveState}
-            labels={{
-              saving: `Saving ${preferenceMessage.toLowerCase()}`,
-              saved: `${preferenceMessage} saved`,
-              error: `Could not save ${preferenceMessage.toLowerCase()}; previous setting restored`,
-            }}
-          />
-        )}
-      </div>
-
-      {/* Auto Save Toggle */}
-      <div className="flex items-center justify-between p-4 border rounded-lg">
-        <div className="flex-1">
-          <div className="font-medium">Save Audio Recordings</div>
-          <div className="text-sm text-ink-muted">
-            Keep each meeting&apos;s audio as <span className="font-mono">audio.mp4</span> in its folder
-            under the recordings folder (open it from General)
-          </div>
-        </div>
-        <Switch
-          aria-label="Save audio recordings"
-          checked={preferences.auto_save}
-          onCheckedChange={handleAutoSaveToggle}
-          disabled={saving}
+      {preferenceSaveState && (
+        <SaveFeedback
+          state={preferenceSaveState}
+          labels={{
+            saving: `Saving ${preferenceMessage.toLowerCase()}`,
+            saved: `${preferenceMessage} saved`,
+            error: `Could not save ${preferenceMessage.toLowerCase()}; previous setting restored`,
+          }}
         />
-      </div>
-
-      <div className="flex items-center justify-between p-4 border rounded-lg">
-        <div className="flex-1 pr-4">
-          <div className="font-medium">Meeting Detection Prompt</div>
-          <div className="text-sm text-ink-muted">
-            Ask before recording when a meeting app starts using the microphone
-          </div>
-        </div>
-        <Switch
-          aria-label="Show meeting detection prompt"
-          checked={preferences.automatic_record_prompt}
-          onCheckedChange={handleAutomaticPromptToggle}
-          disabled={saving}
-        />
-      </div>
-
-      <MeetingDetectionIgnoreList />
-
-      <div className="flex items-center justify-between p-4 border rounded-lg">
-        <div className="flex-1 pr-4">
-          <div className="font-medium">Discard short recordings</div>
-          <div className="text-sm text-ink-muted">
-            Delete meetings shorter than this that have no transcript or notes (0 disables).
-          </div>
-        </div>
-        <div className="flex items-center gap-2">
-          <input
-            type="number"
-            min={0}
-            max={3600}
-            value={preferences.min_meeting_duration_seconds}
-            onChange={(event) => void handleMinDurationChange(event.target.value)}
-            aria-label="Minimum meeting duration in seconds"
-            disabled={saving}
-            className="h-9 w-20 rounded-md border border-hairline bg-surface-2 px-2 text-sm text-ink"
-          />
-          <span className="text-sm text-ink-muted">seconds</span>
-        </div>
-      </div>
-
-      {/* Info when auto_save is disabled */}
-      {!preferences.auto_save && (
-        <div className="rounded-lg border border-warning bg-warning-subtle p-4">
-          <div className="text-sm text-warning">
-            Audio recording is disabled. Enable Save Audio Recordings to automatically save your meeting audio.
-          </div>
-        </div>
       )}
 
-      <div className="flex items-center justify-between p-4 border rounded-lg">
-        <div className="flex-1 pr-4">
-          <div className="font-medium">Live transcription switch</div>
-          <div className="text-sm text-ink-muted">
-            Show a switch in the live transcript that turns live transcription off during a
-            recording. Audio is still recorded, and the meeting is transcribed after it ends. When
-            this is off, every recording is transcribed live.
+      <SettingsCard title="Audio" description="What is kept from each meeting.">
+        <div className="flex items-center justify-between p-4 border rounded-lg">
+          <div className="flex-1">
+            <div className="font-medium">Save Audio Recordings</div>
+            <div className="text-sm text-ink-muted">
+              Keep each meeting&apos;s audio as <span className="font-mono">audio.mp4</span> in its folder
+              under the recordings folder (open it from General)
+            </div>
           </div>
+          <Switch
+            aria-label="Save audio recordings"
+            checked={preferences.auto_save}
+            onCheckedChange={handleAutoSaveToggle}
+            disabled={saving}
+          />
         </div>
-        <Switch
-          aria-label="Show the live transcription switch"
-          checked={betaFeatures.liveTranscription}
-          onCheckedChange={(checked) => toggleBetaFeature('liveTranscription', checked)}
-        />
-      </div>
 
-      {/* Device Preferences */}
-      <div className="space-y-4">
-        <div className="border-t pt-6">
-          <h4 className="text-base font-medium text-ink mb-4">Default Audio Devices</h4>
-          <p className="text-sm text-ink-muted mb-4">
-            Set your preferred microphone and system audio devices for recording. These will be automatically selected when starting new recordings.
-          </p>
+        {/* Info when auto_save is disabled */}
+        {!preferences.auto_save && (
+          <div className="rounded-lg border border-warning bg-warning-subtle p-4">
+            <div className="text-sm text-warning">
+              Audio recording is disabled. Enable Save Audio Recordings to automatically save your meeting audio.
+            </div>
+          </div>
+        )}
 
-          {isRecording && (
-            <p
-              role="status"
-              aria-live="polite"
-              className="mb-4 rounded-md border border-warning bg-warning-subtle p-2 text-sm text-warning"
-            >
-              Device selection is locked while a recording is in progress. Connecting a new device mid-recording will not switch to it. Stop the current meeting to change devices.
-            </p>
-          )}
-
-          <div className="border rounded-lg p-4 bg-surface-2">
-            <DeviceSelection
-              selectedDevices={{
-                micDevice: preferences.preferred_mic_device,
-                systemDevice: preferences.preferred_system_device
-              }}
-              onDeviceChange={handleDeviceChange}
-              disabled={saving || isRecording}
+        <div className="flex items-center justify-between p-4 border rounded-lg">
+          <div className="flex-1 pr-4">
+            <div className="font-medium">Discard short recordings</div>
+            <div className="text-sm text-ink-muted">
+              Delete meetings shorter than this that have no transcript or notes (0 disables).
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <input
+              type="number"
+              min={0}
+              max={3600}
+              value={preferences.min_meeting_duration_seconds}
+              onChange={(event) => void handleMinDurationChange(event.target.value)}
+              aria-label="Minimum meeting duration in seconds"
+              disabled={saving}
+              className="h-9 w-20 rounded-md border border-hairline bg-surface-2 px-2 text-sm text-ink"
             />
+            <span className="text-sm text-ink-muted">seconds</span>
           </div>
         </div>
-      </div>
 
-      {/* Setup Check */}
-      <div className="space-y-4">
-        <div className="border-t pt-6">
-          <h4 className="text-base font-medium text-ink mb-4">Check your setup</h4>
+        <div className="flex items-center justify-between p-4 border rounded-lg">
+          <div className="flex-1 pr-4">
+            <div className="font-medium">Live transcription switch</div>
+            <div className="text-sm text-ink-muted">
+              Show a switch in the live transcript that turns live transcription off during a
+              recording. Audio is still recorded, and the meeting is transcribed after it ends. When
+              this is off, every recording is transcribed live.
+            </div>
+          </div>
+          <Switch
+            aria-label="Show the live transcription switch"
+            checked={betaFeatures.liveTranscription}
+            onCheckedChange={(checked) => toggleBetaFeature('liveTranscription', checked)}
+          />
+        </div>
+      </SettingsCard>
+
+      <SettingsCard title="Meeting detection" description="Notice when a meeting app starts using the microphone.">
+        <div className="flex items-center justify-between p-4 border rounded-lg">
+          <div className="flex-1 pr-4">
+            <div className="font-medium">Meeting Detection Prompt</div>
+            <div className="text-sm text-ink-muted">
+              Ask before recording when a meeting app starts using the microphone
+            </div>
+          </div>
+          <Switch
+            aria-label="Show meeting detection prompt"
+            checked={preferences.automatic_record_prompt}
+            onCheckedChange={handleAutomaticPromptToggle}
+            disabled={saving}
+          />
+        </div>
+
+        <MeetingDetectionIgnoreList />
+      </SettingsCard>
+
+      <SettingsCard
+        title="Devices"
+        description="The microphone and system audio new recordings start with, and a check that a meeting will actually be heard."
+      >
+        {isRecording && (
+          <p
+            role="status"
+            aria-live="polite"
+            className="rounded-md border border-warning bg-warning-subtle p-2 text-sm text-warning"
+          >
+            Device selection is locked while a recording is in progress. Connecting a new device mid-recording will not switch to it. Stop the current meeting to change devices.
+          </p>
+        )}
+
+        <div className="border rounded-lg p-4 bg-surface-2">
+          <DeviceSelection
+            selectedDevices={{
+              micDevice: preferences.preferred_mic_device,
+              systemDevice: preferences.preferred_system_device
+            }}
+            onDeviceChange={handleDeviceChange}
+            disabled={saving || isRecording}
+          />
+        </div>
+
+        {/* Setup Check */}
+        <div className="border-t border-hairline pt-4">
+          <h4 className="text-base font-medium text-ink mb-2">Check your setup</h4>
           <p className="text-sm text-ink-muted mb-4">
             Run the same microphone, system audio and transcription model check onboarding ends
             with, any time you want to be sure a meeting will actually be heard.
@@ -441,8 +433,35 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
             </div>
           )}
         </div>
-      </div>
+      </SettingsCard>
+
+      {/* The capture backend is jargon most people never need, so it starts folded away. */}
+      <details
+        className="group rounded-lg border border-hairline bg-surface-raised shadow-sm"
+        onToggle={(event) => setShowAdvanced(event.currentTarget.open)}
+      >
+        <summary className="cursor-pointer select-none px-6 py-4 text-sm font-semibold text-ink-muted hover:text-ink">
+          Advanced
+        </summary>
+        <div className="border-t border-hairline px-6 py-4">
+          {/* Mounted only when opened, so the tab does not query capture backends up front. */}
+          {showAdvanced && <AudioBackendSelector disabled={saving || isRecording} />}
+        </div>
+      </details>
     </div>
+  );
+}
+
+/** One titled card of the Recording tab. */
+function SettingsCard({ title, description, children }: { title: string; description: string; children: React.ReactNode }) {
+  return (
+    <section aria-label={title} className="space-y-4 rounded-lg border border-hairline bg-surface-raised p-6 shadow-sm">
+      <div>
+        <h3 className="text-lg font-semibold text-ink">{title}</h3>
+        <p className="mt-1 text-sm text-ink-muted">{description}</p>
+      </div>
+      {children}
+    </section>
   );
 }
 
