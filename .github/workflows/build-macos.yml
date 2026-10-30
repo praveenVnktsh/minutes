@@ -101,13 +101,6 @@ jobs:
           workspaces: ". -> target"
           key: macos-latest-aarch64-apple-darwin
 
-      # See build.yml: the restored cache keeps sherpa-onnx-sys's prebuilt lib
-      # directory without the .a files, so force a fresh download.
-      - name: Reset sherpa-onnx build-script state
-        run: |
-          rm -rf target/sherpa-onnx-prebuilt target/release/build/sherpa-onnx-sys-* target/*/release/build/sherpa-onnx-sys-* \
-            target/release/.fingerprint/sherpa-onnx-sys-* target/*/release/.fingerprint/sherpa-onnx-sys-*
-
       - name: Install frontend dependencies
         run: |
           cd frontend
@@ -137,14 +130,9 @@ jobs:
           echo "CERT_ID=$CERT_ID" >> $GITHUB_ENV
           echo "Certificate imported: $CERT_ID"
 
-      - name: Configure build acceleration
-        run: |
-          echo "✓ macOS build will use Metal GPU acceleration (enabled by default)"
-          echo "✓ CoreML acceleration available for Apple Silicon"
-
-      - name: Build nemotron-helper sidecar
+      - name: Build speech-helper sidecar
         shell: bash
-        run: bash nemotron-helper/build.sh release
+        run: bash speech-helper/build.sh release
 
       - name: Build llama-helper sidecar
         run: |

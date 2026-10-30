@@ -293,9 +293,6 @@ static RECORDING_MANAGER: Mutex<Option<RecordingSession>> = Mutex::new(None);
 static TRANSCRIPTION_TASK: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
 
 const COMPLETED_TRANSCRIPT_HISTORY_LIMIT: usize = 50;
-/// Longest the stop path waits for the chunked live worker to transcribe the
-/// chunks still queued.
-const CHUNKED_DRAIN_LIMIT: std::time::Duration = std::time::Duration::from_secs(600);
 /// Longest the stop path waits for the streaming worker before cancelling it.
 /// It never holds more than `MAX_BACKLOG_SECONDS` of audio, which decodes in
 /// a few seconds.
@@ -355,17 +352,13 @@ static STOPPING_TRANSCRIPT_SEGMENTS: Mutex<
     )>,
 > = Mutex::new(None);
 
-/// Determine the transcription engine actually serving this recording session
-/// and record it against the meeting's metadata.json (PRA-577 model
-/// provenance note).
+/// Record the transcription model serving this recording session (returned by
+/// `transcription::live::start_worker`) against the meeting's metadata.json
+/// (PRA-577 model provenance note).
 ///
-/// `get_or_init_transcription_engine` mirrors what the transcription worker
-/// just did to obtain its own engine handle: when a model is already loaded
-/// (the normal case here, since the worker starts first) it reuses it rather
-/// than reloading, so this call is cheap. Best-effort only — on any failure
-/// to determine the engine, or if the recording session is no longer live by
-/// the time it resolves, this logs and gives up quietly; provenance is a
-/// nice-to-have, never worth failing or delaying a recording over.
+/// Best-effort only: if the recording session is no longer live by the time
+/// this runs, it logs and gives up quietly; provenance is a nice-to-have,
+/// never worth failing or delaying a recording over.
 fn record_live_transcription_model(
     transcription_model: crate::audio::model_provenance::TranscriptionModel,
 ) {
@@ -658,14 +651,11 @@ async fn verify_microphone_before_recording() -> Result<(), String> {
     }
 }
 
-/// Validate the transcription engine is ready before any capture starts, on
-/// both start paths and in both live and deferred transcription modes. A
-/// corrupt model, a missing ONNX runtime, or an allocation failure has to be
-/// caught here, while the meeting can still be re-run — not discovered later
-/// in the deferred-transcription queue after the meeting has already ended
-/// and the recording can no longer be redone. Live transcription still
-/// decides whether the engine stays resident once recording is underway;
-/// this check runs the same way either way.
+/// Prepare the live transcription engine before any capture starts, on both
+/// start paths and in both live and deferred transcription modes. A corrupt
+/// model or a helper that fails to start has to be caught here, while the
+/// meeting can still be re-run. Live transcription still decides whether the
+/// engine stays resident once recording is underway.
 async fn validate_transcription_engine_before_capture<R: Runtime>(
     app: &AppHandle<R>,
 ) -> Result<(), String> {
@@ -680,9 +670,8 @@ async fn validate_transcription_engine_before_capture<R: Runtime>(
         }
     );
 
-    // Decide the live path and load its model now, while a load failure can
-    // still fall back. A missing model never stops the recording: it degrades
-    // to another engine or to no live text, with a notice.
+    // Load the live model now. A missing model or a load failure never stops
+    // the recording: it degrades to no live text, with a notice.
     transcription::live::prepare_for_recording(app).await;
     info!("✅ Live transcription prepared");
     Ok(())
@@ -1047,9 +1036,9 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
 
     let live_transcription_enabled =
         super::pipeline::LIVE_TRANSCRIPTION_ENABLED.load(Ordering::SeqCst);
-    // Start the live worker for this recording's plan (streaming Nemotron or
-    // a chunked engine). Without a usable engine the recording carries on as
-    // in deferred mode, and the final pass transcribes it afterwards.
+    // Start the streaming Nemotron worker. Without a usable engine the
+    // recording carries on as in deferred mode, and the final pass transcribes
+    // it afterwards.
     let pending_receiver = if live_transcription_enabled {
         match transcription::live::start_worker(&app, transcription_receiver).await {
             Ok((task_handle, model)) => {
@@ -1302,9 +1291,9 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
 
     let live_transcription_enabled =
         super::pipeline::LIVE_TRANSCRIPTION_ENABLED.load(Ordering::SeqCst);
-    // Start the live worker for this recording's plan (streaming Nemotron or
-    // a chunked engine). Without a usable engine the recording carries on as
-    // in deferred mode, and the final pass transcribes it afterwards.
+    // Start the streaming Nemotron worker. Without a usable engine the
+    // recording carries on as in deferred mode, and the final pass transcribes
+    // it afterwards.
     let pending_receiver = if live_transcription_enabled {
         match transcription::live::start_worker(&app, transcription_receiver).await {
             Ok((task_handle, model)) => {
@@ -1523,16 +1512,10 @@ async fn stop_recording_session<R: Runtime>(
         // The streaming worker skips any backlog over MAX_BACKLOG_SECONDS, so
         // a healthy one drains in seconds; past STREAMING_DRAIN_LIMIT it is
         // cancelled (its blocking thread cannot be aborted) so saving goes
-        // on and the model is freed. The chunked worker must transcribe every
-        // queued chunk, so it keeps the long limit.
-        let streaming = super::pipeline::LIVE_STREAMING_MODE.load(Ordering::SeqCst);
-        let drain_limit = if streaming {
-            STREAMING_DRAIN_LIMIT
-        } else {
-            CHUNKED_DRAIN_LIMIT
-        };
+        // on and the model is freed.
+        let drain_limit = STREAMING_DRAIN_LIMIT;
         let drain_error = match tokio::time::timeout(drain_limit, &mut task_handle).await {
-            Err(_) if streaming => {
+            Err(_) => {
                 warn!(
                     "⏱️ Streaming live transcription still draining after {:?}; cancelling it (the final pass covers the rest)",
                     drain_limit
@@ -1557,11 +1540,6 @@ async fn stop_recording_session<R: Runtime>(
                     "Transcription worker failed before final history was captured: {e}"
                 ))
             }
-            Err(_) => {
-                warn!("⏱️ Transcription timeout (10 minutes) reached, continuing shutdown to prevent indefinite hang");
-                task_handle.abort();
-                Some("Timed out while finishing transcription".to_string())
-            }
         };
 
         // Stop progress monitoring
@@ -1573,8 +1551,8 @@ async fn stop_recording_session<R: Runtime>(
     };
 
     // The worker has drained: free the streaming model before the final pass
-    // needs the memory, and note which chunked engine (if any) live text used.
-    let live_chunked_provider = transcription::live::release_after_recording();
+    // needs the memory.
+    transcription::live::release_after_recording();
 
     // The worker has drained, so no more final transcript events can arrive.
     {
@@ -1606,88 +1584,6 @@ async fn stop_recording_session<R: Runtime>(
                 "Discarding stopped transcript tail for unexpected session {}",
                 stopping_session_id
             );
-        }
-    }
-
-    // Step 3: Now safely unload Whisper model after ALL chunks are processed
-    let _ = app.emit(
-        "recording-shutdown-progress",
-        serde_json::json!({
-            "stage": "unloading_model",
-            "message": "Unloading speech recognition model...",
-            "progress": 70
-        }),
-    );
-
-    info!("🧠 All transcript chunks processed. Now safely unloading transcription model...");
-
-    // Unload only the chunked engine this recording itself used: a streaming
-    // recording loaded none, and Whisper/Parakeet may be busy with a final pass
-    // for another meeting. A running pass unloads its own engine when it
-    // finishes (unload_engine_after_batch).
-    let config = if super::transcription_queue::get_queue()
-        .has_active_task()
-        .await
-    {
-        info!("Keeping transcription engines loaded: a transcription task is running");
-        None
-    } else {
-        live_chunked_provider
-    };
-    match config.as_deref() {
-        Some("parakeet") => {
-            info!("🦜 Unloading Parakeet model...");
-            let engine_clone = {
-                let engine_guard = crate::parakeet_engine::commands::PARAKEET_ENGINE
-                    .lock()
-                    .unwrap();
-                engine_guard.as_ref().cloned()
-            };
-
-            if let Some(engine) = engine_clone {
-                let current_model = engine
-                    .get_current_model()
-                    .await
-                    .unwrap_or_else(|| "unknown".to_string());
-                info!("Current Parakeet model before unload: '{}'", current_model);
-
-                if engine.unload_model().await {
-                    info!(
-                        "✅ Parakeet model '{}' unloaded successfully",
-                        current_model
-                    );
-                } else {
-                    warn!("⚠️ Failed to unload Parakeet model '{}'", current_model);
-                }
-            } else {
-                warn!("⚠️ No Parakeet engine found to unload model");
-            }
-        }
-        None => info!("No chunked live engine to unload"),
-        Some(_) => {
-            info!("🎤 Unloading Whisper model...");
-            let engine_clone = {
-                let engine_guard = crate::whisper_engine::commands::WHISPER_ENGINE
-                    .lock()
-                    .unwrap();
-                engine_guard.as_ref().cloned()
-            };
-
-            if let Some(engine) = engine_clone {
-                let current_model = engine
-                    .get_current_model()
-                    .await
-                    .unwrap_or_else(|| "unknown".to_string());
-                info!("Current Whisper model before unload: '{}'", current_model);
-
-                if engine.unload_model().await {
-                    info!("✅ Whisper model '{}' unloaded successfully", current_model);
-                } else {
-                    warn!("⚠️ Failed to unload Whisper model '{}'", current_model);
-                }
-            } else {
-                warn!("⚠️ No Whisper engine found to unload model");
-            }
         }
     }
 

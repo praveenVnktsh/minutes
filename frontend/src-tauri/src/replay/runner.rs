@@ -388,17 +388,8 @@ fn probe_duration(audio: &Path) -> Result<f64> {
     }
 }
 
-/// How the fed audio reaches the live worker.
-enum Feed {
-    /// Nemotron: continuous windows per source.
-    Streaming,
-    /// Chunked engine: Silero VAD segments, as the pipeline sends them.
-    Chunked(Box<crate::audio::vad::ContinuousVadProcessor>),
-}
-
 struct Feeder {
     sender: UnboundedSender<AudioChunk>,
-    feed: Feed,
     chunk_id: u64,
 }
 
@@ -415,52 +406,20 @@ impl Feeder {
         let _ = self.sender.send(chunk);
     }
 
+    /// Nemotron takes continuous windows per source.
     fn window(&mut self, samples: &[f32], position: u64) {
-        match &mut self.feed {
-            Feed::Streaming => {
-                self.send(
-                    vec![0.0; samples.len()],
-                    RecordingDeviceType::Microphone,
-                    position,
-                );
-                self.send(samples.to_vec(), RecordingDeviceType::System, position);
-            }
-            Feed::Chunked(vad) => {
-                let segments = vad.process_audio(samples).unwrap_or_default();
-                self.segments(segments);
-            }
-        }
-    }
-
-    fn segments(&mut self, segments: Vec<crate::audio::vad::SpeechSegment>) {
-        for segment in segments {
-            if segment.samples.len() < 800 {
-                continue;
-            }
-            let chunk = AudioChunk {
-                data: segment.samples,
-                sample_rate: 16_000,
-                timestamp: segment.start_timestamp_ms / 1000.0,
-                chunk_id: self.chunk_id,
-                device_type: RecordingDeviceType::System,
-            };
-            self.chunk_id += 1;
-            let _ = self.sender.send(chunk);
-        }
+        self.send(
+            vec![0.0; samples.len()],
+            RecordingDeviceType::Microphone,
+            position,
+        );
+        self.send(samples.to_vec(), RecordingDeviceType::System, position);
     }
 
     /// The stop path's flush: close the utterances in progress.
     fn flush(mut self, position: u64) {
-        match &mut self.feed {
-            Feed::Streaming => {
-                self.send(Vec::new(), RecordingDeviceType::Microphone, position);
-                self.send(Vec::new(), RecordingDeviceType::System, position);
-            }
-            Feed::Chunked(vad) => {
-                let segments = vad.flush().unwrap_or_default();
-                self.segments(segments);
-            }
-        }
+        self.send(Vec::new(), RecordingDeviceType::Microphone, position);
+        self.send(Vec::new(), RecordingDeviceType::System, position);
     }
 }
 
@@ -508,11 +467,11 @@ fn pace_to(end: Duration, realtime: bool) {
 fn feed_audio(
     audio: PathBuf,
     mut feeder: Feeder,
+    streaming: bool,
     realtime: bool,
     limit_ms: Option<u64>,
     recorder: Arc<Recorder>,
 ) -> Result<(Feeder, u64)> {
-    let streaming = matches!(feeder.feed, Feed::Streaming);
     let mut child = Command::new(ffmpeg()?)
         .args(["-hide_banner", "-nostdin", "-v", "error", "-i"])
         .arg(&audio)
@@ -1042,7 +1001,7 @@ async fn replay(
     recorder: Arc<Recorder>,
     sandbox: PathBuf,
     meeting_folder: PathBuf,
-    store: Value,
+    _store: Value,
 ) -> Result<()> {
     // Database: a fresh sandbox one with the user's model settings.
     let db = DatabaseManager::new(
@@ -1056,11 +1015,7 @@ async fn replay(
     app.manage(AppState { db_manager: db });
 
     // What the app's setup does for transcription.
-    crate::whisper_engine::commands::set_models_directory(&app);
-    crate::parakeet_engine::commands::set_models_directory(&app);
-    if let Some(vocabulary) = store.get("transcriptionVocabulary").and_then(Value::as_str) {
-        crate::whisper_engine::whisper_engine::set_transcription_vocabulary(vocabulary.to_string());
-    }
+    crate::audio::speech::models::setup(&app);
     crate::audio::transcription_queue::init_queue_worker(&app);
 
     let shared = Arc::new(Shared::default());
@@ -1096,7 +1051,7 @@ async fn replay(
         .map(|s| format!("{} / {}", s.provider, s.model))
         .unwrap_or_else(|| "not configured".into());
 
-    // Start like `start_recording`: plan the live model, start its worker,
+    // Start like `start_recording`: load the live model, start its worker,
     // then the recording-time features.
     let session_id = crate::meeting_activity::new_recording_session_id();
     crate::meeting_activity::start_recording(&app, session_id.clone());
@@ -1190,17 +1145,8 @@ async fn replay(
     );
 
     // Feed the recording.
-    let feed = if streaming {
-        Feed::Streaming
-    } else {
-        Feed::Chunked(Box::new(
-            crate::audio::vad::ContinuousVadProcessor::new(SAMPLE_RATE, 500)
-                .map_err(|e| anyhow!("VAD: {e}"))?,
-        ))
-    };
     let feeder = Feeder {
         sender,
-        feed,
         chunk_id: 0,
     };
     let (audio, realtime, limit) = (
@@ -1210,7 +1156,7 @@ async fn replay(
     );
     let feed_recorder = recorder.clone();
     let (feeder, position) = tokio::task::spawn_blocking(move || {
-        feed_audio(audio, feeder, realtime, limit, feed_recorder)
+        feed_audio(audio, feeder, streaming, realtime, limit, feed_recorder)
     })
     .await??;
     // After the audio, meeting time runs with the wall clock (stop graces,
@@ -1229,11 +1175,7 @@ async fn replay(
     );
     feeder.flush(position);
     if let Some(mut worker) = worker {
-        let limit = if streaming {
-            DRAIN_LIMIT
-        } else {
-            Duration::from_secs(600)
-        };
+        let limit = DRAIN_LIMIT;
         if tokio::time::timeout(limit, &mut worker).await.is_err() {
             log::warn!("Replay: live transcription still draining after {limit:?}; cancelling");
             crate::audio::live_streaming::worker::cancel_current();
@@ -1245,7 +1187,7 @@ async fn replay(
             }
         }
     }
-    let _ = crate::audio::transcription::live::release_after_recording();
+    crate::audio::transcription::live::release_after_recording();
     crate::live_summary::finish_session(&session_id);
     crate::copilot::finish_session(&app, &session_id);
     crate::audio::recording_commands::set_replay_recording(false, false);

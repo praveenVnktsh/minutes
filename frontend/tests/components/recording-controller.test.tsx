@@ -169,9 +169,7 @@ const getPendingRecordingRequest = mock(async (): Promise<RecordingStartRequest 
 
 const invoke = mock(async (command: string, _args?: Record<string, unknown>): Promise<unknown> => {
   switch (command) {
-    case 'api_get_transcript_config': return { provider: 'test' };
-    case 'initialize_test': return undefined;
-    case 'has_test': return true;
+    case 'speech_models_status': return { models: [], liveReady: true, batchReady: true, diarizationReady: true };
     case 'set_live_transcription_enabled': return undefined;
     case 'get_meeting_folder_path': return '/recordings/live';
     default: return undefined;
@@ -195,7 +193,6 @@ mock.module('../../src/contexts/ConfigContext', () => ({
     selectedDevices: { micDevice: 'mic', systemDevice: 'system' },
     betaFeatures: { liveTranscription: true },
     selectedLanguage: 'auto',
-    transcriptModelConfig: { model: 'model', provider: 'test' },
   }),
 }));
 mock.module('../../src/contexts/MeetingActivityContext', () => ({
@@ -232,10 +229,6 @@ mock.module('../../src/lib/analytics', () => ({
   },
 }));
 mock.module('../../src/lib/recordingNotification', () => ({ showRecordingNotification: mock(async () => {}) }));
-mock.module('../../src/lib/transcription-model-readiness', () => ({
-  getProviderCommands: () => ({ initialize: 'initialize_test', hasAvailableModels: 'has_test', getAvailableModels: 'models_test' }),
-  hasDownloadingModel: () => false,
-}));
 mock.module('../../src/lib/autoSummary', () => ({ markDeferredMeetingForAutoSummary: () => {} }));
 mock.module('../../src/lib/summary-language-preferences', () => ({
   applyPinnedSummaryLanguageToMeeting: async () => true,

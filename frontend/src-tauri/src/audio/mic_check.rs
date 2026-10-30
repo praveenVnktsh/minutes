@@ -1,9 +1,9 @@
 // audio/mic_check.rs
 //
-// The setup check that closes onboarding: prove the downloaded model loads,
-// then record a few seconds of the microphone and of the system audio at the
-// same time, show the user a meter per channel, and turn each capture into text
-// on its own.
+// The setup check that closes onboarding: prove the downloaded model (Parakeet
+// in the batch speech-helper) loads, then record a few seconds of the
+// microphone and of the system audio at the same time, show the user a meter
+// per channel, and turn each capture into text on its own.
 //
 // The three things it checks are reported separately and never rolled into a
 // single verdict. A Mac with no meeting running is supposed to finish with a
@@ -28,8 +28,8 @@ use tauri::{AppHandle, Runtime};
 
 use super::audio_processing::{audio_to_mono, resample_audio};
 use super::capture_probe::{peak_of, probe_channel, ProbeCapture, ProbeChannel, ProbeError};
-use crate::parakeet_engine::commands::{parakeet_init, PARAKEET_ENGINE};
-use crate::parakeet_engine::{ModelStatus, ParakeetEngine};
+use super::common::FINAL_MODEL;
+use crate::audio::speech;
 
 const DEFAULT_DURATION_SECS: f64 = 8.0;
 const MIN_DURATION_SECS: f64 = 3.0;
@@ -41,8 +41,6 @@ const SILENCE_FLOOR: f32 = 0.01;
 
 /// Parakeet wants mono f32 at this rate.
 const TRANSCRIBE_SAMPLE_RATE: u32 = 16_000;
-/// The model onboarding downloads, and so the one most likely to be on disk.
-const PREFERRED_MODEL: &str = crate::config::DEFAULT_PARAKEET_MODEL;
 
 /// Only one check may own the audio devices at a time.
 static CHECK_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
@@ -233,13 +231,10 @@ pub async fn mic_check_start<R: Runtime>(
     // The model comes first, and once. Loading it is the first time in the
     // app's life these weights are exercised, so the log line below is what a
     // support thread will ask for.
-    let (engine, model) = match ready_engine().await {
-        Ok((engine, model_name)) => {
-            info!(
-                "Setup check loaded the transcription model: {}",
-                model_name.as_deref().unwrap_or("unnamed model")
-            );
-            (engine, ModelReport::loaded(model_name))
+    let model = match ready_engine(&app).await {
+        Ok(model_name) => {
+            info!("Setup check loaded the transcription model: {}", model_name);
+            ModelReport::loaded(Some(model_name))
         }
         Err((outcome, detail)) => {
             warn!(
@@ -285,10 +280,8 @@ pub async fn mic_check_start<R: Runtime>(
     let window_ms = started.elapsed().as_millis() as u64;
 
     // The two transcriptions run one after another rather than joined: there is
-    // a single engine behind them, and letting two few-second buffers contend
-    // for it buys nothing worth the contention.
+    // a single helper behind them, which takes one request at a time.
     let microphone = report_channel(
-        &engine,
         ProbeChannel::Microphone,
         mic_device_name.as_deref(),
         microphone_probe,
@@ -296,13 +289,13 @@ pub async fn mic_check_start<R: Runtime>(
     )
     .await;
     let system_audio = report_channel(
-        &engine,
         ProbeChannel::SystemAudio,
         system_device_name.as_deref(),
         system_probe,
         &cancelled,
     )
     .await;
+    release_engine().await;
 
     let result = SetupCheckResult {
         model,
@@ -375,7 +368,6 @@ fn requested_name(device_name: Option<&str>) -> String {
 /// Everything one channel is guilty of, decided from its own samples and its
 /// own transcription. Neither channel's verdict depends on the other's.
 async fn report_channel(
-    engine: &ParakeetEngine,
     channel: ProbeChannel,
     device_name: Option<&str>,
     probe: Result<ProbeCapture, ProbeError>,
@@ -433,8 +425,8 @@ async fn report_channel(
     let mono = audio_to_mono(&capture.samples, capture.channels);
     let resampled = resample_audio(&mono, capture.sample_rate, TRANSCRIBE_SAMPLE_RATE);
 
-    let transcript = match engine.transcribe_audio(resampled).await {
-        Ok(transcript) => transcript,
+    let transcript = match speech::batch::transcribe(resampled).await {
+        Ok(transcript) => transcript.text,
         Err(error) => {
             error!("Setup check {} transcription failed: {}", channel, error);
             return report(ChannelOutcome::TranscriptionFailed)
@@ -512,59 +504,33 @@ fn digital_silence_outcome(channel: ProbeChannel) -> ChannelOutcome {
     ChannelOutcome::PermissionDenied
 }
 
-fn parakeet_engine() -> Option<Arc<ParakeetEngine>> {
-    PARAKEET_ENGINE
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .as_ref()
-        .cloned()
+/// Bring the batch speech-helper up with Parakeet loaded, or say which kind of
+/// model problem the user has. The name that comes back is the model that is
+/// now loaded, which is what the frontend shows.
+async fn ready_engine<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<String, (ModelCheckOutcome, Option<String>)> {
+    if !speech::models::batch_ready(app) {
+        return Err((ModelCheckOutcome::Unavailable, None));
+    }
+
+    // The helper loads its models on the first request, so a second of
+    // silence proves the weights load and the engine answers before the user
+    // is asked to speak.
+    info!("Setup check loading Parakeet model '{}'", FINAL_MODEL);
+    if let Err(error) = speech::batch::transcribe(vec![0.0; TRANSCRIBE_SAMPLE_RATE as usize]).await
+    {
+        release_engine().await;
+        return Err((ModelCheckOutcome::Failed, Some(error.to_string())));
+    }
+
+    Ok(FINAL_MODEL.to_string())
 }
 
-/// Bring the shared Parakeet engine up with a model loaded, or say which kind
-/// of model problem the user has. The name that comes back is the model that is
-/// now loaded, which is what the frontend shows.
-async fn ready_engine(
-) -> Result<(Arc<ParakeetEngine>, Option<String>), (ModelCheckOutcome, Option<String>)> {
-    if parakeet_engine().is_none() {
-        parakeet_init()
-            .await
-            .map_err(|error| (ModelCheckOutcome::Failed, Some(error)))?;
-    }
-
-    let engine = parakeet_engine().ok_or((
-        ModelCheckOutcome::Failed,
-        Some("Parakeet engine not initialized".to_string()),
-    ))?;
-
-    // A model the app already loaded is the one the user will record with, so
-    // the check exercises that rather than reloading weights for its own sake.
-    if engine.is_model_loaded().await {
-        let name = engine.get_current_model().await;
-        return Ok((engine, name));
-    }
-
-    let models = engine
-        .discover_models()
-        .await
-        .map_err(|error| (ModelCheckOutcome::Failed, Some(error.to_string())))?;
-    let available: Vec<_> = models
-        .iter()
-        .filter(|model| matches!(model.status, ModelStatus::Available))
-        .collect();
-
-    let model = available
-        .iter()
-        .find(|model| model.name == PREFERRED_MODEL)
-        .or_else(|| available.first())
-        .ok_or((ModelCheckOutcome::Unavailable, None))?;
-
-    info!("Setup check loading Parakeet model '{}'", model.name);
-    engine
-        .load_model(&model.name)
-        .await
-        .map_err(|error| (ModelCheckOutcome::Failed, Some(error.to_string())))?;
-
-    Ok((engine, Some(model.name.clone())))
+/// Stop the batch helper the check started (~1.5 GB) unless a queued
+/// transcription task is using it; nothing else would stop it afterwards.
+async fn release_engine() {
+    crate::audio::common::release_batch_helper(None).await;
 }
 
 #[cfg(test)]
@@ -679,7 +645,7 @@ mod tests {
         microphone.transcript = Some("testing one two three".to_string());
 
         let result = SetupCheckResult {
-            model: ModelReport::loaded(Some(PREFERRED_MODEL.to_string())),
+            model: ModelReport::loaded(Some(FINAL_MODEL.to_string())),
             microphone,
             system_audio: ChannelReport::new(
                 ProbeChannel::SystemAudio,
@@ -698,7 +664,7 @@ mod tests {
         assert!(json.get("system_audio").is_none());
 
         assert_eq!(json["model"]["outcome"], "loaded");
-        assert_eq!(json["model"]["modelName"], PREFERRED_MODEL);
+        assert_eq!(json["model"]["modelName"], "parakeet-tdt-0.6b-v2-coreml");
         assert!(json["model"]["detail"].is_null());
         assert!(json["model"].get("model_name").is_none());
 

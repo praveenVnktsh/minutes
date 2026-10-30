@@ -7,7 +7,6 @@
 
 import { invoke } from '@tauri-apps/api/core';
 import { emit } from '@tauri-apps/api/event';
-import { TranscriptModelProps } from '@/components/TranscriptSettings';
 import type { CustomOpenAIConfig, ModelConfig } from '@/types/modelConfig';
 
 export type { CustomOpenAIConfig, ModelConfig } from '@/types/modelConfig';
@@ -63,10 +62,10 @@ export function validateModelConfig(config: ModelConfig): ModelConfig {
 
   const customModel = optionalTrimmed(config.customOpenAIModel);
   const model = config.provider === 'custom-openai' ? customModel ?? '' : config.model.trim();
-  const whisperModel = config.whisperModel.trim();
+  // Kept for the save command's signature; empty since Whisper was removed.
+  const whisperModel = (config.whisperModel ?? '').trim();
 
   if (!model) throw new InvalidModelConfigError('Model is required');
-  if (!whisperModel) throw new InvalidModelConfigError('Transcription model is required');
 
   const normalized: ModelConfig = {
     ...config,
@@ -118,14 +117,6 @@ export class ConfigService {
     private readonly invokeCommand: Invoke = invoke,
     private readonly emitEvent: Emit = emit,
   ) {}
-
-  /**
-   * Get saved transcript model configuration
-   * @returns Promise with { provider, model, apiKey }
-   */
-  async getTranscriptConfig(): Promise<TranscriptModelProps> {
-    return this.invokeCommand<TranscriptModelProps>('api_get_transcript_config');
-  }
 
   /**
    * Get saved summary model configuration

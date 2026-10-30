@@ -1,6 +1,11 @@
-//! Two-source streaming transcription on top of a [`Recognizer`] (sherpa on
-//! the CPU, or Core ML in the helper), free of Tauri so it can be exercised
-//! end to end in tests.
+//! Two-source streaming transcription on top of a [`Recognizer`] (Core ML in
+//! the `speech-helper` sidecar), free of Tauri so it can be exercised end to
+//! end in tests.
+//!
+//! The model tests below are ignored by default. They need
+//! `NEMOTRON_STREAMING_MODEL_DIR` set to the FluidAudio models directory
+//! (holding `nemotron-speech-streaming-en-0.6b-coreml/`) with a `test_wavs/`
+//! folder of 16 kHz clips in it, and a built `speech-helper`.
 //!
 //! Each source (microphone, system) has its own recognizer stream and silence
 //! gate. Audio is fed as it arrives; `decode` runs every ready stream as one
@@ -9,8 +14,8 @@
 use std::sync::Arc;
 
 use super::engine::StreamingEngine;
-use super::recognizer::StreamId;
 use super::gate::{join_tokens, next_commit, segment_bounds, GateAction, SilenceGate};
+use super::recognizer::StreamId;
 use crate::audio::RecordingDeviceType;
 
 /// Zeros appended before `input_finished`, so the model's last 560 ms chunk
@@ -129,10 +134,7 @@ impl StreamingTranscriber {
     pub fn last_token_time(&self, source: Source) -> Option<f64> {
         let state = &self.sources[source.index()];
         let result = self.engine.recognizer.result(state.stream?)?;
-        result
-            .times
-            .last()
-            .map(|t| state.origin + result.start + t)
+        result.times.last().map(|t| state.origin + result.start + t)
     }
 
     /// Why the engine stopped working, if it did.
@@ -149,9 +151,7 @@ impl StreamingTranscriber {
 
     fn feed(&self, state: &mut SourceState, samples: &[f32]) {
         if let Some(id) = state.stream {
-            self.engine
-                .recognizer
-                .accept(id, self.sample_rate, samples);
+            self.engine.recognizer.accept(id, self.sample_rate, samples);
             state.fed += samples.len() as u64;
         }
     }
@@ -580,9 +580,8 @@ mod tests {
         }
     }
 
-    /// End to end against the real model. Set `NEMOTRON_STREAMING_MODEL_DIR` to
-    /// a folder holding the pinned files (and `test_wavs/` from the same repo)
-    /// and run with `--ignored`.
+    /// End to end against the real model (see the module docs for the
+    /// setup); run with `--ignored`.
     #[test]
     #[ignore]
     fn transcribes_two_utterances_on_the_recording_timeline() {
@@ -608,7 +607,7 @@ mod tests {
                 offset += 8 + size;
             }
         };
-        // Upsample to the pipeline's 48 kHz to exercise sherpa's resampler.
+        // Upsample to the pipeline's 48 kHz to exercise the helper's resampler.
         let up = |audio: Vec<f32>| -> Vec<f32> { audio.iter().flat_map(|&s| [s, s, s]).collect() };
         let sr = 48_000u32;
         let mut audio = vec![0.0; 2 * sr as usize]; // 2 s of silence first

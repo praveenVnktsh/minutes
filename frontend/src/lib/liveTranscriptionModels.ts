@@ -1,62 +1,13 @@
 import { invoke } from '@tauri-apps/api/core';
 
-/** Which model streams text during a recording. */
-export type LiveModelChoice = 'nemotron-streaming' | 'chunked';
-
-export interface LiveModelStatus {
-  modelId: string;
-  downloaded: boolean;
-  downloading: boolean;
-  loaded: boolean;
-  sizeBytes: number;
-}
-
-/** Where the streaming live model runs (Settings → Advanced). */
-export type LiveEngineChoice = 'auto' | 'gpu' | 'neural-engine' | 'cpu';
-
-export const LIVE_ENGINE_OPTIONS: { value: LiveEngineChoice; label: string }[] = [
-  { value: 'auto', label: 'Auto (Neural Engine)' },
-  { value: 'gpu', label: 'GPU' },
-  { value: 'neural-engine', label: 'Neural Engine' },
-  { value: 'cpu', label: 'CPU' },
-];
-
-export interface LiveTranscriptionSettings {
-  liveModel: LiveModelChoice;
-  autoFinalPass: boolean;
-  liveEngine: LiveEngineChoice;
-  liveModelStatus: LiveModelStatus;
-}
-
-export type LiveTranscriptionSettingsChange = {
-  liveModel?: LiveModelChoice;
-  autoFinalPass?: boolean;
-  liveEngine?: LiveEngineChoice;
-};
-
-/** `live-model-download-progress` payload. */
-export interface LiveModelDownloadProgressEvent {
-  modelName: string;
-  progress: number;
-  downloaded_mb: number;
-  total_mb: number;
-  speed_mbps: number;
-  eta_seconds: number | null;
-  status: 'downloading' | 'completed' | 'error' | 'cancelled';
-  error: string | null;
-}
-
-export const LIVE_MODEL_DOWNLOAD_PROGRESS_EVENT = 'live-model-download-progress';
-export const LIVE_MODEL_DISPLAY_NAME = 'Nemotron Streaming 0.6B';
-
-export const liveTranscriptionApi = {
-  getSettings: () => invoke<LiveTranscriptionSettings>('get_live_transcription_settings'),
-  setSettings: (changes: LiveTranscriptionSettingsChange) =>
-    invoke<LiveTranscriptionSettings>('set_live_transcription_settings', changes),
-  download: () => invoke<void>('live_model_download'),
-  cancelDownload: () => invoke<boolean>('live_model_cancel_download'),
-  deleteModel: () => invoke<void>('live_model_delete'),
-};
+// The live settings moved next to the speech models they configure; these
+// re-exports keep older imports working.
+export {
+  LIVE_ENGINE_OPTIONS,
+  liveTranscriptionApi,
+  type LiveEngineChoice,
+  type LiveTranscriptionSettings,
+} from './speechModels';
 
 /** When the final pass ("Improve transcript after meetings") runs. */
 export type FinalPassTiming = 'automatic' | 'when-plugged-in' | 'off';
@@ -87,7 +38,10 @@ export interface FinalPassStarted {
   message: string | null;
   provider: string | null;
   model: string | null;
-  fallbackNotice: string | null;
+  /** Older builds named a fallback engine here; with one engine it stays empty. */
+  fallbackNotice?: string | null;
+  /** What a `waiting` pass waits for; older builds only waited for power. */
+  waitingFor?: 'power' | 'models' | null;
 }
 
 /** `final-transcript-pass-complete` payload: the hook for work that should
@@ -114,6 +68,19 @@ export function finalPassTookOver(result: unknown): result is FinalPassStarted {
     typeof result === 'object'
     && result !== null
     && (result as Partial<FinalPassStarted>).status === 'queued'
+  );
+}
+
+/**
+ * Whether the pass waits for the speech models to finish downloading. It then
+ * runs by itself once they land, so nothing should retranscribe in its place.
+ */
+export function finalPassWaitsForModels(result: unknown): boolean {
+  return (
+    typeof result === 'object'
+    && result !== null
+    && (result as Partial<FinalPassStarted>).status === 'waiting'
+    && (result as Partial<FinalPassStarted>).waitingFor === 'models'
   );
 }
 

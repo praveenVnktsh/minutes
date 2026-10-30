@@ -1,7 +1,6 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { listen } from '@tauri-apps/api/event';
 import { toast } from 'sonner';
 import { Label } from '@/components/ui/label';
 import {
@@ -11,70 +10,91 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { TranscriptModelCard, type TranscriptModelStatus } from '@/components/TranscriptModelCard';
-import { BYTES_PER_MIB } from '@/lib/download-display';
+import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion';
+import { finalPassApi, type FinalPassTiming } from '@/lib/liveTranscriptionModels';
 import {
   LIVE_ENGINE_OPTIONS,
-  LIVE_MODEL_DISPLAY_NAME,
-  LIVE_MODEL_DOWNLOAD_PROGRESS_EVENT,
-  finalPassApi,
   liveTranscriptionApi,
   type LiveEngineChoice,
-  type FinalPassTiming,
-  type LiveModelChoice,
-  type LiveModelDownloadProgressEvent,
   type LiveTranscriptionSettings,
-  type LiveTranscriptionSettingsChange,
-} from '@/lib/liveTranscriptionModels';
-import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion';
+} from '@/lib/speechModels';
 
-/** Card status for the live model from settings plus the latest progress event. */
-export function liveModelCardStatus(
-  settings: LiveTranscriptionSettings | null,
-  progress: LiveModelDownloadProgressEvent | null,
-): TranscriptModelStatus {
-  if (progress?.status === 'downloading') return { Downloading: { progress: progress.progress } };
-  if (progress?.status === 'error') return { Error: progress.error ?? 'Download failed' };
-  if (progress?.status === 'completed' || settings?.liveModelStatus.downloaded) return 'Available';
-  if (settings?.liveModelStatus.downloading) return { Downloading: { progress: progress?.progress ?? 0 } };
-  return 'Missing';
+/** The engine to show as chosen. Anything the select does not offer (the
+ * removed CPU engine, a newer value) reads as Auto, which is what Rust runs. */
+export function liveEngineValue(settings: Pick<LiveTranscriptionSettings, 'liveEngine'> | null): LiveEngineChoice {
+  const engine = settings?.liveEngine;
+  return LIVE_ENGINE_OPTIONS.some((option) => option.value === engine) ? (engine as LiveEngineChoice) : 'auto';
 }
 
-/**
- * Settings for the two transcription passes: the live model that streams text
- * while recording, and whether the final model re-transcribes the recording
- * afterwards, and when (the final model itself is chosen below, in TranscriptSettings).
- */
-export function LiveTranscriptionModelSettings() {
-  const [settings, setSettings] = useState<LiveTranscriptionSettings | null>(null);
-  const [progress, setProgress] = useState<LiveModelDownloadProgressEvent | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [cancelling, setCancelling] = useState(false);
+function saveFailed(error: unknown) {
+  toast.error('Could not save transcription settings', {
+    description: error instanceof Error ? error.message : String(error),
+  });
+}
 
-  const refresh = useCallback(async () => {
-    try {
-      setSettings(await liveTranscriptionApi.getSettings());
-    } catch (error) {
-      console.error('Failed to load live transcription settings:', error);
-    }
-  }, []);
+/** Where the live model runs, under an Advanced disclosure. */
+export function LiveEngineSettings() {
+  const [settings, setSettings] = useState<LiveTranscriptionSettings | null>(null);
+  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    void refresh();
-    const unlisten = listen<LiveModelDownloadProgressEvent>(LIVE_MODEL_DOWNLOAD_PROGRESS_EVENT, (event) => {
-      setProgress(event.payload);
-      if (event.payload.status !== 'downloading') {
-        setCancelling(false);
-        void refresh();
-      }
+    liveTranscriptionApi.getSettings().then(setSettings).catch((error) => {
+      console.error('Failed to load live transcription settings:', error);
     });
-    return () => {
-      void unlisten.then((fn) => fn());
-    };
-  }, [refresh]);
+  }, []);
 
+  const save = useCallback(async (liveEngine: LiveEngineChoice) => {
+    const previous = settings;
+    if (previous) setSettings({ ...previous, liveEngine });
+    setSaving(true);
+    try {
+      setSettings(await liveTranscriptionApi.setSettings({ liveEngine }));
+    } catch (error) {
+      setSettings(previous);
+      saveFailed(error);
+    } finally {
+      setSaving(false);
+    }
+  }, [settings]);
+
+  return (
+    <Accordion type="single" collapsible>
+      <AccordionItem value="advanced" className="border-b-0">
+        <AccordionTrigger className="py-2 text-sm font-medium text-ink-muted">Advanced</AccordionTrigger>
+        <AccordionContent>
+          <Label className="mb-1 block text-sm font-medium text-ink">Live transcription engine</Label>
+          <p className="mx-1 mb-2 text-xs text-ink-muted">
+            Where the live model runs. Auto uses the Neural Engine, which keeps the CPU and GPU
+            free with the same accuracy.
+          </p>
+          <div className="mx-1">
+            <Select
+              value={liveEngineValue(settings)}
+              disabled={!settings || saving}
+              onValueChange={(value) => void save(value as LiveEngineChoice)}
+            >
+              <SelectTrigger aria-label="Live transcription engine" className="focus:ring-2 focus:ring-focus">
+                <SelectValue placeholder="Auto" />
+              </SelectTrigger>
+              <SelectContent>
+                {LIVE_ENGINE_OPTIONS.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        </AccordionContent>
+      </AccordionItem>
+    </Accordion>
+  );
+}
+
+/** Whether the transcript is redone after each meeting, and when. */
+export function FinalPassTimingSettings() {
   const [timing, setTiming] = useState<FinalPassTiming | null>(null);
-  const [savingTiming, setSavingTiming] = useState(false);
+  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     finalPassApi.getTiming().then(setTiming).catch((error) => {
@@ -82,183 +102,44 @@ export function LiveTranscriptionModelSettings() {
     });
   }, []);
 
-  const saveTiming = useCallback(async (next: FinalPassTiming) => {
+  const save = useCallback(async (next: FinalPassTiming) => {
     const previous = timing;
     setTiming(next);
-    setSavingTiming(true);
+    setSaving(true);
     try {
       setTiming(await finalPassApi.setTiming(next));
     } catch (error) {
       setTiming(previous);
-      toast.error('Could not save transcription settings', {
-        description: error instanceof Error ? error.message : String(error),
-      });
-    } finally {
-      setSavingTiming(false);
-    }
-  }, [timing]);
-
-  const save = useCallback(async (changes: LiveTranscriptionSettingsChange) => {
-    const previous = settings;
-    if (previous) setSettings({ ...previous, ...changes });
-    setSaving(true);
-    try {
-      setSettings(await liveTranscriptionApi.setSettings(changes));
-    } catch (error) {
-      setSettings(previous);
-      toast.error('Could not save transcription settings', {
-        description: error instanceof Error ? error.message : String(error),
-      });
+      saveFailed(error);
     } finally {
       setSaving(false);
     }
-  }, [settings]);
-
-  const download = useCallback(() => {
-    setProgress({
-      modelName: settings?.liveModelStatus.modelId ?? '',
-      progress: 0,
-      downloaded_mb: 0,
-      total_mb: (settings?.liveModelStatus.sizeBytes ?? 0) / BYTES_PER_MIB,
-      speed_mbps: 0,
-      eta_seconds: null,
-      status: 'downloading',
-      error: null,
-    });
-    liveTranscriptionApi.download().catch((error) => {
-      // The progress event carries the failure to the card and the toast.
-      console.warn('Live model download did not finish:', error);
-    });
-  }, [settings]);
-
-  const cancel = useCallback(() => {
-    setCancelling(true);
-    liveTranscriptionApi.cancelDownload().catch((error) => {
-      setCancelling(false);
-      console.error('Failed to cancel the live model download:', error);
-    });
-  }, []);
-
-  const remove = useCallback(async () => {
-    try {
-      await liveTranscriptionApi.deleteModel();
-      setProgress(null);
-      await refresh();
-    } catch (error) {
-      toast.error('Could not delete the live model', {
-        description: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }, [refresh]);
-
-  const liveModel = settings?.liveModel ?? 'nemotron-streaming';
-  const sizeMb = Math.round((settings?.liveModelStatus.sizeBytes ?? 0) / BYTES_PER_MIB);
+  }, [timing]);
 
   return (
-    <div className="space-y-6 pb-6">
-      <div>
-        <Label className="mb-1 block text-sm font-medium text-ink">Live transcript model</Label>
-        <p className="mx-1 mb-2 text-xs text-ink-muted">
-          Streams text while you record. After the meeting, the final transcript model replaces it.
-        </p>
-        <div className="mx-1">
-          <Select
-            value={liveModel}
-            disabled={!settings || saving}
-            onValueChange={(value) => void save({ liveModel: value as LiveModelChoice })}
-          >
-            <SelectTrigger aria-label="Live transcript model" className="focus:ring-2 focus:ring-focus">
-              <SelectValue placeholder="Select live model" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="nemotron-streaming">
-                {LIVE_MODEL_DISPLAY_NAME} (Recommended)
-              </SelectItem>
-              <SelectItem value="chunked">Final transcript model, in chunks</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
-        {liveModel === 'nemotron-streaming' && (
-          <div className="mt-4">
-            <TranscriptModelCard
-              displayName={LIVE_MODEL_DISPLAY_NAME}
-              details={`NVIDIA streaming model for English, text in about half a second · ${sizeMb} MB`}
-              status={liveModelCardStatus(settings, progress)}
-              sizeMb={sizeMb}
-              isSelected
-              isRecommended
-              isCancelling={cancelling}
-              onSelect={() => {}}
-              onDownload={download}
-              onCancel={cancel}
-              onDelete={() => void remove()}
-            />
-            {settings && !settings.liveModelStatus.downloaded && progress?.status !== 'downloading' && (
-              <p className="mx-1 mt-2 text-xs text-ink-muted">
-                Until it is downloaded, live text uses the final transcript model.
-              </p>
-            )}
-          </div>
-        )}
+    <div>
+      <Label className="mb-1 block text-sm font-medium text-ink">Improve transcript after meetings</Label>
+      <p className="mx-1 mb-2 text-xs text-ink-muted">
+        Re-transcribes the recording with Parakeet and identifies speakers again. It is the
+        heaviest work Minutes does, so by default it waits until your Mac is plugged in and out of Low Power Mode. Edited
+        transcripts are never replaced.
+      </p>
+      <div className="mx-1">
+        <Select
+          value={timing ?? 'when-plugged-in'}
+          disabled={timing === null || saving}
+          onValueChange={(value) => void save(value as FinalPassTiming)}
+        >
+          <SelectTrigger aria-label="Improve transcript after meetings" className="focus:ring-2 focus:ring-focus">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="when-plugged-in">When plugged in (Recommended)</SelectItem>
+            <SelectItem value="automatic">Automatically</SelectItem>
+            <SelectItem value="off">Off</SelectItem>
+          </SelectContent>
+        </Select>
       </div>
-
-      <div>
-        <Label className="mb-1 block text-sm font-medium text-ink">Improve transcript after meetings</Label>
-        <p className="mx-1 mb-2 text-xs text-ink-muted">
-          Re-transcribes the recording with the final model and identifies speakers again. It is the
-          heaviest work Minutes does, so by default it waits until your Mac is plugged in and out of Low Power Mode. Edited
-          transcripts are never replaced.
-        </p>
-        <div className="mx-1">
-          <Select
-            value={timing ?? 'when-plugged-in'}
-            disabled={timing === null || savingTiming}
-            onValueChange={(value) => void saveTiming(value as FinalPassTiming)}
-          >
-            <SelectTrigger aria-label="Improve transcript after meetings" className="focus:ring-2 focus:ring-focus">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="when-plugged-in">When plugged in (Recommended)</SelectItem>
-              <SelectItem value="automatic">Automatically</SelectItem>
-              <SelectItem value="off">Off</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
-      </div>
-
-      {liveModel === 'nemotron-streaming' && (
-        <Accordion type="single" collapsible>
-          <AccordionItem value="advanced" className="border-b-0">
-            <AccordionTrigger className="py-2 text-sm font-medium text-ink-muted">Advanced</AccordionTrigger>
-            <AccordionContent>
-              <Label className="mb-1 block text-sm font-medium text-ink">Live transcription engine</Label>
-              <p className="mx-1 mb-2 text-xs text-ink-muted">
-                Where the live model runs. Auto uses the Neural Engine, which keeps the CPU and GPU
-                free with the same accuracy.
-              </p>
-              <div className="mx-1">
-                <Select
-                  value={settings?.liveEngine ?? 'auto'}
-                  disabled={!settings || saving}
-                  onValueChange={(value) => void save({ liveEngine: value as LiveEngineChoice })}
-                >
-                  <SelectTrigger aria-label="Live transcription engine" className="focus:ring-2 focus:ring-focus">
-                    <SelectValue placeholder="Auto" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {LIVE_ENGINE_OPTIONS.map((option) => (
-                      <SelectItem key={option.value} value={option.value}>
-                        {option.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-            </AccordionContent>
-          </AccordionItem>
-        </Accordion>
-      )}
     </div>
   );
 }

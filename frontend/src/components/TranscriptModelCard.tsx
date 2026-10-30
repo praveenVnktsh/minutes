@@ -3,9 +3,9 @@ import { Download, RefreshCw, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { badge, progress as progressBar, selection, toneFill, toneText } from '@/lib/theme-classes';
-import { formatFileSize } from '@/lib/whisper';
+import { formatBytes, mibToBytes } from '@/lib/download-display';
 
-/** The status shape both the Whisper and Parakeet engines report. */
+/** A model's download state, as the speech model settings derive it. */
 export type TranscriptModelStatus =
   | 'Available'
   | 'Missing'
@@ -18,10 +18,15 @@ interface TranscriptModelCardProps {
   /** One line under the name, e.g. what the model is good at and its size. */
   details: string;
   status: TranscriptModelStatus;
+  /** Download size in MiB. */
   sizeMb: number;
   isSelected: boolean;
   isRecommended: boolean;
   isCancelling: boolean;
+  /** Hides the delete button, e.g. while another model is downloading. */
+  deleteDisabled?: boolean;
+  /** Disables the download buttons, e.g. while another model is downloading. */
+  downloadDisabled?: boolean;
   onSelect: () => void;
   onDownload: () => void;
   onCancel: () => void;
@@ -40,6 +45,8 @@ export function TranscriptModelCard({
   isSelected,
   isRecommended,
   isCancelling,
+  deleteDisabled = false,
+  downloadDisabled = false,
   onSelect,
   onDownload,
   onCancel,
@@ -110,6 +117,7 @@ export function TranscriptModelCard({
               <Button
                 variant="outline"
                 size="sm"
+                disabled={downloadDisabled}
                 className="min-w-[100px]"
                 onClick={(e) => {
                   e.stopPropagation();
@@ -124,6 +132,7 @@ export function TranscriptModelCard({
               <Button
                 variant="outline"
                 size="sm"
+                disabled={downloadDisabled}
                 className="min-w-[100px]"
                 onClick={(e) => {
                   e.stopPropagation();
@@ -138,6 +147,7 @@ export function TranscriptModelCard({
               <Button
                 variant="outline"
                 size="sm"
+                disabled={downloadDisabled}
                 onClick={(e) => {
                   e.stopPropagation();
                   onDownload();
@@ -147,7 +157,7 @@ export function TranscriptModelCard({
                 Re-download
               </Button>
             )}
-            {(isAvailable || isCorrupted) && (
+            {(isAvailable || isCorrupted) && !deleteDisabled && (
               <button
                 onClick={(e) => {
                   e.stopPropagation();
@@ -197,7 +207,7 @@ export function TranscriptModelCard({
           </div>
           {sizeMb > 0 && (
             <p className="mt-1 text-xs text-ink-muted">
-              {formatFileSize(Math.round((sizeMb * progress) / 100))} / {formatFileSize(sizeMb)}
+              {formatBytes(mibToBytes((sizeMb * progress) / 100))} / {formatBytes(mibToBytes(sizeMb))}
             </p>
           )}
         </div>

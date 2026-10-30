@@ -199,7 +199,7 @@ pub async fn initialize_fresh_database(app: AppHandle) -> Result<(), String> {
         pool,
         "builtin-ai",
         default_summary_model,
-        crate::config::DEFAULT_WHISPER_MODEL, // Unused for builtin but required
+        "", // The legacy whisperModel column; nothing reads it
         None,
     )
     .await
@@ -211,8 +211,8 @@ pub async fn initialize_fresh_database(app: AppHandle) -> Result<(), String> {
     if let Err(e) =
         crate::database::repositories::setting::SettingsRepository::save_transcript_config(
             pool,
-            "parakeet",
-            crate::config::DEFAULT_PARAKEET_MODEL,
+            crate::audio::common::FINAL_PROVIDER,
+            crate::audio::common::FINAL_MODEL,
         )
         .await
     {

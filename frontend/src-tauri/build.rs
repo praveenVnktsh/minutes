@@ -6,9 +6,6 @@ fn main() {
         panic!("Minutes builds for macOS (Apple Silicon) only");
     }
 
-    #[cfg(feature = "coreml")]
-    println!("cargo:warning=CoreML acceleration ENABLED");
-
     println!("cargo:rustc-link-lib=framework=AVFoundation");
     println!("cargo:rustc-link-lib=framework=Cocoa");
     println!("cargo:rustc-link-lib=framework=Foundation");

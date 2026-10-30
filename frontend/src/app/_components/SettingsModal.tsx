@@ -1,7 +1,6 @@
 'use client';
 
 import { DeviceSelection } from '@/components/DeviceSelection';
-import { LanguageSelection } from '@/components/LanguageSelection';
 import { ModelConfigForm } from '@/components/settings/ModelConfigForm';
 import { TranscriptSettings } from '@/components/TranscriptSettings';
 import { Alert, AlertDescription } from '@/components/ui/alert';
@@ -31,10 +30,6 @@ export function SettingsModals({ modals, messages, onClose }: SettingsModalsProp
   const {
     selectedDevices,
     setSelectedDevices,
-    selectedLanguage,
-    setSelectedLanguage,
-    transcriptModelConfig,
-    setTranscriptModelConfig,
     showConfidenceIndicator,
     toggleConfidenceIndicator,
     isModelConfigSaving,
@@ -83,9 +78,9 @@ export function SettingsModals({ modals, messages, onClose }: SettingsModalsProp
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Language settings</DialogTitle>
-            <DialogDescription>Choose the primary language used for transcription.</DialogDescription>
+            <DialogDescription>The language meetings are transcribed in.</DialogDescription>
           </DialogHeader>
-          <LanguageSelection selectedLanguage={selectedLanguage} onLanguageChange={setSelectedLanguage} disabled={isRecording} provider={transcriptModelConfig.provider} />
+          <p className="text-sm text-ink-muted">Transcription is English-only.</p>
           <DialogFooter><Button onClick={() => onClose('languageSettings')}>Done</Button></DialogFooter>
         </DialogContent>
       </Dialog>
@@ -94,13 +89,9 @@ export function SettingsModals({ modals, messages, onClose }: SettingsModalsProp
         <DialogContent className="max-h-[90vh] max-w-4xl overflow-y-auto">
           <DialogHeader>
             <DialogTitle>{messages.modelSelector ? 'Speech recognition setup required' : 'Transcription model settings'}</DialogTitle>
-            <DialogDescription>{messages.modelSelector || 'Choose the engine and model used to transcribe meetings.'}</DialogDescription>
+            <DialogDescription>{messages.modelSelector || 'The speech models used to transcribe meetings.'}</DialogDescription>
           </DialogHeader>
-          <TranscriptSettings
-            transcriptModelConfig={transcriptModelConfig}
-            setTranscriptModelConfig={setTranscriptModelConfig}
-            onModelSelect={() => onClose('modelSelector')}
-          />
+          <TranscriptSettings />
           <DialogFooter className="items-center sm:justify-between">
             <label className="flex items-center gap-3 text-sm text-ink">
               <Switch aria-label="Show transcription confidence indicators" checked={showConfidenceIndicator} onCheckedChange={toggleConfidenceIndicator} />

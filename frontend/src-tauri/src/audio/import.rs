@@ -2,23 +2,22 @@
 
 use crate::api::TranscriptSegment;
 use crate::audio::decoder::{decode_audio_file, decode_audio_file_with_progress};
-use crate::audio::vad::get_speech_chunks_with_progress;
-use crate::config::{DEFAULT_PARAKEET_MODEL, DEFAULT_WHISPER_MODEL};
-use crate::parakeet_engine::ParakeetEngine;
+use crate::audio::speech::batch::{self as speech_batch, SpeechSegment};
 use crate::state::AppState;
-use crate::whisper_engine::WhisperEngine;
 use anyhow::{anyhow, Result};
 use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
 
 use super::audio_processing::create_meeting_folder;
-use super::common::{create_transcript_segments, split_segment_at_silence, write_transcripts_json};
+use super::common::{
+    create_transcript_segments, split_segment_at_silence, write_transcripts_json, FINAL_MODEL,
+    FINAL_PROVIDER,
+};
 use super::constants::AUDIO_EXTENSIONS;
 use super::recording_preferences::get_default_recordings_folder;
 
@@ -50,13 +49,6 @@ impl Drop for ImportGuard {
         IMPORT_IN_PROGRESS.store(false, Ordering::SeqCst);
     }
 }
-
-/// VAD redemption time in milliseconds - bridges natural pauses in speech
-/// Batch processing needs longer redemption (2000ms) than the live pipeline
-/// (500ms) because the entire file is processed at once by VAD with no
-/// latency requirement, and short redemption fragments speech at every
-/// natural sentence/topic pause (500ms-2s)
-const VAD_REDEMPTION_TIME_MS: u32 = 2000;
 
 /// Maximum file size: 20GB (prevents OOM and excessive processing time)
 const MAX_FILE_SIZE_BYTES: u64 = 20 * 1024 * 1024 * 1024; // 20GB
@@ -248,7 +240,9 @@ fn extract_duration_from_metadata(path: &Path) -> Result<f64> {
     Ok(duration_seconds)
 }
 
-/// Start import of an audio file
+/// Start import of an audio file. `language`, `model` and `provider` are
+/// accepted for compatibility and ignored: imports are transcribed in English
+/// with Parakeet TDT v2 in the speech-helper.
 pub async fn start_import<R: Runtime>(
     app: AppHandle<R>,
     source_path: String,
@@ -263,7 +257,6 @@ pub async fn start_import<R: Runtime>(
     // Reset cancellation flag
     IMPORT_CANCELLED.store(false, Ordering::SeqCst);
 
-    let use_parakeet = provider.as_deref() == Some("parakeet");
     let result = run_import(
         app.clone(),
         source_path,
@@ -276,7 +269,7 @@ pub async fn start_import<R: Runtime>(
     .await;
 
     // Unload the engine after the batch job (success, failure, or cancellation)
-    super::common::unload_engine_after_batch(use_parakeet).await;
+    super::common::unload_engine_after_batch().await;
 
     // Guard will automatically clear flag on drop
     // No need for manual: IMPORT_IN_PROGRESS.store(false, Ordering::SeqCst);
@@ -324,12 +317,11 @@ async fn run_import<R: Runtime>(
     }
 
     info!(
-        "Starting import for '{}' from {} with language {:?}, model {:?}, provider {:?}",
+        "Starting import for '{}' from {} (requested language {:?}, model {:?}, provider {:?} are ignored: English, Parakeet)",
         title, source_path, language, model, provider
     );
 
-    // Determine which provider to use (default to whisper)
-    let use_parakeet = provider.as_deref() == Some("parakeet");
+    super::common::ensure_batch_ready(&app)?;
 
     emit_progress(&app, "copying", 5, "Creating meeting folder...");
 
@@ -424,37 +416,26 @@ async fn run_import<R: Runtime>(
         return Err(anyhow!("Import cancelled"));
     }
 
-    // Use VAD to find speech segments
+    // Use VAD (Silero in the speech-helper) to find speech segments
     let app_for_vad = app.clone();
+    let vad_progress: Box<dyn Fn(f32) + Send + Sync> = Box::new(move |fraction: f32| {
+        let percent = (fraction.clamp(0.0, 1.0) * 100.0) as u32;
+        let overall_progress = 25 + (percent as f32 * 0.05) as u32;
+        emit_progress(
+            &app_for_vad,
+            "vad",
+            overall_progress,
+            &format!("Detecting speech segments... {}%", percent),
+        );
+    });
 
-    let speech_segments = tokio::task::spawn_blocking(move || {
-        get_speech_chunks_with_progress(
-            &audio_samples,
-            VAD_REDEMPTION_TIME_MS,
-            |vad_progress, segments_found| {
-                let overall_progress = 25 + (vad_progress as f32 * 0.05) as u32;
-                emit_progress(
-                    &app_for_vad,
-                    "vad",
-                    overall_progress,
-                    &format!(
-                        "Detecting speech segments... {}% ({} found)",
-                        vad_progress, segments_found
-                    ),
-                );
-                !IMPORT_CANCELLED.load(Ordering::SeqCst)
-            },
-        )
-    })
-    .await
-    .map_err(|e| anyhow!("VAD task panicked: {}", e))?
-    .map_err(|e| anyhow!("VAD processing failed: {}", e))?;
+    let speech_segments = speech_batch::speech_segments(&audio_samples, Some(vad_progress))
+        .await
+        .map_err(|e| anyhow!("VAD processing failed: {}", e))?;
+    drop(audio_samples);
 
     let total_segments = speech_segments.len();
-    info!(
-        "VAD detected {} speech segments (redemption_time={}ms)",
-        total_segments, VAD_REDEMPTION_TIME_MS
-    );
+    info!("VAD detected {} speech segments", total_segments);
 
     // Diagnostic: log segment duration distribution
     if !speech_segments.is_empty() {
@@ -518,25 +499,13 @@ async fn run_import<R: Runtime>(
 
     emit_progress(&app, "transcribing", 30, "Loading transcription engine...");
 
-    // Initialize the appropriate engine
-    let whisper_engine = if !use_parakeet && total_segments > 0 {
-        Some(get_or_init_whisper(&app, model.as_deref()).await?)
-    } else {
-        None
-    };
-    let parakeet_engine = if use_parakeet && total_segments > 0 {
-        Some(get_or_init_parakeet(&app, model.as_deref()).await?)
-    } else {
-        None
-    };
-
     // Split very long segments at silence boundaries for better transcription quality.
     // Hard cuts at arbitrary sample positions lose words at boundaries. Instead, scan
     // for the lowest-energy window near the target split point and cut there.
     const MAX_SEGMENT_SAMPLES: usize = 25 * 16000; // 25 seconds at 16kHz
 
-    let mut processable_segments: Vec<crate::audio::vad::SpeechSegment> = Vec::new();
-    for segment in &speech_segments {
+    let mut processable_segments: Vec<SpeechSegment> = Vec::new();
+    for segment in speech_segments {
         if segment.samples.len() > MAX_SEGMENT_SAMPLES {
             debug!(
                 "Splitting large segment ({:.0}ms, {} samples) at silence boundaries",
@@ -544,11 +513,11 @@ async fn run_import<R: Runtime>(
                 segment.samples.len()
             );
 
-            let sub_segments = split_segment_at_silence(segment, MAX_SEGMENT_SAMPLES);
+            let sub_segments = split_segment_at_silence(&segment, MAX_SEGMENT_SAMPLES);
             debug!("Split into {} sub-segments", sub_segments.len());
             processable_segments.extend(sub_segments);
         } else {
-            processable_segments.push(segment.clone());
+            processable_segments.push(segment);
         }
     }
 
@@ -561,8 +530,9 @@ async fn run_import<R: Runtime>(
     // Process each speech segment
     let mut all_transcripts: Vec<(String, f64, f64)> = Vec::new();
     let mut total_confidence = 0.0f32;
+    let mut confidence_count = 0usize;
 
-    for (i, segment) in processable_segments.iter().enumerate() {
+    for (i, segment) in processable_segments.into_iter().enumerate() {
         if IMPORT_CANCELLED.load(Ordering::SeqCst) {
             let _ = std::fs::remove_dir_all(&meeting_folder);
             return Err(anyhow!("Import cancelled"));
@@ -599,26 +569,16 @@ async fn run_import<R: Runtime>(
         }
 
         // Transcribe
-        let (text, conf) = if use_parakeet {
-            let engine = parakeet_engine.as_ref().unwrap();
-            let text = engine
-                .transcribe_audio(segment.samples.clone())
-                .await
-                .map_err(|e| anyhow!("Parakeet transcription failed on segment {}: {}", i, e))?;
-            (text, 0.9f32)
-        } else {
-            let engine = whisper_engine.as_ref().unwrap();
-            let (text, conf, _) = engine
-                .transcribe_audio_with_confidence(segment.samples.clone(), language.clone())
-                .await
-                .map_err(|e| anyhow!("Whisper transcription failed on segment {}: {}", i, e))?;
-            (text, conf)
-        };
+        let (start_ms, end_ms) = (segment.start_timestamp_ms, segment.end_timestamp_ms);
+        let transcript = speech_batch::transcribe(segment.samples)
+            .await
+            .map_err(|e| anyhow!("Transcription failed on segment {}: {}", i, e))?;
+        let (text, conf) = (transcript.text, transcript.confidence);
 
         let trimmed = text.trim();
         if !trimmed.is_empty() {
             debug!(
-                "Segment {}/{}: {:.1}s, conf={:.2}, text='{}'",
+                "Segment {}/{}: {:.1}s, conf={:?}, text='{}'",
                 i + 1,
                 processable_count,
                 segment_duration_sec,
@@ -633,8 +593,11 @@ async fn run_import<R: Runtime>(
                     trimmed
                 }
             );
-            all_transcripts.push((text, segment.start_timestamp_ms, segment.end_timestamp_ms));
-            total_confidence += conf;
+            all_transcripts.push((text, start_ms, end_ms));
+            if let Some(conf) = conf {
+                total_confidence += conf;
+                confidence_count += 1;
+            }
         } else {
             debug!(
                 "Segment {}/{}: {:.1}s — empty transcription",
@@ -646,8 +609,8 @@ async fn run_import<R: Runtime>(
     }
 
     let transcribed_count = all_transcripts.len();
-    let avg_confidence = if transcribed_count > 0 {
-        total_confidence / transcribed_count as f32
+    let avg_confidence = if confidence_count > 0 {
+        total_confidence / confidence_count as f32
     } else {
         0.0
     };
@@ -713,45 +676,14 @@ async fn run_import<R: Runtime>(
         warn!("Failed to write metadata.json: {}", e);
     }
 
-    // Record which transcription model actually produced this transcript so the
+    // Record which transcription model produced this transcript so the
     // meeting details view can show provenance later. Best-effort: a failure
     // here should not fail the import.
-    let transcription_provider = if use_parakeet { "parakeet" } else { "whisper" };
-    let transcription_model = if let Some(engine) = whisper_engine.as_ref() {
-        engine.get_current_model().await.unwrap_or_else(|| {
-            model
-                .clone()
-                .unwrap_or_else(|| DEFAULT_WHISPER_MODEL.to_string())
-        })
-    } else if let Some(engine) = parakeet_engine.as_ref() {
-        engine.get_current_model().await.unwrap_or_else(|| {
-            model
-                .clone()
-                .unwrap_or_else(|| DEFAULT_PARAKEET_MODEL.to_string())
-        })
-    } else {
-        // No speech was detected, so no engine was loaded. Resolve the model
-        // that would have been used, mirroring the target_model logic in
-        // get_or_init_whisper/get_or_init_parakeet above.
-        match model.as_deref() {
-            Some(m) => m.to_string(),
-            None => get_configured_model(&app, transcription_provider)
-                .await
-                .unwrap_or_else(|_| {
-                    if use_parakeet {
-                        DEFAULT_PARAKEET_MODEL.to_string()
-                    } else {
-                        DEFAULT_WHISPER_MODEL.to_string()
-                    }
-                }),
-        }
-    };
-
     if let Err(e) = crate::audio::model_provenance::record_transcription_model(
         &meeting_folder,
         &crate::audio::model_provenance::TranscriptionModel {
-            provider: transcription_provider.to_string(),
-            model: transcription_model,
+            provider: FINAL_PROVIDER.to_string(),
+            model: FINAL_MODEL.to_string(),
         },
     ) {
         warn!("Failed to record transcription model provenance: {}", e);
@@ -865,136 +797,6 @@ async fn create_meeting_with_transcripts(
     );
 
     Ok(meeting_id)
-}
-
-/// Get or initialize the Whisper engine
-async fn get_or_init_whisper<R: Runtime>(
-    app: &AppHandle<R>,
-    requested_model: Option<&str>,
-) -> Result<Arc<WhisperEngine>> {
-    use crate::whisper_engine::commands::WHISPER_ENGINE;
-
-    let engine = {
-        let guard = WHISPER_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
-        guard.as_ref().cloned()
-    };
-
-    match engine {
-        Some(e) => {
-            let target_model = match requested_model {
-                Some(model) => model.to_string(),
-                None => get_configured_model(app, "whisper").await?,
-            };
-
-            let current_model = e.get_current_model().await;
-            let needs_load = match &current_model {
-                Some(loaded) => loaded != &target_model,
-                None => true,
-            };
-
-            if needs_load {
-                info!(
-                    "Loading Whisper model '{}' (current: {:?})",
-                    target_model, current_model
-                );
-
-                if let Err(e) = e.discover_models().await {
-                    warn!("Model discovery error (continuing): {}", e);
-                }
-
-                e.load_model(&target_model)
-                    .await
-                    .map_err(|e| anyhow!("Failed to load model '{}': {}", target_model, e))?;
-            }
-
-            Ok(e)
-        }
-        None => Err(anyhow!("Whisper engine not initialized")),
-    }
-}
-
-/// Get or initialize the Parakeet engine
-async fn get_or_init_parakeet<R: Runtime>(
-    app: &AppHandle<R>,
-    requested_model: Option<&str>,
-) -> Result<Arc<ParakeetEngine>> {
-    use crate::parakeet_engine::commands::PARAKEET_ENGINE;
-
-    let engine = {
-        let guard = PARAKEET_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
-        guard.as_ref().cloned()
-    };
-
-    match engine {
-        Some(e) => {
-            let target_model = match requested_model {
-                Some(model) => model.to_string(),
-                None => get_configured_model(app, "parakeet").await?,
-            };
-
-            let current_model = e.get_current_model().await;
-            let needs_load = match &current_model {
-                Some(loaded) => loaded != &target_model,
-                None => true,
-            };
-
-            if needs_load {
-                info!(
-                    "Loading Parakeet model '{}' (current: {:?})",
-                    target_model, current_model
-                );
-
-                if let Err(e) = e.discover_models().await {
-                    warn!("Model discovery error (continuing): {}", e);
-                }
-
-                e.load_model(&target_model)
-                    .await
-                    .map_err(|e| anyhow!("Failed to load model '{}': {}", target_model, e))?;
-            }
-
-            Ok(e)
-        }
-        None => Err(anyhow!("Parakeet engine not initialized")),
-    }
-}
-
-/// Get the configured model from database
-async fn get_configured_model<R: Runtime>(
-    app: &AppHandle<R>,
-    provider_type: &str,
-) -> Result<String> {
-    let app_state = app
-        .try_state::<AppState>()
-        .ok_or_else(|| anyhow!("App state not available"))?;
-
-    let result: Option<(String, String)> =
-        sqlx::query_as("SELECT provider, model FROM transcript_settings WHERE id = '1'")
-            .fetch_optional(app_state.db_manager.pool())
-            .await
-            .map_err(|e| anyhow!("Failed to query config: {}", e))?;
-
-    match result {
-        Some((provider, model)) => {
-            if (provider_type == "whisper" && (provider == "localWhisper" || provider == "whisper"))
-                || (provider_type == "parakeet" && provider == "parakeet")
-            {
-                Ok(model)
-            } else {
-                // Return default model for the requested type
-                Ok(if provider_type == "parakeet" {
-                    DEFAULT_PARAKEET_MODEL.to_string()
-                } else {
-                    DEFAULT_WHISPER_MODEL.to_string()
-                })
-            }
-        }
-        None => Ok(if provider_type == "parakeet" {
-            DEFAULT_PARAKEET_MODEL.to_string()
-        } else {
-            DEFAULT_WHISPER_MODEL.to_string()
-        }),
-    }
 }
 
 /// Write metadata.json to a meeting folder (atomic write with temp file)
@@ -1271,11 +1073,10 @@ mod tests {
     #[test]
     fn test_split_segment_at_silence_short_segment() {
         // Segment shorter than max — returned as-is
-        let segment = crate::audio::vad::SpeechSegment {
+        let segment = SpeechSegment {
             samples: vec![0.1; 16000], // 1 second
             start_timestamp_ms: 0.0,
             end_timestamp_ms: 1000.0,
-            confidence: 0.9,
         };
         let result = split_segment_at_silence(&segment, 25 * 16000);
         assert_eq!(result.len(), 1);
@@ -1290,11 +1091,10 @@ mod tests {
         for sample in samples.iter_mut().skip(25 * 16000).take(3200) {
             *sample = 0.0;
         }
-        let segment = crate::audio::vad::SpeechSegment {
+        let segment = SpeechSegment {
             samples,
             start_timestamp_ms: 0.0,
             end_timestamp_ms: 60_000.0,
-            confidence: 0.9,
         };
 
         let result = split_segment_at_silence(&segment, 25 * 16000);
@@ -1320,11 +1120,10 @@ mod tests {
     #[test]
     fn test_split_segment_at_silence_no_silence_uses_overlap() {
         // Continuous speech (constant energy) — should still split with overlap
-        let segment = crate::audio::vad::SpeechSegment {
+        let segment = SpeechSegment {
             samples: vec![0.5f32; 60 * 16000], // 60 seconds of "speech"
             start_timestamp_ms: 0.0,
             end_timestamp_ms: 60_000.0,
-            confidence: 0.9,
         };
 
         let result = split_segment_at_silence(&segment, 25 * 16000);
@@ -1414,13 +1213,18 @@ mod tests {
         assert_eq!(parsed["source"], "import");
     }
 
-    /// Integration test that decodes a real audio file and runs VAD.
-    /// Run with: TEST_AUDIO_PATH=/path/to/audio.mp4 cargo test -- --ignored --nocapture
-    #[test]
+    /// Integration test that decodes a real audio file and runs VAD in the
+    /// speech-helper. Run with:
+    /// TEST_AUDIO_PATH=/path/to/audio.mp4 MINUTES_SPEECH_HELPER=/path/to/speech-helper \
+    /// MINUTES_SPEECH_MODELS=/path/to/models/fluidaudio cargo test -- --ignored --nocapture
+    #[tokio::test]
     #[ignore]
-    fn test_import_pipeline_decode_vad() {
+    async fn test_import_pipeline_decode_vad() {
         let audio_path = std::env::var("TEST_AUDIO_PATH")
             .expect("Set TEST_AUDIO_PATH to run this integration test");
+        let models_dir = std::env::var("MINUTES_SPEECH_MODELS")
+            .expect("Set MINUTES_SPEECH_MODELS to run this integration test");
+        speech_batch::configure(PathBuf::from(models_dir));
 
         let path = Path::new(&audio_path);
         assert!(path.exists(), "Audio file not found: {}", audio_path);
@@ -1446,57 +1250,35 @@ mod tests {
             samples.len() as f64 / 16000.0
         );
 
-        // Step 3: Run VAD with both redemption times and compare
-        for redemption_ms in [400u32, 2000] {
-            println!("\n--- VAD with redemption_time={}ms ---", redemption_ms);
-            let segments = crate::audio::vad::get_speech_chunks_with_progress(
-                &samples,
-                redemption_ms,
-                |progress, count| {
-                    if progress % 20 == 0 {
-                        println!("  VAD progress: {}% ({} segments)", progress, count);
-                    }
-                    true
-                },
-            )
+        // Step 3: Run VAD
+        let segments = speech_batch::speech_segments(&samples, None)
+            .await
             .expect("VAD failed");
+        speech_batch::unload().await;
 
-            let total_segments = segments.len();
-            println!("Found {} segments", total_segments);
+        println!("Found {} segments", segments.len());
+        let durations: Vec<f64> = segments
+            .iter()
+            .map(|s| s.end_timestamp_ms - s.start_timestamp_ms)
+            .collect();
+        let total_speech: f64 = durations.iter().sum();
+        let oversized = durations.iter().filter(|d| **d > 25_000.0).count();
+        println!(
+            "total_speech={:.1}s/{:.1}s, segments >25s (would be split): {}",
+            total_speech / 1000.0,
+            decoded.duration_seconds,
+            oversized
+        );
 
-            if !segments.is_empty() {
-                let durations: Vec<f64> = segments
-                    .iter()
-                    .map(|s| s.end_timestamp_ms - s.start_timestamp_ms)
-                    .collect();
-                let total_speech: f64 = durations.iter().sum();
-                let avg = total_speech / durations.len() as f64;
-                let min = durations.iter().cloned().fold(f64::INFINITY, f64::min);
-                let max = durations.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-
-                println!(
-                    "Stats: avg={:.0}ms, min={:.0}ms, max={:.0}ms, total_speech={:.1}s/{:.1}s ({:.0}%)",
-                    avg, min, max,
-                    total_speech / 1000.0,
-                    decoded.duration_seconds,
-                    (total_speech / 1000.0 / decoded.duration_seconds) * 100.0
-                );
-
-                // Segments over 25s that would be split
-                let oversized = durations.iter().filter(|d| **d > 25_000.0).count();
-                println!("Segments >25s (would be split): {}", oversized);
-
-                // Basic sanity checks
-                assert!(total_speech > 0.0, "No speech detected");
-                for (i, seg) in segments.iter().enumerate() {
-                    assert!(!seg.samples.is_empty(), "Segment {} has no samples", i);
-                    assert!(
-                        seg.end_timestamp_ms > seg.start_timestamp_ms,
-                        "Segment {} has invalid timestamps",
-                        i
-                    );
-                }
-            }
+        // Basic sanity checks
+        assert!(total_speech > 0.0, "No speech detected");
+        for (i, seg) in segments.iter().enumerate() {
+            assert!(!seg.samples.is_empty(), "Segment {} has no samples", i);
+            assert!(
+                seg.end_timestamp_ms > seg.start_timestamp_ms,
+                "Segment {} has invalid timestamps",
+                i
+            );
         }
     }
 }

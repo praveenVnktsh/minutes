@@ -1,6 +1,6 @@
 # GitHub Actions Workflows Overview
 
-Minutes is a Mac-only app (Apple Silicon, macOS 13+). Every workflow that builds the app targets `aarch64-apple-darwin` on a `macos-latest` runner. Jobs that only manage releases or validate configuration run on `ubuntu-latest`, because they build nothing.
+Minutes is a Mac-only app (Apple Silicon, macOS 13+; transcription needs macOS 15+). Every workflow that builds the app targets `aarch64-apple-darwin` on a `macos-latest` runner. Jobs that only manage releases or validate configuration run on `ubuntu-latest`, because they build nothing.
 
 ## Automatic Workflows
 
