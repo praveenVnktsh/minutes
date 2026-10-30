@@ -67,24 +67,6 @@ pub fn request_screen_recording_permission() -> Result<()> {
     }
 }
 
-/// Tauri command to log where the Screen Recording (Audio Capture) setting is.
-///
-/// Registered in lib.rs, which is the only reason it still takes this shape;
-/// no caller in this repository invokes it today. Its `true` means "logged",
-/// not "granted" — see [`check_screen_recording_permission`].
-#[tauri::command]
-pub async fn check_screen_recording_permission_command() -> bool {
-    check_screen_recording_permission()
-}
-
-/// Tauri command to open the settings page for the Screen Recording (Audio
-/// Capture) permission. Returning `Ok` means the page was asked to open,
-/// nothing about the grant.
-#[tauri::command]
-pub async fn request_screen_recording_permission_command() -> Result<(), String> {
-    request_screen_recording_permission().map_err(|e| e.to_string())
-}
-
 /// Tauri command behind onboarding's system audio row.
 ///
 /// It decides nothing itself, deliberately: onboarding and the start of a

@@ -1125,12 +1125,6 @@ pub async fn cancel_import_command() -> Result<(), String> {
     Ok(())
 }
 
-/// Check if import is in progress
-#[tauri::command]
-pub async fn is_import_in_progress_command() -> bool {
-    is_import_in_progress()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

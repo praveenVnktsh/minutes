@@ -1,13 +1,6 @@
 // audio/transcription/provider.rs
 //
-// Defines the unified TranscriptionProvider trait and common types for all
-// transcription engines (Whisper, Parakeet, future providers).
-
-use async_trait::async_trait;
-
-// ============================================================================
-// TRANSCRIPTION PROVIDER TRAIT & ERROR TYPES
-// ============================================================================
+// Error type shared by the chunked transcription engines (Whisper, Parakeet).
 
 /// Granular error types for transcription operations
 #[derive(Debug, Clone)]
@@ -36,38 +29,3 @@ impl std::fmt::Display for TranscriptionError {
 }
 
 impl std::error::Error for TranscriptionError {}
-
-/// Unified transcription result across all providers
-#[derive(Debug, Clone)]
-pub struct TranscriptResult {
-    pub text: String,
-    pub confidence: Option<f32>, // None if provider doesn't support confidence scores
-    pub is_partial: bool,
-}
-
-/// Trait for transcription providers (Whisper, Parakeet, future providers)
-#[async_trait]
-pub trait TranscriptionProvider: Send + Sync {
-    /// Transcribe audio samples to text
-    ///
-    /// # Arguments
-    /// * `audio` - Audio samples (16kHz mono, f32 format)
-    /// * `language` - Optional language hint (e.g., "en", "es", "fr")
-    ///
-    /// # Returns
-    /// * `TranscriptResult` with text, optional confidence, and partial flag
-    async fn transcribe(
-        &self,
-        audio: Vec<f32>,
-        language: Option<String>,
-    ) -> std::result::Result<TranscriptResult, TranscriptionError>;
-
-    /// Check if a model is currently loaded
-    async fn is_model_loaded(&self) -> bool;
-
-    /// Get the name of the currently loaded model
-    async fn get_current_model(&self) -> Option<String>;
-
-    /// Get the provider name (for logging/debugging)
-    fn provider_name(&self) -> &'static str;
-}

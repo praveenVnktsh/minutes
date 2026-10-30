@@ -2,7 +2,6 @@
 //
 // TranscriptionEngine enum and model initialization/validation logic.
 
-use super::provider::TranscriptionProvider;
 use log::{info, warn};
 use std::sync::Arc;
 use tauri::{AppHandle, Manager, Runtime};
@@ -15,7 +14,6 @@ use tauri::{AppHandle, Manager, Runtime};
 pub enum TranscriptionEngine {
     Whisper(Arc<crate::whisper_engine::WhisperEngine>), // Direct access (backward compat)
     Parakeet(Arc<crate::parakeet_engine::ParakeetEngine>), // Direct access (backward compat)
-    Provider(Arc<dyn TranscriptionProvider>),           // Trait-based (preferred for new code)
 }
 
 impl TranscriptionEngine {
@@ -24,7 +22,6 @@ impl TranscriptionEngine {
         match self {
             Self::Whisper(engine) => engine.is_model_loaded().await,
             Self::Parakeet(engine) => engine.is_model_loaded().await,
-            Self::Provider(provider) => provider.is_model_loaded().await,
         }
     }
 
@@ -33,7 +30,6 @@ impl TranscriptionEngine {
         match self {
             Self::Whisper(engine) => engine.get_current_model().await,
             Self::Parakeet(engine) => engine.get_current_model().await,
-            Self::Provider(provider) => provider.get_current_model().await,
         }
     }
 
@@ -42,7 +38,6 @@ impl TranscriptionEngine {
         match self {
             Self::Whisper(_) => "Whisper (direct)",
             Self::Parakeet(_) => "Parakeet (direct)",
-            Self::Provider(provider) => provider.provider_name(),
         }
     }
 }

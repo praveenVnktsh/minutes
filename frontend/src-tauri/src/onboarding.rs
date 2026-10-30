@@ -203,13 +203,6 @@ pub async fn save_onboarding_status_cmd<R: Runtime>(
 }
 
 #[tauri::command]
-pub async fn reset_onboarding_status_cmd<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
-    reset_onboarding_status(&app)
-        .await
-        .map_err(|e| format!("Failed to reset onboarding status: {}", e))
-}
-
-#[tauri::command]
 pub async fn complete_onboarding<R: Runtime>(
     app: AppHandle<R>,
     state: tauri::State<'_, AppState>,

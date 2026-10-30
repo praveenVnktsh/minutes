@@ -1143,18 +1143,6 @@ pub async fn start_retranscription_command<R: Runtime>(
     })
 }
 
-#[tauri::command]
-pub async fn cancel_retranscription_command() -> Result<(), String> {
-    // Legacy cancel still works for direct retranscriptions
-    cancel_retranscription();
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn is_retranscription_in_progress_command() -> bool {
-    is_retranscription_in_progress()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

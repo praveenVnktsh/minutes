@@ -1009,12 +1009,6 @@ pub fn init_queue_worker<R: Runtime>(app: &AppHandle<R>) {
 // Tauri commands
 // ============================================================================
 
-/// Get the current queue status
-#[tauri::command]
-pub async fn get_transcription_queue_status() -> QueueStatus {
-    get_queue().get_status().await
-}
-
 /// Cancel a transcription task by ID
 #[tauri::command]
 pub async fn cancel_transcription_task<R: Runtime>(
@@ -1110,12 +1104,6 @@ pub async fn resume_transcription_task<R: Runtime>(
         None,
     );
     Ok(true)
-}
-
-/// Check if the queue has an active task (used to determine if live transcription should be disabled)
-#[tauri::command]
-pub async fn is_transcription_queue_active() -> bool {
-    get_queue().has_active_task().await
 }
 
 #[cfg(test)]

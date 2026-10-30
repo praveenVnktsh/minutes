@@ -351,7 +351,6 @@ fn get_recording_level() -> f32 {
     audio::pipeline::recording_level()
 }
 
-
 // Whisper commands are now handled by whisper_engine::commands module
 
 #[tauri::command]
@@ -372,23 +371,6 @@ async fn get_audio_devices() -> Result<Vec<AudioDevice>, String> {
 #[tauri::command]
 async fn trigger_microphone_permission() -> Result<PermissionReport, String> {
     Ok(audio::permission_check::verify_microphone().await)
-}
-
-#[tauri::command]
-async fn start_recording_with_devices<R: Runtime>(
-    app: AppHandle<R>,
-    mic_device_name: Option<String>,
-    system_device_name: Option<String>,
-) -> Result<RecordingStarted, String> {
-    start_recording_with_devices_and_meeting(
-        app,
-        mic_device_name,
-        system_device_name,
-        None,
-        None,
-        None,
-    )
-    .await
 }
 
 #[tauri::command]
@@ -587,7 +569,6 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_deep_link::init())
-        .manage(whisper_engine::parallel_commands::ParallelProcessorState::new())
         .manage(Arc::new(RwLock::new(
             None::<notifications::manager::NotificationManager<tauri::Wry>>,
         )) as NotificationManagerState<tauri::Wry>)
@@ -779,7 +760,8 @@ pub fn run() {
                 let Ok(app_data_dir) = _app.path().app_data_dir() else {
                     return;
                 };
-                let models_dir = summary::summary_engine::models::get_models_directory(&app_data_dir);
+                let models_dir =
+                    summary::summary_engine::models::get_models_directory(&app_data_dir);
                 if live_summary::llm::live_notes_model_downloaded(&models_dir) {
                     tauri::async_runtime::spawn(async move {
                         summary::summary_engine::adapters::ensure_downloaded(&models_dir).await;
@@ -827,7 +809,6 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
-            tray::set_meeting_detected_tray,
             shortcuts::get_global_shortcuts,
             shortcuts::set_global_shortcuts,
             debug_mode::get_debug_mode,
@@ -882,21 +863,8 @@ pub fn run() {
             parakeet_engine::commands::parakeet_cancel_download,
             parakeet_engine::commands::parakeet_delete_corrupted_model,
             parakeet_engine::commands::open_parakeet_models_folder,
-            // Parallel processing commands
-            whisper_engine::parallel_commands::initialize_parallel_processor,
-            whisper_engine::parallel_commands::start_parallel_processing,
-            whisper_engine::parallel_commands::pause_parallel_processing,
-            whisper_engine::parallel_commands::resume_parallel_processing,
-            whisper_engine::parallel_commands::stop_parallel_processing,
-            whisper_engine::parallel_commands::get_parallel_processing_status,
-            whisper_engine::parallel_commands::get_system_resources,
-            whisper_engine::parallel_commands::check_resource_constraints,
-            whisper_engine::parallel_commands::calculate_optimal_workers,
-            whisper_engine::parallel_commands::prepare_audio_chunks,
-            whisper_engine::parallel_commands::test_parallel_processing_setup,
             get_audio_devices,
             trigger_microphone_permission,
-            start_recording_with_devices,
             start_recording_with_devices_and_meeting,
             start_audio_level_monitoring,
             stop_audio_level_monitoring,
@@ -908,7 +876,6 @@ pub fn run() {
             // Recording pause/resume commands
             audio::recording_commands::pause_recording,
             audio::recording_commands::resume_recording,
-            audio::recording_commands::is_recording_paused,
             audio::recording_commands::get_recording_state,
             audio::recording_commands::get_meeting_folder_path,
             live_notes::save_live_notes,
@@ -917,7 +884,6 @@ pub fn run() {
             live_notes::get_meeting_live_notes,
             live_notes::save_meeting_live_notes,
             live_summary::get_live_timeline,
-            live_summary::get_live_enhanced,
             live_summary::has_live_enhanced_notes,
             live_summary::list_meeting_timeline_entries,
             live_summary::get_live_summary_settings,
@@ -947,8 +913,6 @@ pub fn run() {
             // Reload sync commands (retrieve transcript history and meeting name)
             audio::recording_commands::get_transcript_history,
             audio::recording_commands::get_recording_meeting_name,
-            // Playback device detection (Bluetooth warning)
-            audio::recording_commands::get_active_audio_output,
             // Audio recovery commands (for transcript recovery feature)
             audio::incremental_saver::recover_audio_from_checkpoints,
             audio::incremental_saver::cleanup_checkpoints,
@@ -959,7 +923,6 @@ pub fn run() {
             ollama::get_ollama_models,
             ollama::pull_ollama_model,
             ollama::delete_ollama_model,
-            ollama::get_ollama_model_context,
             openai::openai::get_openai_models,
             anthropic::anthropic::get_anthropic_models,
             groq::groq::get_groq_models,
@@ -981,7 +944,6 @@ pub fn run() {
             api::api_get_transcript_config,
             api::api_save_transcript_config,
             api::api_get_transcript_api_key,
-            api::api_delete_meeting,
             api::api_get_meeting,
             api::api_get_meeting_metadata,
             api::api_get_meeting_transcripts,
@@ -1012,8 +974,6 @@ pub fn run() {
             summary::prompt_settings::api_reset_summary_prompt,
             // Template commands
             summary::template_commands::api_list_templates,
-            summary::template_commands::api_get_template_details,
-            summary::template_commands::api_validate_template,
             // Built-in AI commands
             summary::summary_engine::commands::builtin_ai_list_models,
             summary::summary_engine::commands::builtin_ai_get_model_info,
@@ -1028,8 +988,6 @@ pub fn run() {
             audio::recording_preferences::set_recording_preferences,
             audio::recording_preferences::get_default_recordings_folder_path,
             audio::recording_preferences::open_recordings_folder,
-            audio::recording_preferences::select_recording_folder,
-            audio::recording_preferences::get_available_audio_backends,
             audio::recording_preferences::get_current_audio_backend,
             audio::recording_preferences::set_audio_backend,
             audio::recording_preferences::get_audio_backend_info,
@@ -1041,33 +999,12 @@ pub fn run() {
             // Notification system commands
             notifications::commands::get_notification_settings,
             notifications::commands::set_notification_settings,
-            notifications::commands::request_notification_permission,
-            notifications::commands::show_notification,
-            notifications::commands::show_test_notification,
-            notifications::commands::is_dnd_active,
-            notifications::commands::get_system_dnd_status,
-            notifications::commands::set_manual_dnd,
-            notifications::commands::set_notification_consent,
-            notifications::commands::clear_notifications,
-            notifications::commands::is_notification_system_ready,
-            notifications::commands::initialize_notification_manager_manual,
-            notifications::commands::test_notification_with_auto_consent,
-            notifications::commands::get_notification_stats,
-            // System audio capture commands
-            audio::system_audio_commands::start_system_audio_capture_command,
-            audio::system_audio_commands::list_system_audio_devices_command,
-            audio::system_audio_commands::check_system_audio_permissions_command,
+            // Meeting detection (system audio monitoring)
             audio::system_audio_commands::start_system_audio_monitoring,
-            audio::system_audio_commands::stop_system_audio_monitoring,
-            audio::system_audio_commands::get_system_audio_monitoring_status,
-            // Screen Recording permission commands
-            audio::permissions::check_screen_recording_permission_command,
-            audio::permissions::request_screen_recording_permission_command,
+            // System audio permission
             audio::permissions::trigger_system_audio_permission_command,
             // Database import commands
             database::commands::check_first_launch,
-            database::commands::select_legacy_database_path,
-            database::commands::detect_legacy_database,
             database::commands::check_default_legacy_database,
             database::commands::check_homebrew_database,
             database::commands::import_and_initialize_database,
@@ -1079,7 +1016,6 @@ pub fn run() {
             // Onboarding commands
             onboarding::get_onboarding_status,
             onboarding::save_onboarding_status_cmd,
-            onboarding::reset_onboarding_status_cmd,
             onboarding::complete_onboarding,
             // System settings commands
             utils::open_system_settings,
@@ -1096,8 +1032,6 @@ pub fn run() {
             audio::live_streaming::commands::live_model_download,
             audio::live_streaming::commands::live_model_cancel_download,
             audio::live_streaming::commands::live_model_delete,
-            audio::retranscription::cancel_retranscription_command,
-            audio::retranscription::is_retranscription_in_progress_command,
             audio::diarization::run_speaker_diarization,
             audio::diarization::get_diarization_status,
             audio::speaker_corrections::get_speaker_identities,
@@ -1111,13 +1045,10 @@ pub fn run() {
             audio::import::validate_audio_file_command,
             audio::import::start_import_audio_command,
             audio::import::cancel_import_command,
-            audio::import::is_import_in_progress_command,
             // Transcription queue commands
-            audio::transcription_queue::get_transcription_queue_status,
             audio::transcription_queue::cancel_transcription_task,
             audio::transcription_queue::pause_transcription_task,
             audio::transcription_queue::resume_transcription_task,
-            audio::transcription_queue::is_transcription_queue_active,
             // Transcription-complete webhook integration
             webhooks::get_webhook_config,
             webhooks::set_webhook_config,

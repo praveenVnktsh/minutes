@@ -1127,16 +1127,6 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     Ok(session_id)
 }
 
-/// Start recording with specific devices
-pub async fn start_recording_with_devices<R: Runtime>(
-    app: AppHandle<R>,
-    mic_device_name: Option<String>,
-    system_device_name: Option<String>,
-) -> Result<String, String> {
-    start_recording_with_devices_and_meeting(app, mic_device_name, system_device_name, None, None)
-        .await
-}
-
 /// Start recording with specific devices and optional meeting name.
 /// With `resume_meeting_id`, records into that saved meeting instead of a new one.
 pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
@@ -2134,15 +2124,6 @@ pub async fn get_recording_meeting_name() -> Result<Option<String>, String> {
 // ============================================================================
 // DEVICE MONITORING COMMANDS (AirPods/Bluetooth disconnect/reconnect support)
 // ============================================================================
-
-/// Get information about the active audio output device
-/// Used to warn users about Bluetooth playback issues
-#[tauri::command]
-pub async fn get_active_audio_output() -> Result<super::playback_monitor::AudioOutputInfo, String> {
-    super::playback_monitor::get_active_audio_output()
-        .await
-        .map_err(|e| format!("Failed to get audio output info: {}", e))
-}
 
 // ============================================================================
 // MIC HOT-SWAP (disconnect recovery)
