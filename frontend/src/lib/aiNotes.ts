@@ -352,3 +352,58 @@ export function applyTidyWrapUp(
   }
   return writer.done(inserted);
 }
+
+/** AI notes Markdown (a whole-transcript summary) as wrap-up groups: each
+ * heading starts a topic, list items become bullets, other lines paragraphs. */
+export function markdownWrapUp(markdown: string, ms = 0): WrapUpGroup[] {
+  const groups: WrapUpGroup[] = [];
+  let current: WrapUpGroup | null = null;
+  let topic = 'AI notes';
+  const add = (type: WrapUpGroup['type'], text: string) => {
+    if (!current || current.type !== type || current.topic !== topic) {
+      current = { topic, type, lines: [] };
+      groups.push(current);
+    }
+    current.lines.push({ entryId: '', text, ms });
+  };
+  for (const raw of markdown.split('\n')) {
+    const line = raw.trim();
+    if (!line || /^(-{3,}|\*{3,}|_{3,})$/.test(line)) continue;
+    const heading = line.match(/^#{1,6}\s+(.*)$/);
+    if (heading) {
+      topic = heading[1].replace(/\*\*/g, '').trim() || topic;
+      current = null;
+      continue;
+    }
+    const item = line.match(/^(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s+)?(.*)$/);
+    if (item) {
+      if (item[1].trim()) add('bulletListItem', item[1].trim());
+    } else {
+      add('paragraph', line);
+    }
+  }
+  return groups;
+}
+
+/**
+ * "Regenerate AI notes": every AI line (one still the AI's; an edited line is
+ * the user's) is removed and the new AI notes are written in their place at
+ * the end of the notes. The user's lines are kept as they are. The document
+ * is marked wrapped up, so the end-of-meeting wrap-up is not added again.
+ */
+export function replaceAiNotes(
+  document: LiveNotesDocument,
+  markdown: string,
+  makeId: () => string = defaultId,
+): LiveNotesDocument | null {
+  if (!Array.isArray(document.editorBlocks)) return null;
+  const groups = markdownWrapUp(markdown, Math.max(0, ...document.notes.map((note) => note.timestampSeconds)) * 1000);
+  if (groups.length === 0) return null;
+  const writer = new AiWriter(document, makeId);
+  writer.remove(new Set(Object.keys(document.aiBlocks ?? {})));
+  writer.writeWrapUp(groups);
+  const inserted = new Set(document.aiEntries ?? []);
+  inserted.add(WRAP_UP_ENTRY);
+  inserted.add(TIDY_WRAP_UP_ENTRY);
+  return writer.done(inserted);
+}

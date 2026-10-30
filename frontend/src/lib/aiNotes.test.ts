@@ -10,7 +10,9 @@ import {
   completeAiNotes,
   hasAiNotes,
   legacyAiNotes,
+  markdownWrapUp,
   notesMarkdown,
+  replaceAiNotes,
   tidyWrapUpOf,
   TIDY_WRAP_UP_ENTRY,
   WRAP_UP_ENTRY,
@@ -251,6 +253,52 @@ describe('Show AI notes', () => {
     const contents = buildMeetingExport({ title: 'Planning', notes: '- Mine', aiNotes: '- Old summary', transcripts: [] });
     expect(contents).toBe('# Planning\n\n## Notes\n\n- Mine\n\n## AI notes\n\n- Old summary\n');
     expect(buildMeetingExport({ title: 'Planning', notes: '- Mine', transcripts: [] })).not.toContain('AI notes');
+  });
+});
+
+describe('regenerating AI notes', () => {
+  test('reads a summary into topics, bullets and paragraphs', () => {
+    expect(markdownWrapUp('# Summary\nWe agreed.\n\n## Action items\n- [ ] Ana — send deck\n1. Bo — book room\n---')).toEqual([
+      { topic: 'Summary', type: 'paragraph', lines: [{ entryId: '', text: 'We agreed.', ms: 0 }] },
+      {
+        topic: 'Action items',
+        type: 'bulletListItem',
+        lines: [
+          { entryId: '', text: 'Ana — send deck', ms: 0 },
+          { entryId: '', text: 'Bo — book room', ms: 0 },
+        ],
+      },
+    ]);
+  });
+
+  test('replaces only the AI lines and keeps the user lines, marked wrapped up', () => {
+    let next = 0;
+    const replaced = replaceAiNotes(meetingDocument(), '## Decisions\n- Ship on Friday', () => `n${++next}`)!;
+    const ids = (replaced.editorBlocks as { id: string }[]).map((block) => block.id);
+    expect(ids).toContain('mine');
+    expect(ids).toContain('empty');
+    expect(ids).not.toContain('h1');
+    expect(ids).not.toContain('a1');
+    expect(Object.values(replaced.aiBlocks ?? {}).map((info) => info.text)).toEqual(['Decisions', 'Ship on Friday']);
+    expect(replaced.aiEntries).toContain(WRAP_UP_ENTRY);
+    expect(replaced.aiEntries).toContain(TIDY_WRAP_UP_ENTRY);
+    expect(replaced.notes.map((note) => note.text)).toEqual(['Ask about budget', 'Decisions', 'Ship on Friday', '']);
+    // The wrap-up is not added on top of the regenerated notes.
+    expect(completeAiNotes(replaced, [])).toBeNull();
+  });
+
+  test('an edited AI line is the user\'s, so it survives', () => {
+    const document = meetingDocument();
+    // The editor drops an edited line from aiBlocks.
+    const edited: LiveNotesDocument = { ...document, aiBlocks: { h1: document.aiBlocks!.h1 } };
+    const replaced = replaceAiNotes(edited, '- New line', () => 'n1')!;
+    const ids = (replaced.editorBlocks as { id: string }[]).map((block) => block.id);
+    expect(ids).toContain('a1');
+    expect(ids).not.toContain('h1');
+  });
+
+  test('empty AI notes leave the document alone', () => {
+    expect(replaceAiNotes(meetingDocument(), '  \n')).toBeNull();
   });
 });
 

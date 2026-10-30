@@ -73,6 +73,16 @@ mock.module('../../src/hooks/meeting-details/useMeetingOperations', () => ({ use
   handleOpenMeetingFolder: async () => {},
 }) }));
 mock.module('framer-motion', () => ({ motion: { div: ({ children }: { children?: unknown }) => children } }));
+const originalDialog = { ...await import('../../src/components/ui/dialog') };
+// Radix renders dialog content in a portal, which the test renderer cannot.
+mock.module('../../src/components/ui/dialog', () => ({
+  Dialog: ({ open, children }: { open?: boolean; children?: unknown }) => (open ? children : null),
+  DialogContent: ({ children }: { children?: unknown }) => children,
+  DialogHeader: ({ children }: { children?: unknown }) => children,
+  DialogFooter: ({ children }: { children?: unknown }) => children,
+  DialogTitle: ({ children }: { children?: unknown }) => children,
+  DialogDescription: ({ children }: { children?: unknown }) => children,
+}));
 mock.module('../../src/components/ui/popover', () => ({
   Popover: ({ children }: { children?: unknown }) => children,
   PopoverContent: ({ children }: { children?: unknown }) => children,
@@ -113,6 +123,7 @@ afterAll(() => {
   mock.module('sonner', () => originalToast);
   mock.module('../../src/contexts/RecordingStateContext', () => originalRecordingState);
   mock.module('../../src/contexts/RecordingControllerContext', () => originalRecordingController);
+  mock.module('../../src/components/ui/dialog', () => originalDialog);
   mock.module('../../src/lib/summary-language-preferences', () => originalPreferences);
 });
 
@@ -174,6 +185,10 @@ function button(label: string) {
   return renderer!.root.findAll((node) => node.type === 'button'
     && node.children.some((child) => typeof child === 'string' && child.includes(label)))[0];
 }
+function exactButton(label: string) {
+  return renderer!.root.findAll((node) => node.type === 'button'
+    && node.children.some((child) => typeof child === 'string' && child.trim() === label))[0];
+}
 const rendered = () => JSON.stringify(renderer!.toJSON());
 
 describe('PageContent owner repair composition', () => {
@@ -191,6 +206,8 @@ describe('PageContent owner repair composition', () => {
     expect(workspaceProps.notesMode).toBeUndefined();
     expect(button('Copy notes')).toBeDefined();
     expect(button('Export')).toBeDefined();
+    // With Show AI notes on, Copy and Export include them, so say nothing more.
+    expect(rendered()).not.toContain('without AI notes');
   });
 
   test('a persistence-complete event refreshes only the current meeting', async () => {
@@ -201,10 +218,10 @@ describe('PageContent owner repair composition', () => {
     expect(refetch).toHaveBeenCalledTimes(1);
   });
 
-  test('offers a retry, and no rewrite, while the initial summary read is unavailable', async () => {
+  test('offers a retry, and no regenerate, while the initial summary read is unavailable', async () => {
     await show(undefined, 'database busy');
     expect(rendered()).toContain('Could not load AI notes');
-    expect(button('Rewrite AI notes')).toBeUndefined();
+    expect(button('Regenerate AI notes')).toBeUndefined();
     expect(button('Write AI notes')).toBeUndefined();
   });
 
@@ -212,13 +229,16 @@ describe('PageContent owner repair composition', () => {
     let resolveStart!: (value: { process_id: string }) => void;
     startPromise = new Promise((resolve) => { resolveStart = resolve; });
     await show();
+    // Regenerating asks first, and says what it keeps.
+    await act(async () => { button('Regenerate AI notes').props.onClick(); });
+    expect(rendered()).toContain('Lines you wrote or edited are kept');
     await act(async () => {
-      button('Rewrite AI notes').props.onClick();
+      exactButton('Regenerate').props.onClick();
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     expect(rendered()).toContain('Finishing notes');
 
-    await act(async () => { button('Stop').props.onClick(); });
+    await act(async () => { button('Stop AI notes').props.onClick(); });
     await act(async () => resolveStart({ process_id: '2026-09-19T11:00:00.000000000Z' }));
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
     expect(invocations.some(([command]) => command === 'api_cancel_summary')).toBe(true);
