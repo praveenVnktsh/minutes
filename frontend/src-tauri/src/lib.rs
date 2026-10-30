@@ -929,6 +929,7 @@ pub fn run() {
             api::api_get_transcription_vocabulary,
             api::api_set_transcription_vocabulary,
             api::api_search_transcripts,
+            api::api_search_meeting_transcript,
             api::api_get_model_config,
             api::api_save_model_config,
             api::api_get_api_key,

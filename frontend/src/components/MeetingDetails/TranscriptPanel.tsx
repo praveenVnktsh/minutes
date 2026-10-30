@@ -18,6 +18,7 @@ import { toneText } from '@/lib/theme-classes';
 import { FINAL_PASS_COMPLETE_EVENT, type FinalPassComplete } from '@/lib/liveTranscriptionModels';
 import { SpeakerStatusNotice } from './SpeakerStatusNotice';
 import { ModelProvenanceNote } from './ModelProvenanceNote';
+import { resolveMatchTarget, searchMeetingTranscript, transcriptMatchIds, type TranscriptMatch } from '@/lib/transcriptSearch';
 
 /**
  * The one status line under the transcript header: a playback error first,
@@ -90,6 +91,8 @@ interface TranscriptPanelProps {
   totalCount?: number;
   loadedCount?: number;
   onLoadMore?: () => void;
+  /** Loads every remaining row (used to reach a search match not loaded yet). */
+  onLoadAll?: () => Promise<void>;
 
   // Retranscription props
   meetingId?: string;
@@ -112,6 +115,7 @@ export function TranscriptPanel({
   totalCount,
   loadedCount,
   onLoadMore,
+  onLoadAll,
   meetingId,
   meetingFolderPath,
   onRefetchTranscripts,
@@ -304,42 +308,81 @@ export function TranscriptPanel({
 
   const normalizedQuery = searchQuery.trim().toLowerCase();
 
-  const matchIndices = useMemo(() => {
-    if (!normalizedQuery) return [] as number[];
-    const indices: number[] = [];
-    convertedSegments.forEach((segment, index) => {
-      if (segment.text.toLowerCase().includes(normalizedQuery)) indices.push(index);
-    });
-    return indices;
-  }, [convertedSegments, normalizedQuery]);
+  // The whole transcript is searched in the database, so a match in a row
+  // that is not loaded yet still counts and can be jumped to.
+  const [remoteMatches, setRemoteMatches] = useState<TranscriptMatch[] | null>(null);
+  const searchedRowCount = usePagination ? (totalCount ?? convertedSegments.length) : convertedSegments.length;
+  useEffect(() => {
+    setRemoteMatches(null);
+    if (!meetingId || !normalizedQuery) return undefined;
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      searchMeetingTranscript(meetingId, normalizedQuery)
+        .then((matches) => {
+          if (!cancelled) setRemoteMatches(matches);
+        })
+        .catch((error) => {
+          // The rows on screen are still searched.
+          if (!cancelled) console.warn('Could not search the whole transcript:', error);
+        });
+    }, 200);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [meetingId, normalizedQuery, searchedRowCount]);
 
-  const matchIds = useMemo(
-    () => new Set(matchIndices.map((index) => convertedSegments[index].id)),
-    [matchIndices, convertedSegments],
+  const matchIdList = useMemo(
+    () => transcriptMatchIds(convertedSegments, normalizedQuery, remoteMatches),
+    [convertedSegments, normalizedQuery, remoteMatches],
   );
+  const matchIds = useMemo(() => new Set(matchIdList), [matchIdList]);
 
   const [activeMatch, setActiveMatch] = useState(0);
   useEffect(() => {
     setActiveMatch(0);
   }, [normalizedQuery]);
 
-  const activeMatchIndex = matchIndices.length
-    ? Math.min(activeMatch, matchIndices.length - 1)
+  const activeMatchIndex = matchIdList.length
+    ? Math.min(activeMatch, matchIdList.length - 1)
     : -1;
-  const activeMatchId = activeMatchIndex >= 0
-    ? convertedSegments[matchIndices[activeMatchIndex]]?.id
-    : undefined;
+  const activeMatchId = activeMatchIndex >= 0 ? matchIdList[activeMatchIndex] : undefined;
+
+  // A match beyond the loaded rows: load the rest, then jump once it is there.
+  const [pendingJumpId, setPendingJumpId] = useState<string | null>(null);
+  const jumpTo = useCallback((id: string, index: number) => {
+    window.dispatchEvent(new CustomEvent('meetily:jump-to-transcript', { detail: { id, index } }));
+  }, []);
+  useEffect(() => {
+    if (!pendingJumpId) return;
+    const target = resolveMatchTarget(convertedSegments, pendingJumpId, false);
+    if (target.kind !== 'jump') return;
+    setPendingJumpId(null);
+    // Let the view render the new rows before scrolling to one.
+    requestAnimationFrame(() => jumpTo(pendingJumpId, target.index));
+  }, [convertedSegments, jumpTo, pendingJumpId]);
 
   const goToMatch = useCallback((delta: number) => {
-    if (matchIndices.length === 0) return;
-    const next = (activeMatch + delta + matchIndices.length) % matchIndices.length;
+    if (matchIdList.length === 0) return;
+    const next = (activeMatch + delta + matchIdList.length) % matchIdList.length;
     setActiveMatch(next);
-    const index = matchIndices[next];
-    const id = convertedSegments[index]?.id;
-    if (id) {
-      window.dispatchEvent(new CustomEvent('meetily:jump-to-transcript', { detail: { id, index } }));
+    const id = matchIdList[next];
+    const canLoadMore = Boolean(hasMore && (onLoadAll || onLoadMore));
+    const target = resolveMatchTarget(convertedSegments, id, canLoadMore);
+    if (target.kind === 'jump') {
+      jumpTo(id, target.index);
+    } else if (target.kind === 'load') {
+      setPendingJumpId(id);
+      if (onLoadAll) void onLoadAll();
+      else onLoadMore?.();
     }
-  }, [activeMatch, matchIndices, convertedSegments]);
+  }, [activeMatch, convertedSegments, hasMore, jumpTo, matchIdList, onLoadAll, onLoadMore]);
+
+  // Keep paging toward a pending match when only page-by-page loading exists.
+  useEffect(() => {
+    if (!pendingJumpId || onLoadAll || !hasMore || isLoadingMore) return;
+    if (resolveMatchTarget(convertedSegments, pendingJumpId, true).kind === 'load') onLoadMore?.();
+  }, [convertedSegments, hasMore, isLoadingMore, onLoadAll, onLoadMore, pendingJumpId]);
 
   // Say when the background pass has swapped in its transcript, or kept the
   // current one.
@@ -491,12 +534,12 @@ export function TranscriptPanel({
           {normalizedQuery && (
             <div className="flex shrink-0 items-center gap-1">
               <span className="text-[11px] tabular-nums text-[var(--ink-subtle)]">
-                {matchIndices.length === 0 ? 'No matches' : `${activeMatchIndex + 1}/${matchIndices.length}`}
+                {matchIdList.length === 0 ? 'No matches' : `${activeMatchIndex + 1}/${matchIdList.length}`}
               </span>
               <button
                 type="button"
                 onClick={() => goToMatch(-1)}
-                disabled={matchIndices.length === 0}
+                disabled={matchIdList.length === 0}
                 title="Previous match"
                 aria-label="Previous match"
                 className="rounded p-1 text-[var(--ink-subtle)] hover:bg-[var(--surface-2)] hover:text-ink disabled:opacity-40"
@@ -506,7 +549,7 @@ export function TranscriptPanel({
               <button
                 type="button"
                 onClick={() => goToMatch(1)}
-                disabled={matchIndices.length === 0}
+                disabled={matchIdList.length === 0}
                 title="Next match"
                 aria-label="Next match"
                 className="rounded p-1 text-[var(--ink-subtle)] hover:bg-[var(--surface-2)] hover:text-ink disabled:opacity-40"
@@ -558,34 +601,38 @@ export function TranscriptPanel({
               </>
             )}
           </div>
-        ) : normalizedQuery && matchIndices.length === 0 ? (
-          <div className="flex flex-1 items-center justify-center px-8 pb-16 text-center text-sm text-[var(--ink-subtle)]">
-            No transcript matches “{searchQuery.trim()}”.
-          </div>
         ) : (
-          <div className="mx-auto w-full max-w-[900px] flex-1 overflow-hidden pb-4">
-            <VirtualizedTranscriptView
-              segments={convertedSegments}
-              matchIds={matchIds}
-              activeMatchId={activeMatchId}
-              highlightQuery={normalizedQuery}
-              isRecording={isRecording}
-              isPaused={false}
-              isProcessing={false}
-              isStopping={false}
-              enableStreaming={false}
-              disableAutoScroll={disableAutoScroll}
-              hasMore={hasMore}
-              isLoadingMore={isLoadingMore}
-              totalCount={totalCount}
-              loadedCount={loadedCount}
-              onLoadMore={onLoadMore}
-              speakerOptions={speakerOptions}
-              onSpeakerChange={meetingId && !editsLocked ? handleSpeakerReassignment : undefined}
-              onRenameSpeaker={meetingId && !editsLocked ? handleRenameSpeaker : undefined}
-              onSeek={audioPath ? handleSeek : undefined}
-              activeSegmentId={activeSegmentId}
-            />
+          <div className="mx-auto flex w-full max-w-[900px] flex-1 flex-col overflow-hidden pb-4">
+            {/* A note, not a replacement: the rows (and their load-more) stay. */}
+            {normalizedQuery && matchIdList.length === 0 && (
+              <p role="status" className="px-8 pb-2 text-center text-sm text-[var(--ink-subtle)]">
+                No transcript matches “{searchQuery.trim()}”.
+              </p>
+            )}
+            <div className="min-h-0 flex-1 overflow-hidden">
+              <VirtualizedTranscriptView
+                segments={convertedSegments}
+                matchIds={matchIds}
+                activeMatchId={activeMatchId}
+                highlightQuery={normalizedQuery}
+                isRecording={isRecording}
+                isPaused={false}
+                isProcessing={false}
+                isStopping={false}
+                enableStreaming={false}
+                disableAutoScroll={disableAutoScroll}
+                hasMore={hasMore}
+                isLoadingMore={isLoadingMore}
+                totalCount={totalCount}
+                loadedCount={loadedCount}
+                onLoadMore={onLoadMore}
+                speakerOptions={speakerOptions}
+                onSpeakerChange={meetingId && !editsLocked ? handleSpeakerReassignment : undefined}
+                onRenameSpeaker={meetingId && !editsLocked ? handleRenameSpeaker : undefined}
+                onSeek={audioPath ? handleSeek : undefined}
+                activeSegmentId={activeSegmentId}
+              />
+            </div>
           </div>
         )}
 
