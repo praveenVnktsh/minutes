@@ -2,7 +2,6 @@
 
 import { useState } from 'react';
 import { Mic, Pause, Play, Sparkles, Square } from 'lucide-react';
-import type { SummaryResponse } from '@/types/summary';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { StatusFeedback } from '@/components/ui/status-feedback';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
@@ -11,16 +10,11 @@ import { RecordingWaveform } from '@/components/RecordingWaveform';
 
 interface RecordingControlsProps {
   isRecording: boolean;
-  barHeights: string[];
   onRecordingStop: (callApi?: boolean) => void | Promise<void>;
   onRecordingStart: () => void | Promise<void>;
-  onTranscriptReceived: (summary: SummaryResponse) => void;
-  onTranscriptionError?: (message: string) => void;
   onStopInitiated?: () => void;
   isRecordingDisabled: boolean;
   isParentProcessing: boolean;
-  selectedDevices?: { micDevice: string | null; systemDevice: string | null };
-  meetingName?: string;
 }
 
 function formatTime(time: number): string {

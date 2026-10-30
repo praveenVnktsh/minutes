@@ -25,7 +25,7 @@ coreml = ["whisper-rs/coreml"]
 openmp = ["whisper-rs/openmp"]
 ```
 
-`metal` and `coreml` are explicit opt-ins kept for scripts such as `pnpm run tauri:dev:metal`; the macOS build already has both.
+`metal` and `coreml` remain for scripts that pass them explicitly; the macOS build already has both.
 
 ## Related Documentation
 

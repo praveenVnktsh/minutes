@@ -160,7 +160,6 @@ const onRecordingStartRequested = mock(async (callback: (request: RecordingStart
   return requestListener;
 });
 const onRecordingStopped = mock(async () => mock(() => {}));
-const onChunkDropWarning = mock(async () => mock(() => {}));
 const onTranscriptionError = mock(async (callback: (error: TranscriptionErrorPayload) => void) => {
   transcriptionErrorCallback = callback;
   return mock(() => {});
@@ -256,7 +255,6 @@ mock.module('../../src/services/recordingService', () => ({
     pauseRecording,
     resumeRecording,
     onRecordingStopped,
-    onChunkDropWarning,
     getRecordingState,
     getRecordingMeetingName,
   },
@@ -265,7 +263,6 @@ mock.module('../../src/services/storageService', () => ({ storageService: { crea
 mock.module('../../src/services/transcriptService', () => ({
   transcriptService: {
     onTranscriptionError,
-    onTranscriptionComplete: async () => mock(() => {}),
     getTranscriptionStatus: async () => ({ is_processing: false, chunks_in_queue: 0 }),
     getTranscriptHistory,
   },
@@ -325,7 +322,7 @@ beforeEach(() => {
     flushBuffer, flushNotes, startRecordingWithDevices, stopRecording,
     pauseRecording, resumeRecording, createMeeting, saveMeeting,
     bindActiveRecordingMeeting, claimRecordingRequest, acknowledgeRecordingRequest,
-    onRecordingStartRequested, onRecordingStopped, onChunkDropWarning,
+    onRecordingStartRequested, onRecordingStopped,
     onTranscriptionError, getPendingRecordingRequest, getActivitySnapshot,
     getRecordingState, getRecordingMeetingName, getTranscriptHistory, markRecoveryMeetingSaved, loadNotes,
   ].forEach((fn) => fn.mockClear());
@@ -797,7 +794,6 @@ describe('RecordingControllerProvider', () => {
 
     expect(onRecordingStopped).toHaveBeenCalledTimes(1);
     expect(onTranscriptionError).toHaveBeenCalledTimes(1);
-    expect(onChunkDropWarning).toHaveBeenCalledTimes(1);
     expect(listen.mock.calls.some((call) => call[0] === 'recording-stop-complete')).toBe(true);
   });
 });

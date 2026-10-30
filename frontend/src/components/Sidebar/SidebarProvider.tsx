@@ -95,8 +95,6 @@ interface SidebarContextType {
   setMeetingArchived: (meetingId: string, archived: boolean) => Promise<void>;
   setMeetingDebug: (meetingId: string, debug: boolean) => Promise<void>;
   meetingMutations: MeetingMutationStates;
-  transcriptServerAddress: string;
-  setTranscriptServerAddress: (address: string) => void;
   // Compatibility API: c6 will migrate summary polling to the activity owner.
   startSummaryPolling: (
     meetingId: string,
@@ -132,7 +130,6 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
   const [searchError, setSearchError] = useState<string | null>(null);
   const [meetingMutations, setMeetingMutations] = useState<MeetingMutationStates>({});
   const [navigationError, setNavigationError] = useState<string | null>(null);
-  const [transcriptServerAddress, setTranscriptServerAddress] = useState('http://127.0.0.1:8178/stream');
   const summarySubscriptionsRef = React.useRef(new Map<string, SummarySubscription>());
   const meetingsRef = React.useRef<CurrentMeeting[]>([]);
   const catalogRequestRef = React.useRef(0);
@@ -489,8 +486,6 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
       setMeetingArchived,
       setMeetingDebug,
       meetingMutations,
-      transcriptServerAddress,
-      setTranscriptServerAddress,
       startSummaryPolling,
       stopSummaryPolling,
       refetchMeetings: fetchMeetings,

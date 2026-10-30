@@ -76,11 +76,6 @@ export class RecordingService {
     return invoke<string | null>('get_recording_meeting_name');
   }
 
-  /** Bind the frontend-created meeting row to the exact native recording session. */
-  async bindMeeting(sessionId: string, meetingId: string): Promise<void> {
-    await invoke('bind_active_recording_meeting', { sessionId, meetingId });
-  }
-
   /**
    * Start recording (no device configuration)
    * @returns Exact native recording session identity
@@ -156,15 +151,6 @@ export class RecordingService {
   }
 
   /**
-   * Listen for recording-starting event (fires when start begins)
-   * @param callback - Function to call when recording start begins
-   * @returns Promise that resolves to unlisten function
-   */
-  async onRecordingStarting(callback: () => void): Promise<UnlistenFn> {
-    return listen('recording-starting', callback);
-  }
-
-  /**
    * Listen for recording-stopped event (with metadata)
    * @param callback - Function to call when recording stops
    * @returns Promise that resolves to unlisten function
@@ -173,44 +159,6 @@ export class RecordingService {
     return listen<RecordingStoppedPayload>('recording-stopped', (event) => {
       callback(event.payload);
     });
-  }
-
-  /**
-   * Listen for recording-paused event
-   * @param callback - Function to call when recording is paused
-   * @returns Promise that resolves to unlisten function
-   */
-  async onRecordingPaused(callback: () => void): Promise<UnlistenFn> {
-    return listen('recording-paused', callback);
-  }
-
-  /**
-   * Listen for recording-resumed event
-   * @param callback - Function to call when recording resumes
-   * @returns Promise that resolves to unlisten function
-   */
-  async onRecordingResumed(callback: () => void): Promise<UnlistenFn> {
-    return listen('recording-resumed', callback);
-  }
-
-  /**
-   * Listen for chunk-drop-warning event (audio buffer overflow)
-   * @param callback - Function to call when chunks are dropped
-   * @returns Promise that resolves to unlisten function
-   */
-  async onChunkDropWarning(callback: (warning: string) => void): Promise<UnlistenFn> {
-    return listen<string>('chunk-drop-warning', (event) => {
-      callback(event.payload);
-    });
-  }
-
-  /**
-   * Listen for speech-detected event (VAD)
-   * @param callback - Function to call when speech is detected
-   * @returns Promise that resolves to unlisten function
-   */
-  async onSpeechDetected(callback: () => void): Promise<UnlistenFn> {
-    return listen('speech-detected', callback);
   }
 
   /**

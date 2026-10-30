@@ -8,7 +8,7 @@ import { statusNotice } from '@/lib/liveTimeline';
  * in as AI lines under their topics whenever the user pauses typing. */
 export function LiveNotes() {
   const timeline = useLiveTimeline();
-  return <LiveNotesPad bare aiEntries={timeline?.entries ?? []} />;
+  return <LiveNotesPad aiEntries={timeline?.entries ?? []} />;
 }
 
 /** One quiet line when no AI notes are coming (no model, turned off, paused). */

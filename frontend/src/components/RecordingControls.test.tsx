@@ -34,10 +34,8 @@ const { RecordingControllerFeedback } = await import('./RecordingControllerFeedb
 
 const controls = <RecordingControls
   isRecording
-  barHeights={[]}
   onRecordingStop={() => {}}
   onRecordingStart={() => {}}
-  onTranscriptReceived={() => {}}
   isRecordingDisabled={false}
   isParentProcessing={false}
 />

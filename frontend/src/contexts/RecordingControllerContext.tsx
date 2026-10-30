@@ -1161,7 +1161,6 @@ export function RecordingControllerProvider({
     let unlistenStopped: UnlistenFn | undefined;
     let unlistenTrayStop: UnlistenFn | undefined;
     let unlistenTranscriptionError: UnlistenFn | undefined;
-    let unlistenChunkWarning: UnlistenFn | undefined;
 
     const retain = async (registration: Promise<UnlistenFn>, assign: (unlisten: UnlistenFn) => void) => {
       try {
@@ -1232,12 +1231,6 @@ export function RecordingControllerProvider({
       }),
       (unlisten) => { unlistenTranscriptionError = unlisten; },
     );
-    void retain(
-      recordingService.onChunkDropWarning((warning) => {
-        setFeedback({ kind: 'warning', title: 'Some audio could not be processed', message: warning });
-      }),
-      (unlisten) => { unlistenChunkWarning = unlisten; },
-    );
 
     return () => {
       disposed = true;
@@ -1245,7 +1238,6 @@ export function RecordingControllerProvider({
       unlistenStopped?.();
       unlistenTrayStop?.();
       unlistenTranscriptionError?.();
-      unlistenChunkWarning?.();
     };
   }, [rehydrate, reportError, runLifecycle]);
 

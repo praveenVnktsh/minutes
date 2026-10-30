@@ -15,4 +15,4 @@ The llama-helper sidecar (built-in summary models) is built with `--features met
 
 ## Cargo Features
 
-The `metal` and `coreml` Cargo features remain as explicit opt-ins for scripts such as `pnpm tauri:dev:metal` and `pnpm tauri:dev:coreml`. `openmp` is available for whisper.cpp's OpenMP CPU threading but is not used by default.
+The `metal` and `coreml` Cargo features remain for scripts that pass them explicitly (for example `--features metal` in `scripts/build-local-macos.sh`). `openmp` is available for whisper.cpp's OpenMP CPU threading but is not used by default.
