@@ -10,7 +10,6 @@ import { AlertTriangle, LoaderCircle } from 'lucide-react'
 import SimpleSidebar from '@/components/SimpleSidebar'
 import { SidebarProvider } from '@/components/Sidebar/SidebarProvider'
 import MainContent from '@/components/MainContent'
-import AnalyticsProvider from '@/components/AnalyticsProvider'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { Button } from '@/components/ui/button'
 import { StatusFeedback } from '@/components/ui/status-feedback'
@@ -271,21 +270,19 @@ export function MainAppLayout({ children }: { children: React.ReactNode }) {
     <html lang="en" className="dark" suppressHydrationWarning>
       <body style={{ visibility: 'hidden' }} className={`${sourceSans3.variable} ${sourceSerif4.variable} bg-surface-0 font-sans text-ink antialiased`}>
         <ThemeBootstrap />
-        <AnalyticsProvider>
-          {startupState === 'setup-required' ? (
-            <OnboardingProvider>
-              <OnboardingFlow onComplete={() => {
-                setStartupState('checking')
-                window.location.reload()
-              }} />
-            </OnboardingProvider>
-          ) : startupState === 'ready' ? (
-            <ReadyProviderTree>{children}</ReadyProviderTree>
-          ) : (
-            <BootSurface state={startupState} onRetry={() => setStartupAttempt((attempt) => attempt + 1)} />
-          )}
-          {startupState !== 'ready' && <BootToaster />}
-        </AnalyticsProvider>
+        {startupState === 'setup-required' ? (
+          <OnboardingProvider>
+            <OnboardingFlow onComplete={() => {
+              setStartupState('checking')
+              window.location.reload()
+            }} />
+          </OnboardingProvider>
+        ) : startupState === 'ready' ? (
+          <ReadyProviderTree>{children}</ReadyProviderTree>
+        ) : (
+          <BootSurface state={startupState} onRetry={() => setStartupAttempt((attempt) => attempt + 1)} />
+        )}
+        {startupState !== 'ready' && <BootToaster />}
       </body>
     </html>
   )

@@ -1,12 +1,12 @@
 # Minutes Privacy Policy
 
-Last updated: September 11, 2026
+Last updated: October 30, 2026
 
 ## Local data
 
 Minutes records audio, creates transcripts, and runs supported local AI models on your device. Recordings, transcripts, summaries, preferences, and model files are stored locally in locations controlled by you.
 
-This distribution does not configure or transmit usage analytics. The legacy analytics integration remains disabled and has no project key or collection destination configured.
+Minutes does not collect or transmit usage analytics or telemetry. The app contains no analytics code.
 
 ## Optional external services
 

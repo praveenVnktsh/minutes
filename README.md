@@ -127,7 +127,7 @@ Minutes is a Tauri 2 desktop app: a Next.js/React interface inside a Rust core. 
 
 ## Privacy
 
-Usage telemetry is disabled and no analytics destination is configured. Audio, transcripts, notes, and summaries stay on your machine. If you configure an external AI provider, the data sent to it is governed by that provider's terms and your configuration. Read the [privacy policy](PRIVACY_POLICY.md).
+Minutes contains no usage telemetry or analytics code. Audio, transcripts, notes, and summaries stay on your machine. If you configure an external AI provider, the data sent to it is governed by that provider's terms and your configuration. Read the [privacy policy](PRIVACY_POLICY.md).
 
 ## Updates
 

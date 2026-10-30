@@ -4,7 +4,6 @@ import { ModelConfig } from '@/components/ModelSettingsModal';
 import { useMeetingActivity } from '@/contexts/MeetingActivityContext';
 import { invoke as invokeTauri } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
-import Analytics from '@/lib/analytics';
 
 import {
   detectAndCacheSummaryLanguage,
@@ -125,13 +124,6 @@ export function useSummaryGeneration({
   const adoptedRegenerationRef = useRef(Boolean(parseSummaryContent(restored?.data)));
   const handledTerminalRef = useRef<string | null>(null);
   const hasSummaryRef = useRef(Boolean(parseSummaryContent(restored?.data)));
-  const trackedAttemptRef = useRef<{
-    generationId: number;
-    startedAt: number;
-    provider: ModelConfig['provider'];
-    model: ModelConfig['model'];
-    finished: boolean;
-  } | null>(null);
   const {
     cancelSummary,
     cancelPendingSummaryStart,
@@ -159,29 +151,10 @@ export function useSummaryGeneration({
     }
   }, []);
 
-  const finishGeneration = useCallback(async (
-    generationId: number,
-    outcome: 'ok' | 'fallback' | 'generation_error' | 'empty_result' | 'cancelled'
-  ) => {
-    const attempt = trackedAttemptRef.current;
-    if (!attempt || attempt.generationId !== generationId || attempt.finished) {
-      return;
-    }
-    attempt.finished = true;
-    await Analytics.trackSummaryGenerationCompleted(
-      attempt.provider,
-      attempt.model,
-      outcome === 'ok' || outcome === 'fallback',
-      (Date.now() - attempt.startedAt) / 1000,
-      outcome === 'ok' ? undefined : outcome,
-    );
-  }, []);
-
   const failGeneration = useCallback(async (
     generationId: number,
     isRegeneration: boolean,
     message: string,
-    outcome: 'generation_error' | 'empty_result' = 'generation_error',
   ) => {
     if (!mountedRef.current || visibleMeetingIdRef.current !== meeting.id || generationId !== generationIdRef.current) {
       return;
@@ -192,8 +165,7 @@ export function useSummaryGeneration({
     toast.error(`Failed to ${isRegeneration ? 'regenerate' : 'generate'} summary`, {
       description: message,
     });
-    await finishGeneration(generationId, outcome);
-  }, [finishGeneration, meeting.id]);
+  }, [meeting.id]);
 
   const handlePollingResult = useCallback(async (
     pollingResult: SummaryProcessResponse,
@@ -230,7 +202,6 @@ export function useSummaryGeneration({
       setSummaryStatus(restoredSummary ? 'completed' : 'idle');
       setSummaryError(null);
       activeProcessIdRef.current = null;
-      await finishGeneration(generationId, 'cancelled');
       return;
     }
 
@@ -262,7 +233,6 @@ export function useSummaryGeneration({
             description: `${errorMessage}. Your previous summary has been restored.`,
           });
           activeProcessIdRef.current = null;
-          await finishGeneration(generationId, 'generation_error');
           return;
         }
       }
@@ -275,7 +245,6 @@ export function useSummaryGeneration({
       if (!summary) {
         await failGeneration(generationId, isRegeneration,
           'Summary generation completed without visible content. Please retry.',
-          'empty_result',
         );
         return;
       }
@@ -304,12 +273,8 @@ export function useSummaryGeneration({
       if (meetingName && onMeetingUpdated) {
         await onMeetingUpdated();
       }
-      await finishGeneration(
-        generationId,
-        metadata.normalizationFallback ? 'fallback' : 'ok',
-      );
     }
-  }, [failGeneration, finishGeneration, meeting.id, onMeetingUpdated, setAiSummary, updateMeetingTitle]);
+  }, [failGeneration, meeting.id, onMeetingUpdated, setAiSummary, updateMeetingTitle]);
 
   // Keep polling attached across ordinary rerenders without retaining stale view callbacks.
   const pollingResultRef = useRef(handlePollingResult);
@@ -433,11 +398,6 @@ export function useSummaryGeneration({
     customPrompt?: string;
     isRegeneration?: boolean;
   }) => {
-    const previousAttempt = trackedAttemptRef.current;
-    if (previousAttempt && !previousAttempt.finished) {
-      await finishGeneration(previousAttempt.generationId, 'cancelled');
-    }
-
     const generationId = ++generationIdRef.current;
     handledTerminalRef.current = null;
     adoptedRegenerationRef.current = isRegeneration;
@@ -447,26 +407,8 @@ export function useSummaryGeneration({
 
     try {
       if (!transcriptText.trim()) {
-        await failGeneration(generationId, isRegeneration, 'No transcript text available. Please add some text first.', 'empty_result');
+        await failGeneration(generationId, isRegeneration, 'No transcript text available. Please add some text first.');
         return;
-      }
-
-      const timeSinceRecording = (Date.now() - new Date(meeting.created_at).getTime()) / 60000;
-      trackedAttemptRef.current = {
-        generationId,
-        startedAt: Date.now(),
-        provider: effectiveModelConfig.provider,
-        model: effectiveModelConfig.model,
-        finished: false,
-      };
-      await Analytics.trackSummaryGenerationStarted(
-        effectiveModelConfig.provider,
-        effectiveModelConfig.model,
-        transcriptText.length,
-        timeSinceRecording,
-      );
-      if (customPrompt.trim()) {
-        await Analytics.trackCustomPromptUsed(customPrompt.trim().length);
       }
 
       const summaryLanguage = await resolveSummaryLanguage(
@@ -514,9 +456,7 @@ export function useSummaryGeneration({
     }
   }, [
     failGeneration,
-    finishGeneration,
     handlePollingResult,
-    meeting.created_at,
     meeting.id,
     effectiveModelConfig,
     selectedTemplate,
@@ -662,7 +602,6 @@ export function useSummaryGeneration({
         activeProcessIdRef.current = null;
         setSummaryStatus('idle');
         setSummaryError(null);
-        await finishGeneration(generationId, 'cancelled');
         toast.info('Summary generation stopped', {
           description: 'You can generate a new summary anytime',
           duration: 3000,
@@ -680,7 +619,6 @@ export function useSummaryGeneration({
           pollSubscriptionRef.current = null;
           setSummaryStatus('idle');
           setSummaryError(null);
-          await finishGeneration(generationId, 'cancelled');
           toast.info('Summary generation stopped', {
             description: 'You can generate a new summary anytime',
             duration: 3000,
@@ -717,7 +655,6 @@ export function useSummaryGeneration({
         pollSubscriptionRef.current = null;
         setSummaryStatus('idle');
         setSummaryError(null);
-        await finishGeneration(generationId, 'cancelled');
         toast.info('Summary generation stopped', {
           description: 'You can generate a new summary anytime',
           duration: 3000,
@@ -738,7 +675,7 @@ export function useSummaryGeneration({
         });
       }
     }
-  }, [cancelPendingSummaryStart, cancelSummary, finishGeneration, meeting.id]);
+  }, [cancelPendingSummaryStart, cancelSummary, meeting.id]);
 
   return {
     summaryStatus,

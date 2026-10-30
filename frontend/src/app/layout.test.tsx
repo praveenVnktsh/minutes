@@ -54,7 +54,6 @@ mock.module('next/navigation', () => ({
 mock.module('next/font/local', () => ({
   default: ({ src }: { src: string }) => ({ variable: src.includes('serif') ? 'font-serif-test' : 'font-sans-test' }),
 }))
-mock.module('@/components/AnalyticsProvider', () => ({ default: ({ children }: { children: React.ReactNode }) => <>{children}</> }))
 mock.module('@/contexts/OllamaDownloadContext', () => ({ OllamaDownloadProvider: ({ children }: { children: React.ReactNode }) => <>{children}</> }))
 mock.module('@/contexts/OnboardingContext', () => ({ OnboardingProvider: ({ children }: { children: React.ReactNode }) => <>{children}</> }))
 mock.module('@/components/UpdateCheckProvider', () => ({ UpdateCheckProvider: ({ children }: { children: React.ReactNode }) => <>{children}</> }))

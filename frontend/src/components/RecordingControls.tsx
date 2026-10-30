@@ -7,7 +7,6 @@ import { TooltipProvider } from '@/components/ui/tooltip';
 import { StatusFeedback } from '@/components/ui/status-feedback';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
 import { useRecordingController } from '@/contexts/RecordingControllerContext';
-import Analytics from '@/lib/analytics';
 import { RecordingWaveform } from '@/components/RecordingWaveform';
 
 interface RecordingControlsProps {
@@ -75,7 +74,6 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
             <button
               type="button"
               onClick={() => {
-                Analytics.trackButtonClick('start_recording', 'recording_controls');
                 void run(onRecordingStart);
               }}
               disabled={pending || isRecordingDisabled}
@@ -111,7 +109,6 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
               <button
                 type="button"
                 onClick={() => {
-                  Analytics.trackButtonClick('stop_recording', 'recording_controls');
                   onStopInitiated?.();
                   void run(() => onRecordingStop(true));
                 }}

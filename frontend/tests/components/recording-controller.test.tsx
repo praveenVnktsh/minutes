@@ -223,14 +223,6 @@ mock.module('../../src/components/Sidebar/SidebarProvider', () => ({
   useSidebar: () => ({ setCurrentMeeting, setIsMeetingActive, refetchMeetings }),
 }));
 mock.module('../../src/lib/debugMode', () => ({ cachedDebugMode: () => false }));
-mock.module('../../src/lib/analytics', () => ({
-  default: {
-    trackButtonClick: mock(() => {}),
-    getMeetingsCountToday: mock(async () => 0),
-    trackMeetingCompleted: mock(async () => {}),
-    updateMeetingCount: mock(async () => {}),
-  },
-}));
 mock.module('../../src/lib/recordingNotification', () => ({ showRecordingNotification: mock(async () => {}) }));
 mock.module('../../src/lib/transcription-model-readiness', () => ({
   getProviderCommands: () => ({ initialize: 'initialize_test', hasAvailableModels: 'has_test', getAvailableModels: 'models_test' }),

@@ -4,14 +4,12 @@ import { act, create } from 'react-test-renderer';
 const originalCore = { ...await import('@tauri-apps/api/core') };
 const originalConfig = { ...await import('../../src/contexts/ConfigContext') };
 const originalRecording = { ...await import('../../src/contexts/RecordingStateContext') };
-const originalAnalytics = { ...await import('../../src/lib/analytics') };
 const originalDevices = { ...await import('../../src/components/DeviceSelection') };
 const originalStore = { ...await import('@tauri-apps/plugin-store') };
 afterAll(() => {
   mock.module('@tauri-apps/api/core', () => originalCore);
   mock.module('../../src/contexts/ConfigContext', () => originalConfig);
   mock.module('../../src/contexts/RecordingStateContext', () => originalRecording);
-  mock.module('../../src/lib/analytics', () => originalAnalytics);
   mock.module('../../src/components/DeviceSelection', () => originalDevices);
   mock.module('@tauri-apps/plugin-store', () => originalStore);
 });
@@ -38,7 +36,6 @@ const store = {
 mock.module('@tauri-apps/api/core', () => ({ ...originalCore, invoke }));
 mock.module('../../src/contexts/ConfigContext', () => ({ useConfig: () => ({ setSelectedDevices() {} }) }));
 mock.module('../../src/contexts/RecordingStateContext', () => ({ useRecordingState: () => ({ isRecording: false }) }));
-mock.module('../../src/lib/analytics', () => ({ default: { track: async () => {} } }));
 mock.module('../../src/components/DeviceSelection', () => ({ DeviceSelection: () => null }));
 mock.module('@tauri-apps/plugin-store', () => ({ Store: { load: async () => store } }));
 

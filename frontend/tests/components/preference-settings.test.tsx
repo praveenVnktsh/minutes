@@ -4,12 +4,10 @@ import type { NotificationSettings } from '../../src/contexts/ConfigContext';
 
 const originalCore = { ...await import('@tauri-apps/api/core') };
 const originalConfig = { ...await import('../../src/contexts/ConfigContext') };
-const originalAnalytics = { ...await import('../../src/lib/analytics') };
 const originalUpdate = { ...await import('../../src/components/UpdateSettings') };
 afterAll(() => {
   mock.module('@tauri-apps/api/core', () => originalCore);
   mock.module('../../src/contexts/ConfigContext', () => originalConfig);
-  mock.module('../../src/lib/analytics', () => originalAnalytics);
   mock.module('../../src/components/UpdateSettings', () => originalUpdate);
 });
 
@@ -45,7 +43,6 @@ mock.module('../../src/contexts/ConfigContext', () => ({
     updateNotificationSettings,
   }),
 }));
-mock.module('../../src/lib/analytics', () => ({ default: { track: async () => {} } }));
 mock.module('../../src/components/UpdateSettings', () => ({ UpdateSettings: () => null }));
 
 const { PreferenceSettings } = await import('../../src/components/PreferenceSettings');

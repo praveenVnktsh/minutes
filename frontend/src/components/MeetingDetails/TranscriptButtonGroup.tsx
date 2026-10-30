@@ -14,7 +14,6 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { Copy, FolderOpen, Link2, Loader2, Mic, MoreHorizontal, RefreshCw, UserRoundCog, Users } from 'lucide-react';
 import { toast } from 'sonner';
-import Analytics from '@/lib/analytics';
 import { RetranscribeDialog } from './RetranscribeDialog';
 import { useConfig } from '@/contexts/ConfigContext';
 import { useOptionalRecordingController } from '@/contexts/RecordingControllerContext';
@@ -59,7 +58,6 @@ export function TranscriptButtonGroup({
 
   const handleResumeMeeting = useCallback(async () => {
     if (!meetingId || !recordingController) return;
-    Analytics.trackButtonClick('resume_meeting', 'transcript_panel');
     try {
       await recordingController.resumeMeeting(meetingId);
     } catch (error) {
@@ -115,7 +113,6 @@ export function TranscriptButtonGroup({
           size="sm"
           className="h-8 rounded-full bg-[var(--surface-2)] px-3 text-[var(--ink-muted)] hover:bg-[var(--surface-2)]"
           onClick={() => {
-            Analytics.trackButtonClick('copy_transcript', 'meeting_details');
             onCopyTranscript();
           }}
           disabled={transcriptCount === 0}
@@ -130,7 +127,6 @@ export function TranscriptButtonGroup({
           variant="ghost"
           className="h-8 rounded-full bg-[var(--surface-2)] px-3 text-[var(--ink-muted)] hover:bg-[var(--surface-2)]"
           onClick={() => {
-            Analytics.trackButtonClick('open_recording_folder', 'meeting_details');
             onOpenMeetingFolder();
           }}
           title="Open Recording Folder"
@@ -145,7 +141,6 @@ export function TranscriptButtonGroup({
             variant="ghost"
             className="h-8 rounded-full bg-[var(--surface-2)] px-3 text-[var(--ink-muted)] hover:bg-[var(--surface-2)]"
             onClick={() => {
-              Analytics.trackButtonClick('manage_speakers', 'meeting_details');
               onOpenSpeakerManager();
             }}
             title="Manage speaker names"
@@ -175,7 +170,6 @@ export function TranscriptButtonGroup({
             variant="ghost"
             className="h-8 w-8 rounded-full bg-[var(--surface-2)] p-0 text-[var(--ink-muted)] hover:bg-[var(--surface-2)]"
             onClick={() => {
-              Analytics.trackButtonClick('enhance_transcript', 'meeting_details');
               setShowRetranscribeDialog(true);
             }}
             disabled={isEnhancing}

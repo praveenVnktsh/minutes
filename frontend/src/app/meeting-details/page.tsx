@@ -4,7 +4,6 @@ import { useState, useEffect, Suspense } from "react";
 import { MeetingSummary, SummaryProcessResponse, Transcript } from "@/types";
 import PageContent from "./page-content";
 import { useRouter, useSearchParams } from "next/navigation";
-import Analytics from "@/lib/analytics";
 import { invoke } from "@tauri-apps/api/core";
 import { LoaderIcon } from "lucide-react";
 import { usePaginatedTranscripts } from "@/hooks/usePaginatedTranscripts";
@@ -100,7 +99,6 @@ function MeetingDetailsContent() {
       console.warn('No valid meeting ID in URL - meetingId:', meetingId);
       setError("No meeting selected");
       setIsLoading(false);
-      Analytics.trackPageView('meeting_details');
       return;
     }
 

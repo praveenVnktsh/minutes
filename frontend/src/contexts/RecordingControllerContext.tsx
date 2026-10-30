@@ -38,7 +38,6 @@ import {
   type LiveTranscriptionSettings,
 } from '@/lib/liveTranscriptionModels';
 import { toast } from 'sonner';
-import Analytics from '@/lib/analytics';
 import { showRecordingNotification } from '@/lib/recordingNotification';
 import {
   applyPinnedSummaryLanguageToMeeting,
@@ -614,10 +613,6 @@ export function RecordingControllerProvider({
       }
       clearTranscripts();
       setIsMeetingActive(true);
-      Analytics.trackButtonClick(
-        resumeMeetingId ? 'resume_meeting' : 'start_recording',
-        options.source ?? 'recording_controller',
-      );
       await showRecordingNotification().catch((error) => {
         console.warn('Could not show the recording notification:', error);
       });
@@ -951,22 +946,6 @@ export function RecordingControllerProvider({
         finalization.completed = true;
         sessionsRef.current.delete(sessionId);
         persistSessions(sessionsRef.current);
-        const durationSeconds = Math.max(session.recordingSeconds ?? transcriptSeconds, transcriptSeconds);
-        const wordCount = freshTranscripts.reduce(
-          (count, transcript) => count + transcript.text.split(/\s+/).filter(Boolean).length,
-          0,
-        );
-        void (async () => {
-          const meetingsToday = await Analytics.getMeetingsCountToday();
-          await Analytics.trackMeetingCompleted(savedMeetingId, {
-            duration_seconds: durationSeconds,
-            transcript_segments: freshTranscripts.length,
-            transcript_word_count: wordCount,
-            words_per_minute: durationSeconds > 0 ? wordCount / (durationSeconds / 60) : 0,
-            meetings_today: meetingsToday,
-          });
-          await Analytics.updateMeetingCount();
-        })().catch((error) => console.warn('Could not record meeting completion analytics:', error));
       } catch (error) {
         recordingState.setStatus(RecordingStatus.ERROR, messageOf(error));
         reportError(

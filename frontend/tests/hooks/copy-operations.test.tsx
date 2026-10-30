@@ -7,7 +7,6 @@ import type { NoteDocumentTarget } from '../../src/services/notePersistenceServi
 const originalTauri = { ...await import('@tauri-apps/api/core') };
 const originalSonner = { ...await import('sonner') };
 const originalPersistence = { ...await import('../../src/services/notePersistenceService') };
-const originalAnalytics = { ...await import('../../src/lib/analytics') };
 const originalNavigator = globalThis.navigator;
 
 const invoke = mock(async (_command: string, _args?: Record<string, unknown>): Promise<unknown> => undefined);
@@ -29,9 +28,6 @@ mock.module('sonner', () => ({ toast: { success, error: errorToast } }));
 mock.module('../../src/services/notePersistenceService', () => ({
   meetingNotesTarget: (meetingId: string) => ({ kind: 'meeting', meetingId }),
   notePersistenceService: { flushNotes, loadNotes },
-}));
-mock.module('../../src/lib/analytics', () => ({
-  default: { trackCopy: () => Promise.resolve() },
 }));
 
 const { useCopyOperations } = await import('../../src/hooks/meeting-details/useCopyOperations');
@@ -130,7 +126,6 @@ afterAll(() => {
   mock.module('@tauri-apps/api/core', () => originalTauri);
   mock.module('sonner', () => originalSonner);
   mock.module('../../src/services/notePersistenceService', () => originalPersistence);
-  mock.module('../../src/lib/analytics', () => originalAnalytics);
 });
 
 describe('useCopyOperations', () => {

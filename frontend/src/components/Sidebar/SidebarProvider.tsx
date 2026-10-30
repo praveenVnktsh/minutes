@@ -2,7 +2,6 @@
 
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
-import Analytics from '@/lib/analytics';
 import { invoke } from '@tauri-apps/api/core';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
 import { flushNotes } from '@/services/notePersistenceService';
@@ -215,14 +214,12 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
       replaceMeetings(response, mutationSuccessAtStart);
       catalogLoadedRef.current = true;
       setCatalogStatus('ready');
-      Analytics.trackBackendConnection(true);
     } catch (error) {
       if (requestId !== catalogRequestRef.current) return;
       const message = errorMessage(error);
       console.error('Error fetching meetings:', error);
       setCatalogError(message);
       setCatalogStatus('error');
-      Analytics.trackBackendConnection(false, message);
     }
   }, [replaceMeetings]);
 
@@ -299,9 +296,6 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
         router.push('/');
       });
     }
-
-    // Track recording initiation from sidebar
-    Analytics.trackButtonClick('start_recording', 'sidebar');
     // The actual recording start/stop is handled in the Home component
   };
 
