@@ -34,12 +34,15 @@ const store = {
   save: async () => saveStored(),
 };
 mock.module('@tauri-apps/api/core', () => ({ ...originalCore, invoke }));
-mock.module('../../src/contexts/ConfigContext', () => ({ useConfig: () => ({ setSelectedDevices() {} }) }));
+mock.module('../../src/contexts/ConfigContext', () => ({
+  useConfig: () => ({ setSelectedDevices() {}, betaFeatures: { liveTranscription: true }, toggleBetaFeature() {} }),
+}));
 mock.module('../../src/contexts/RecordingStateContext', () => ({ useRecordingState: () => ({ isRecording: false }) }));
 mock.module('../../src/components/DeviceSelection', () => ({ DeviceSelection: () => null }));
 mock.module('@tauri-apps/plugin-store', () => ({ Store: { load: async () => store } }));
 
 const { RecordingSettings } = await import('../../src/components/RecordingSettings');
+const { ParticipantReminderSetting } = await import('../../src/components/ParticipantReminderSetting');
 
 describe('recording preference feedback', () => {
   beforeEach(() => {
@@ -71,7 +74,7 @@ describe('recording preference feedback', () => {
       storeDisk = storeMemory;
     };
     let renderer: ReturnType<typeof create>;
-    await act(async () => { renderer = create(<RecordingSettings />); await Promise.resolve(); });
+    await act(async () => { renderer = create(<ParticipantReminderSetting />); await Promise.resolve(); });
     const toggle = renderer!.root.findByProps({ 'aria-label': 'Remind me to inform participants when recording starts' });
     await act(async () => { await toggle.props.onCheckedChange(false); });
 
@@ -88,7 +91,7 @@ describe('recording preference feedback', () => {
     storeDisk = false;
     getStored = () => new Promise<boolean>(resolve => { resolveGet = resolve; });
     let renderer: ReturnType<typeof create>;
-    await act(async () => { renderer = create(<RecordingSettings />); await Promise.resolve(); });
+    await act(async () => { renderer = create(<ParticipantReminderSetting />); await Promise.resolve(); });
     const toggle = renderer!.root.findByProps({ 'aria-label': 'Remind me to inform participants when recording starts' });
     expect(toggle.props.disabled).toBe(true);
     await act(async () => { await toggle.props.onCheckedChange(true); });
@@ -113,7 +116,7 @@ describe('recording preference feedback', () => {
   test('reports when restoring the participant reminder cache also fails', async () => {
     saveStored = async () => { throw new Error('store unavailable'); };
     let renderer: ReturnType<typeof create>;
-    await act(async () => { renderer = create(<RecordingSettings />); await Promise.resolve(); });
+    await act(async () => { renderer = create(<ParticipantReminderSetting />); await Promise.resolve(); });
     const toggle = renderer!.root.findByProps({ 'aria-label': 'Remind me to inform participants when recording starts' });
     await act(async () => { await toggle.props.onCheckedChange(false); });
 

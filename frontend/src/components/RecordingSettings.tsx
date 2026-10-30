@@ -1,12 +1,10 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Switch } from '@/components/ui/switch';
-import { FolderOpen } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { DeviceSelection, SelectedDevices } from '@/components/DeviceSelection';
-import { toast } from 'sonner';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
 import { useConfig } from '@/contexts/ConfigContext';
-import { SaveFeedback, StatusFeedback, type SaveFeedbackState } from '@/components/ui/status-feedback';
+import { SaveFeedback, type SaveFeedbackState } from '@/components/ui/status-feedback';
 import { SetupCheckPanel } from '@/components/SetupCheckPanel';
 import { MeetingDetectionIgnoreList } from '@/components/MeetingDetectionIgnoreList';
 import {
@@ -91,16 +89,10 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
   });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [showRecordingNotification, setShowRecordingNotification] = useState(true);
   const [preferenceSaveState, setPreferenceSaveState] = useState<SaveFeedbackState | null>(null);
   const [preferenceMessage, setPreferenceMessage] = useState('Recording preference');
-  const [notificationSaveState, setNotificationSaveState] = useState<SaveFeedbackState | null>(null);
-  const [notificationFailureMessage, setNotificationFailureMessage] = useState('Could not save participant reminder; previous setting restored');
-  const [notificationHydration, setNotificationHydration] = useState<'loading' | 'ready' | 'error'>('loading');
-  const notificationRevision = useRef(0);
-  const notificationSaving = useRef(false);
   const { isRecording } = useRecordingState();
-  const { setSelectedDevices } = useConfig();
+  const { setSelectedDevices, betaFeatures, toggleBetaFeature } = useConfig();
   const [setupCheckRecord, setSetupCheckRecord] = useState<SetupCheckRecord | null>(null);
   const [setupCheckLoading, setSetupCheckLoading] = useState(true);
   const [showSetupCheck, setShowSetupCheck] = useState(false);
@@ -126,26 +118,6 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
     };
 
     loadPreferences();
-  }, []);
-
-  // Load recording notification preference
-  useEffect(() => {
-    const loadNotificationPref = async () => {
-      const revision = notificationRevision.current;
-      try {
-        const { Store } = await import('@tauri-apps/plugin-store');
-        const store = await Store.load('preferences.json');
-        const show = await store.get<boolean>('show_recording_notification') ?? true;
-        if (revision === notificationRevision.current) {
-          setShowRecordingNotification(show);
-          setNotificationHydration('ready');
-        }
-      } catch (error) {
-        console.error('Failed to load notification preference:', error);
-        if (revision === notificationRevision.current) setNotificationHydration('error');
-      }
-    };
-    loadNotificationPref();
   }, []);
 
   // Load whatever the onboarding setup check last found, so re-offering it from settings can
@@ -209,48 +181,6 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
         micDevice: previous.preferred_mic_device,
         systemDevice: previous.preferred_system_device,
       });
-    }
-  };
-
-  const handleOpenFolder = async () => {
-    try {
-      await invoke('open_recordings_folder');
-    } catch (error) {
-      console.error('Failed to open recordings folder:', error);
-      toast.error('Could not open recordings folder', { description: String(error) });
-    }
-  };
-
-  const handleNotificationToggle = async (enabled: boolean) => {
-    if (notificationSaving.current || notificationHydration !== 'ready') return;
-    notificationSaving.current = true;
-    notificationRevision.current += 1;
-    const previous = showRecordingNotification;
-    setShowRecordingNotification(enabled);
-    setNotificationSaveState('saving');
-    setNotificationFailureMessage('Could not save participant reminder; previous setting restored');
-    let store: { set: (key: string, value: unknown) => Promise<void>; save: () => Promise<void> } | null = null;
-    try {
-      const { Store } = await import('@tauri-apps/plugin-store');
-      store = await Store.load('preferences.json');
-      await store.set('show_recording_notification', enabled);
-      await store.save();
-      setNotificationSaveState('saved');
-    } catch (error) {
-      console.error('Failed to save notification preference:', error);
-      setShowRecordingNotification(previous);
-      if (store) {
-        try {
-          await store.set('show_recording_notification', previous);
-          await store.save();
-        } catch (restoreError) {
-          console.error('Failed to restore notification preference:', restoreError);
-          setNotificationFailureMessage('Could not save or restore the participant reminder; reopen settings to verify it');
-        }
-      }
-      setNotificationSaveState('error');
-    } finally {
-      notificationSaving.current = false;
     }
   };
 
@@ -352,7 +282,8 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
         <div className="flex-1">
           <div className="font-medium">Save Audio Recordings</div>
           <div className="text-sm text-ink-muted">
-            Automatically save audio files when recording stops
+            Keep each meeting&apos;s audio as <span className="font-mono">audio.mp4</span> in its folder
+            under the recordings folder (open it from General)
           </div>
         </div>
         <Switch
@@ -402,34 +333,6 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
         </div>
       </div>
 
-      {/* Folder Location - Only shown when auto_save is enabled */}
-      {preferences.auto_save && (
-        <div className="space-y-4">
-          <div className="p-4 border rounded-lg bg-surface-2">
-            <div className="font-medium mb-2">Save Location</div>
-            <div className="text-sm text-ink-muted mb-3 break-all">
-              {preferences.save_folder || 'Default folder'}
-            </div>
-            <button
-              onClick={handleOpenFolder}
-              className="flex items-center gap-2 px-3 py-2 text-sm border border-hairline rounded-md hover:bg-surface-2 transition-colors"
-            >
-              <FolderOpen className="w-4 h-4" />
-              Open Folder
-            </button>
-          </div>
-
-          <div className="rounded-lg border border-info bg-info-subtle p-4">
-            <div className="text-sm text-info">
-              <strong>File Format:</strong> {preferences.file_format.toUpperCase()} files
-            </div>
-            <div className="mt-1 text-xs text-info">
-              Recordings are saved with timestamp: recording_YYYYMMDD_HHMMSS.{preferences.file_format}
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* Info when auto_save is disabled */}
       {!preferences.auto_save && (
         <div className="rounded-lg border border-warning bg-warning-subtle p-4">
@@ -439,33 +342,21 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
         </div>
       )}
 
-      {/* Recording Notification Toggle */}
       <div className="flex items-center justify-between p-4 border rounded-lg">
-        <div className="flex-1">
-          <div className="font-medium">Recording Start Notification</div>
+        <div className="flex-1 pr-4">
+          <div className="font-medium">Live transcription switch</div>
           <div className="text-sm text-ink-muted">
-            Show reminder to inform participants when recording starts
+            Show a switch in the live transcript that turns live transcription off during a
+            recording. Audio is still recorded, and the meeting is transcribed after it ends. When
+            this is off, every recording is transcribed live.
           </div>
         </div>
         <Switch
-          aria-label="Remind me to inform participants when recording starts"
-          checked={showRecordingNotification}
-          onCheckedChange={handleNotificationToggle}
-          disabled={notificationHydration !== 'ready' || notificationSaveState === 'saving'}
+          aria-label="Show the live transcription switch"
+          checked={betaFeatures.liveTranscription}
+          onCheckedChange={(checked) => toggleBetaFeature('liveTranscription', checked)}
         />
       </div>
-      {notificationHydration === 'loading' && <StatusFeedback pending>Loading participant reminder preference</StatusFeedback>}
-      {notificationHydration === 'error' && <StatusFeedback tone="error">Could not load participant reminder preference</StatusFeedback>}
-      {notificationSaveState && (
-        <SaveFeedback
-          state={notificationSaveState}
-          labels={{
-            saving: 'Saving participant reminder',
-            saved: 'Participant reminder saved',
-            error: notificationFailureMessage,
-          }}
-        />
-      )}
 
       {/* Device Preferences */}
       <div className="space-y-4">

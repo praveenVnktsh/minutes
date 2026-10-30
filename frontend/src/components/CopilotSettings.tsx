@@ -27,7 +27,7 @@ const MODEL_HINTS: Record<string, string> = {
 
 const fieldClass = 'h-10 w-full rounded-md border border-input bg-surface-raised px-3 text-sm text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus';
 
-/** Settings → Summary → Copilot: suggestions, its own model, the debug line. */
+/** Settings → AI notes → Copilot: suggestions and its own model. The debug line is under Developer. */
 export function CopilotSettings() {
   const id = useId();
   const [settings, setSettings] = useState<Settings | null>(null);
@@ -132,22 +132,6 @@ export function CopilotSettings() {
           Uses the API keys and endpoints set for the summary model. A small, fast model works best. A different built-in
           model than the summary&apos;s makes the app switch models during the meeting.
         </p>
-      </div>
-
-      <div className="flex items-center justify-between gap-4">
-        <div>
-          <p className="text-sm font-medium text-ink">Show Copilot debug line</p>
-          <p id={`${id}-debug`} className="text-xs text-ink-muted">
-            For developers: first-word latency, speed, reused prompt tokens and detector decisions under the Copilot input.
-          </p>
-        </div>
-        <Switch
-          aria-label="Show Copilot debug line"
-          aria-describedby={`${id}-debug`}
-          checked={settings?.debug ?? false}
-          disabled={disabled}
-          onCheckedChange={(checked) => settings && void save({ ...settings, debug: checked })}
-        />
       </div>
     </div>
   );

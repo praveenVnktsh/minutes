@@ -5,7 +5,6 @@ import { ArrowLeft, Wrench, Database, FlaskConical, Mic, Settings2, Sparkles, We
 import { useRouter, useSearchParams } from 'next/navigation';
 import { BetaSettings } from '@/components/BetaSettings';
 import { CalendarSettings } from '@/components/CalendarSettings';
-import { DebugSettings } from '@/components/DebugSettings';
 import { DeveloperSettings } from '@/components/DeveloperSettings';
 import { PreferenceSettings } from '@/components/PreferenceSettings';
 import { RecordingSettings } from '@/components/RecordingSettings';
@@ -21,7 +20,8 @@ const TABS = [
   { value: 'general', label: 'General', icon: Settings2 },
   { value: 'recording', label: 'Recording', icon: Mic },
   { value: 'transcription', label: 'Transcription', icon: Database },
-  { value: 'summary', label: 'Summary', icon: Sparkles },
+  // The id stays 'summary' so existing settingsHref('summary') deep links keep working.
+  { value: 'summary', label: 'AI notes', icon: Sparkles },
   { value: 'integrations', label: 'Integrations', icon: Webhook },
   { value: 'beta', label: 'Beta', icon: FlaskConical },
   { value: 'developer', label: 'Developer', icon: Wrench },
@@ -83,7 +83,7 @@ export function SettingsPageContent() {
             </TabsContent>
             <TabsContent value="summary" className="mt-6"><SummaryModelSettings /></TabsContent>
             <TabsContent value="integrations" className="mt-6"><CalendarSettings /><WebhookSettings /></TabsContent>
-            <TabsContent value="beta" className="mt-6"><BetaSettings /><div className="mt-6"><DebugSettings /></div></TabsContent>
+            <TabsContent value="beta" className="mt-6"><BetaSettings /></TabsContent>
             <TabsContent value="developer" className="mt-6"><DeveloperSettings /></TabsContent>
           </Tabs>
         </div>

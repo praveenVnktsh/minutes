@@ -8,6 +8,7 @@ import { toast } from "sonner"
 import { useConfig, NotificationSettings } from "@/contexts/ConfigContext"
 import { UpdateSettings } from "./UpdateSettings"
 import { SaveFeedback, type SaveFeedbackState } from "./ui/status-feedback"
+import { ParticipantReminderSetting } from "./ParticipantReminderSetting"
 
 const OS_MODIFIER_KEYS = /^(Meta|Control|Alt|Shift)/
 
@@ -162,23 +163,13 @@ export function PreferenceSettings() {
     }
   };
 
-  const handleOpenFolder = async (folderType: 'database' | 'models' | 'recordings') => {
+  const handleOpenRecordingsFolder = async () => {
     setFolderError('');
     try {
-      switch (folderType) {
-        case 'database':
-          await invoke('open_database_folder');
-          break;
-        case 'models':
-          await invoke('open_models_folder');
-          break;
-        case 'recordings':
-          await invoke('open_recordings_folder');
-          break;
-      }
+      await invoke('open_recordings_folder');
     } catch (error) {
-      console.error(`Failed to open ${folderType} folder:`, error);
-      setFolderError(`Could not open the ${folderType} folder: ${String(error)}`);
+      console.error('Failed to open recordings folder:', error);
+      setFolderError(`Could not open the recordings folder: ${String(error)}`);
     }
   };
 
@@ -202,7 +193,7 @@ export function PreferenceSettings() {
         <div className="flex items-center justify-between">
           <div>
             <h3 className="text-lg font-semibold text-ink mb-2">Notifications</h3>
-            <p className="text-sm text-ink-muted">Enable or disable notifications of start and end of meeting</p>
+            <p className="text-sm text-ink-muted">Show a macOS notification when a recording starts and stops</p>
           </div>
           <Switch
             aria-label="Show operating system notifications when recording starts and stops"
@@ -218,6 +209,9 @@ export function PreferenceSettings() {
             labels={{ saving: 'Saving recording notifications', saved: 'Recording notifications saved', error: 'Could not save recording notifications; previous setting restored' }}
           />
         )}
+        <div className="mt-4 border-t border-hairline pt-4">
+          <ParticipantReminderSetting />
+        </div>
       </div>
 
       {/* Keyboard Shortcuts Section */}
@@ -272,7 +266,7 @@ export function PreferenceSettings() {
           <li className="flex items-center justify-between gap-4">
             <span className="text-sm text-ink">Open command palette</span>
             <kbd className="rounded border border-hairline bg-surface-2 px-2 py-1 text-xs font-medium text-ink-muted">
-              ⌘ / Ctrl + K
+              ⌘K
             </kbd>
           </li>
         </ul>
@@ -293,36 +287,6 @@ export function PreferenceSettings() {
         </p>
 
         <div className="space-y-4">
-          {/* Database Location */}
-          {/* <div className="p-4 border rounded-lg bg-surface-2">
-            <div className="font-medium mb-2">Database</div>
-            <div className="text-sm text-ink-muted mb-3 break-all font-mono text-xs">
-              {storageLocations?.database || 'Loading...'}
-            </div>
-            <button
-              onClick={() => handleOpenFolder('database')}
-              className="flex items-center gap-2 px-3 py-2 text-sm border border-hairline rounded-md hover:bg-surface-2 transition-colors"
-            >
-              <FolderOpen className="w-4 h-4" />
-              Open Folder
-            </button>
-          </div> */}
-
-          {/* Models Location */}
-          {/* <div className="p-4 border rounded-lg bg-surface-2">
-            <div className="font-medium mb-2">Whisper Models</div>
-            <div className="text-sm text-ink-muted mb-3 break-all font-mono text-xs">
-              {storageLocations?.models || 'Loading...'}
-            </div>
-            <button
-              onClick={() => handleOpenFolder('models')}
-              className="flex items-center gap-2 px-3 py-2 text-sm border border-hairline rounded-md hover:bg-surface-2 transition-colors"
-            >
-              <FolderOpen className="w-4 h-4" />
-              Open Folder
-            </button>
-          </div> */}
-
           {/* Recordings Location */}
           <div className="p-4 border rounded-lg bg-surface-2">
             <div className="font-medium mb-2">Meeting Recordings</div>
@@ -330,11 +294,11 @@ export function PreferenceSettings() {
               {storageLocations?.recordings || 'Loading...'}
             </div>
             <button
-              onClick={() => handleOpenFolder('recordings')}
+              onClick={() => void handleOpenRecordingsFolder()}
               className="flex items-center gap-2 px-3 py-2 text-sm border border-hairline rounded-md hover:bg-surface-2 transition-colors"
             >
               <FolderOpen className="w-4 h-4" />
-              Open Folder
+              Open recordings folder
             </button>
           </div>
         </div>

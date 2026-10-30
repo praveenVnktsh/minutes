@@ -37,7 +37,11 @@ mock.module('@tauri-apps/api/core', () => ({
 }))
 mock.module('@/contexts/ConfigContext', () => ({
   ...originalConfig,
-  useConfig: () => ({ setSelectedDevices: (devices: never) => selectedDeviceWrites.push(devices) }),
+  useConfig: () => ({
+    setSelectedDevices: (devices: never) => selectedDeviceWrites.push(devices),
+    betaFeatures: { liveTranscription: true },
+    toggleBetaFeature: () => {},
+  }),
 }))
 mock.module('@/contexts/RecordingStateContext', () => ({
   ...originalRecordingState,
