@@ -32,8 +32,8 @@ import {
 } from '../ui/select';
 import { toast } from 'sonner';
 import { useConfig } from '@/contexts/ConfigContext';
+import { useShell } from '@/contexts/ShellContext';
 import { useImportAudio, ImportResult } from '@/hooks/useImportAudio';
-import { useRouter } from 'next/navigation';
 import { useSidebar } from '../Sidebar/SidebarProvider';
 import { LANGUAGES } from '@/constants/languages';
 import { useTranscriptionModels, ModelOption } from '@/hooks/useTranscriptionModels';
@@ -72,7 +72,7 @@ export function ImportAudioDialog({
   preselectedFile,
   onComplete,
 }: ImportAudioDialogProps) {
-  const router = useRouter();
+  const { navigate } = useShell();
   const { refetchMeetings } = useSidebar();
   const { selectedLanguage, transcriptModelConfig } = useConfig();
 
@@ -103,8 +103,9 @@ export function ImportAudioDialog({
     refetchMeetings();
     onComplete?.();
     onOpenChange(false);
-    router.push(`/meeting-details?id=${result.meeting_id}`);
-  }, [router, refetchMeetings, onComplete, onOpenChange]);
+    // Saves open notes first; a failure shows the shell's navigation feedback.
+    void navigate(`/meeting-details?id=${encodeURIComponent(result.meeting_id)}`).catch(() => {});
+  }, [navigate, refetchMeetings, onComplete, onOpenChange]);
 
   const handleImportError = useCallback((error: string) => {
     toast.error('Import failed', { description: error });

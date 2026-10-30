@@ -35,7 +35,6 @@ export function MeetingsLibrary() {
   const {
     recordingActionLabel,
     runRecordingAction,
-    importActionLabel,
     runImportAction,
     openMeeting,
     isNavigating,
@@ -110,7 +109,7 @@ export function MeetingsLibrary() {
             <p className="mt-2 max-w-xl text-sm leading-6 text-ink-muted">Record a conversation, return to active work, or find notes from an earlier meeting.</p>
           </div>
           <div className="flex flex-wrap gap-2">
-            <Button variant="outline" onClick={() => void runShellAction(runImportAction)}><Upload />{importActionLabel}</Button>
+            <Button variant="outline" onClick={() => void runShellAction(runImportAction)}><Upload />Import recording</Button>
             <Button disabled={recordingActionDisabled} variant={recordingActionLabel === 'Stop recording' ? 'recording' : 'default'} onClick={() => void runRecordingAction()}>
               <Mic />{recordingActionLabel}
             </Button>
