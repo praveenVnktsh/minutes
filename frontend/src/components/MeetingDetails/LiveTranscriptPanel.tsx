@@ -169,7 +169,6 @@ export function LiveTranscriptPanel() {
             isProcessing={isProcessing}
             isStopping={isStopping}
             enableStreaming={isRecording}
-            showConfidence
             segmentTags={segmentTags}
           />
         </div>
