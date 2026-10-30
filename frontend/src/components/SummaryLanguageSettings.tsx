@@ -1,101 +1,66 @@
 'use client';
 
-import { useState } from 'react';
-import { Globe, Pin } from 'lucide-react';
-import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover';
-import { LanguagePickerPopover } from '@/components/LanguagePickerPopover';
-import { useRecentLanguages } from '@/hooks/useRecentLanguages';
-import { labelForCode } from '@/lib/summary-languages';
-import { selection } from '@/lib/theme-classes';
+import { useEffect, useState } from 'react';
+import { Globe } from 'lucide-react';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import { AUTO_VALUE, LANGUAGE_OPTIONS } from '@/lib/summary-languages';
+import {
+  SUMMARY_LANGUAGE_DEFAULT_KEY,
+  readPinnedSummaryLanguageDefault,
+  writePinnedSummaryLanguageDefault,
+} from '@/lib/summary-language-preferences';
 
+/** Settings → AI notes: the default language AI notes are written in for new meetings. */
 export function SummaryLanguageSettings() {
-  const { recents, pinned, addRecent, removeRecent, setPinned } = useRecentLanguages();
-  const [pickerOpen, setPickerOpen] = useState(false);
+  const [language, setLanguage] = useState<string | null>(() => readPinnedSummaryLanguageDefault());
 
-  const togglePin = (code: string) => {
-    setPinned(pinned === code ? null : code);
+  useEffect(() => {
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === SUMMARY_LANGUAGE_DEFAULT_KEY) setLanguage(readPinnedSummaryLanguageDefault());
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, []);
+
+  const change = (value: string) => {
+    const next = value === AUTO_VALUE ? null : value;
+    setLanguage(next);
+    writePinnedSummaryLanguageDefault(next);
   };
 
   return (
-    <div className="bg-surface-raised rounded-lg border border-hairline p-6 shadow-sm relative">
-      <div className="flex items-center gap-2 mb-2">
+    <div className="rounded-lg border border-hairline bg-surface-raised p-6 shadow-sm">
+      <div className="mb-2 flex items-center gap-2">
         <Globe size={18} className="text-ink-muted" />
-        <h3 className="text-lg font-semibold text-ink">Summary Language</h3>
+        <h3 className="text-lg font-semibold text-ink">AI notes language</h3>
       </div>
-      <p className="text-sm text-ink-muted mb-4">
-        Pin one language as the default for new meetings. Unpinned languages remain as
-        quick-switch options in the summary generator. Auto uses the dominant transcript language.
+      <p id="summary-language-description" className="mb-4 text-sm text-ink-muted">
+        The language AI notes are written in for new meetings. Auto uses the transcript&apos;s main language.
       </p>
-
-      <div className="flex flex-wrap items-center gap-2">
-        {recents.map((code) => {
-          const isPinned = pinned === code;
-          return (
-            <span
-              key={code}
-              className={`inline-flex items-center rounded-full border text-sm overflow-hidden ${
-                isPinned
-                  ? `${selection.pill} border-selected`
-                  : 'bg-surface-2 border-hairline text-ink'
-              }`}
-            >
-              <button
-                type="button"
-                aria-label={isPinned ? `Unpin ${labelForCode(code)} as default` : `Pin ${labelForCode(code)} as default`}
-                aria-pressed={isPinned}
-                title={isPinned ? 'Click to unset as default' : 'Click to set as default'}
-                onClick={() => togglePin(code)}
-                className={`flex items-center gap-1.5 pl-3 pr-2 py-1 hover:brightness-95 active:brightness-90 ${
-                  isPinned ? 'text-selected-foreground' : 'text-ink'
-                }`}
-              >
-                <Pin
-                  size={14}
-                  className={isPinned ? 'text-selected-foreground' : 'text-ink-subtle'}
-                  fill={isPinned ? 'currentColor' : 'none'}
-                />
-                {labelForCode(code)}
-              </button>
-              <button
-                type="button"
-                aria-label={`Remove ${labelForCode(code)}`}
-                onClick={() => removeRecent(code)}
-                className={`pr-2.5 pl-0.5 py-1 leading-none ${isPinned ? 'text-selected-foreground/70 hover:text-selected-foreground' : 'text-ink-subtle hover:text-ink'}`}
-              >
-                ×
-              </button>
-            </span>
-          );
-        })}
-
-        <Popover open={pickerOpen} onOpenChange={setPickerOpen}>
-          <PopoverTrigger asChild>
-            <button
-              type="button"
-              disabled={recents.length >= 5}
-              className="inline-flex items-center gap-1 rounded-full border border-dashed border-hairline px-3 py-1 text-sm text-ink-muted hover:border-[var(--ink-subtle)] hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              ＋ Add language
-            </button>
-          </PopoverTrigger>
-          <PopoverContent align="start" className="w-auto p-0 border-0 shadow-none bg-transparent">
-            <LanguagePickerPopover
-              mode="settings"
-              value={null}
-              onChange={(code) => {
-                if (code) addRecent(code);
-                setPickerOpen(false);
-              }}
-              onClose={() => setPickerOpen(false)}
-            />
-          </PopoverContent>
-        </Popover>
-      </div>
-
-      <p className="text-xs text-ink-subtle mt-3">
-        {pinned
-          ? `Default: ${labelForCode(pinned)} - click it again to unset. Max 5 quick-switch options.`
-          : 'Click any language to set it as your default. Max 5 quick-switch options.'}
+      <Select value={language ?? AUTO_VALUE} onValueChange={change}>
+        <SelectTrigger
+          aria-label="AI notes language"
+          aria-describedby="summary-language-description"
+          className="max-w-xs focus:ring-2 focus:ring-focus"
+        >
+          <SelectValue placeholder="Auto" />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value={AUTO_VALUE}>Auto</SelectItem>
+          {LANGUAGE_OPTIONS.map((option) => (
+            <SelectItem key={option.code} value={option.code}>{option.label}</SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      <p className="mt-3 text-xs text-ink-subtle">
+        A language other than English writes the notes from the whole transcript after the meeting, instead of
+        building on the notes written live.
       </p>
     </div>
   );

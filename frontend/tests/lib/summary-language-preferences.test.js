@@ -133,6 +133,6 @@ describe("summary language local fallback", () => {
 
     await expect(
       prefs.saveMeetingSummaryLanguage("meeting-1", "it"),
-    ).rejects.toThrow("Failed to save summary language on this device");
+    ).rejects.toThrow("Failed to save the AI notes language on this device");
   });
 });

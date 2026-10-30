@@ -96,9 +96,9 @@ export function statusNotice(snapshot: TimelineSnapshot | null): { tone: Tone; t
       // limit); without one, no summary model is set up.
       return snapshot.error
         ? { tone: 'warning', text: snapshot.error }
-        : { tone: 'neutral', text: 'AI notes need a summary model. Choose one in Settings → Summary.' };
+        : { tone: 'neutral', text: 'AI notes need a model. Choose one in Settings → AI notes.' };
     case 'disabled':
-      return { tone: 'neutral', text: 'AI notes are off. Turn them on in Settings → Summary.' };
+      return { tone: 'neutral', text: 'AI notes are off. Turn them on in Settings → AI notes.' };
     default:
       return null;
   }

@@ -5,8 +5,8 @@ import { toast } from 'sonner';
 import { Switch } from '@/components/ui/switch';
 import { liveTimelineApi } from '@/lib/liveTimeline';
 
-/** The "Live summary" toggle: short points, decisions and actions while
- * recording, kept as the meeting's chapters. On by default. */
+/** The "AI notes while recording" toggle: key points and decisions written
+ * into the notes while recording, under their topics. On by default. */
 export function LiveSummarySettings() {
   const [enabled, setEnabled] = useState<boolean | null>(null);
   const [saving, setSaving] = useState(false);
@@ -30,7 +30,7 @@ export function LiveSummarySettings() {
       setEnabled((await liveTimelineApi.setSettings(next)).enabled);
     } catch (error) {
       setEnabled(previous);
-      toast.error('Could not save the live summary setting', {
+      toast.error('Could not save the AI notes while recording setting', {
         description: error instanceof Error ? error.message : String(error),
       });
     } finally {
@@ -44,8 +44,8 @@ export function LiveSummarySettings() {
         <div>
           <h3 className="mb-2 text-lg font-semibold text-ink">AI notes while recording</h3>
           <p id="live-summary-description" className="text-sm text-ink-muted">
-            About once a minute, write key points, decisions and action items into your
-            notes under their topics.
+            About once a minute, write key points and decisions into your notes under their
+            topics. Action items come in the wrap-up when the meeting ends.
           </p>
         </div>
         <Switch

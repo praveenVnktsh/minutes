@@ -42,7 +42,7 @@ export function MeetingWorkspace({
   transcript,
   assistant,
   showAssistant,
-  assistantLabel = 'Chat',
+  assistantLabel = 'Copilot',
   peopleCount,
   toolbarActions,
   titleActions,
@@ -63,7 +63,7 @@ export function MeetingWorkspace({
   transcript: ReactNode;
   assistant: ReactNode;
   showAssistant: boolean;
-  /** The dock pill's label: "Copilot" while recording, "Chat" otherwise. */
+  /** The dock pill's label. The assistant is "Copilot" during and after a meeting. */
   assistantLabel?: string;
   peopleCount: number;
   toolbarActions?: ReactNode;
@@ -390,7 +390,7 @@ export function MeetingWorkspace({
             min={320}
             max={Math.max(320, workspaceWidth - MIN_NOTES_WIDTH)}
             onValueChange={setDockWidth}
-            label="Resize transcript and chat panel"
+            label="Resize transcript and Copilot panel"
             onPointerDown={onColumnDividerPointerDown}
             className="z-10 w-2 bg-transparent"
           />

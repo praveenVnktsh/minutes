@@ -7,7 +7,7 @@ import { Switch } from '@/components/ui/switch';
 import { copilotApi, type CopilotSettings as Settings } from '@/lib/copilot';
 
 const PROVIDERS = [
-  { value: '', label: 'Same as the summary model' },
+  { value: '', label: 'Same as the AI notes model' },
   { value: 'builtin-ai', label: 'Built-in AI (offline)' },
   { value: 'claude', label: 'Claude' },
   { value: 'custom-openai', label: 'Custom OpenAI-compatible server' },
@@ -79,8 +79,8 @@ export function CopilotSettings() {
       <div>
         <h3 className="mb-2 text-lg font-semibold text-ink">Copilot</h3>
         <p className="text-sm text-ink-muted">
-          While recording, the dock&apos;s Chat panel becomes Copilot: ask about the last few minutes, and get a suggested reply
-          when someone asks you something. Answers are saved to the meeting&apos;s AI chat.
+          While recording, Copilot in the meeting dock answers questions about the last few minutes and suggests a reply
+          when someone asks you something. Answers are saved with the meeting. These settings apply while recording.
         </p>
       </div>
 
@@ -129,8 +129,8 @@ export function CopilotSettings() {
           />
         )}
         <p className="text-xs text-ink-muted">
-          Uses the API keys and endpoints set for the summary model. A small, fast model works best. A different built-in
-          model than the summary&apos;s makes the app switch models during the meeting.
+          Uses the API keys and endpoints set for the AI notes model. A small, fast model works best. A different built-in
+          model than the AI notes&apos; makes the app switch models during the meeting.
         </p>
       </div>
     </div>

@@ -25,7 +25,7 @@ async function resolveSummaryLanguage(
     if (perMeeting.language) return perMeeting.language;
   } catch (err) {
     console.warn('Failed to load meeting summary language:', err);
-    toast.warning('Could not load saved summary language', {
+    toast.warning('Could not load the saved AI notes language', {
       description: 'Using Auto for this generation.',
     });
   }
@@ -41,7 +41,7 @@ async function resolveSummaryLanguage(
     const detection = await detectAndCacheSummaryLanguage(meetingId, transcriptTexts);
     if (detection.reason === 'tie') {
       toast.warning('Bilingual transcript detected', {
-        description: 'Pick a summary language manually if Auto chooses the wrong fallback.',
+        description: 'Pick an AI notes language manually if Auto chooses the wrong fallback.',
       });
     }
     return detection.language;
@@ -109,7 +109,7 @@ export function useSummaryGeneration({
   const [summaryStatus, setSummaryStatus] = useState<SummaryStatus>(() => initialStatus);
   const [summaryError, setSummaryError] = useState<string | null>(() =>
     initialStatus === 'error'
-      ? restored?.error || 'Summary generation failed. Please retry.'
+      ? restored?.error || 'AI notes failed. Please retry.'
       : null,
   );
   const mountedRef = useRef(true);
@@ -139,13 +139,13 @@ export function useSummaryGeneration({
       case 'processing':
         return 'Processing transcript...';
       case 'summarizing':
-        return 'Generating summary...';
+        return 'Writing AI notes...';
       case 'regenerating':
-        return 'Regenerating summary...';
+        return 'Rewriting AI notes...';
       case 'completed':
-        return 'Summary completed';
+        return 'AI notes ready';
       case 'error':
-        return 'Error generating summary';
+        return 'Error writing AI notes';
       default:
         return '';
     }
@@ -162,7 +162,7 @@ export function useSummaryGeneration({
     activeProcessIdRef.current = null;
     setSummaryError(message);
     setSummaryStatus('error');
-    toast.error(`Failed to ${isRegeneration ? 'regenerate' : 'generate'} summary`, {
+    toast.error(`Failed to ${isRegeneration ? 'rewrite' : 'write'} AI notes`, {
       description: message,
     });
   }, [meeting.id]);
@@ -190,7 +190,7 @@ export function useSummaryGeneration({
       } catch (error) {
         console.error('Failed to reload summary after cancellation:', error);
         await failGeneration(generationId, isRegeneration,
-          'Summary generation was cancelled, but the saved summary could not be reloaded. Please reopen this meeting.');
+          'AI notes were cancelled, but the saved notes could not be reloaded. Please reopen this meeting.');
         return;
       }
       if (!mountedRef.current || visibleMeetingIdRef.current !== meeting.id || generationId !== generationIdRef.current) {
@@ -207,7 +207,7 @@ export function useSummaryGeneration({
 
     if (pollingResult.status === 'error' || pollingResult.status === 'failed') {
       const errorMessage = pollingResult.error
-        || `Summary ${isRegeneration ? 'regeneration' : 'generation'} failed`;
+        || (isRegeneration ? 'AI notes rewrite failed' : 'AI notes failed');
       if (isRegeneration) {
         let existing: SummaryProcessResponse;
         try {
@@ -217,7 +217,7 @@ export function useSummaryGeneration({
         } catch (error) {
           console.error('Failed to reload previous summary after generation failure:', error);
           await failGeneration(generationId, isRegeneration,
-            `${errorMessage}. The saved summary could not be reloaded. Please reopen this meeting.`);
+            `${errorMessage}. The saved AI notes could not be reloaded. Please reopen this meeting.`);
           return;
         }
         if (!mountedRef.current || visibleMeetingIdRef.current !== meeting.id || generationId !== generationIdRef.current) {
@@ -229,8 +229,8 @@ export function useSummaryGeneration({
           setAiSummary(restoredSummary);
           setSummaryStatus('completed');
           setSummaryError(null);
-          toast.error('Failed to regenerate summary', {
-            description: `${errorMessage}. Your previous summary has been restored.`,
+          toast.error('Failed to rewrite AI notes', {
+            description: `${errorMessage}. Your previous AI notes have been restored.`,
           });
           activeProcessIdRef.current = null;
           return;
@@ -244,7 +244,7 @@ export function useSummaryGeneration({
       const summary = parseSummaryContent(pollingResult.data);
       if (!summary) {
         await failGeneration(generationId, isRegeneration,
-          'Summary generation completed without visible content. Please retry.',
+          'AI notes finished without visible content. Please retry.',
         );
         return;
       }
@@ -259,14 +259,14 @@ export function useSummaryGeneration({
       activeProcessIdRef.current = null;
       setSummaryError(null);
       if (metadata.normalizationFallback) {
-        toast.warning('Summary generated with fallback', {
-          description: 'English normalization failed, so the original sanitized summary was kept.',
+        toast.warning('AI notes written with fallback', {
+          description: 'English normalization failed, so the original sanitized notes were kept.',
         });
       } else {
-        toast.success('Summary generated successfully!', {
+        toast.success('AI notes written', {
           description: metadata.reasoningStripped
-            ? 'Your meeting summary is ready. Model reasoning was filtered out of the notes.'
-            : 'Your meeting summary is ready',
+            ? 'Your AI notes are ready. Model reasoning was filtered out of the notes.'
+            : 'Your AI notes are ready',
           duration: 4000,
         });
       }
@@ -329,7 +329,7 @@ export function useSummaryGeneration({
     const status = restoredSummaryStatus(authoritative);
     setSummaryStatus(status);
     setSummaryError(status === 'error'
-      ? authoritative.error || 'Summary generation failed. Please retry.'
+      ? authoritative.error || 'AI notes failed. Please retry.'
       : null);
     const restoredDocument = parseSummaryContent(authoritative.data);
     hasSummaryRef.current = Boolean(restoredDocument);
@@ -382,7 +382,7 @@ export function useSummaryGeneration({
       void failGeneration(
         generationId,
         isRegeneration,
-        ownerSummaryActivity.error || 'Summary generation failed.',
+        ownerSummaryActivity.error || 'AI notes failed.',
       );
     }
   }, [failGeneration, handlePollingResult, ownerSummaryActivity, subscribeToProcess]);
@@ -452,7 +452,7 @@ export function useSummaryGeneration({
 
       subscribeToProcess(processId, generationId, isRegeneration);
     } catch (error) {
-      await failGeneration(generationId, isRegeneration, error instanceof Error ? error.message : 'Summary generation failed.');
+      await failGeneration(generationId, isRegeneration, error instanceof Error ? error.message : 'AI notes failed.');
     }
   }, [
     failGeneration,
@@ -499,7 +499,7 @@ export function useSummaryGeneration({
       return;
     }
     if (modelConfigurationError) {
-      showPreflightError('Model configuration could not be saved. Retry saving it before generating a summary.');
+      showPreflightError('Model configuration could not be saved. Retry saving it before writing AI notes.');
       return;
     }
     let allTranscripts: Transcript[];
@@ -510,7 +510,7 @@ export function useSummaryGeneration({
       return;
     }
     if (!allTranscripts.length) {
-      showPreflightError('No transcripts available for summary');
+      showPreflightError('No transcript available for AI notes');
       return;
     }
 
@@ -518,7 +518,7 @@ export function useSummaryGeneration({
       await validateSummaryModel(effectiveModelConfig);
     } catch (error) {
       console.error('Failed to validate summary model:', error);
-      showPreflightError(error instanceof Error ? error.message : 'Failed to validate summary model. Please check model settings.');
+      showPreflightError(error instanceof Error ? error.message : 'Failed to validate the AI notes model. Please check model settings.');
       onOpenModelSettings?.();
       return;
     }
@@ -529,7 +529,7 @@ export function useSummaryGeneration({
         customPrompt: await withLiveNotesContext(customPrompt),
       });
     } catch (error) {
-      showPreflightError(`Could not save current notes before summary generation: ${error instanceof Error ? error.message : String(error)}`);
+      showPreflightError(`Could not save current notes before writing AI notes: ${error instanceof Error ? error.message : String(error)}`);
     }
   }, [
     buildSummaryTranscriptPayload,
@@ -552,7 +552,7 @@ export function useSummaryGeneration({
       return;
     }
     if (modelConfigurationError) {
-      showPreflightError('Model configuration could not be saved. Retry saving it before regenerating a summary.');
+      showPreflightError('Model configuration could not be saved. Retry saving it before rewriting AI notes.');
       return;
     }
     let allTranscripts: Transcript[];
@@ -565,7 +565,7 @@ export function useSummaryGeneration({
 
     if (!allTranscripts.length) {
       console.error('No transcripts available for regeneration');
-      toast.error('No transcripts available for summary regeneration');
+      toast.error('No transcript available to rewrite AI notes');
       return;
     }
 
@@ -577,7 +577,7 @@ export function useSummaryGeneration({
         isRegeneration: true
       });
     } catch (error) {
-      showPreflightError(`Could not save current notes before summary regeneration: ${error instanceof Error ? error.message : String(error)}`);
+      showPreflightError(`Could not save current notes before rewriting AI notes: ${error instanceof Error ? error.message : String(error)}`);
     }
   }, [
     buildSummaryTranscriptPayload,
@@ -602,8 +602,8 @@ export function useSummaryGeneration({
         activeProcessIdRef.current = null;
         setSummaryStatus('idle');
         setSummaryError(null);
-        toast.info('Summary generation stopped', {
-          description: 'You can generate a new summary anytime',
+        toast.info('AI notes stopped', {
+          description: 'You can write AI notes again anytime',
           duration: 3000,
         });
         return;
@@ -619,12 +619,12 @@ export function useSummaryGeneration({
           pollSubscriptionRef.current = null;
           setSummaryStatus('idle');
           setSummaryError(null);
-          toast.info('Summary generation stopped', {
-            description: 'You can generate a new summary anytime',
+          toast.info('AI notes stopped', {
+            description: 'You can write AI notes again anytime',
             duration: 3000,
           });
         } else if (!cancelled && generationId === generationIdRef.current) {
-          toast.info('Summary is already finishing', {
+          toast.info('AI notes are already finishing', {
             description: 'Waiting for the latest result.',
           });
         }
@@ -635,7 +635,7 @@ export function useSummaryGeneration({
           && visibleMeetingIdRef.current === meeting.id
           && generationId === generationIdRef.current
         ) {
-          toast.error('Failed to stop summary generation', {
+          toast.error('Failed to stop AI notes', {
             description: 'Generation is still running; waiting for its latest status.',
           });
         }
@@ -655,12 +655,12 @@ export function useSummaryGeneration({
         pollSubscriptionRef.current = null;
         setSummaryStatus('idle');
         setSummaryError(null);
-        toast.info('Summary generation stopped', {
-          description: 'You can generate a new summary anytime',
+        toast.info('AI notes stopped', {
+          description: 'You can write AI notes again anytime',
           duration: 3000,
         });
       } else if (activeProcessIdRef.current === processId) {
-        toast.info('Summary is already finishing', {
+        toast.info('AI notes are already finishing', {
           description: 'Waiting for the latest result.',
         });
       }
@@ -670,7 +670,7 @@ export function useSummaryGeneration({
         generationId === generationIdRef.current
         && activeProcessIdRef.current === processId
       ) {
-        toast.error('Failed to stop summary generation', {
+        toast.error('Failed to stop AI notes', {
           description: 'Generation is still running; waiting for its latest status.',
         });
       }

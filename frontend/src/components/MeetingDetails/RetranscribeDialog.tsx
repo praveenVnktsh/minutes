@@ -120,7 +120,7 @@ export function RetranscribeDialog({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <RefreshCw className="h-5 w-5 text-info" />
-            Enhance transcript
+            Re-transcribe
           </DialogTitle>
           <DialogDescription>
             Re-run transcription with a different language or model.

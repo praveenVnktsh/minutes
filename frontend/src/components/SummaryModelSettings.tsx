@@ -21,13 +21,14 @@ export function SummaryModelSettings({ refetchTrigger: _refetchTrigger }: Summar
       <div className="rounded-lg border border-hairline bg-surface-raised p-6 shadow-sm">
         <div className="flex items-center justify-between gap-4">
           <div>
-            <h3 className="mb-2 text-lg font-semibold text-ink">Automatic summaries</h3>
+            <h3 className="mb-2 text-lg font-semibold text-ink">Write AI notes when the meeting ends</h3>
             <p id="auto-summary-description" className="text-sm text-ink-muted">
-              Generate a summary after a meeting finishes processing.
+              Once the meeting&apos;s transcript is ready, finish its AI notes (with the wrap-up and action items)
+              and give the meeting a title. When off, the notes stay as they were written during the meeting.
             </p>
           </div>
           <Switch
-            aria-label="Generate summaries automatically"
+            aria-label="Write AI notes when the meeting ends"
             aria-describedby="auto-summary-description"
             checked={isAutoSummary}
             onCheckedChange={toggleIsAutoSummary}

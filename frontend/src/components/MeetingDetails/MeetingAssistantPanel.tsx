@@ -147,7 +147,7 @@ export function MeetingAssistantPanel({
       await applyResult(operation);
     } catch (error) {
       applyError(operation, error);
-      toast.error('The meeting assistant could not respond', { description: String(error) });
+      toast.error('Copilot could not respond', { description: String(error) });
     }
   };
 
@@ -162,7 +162,7 @@ export function MeetingAssistantPanel({
     <div className="flex h-full flex-col bg-[var(--surface-1)]">
       <div className="flex items-start justify-between gap-3 px-5 pb-3 pt-5">
         <div>
-          <h2 className="text-sm font-semibold text-ink">AI chat</h2>
+          <h2 className="text-sm font-semibold text-ink">Copilot</h2>
           <p className="mt-0.5 text-[11px] text-[var(--ink-subtle)]">Answers from the notes and transcript</p>
         </div>
         <Dialog open={settingsOpen} onOpenChange={(open) => { if (!isModelConfigSaving) setSettingsOpen(open); }}>
@@ -200,7 +200,7 @@ export function MeetingAssistantPanel({
                 <Bot className="h-5 w-5" />
               </div>
               <h3 className="mt-4 text-sm font-semibold text-ink">Ask about this meeting</h3>
-              <p className="mt-1.5 text-xs leading-5 text-[var(--ink-muted)]">Ask questions about the enhanced notes or transcript.</p>
+              <p className="mt-1.5 text-xs leading-5 text-[var(--ink-muted)]">Ask questions about the AI notes or transcript.</p>
               <div className="mt-5 flex flex-col items-start gap-2">
                 {STARTERS.map((starter) => (
                   <button key={starter} type="button" onClick={() => setInput(starter)} className="rounded-full bg-surface-2 px-3 py-1.5 text-left text-[11px] text-ink-muted hover:bg-surface-raised">
@@ -230,7 +230,7 @@ export function MeetingAssistantPanel({
               <Sparkles className="h-4 w-4 animate-pulse" /> Reading the meeting…
             </div>
           )}
-          {sendError && <p role="alert" className="text-xs text-error">The meeting assistant could not respond: {sendError}</p>}
+          {sendError && <p role="alert" className="text-xs text-error">Copilot could not respond: {sendError}</p>}
           <div ref={endRef} />
         </div>
       </div>
