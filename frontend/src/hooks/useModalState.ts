@@ -1,7 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
-import { listen } from '@tauri-apps/api/event';
-import { toast } from 'sonner';
-import { TranscriptModelProps } from '@/components/TranscriptSettings';
+import { useState, useCallback } from 'react';
 
 export type ModalType =
   | 'modelSettings'
@@ -35,16 +32,10 @@ interface UseModalStateReturn {
 }
 
 /**
- * Custom hook for managing all modal state and event listeners.
- * Consolidates 9 useState calls and 3 event listeners from page.tsx.
- *
- * Features:
- * - Unified modal state management
- * - Event listeners for chunk drops, transcription errors, model downloads
- * - Auto-close on model download completion
+ * Custom hook for managing all modal state: which modals are open and the
+ * message each one shows.
  */
-export function useModalState(transcriptModelConfig?: TranscriptModelProps): UseModalStateReturn {
-  const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+export function useModalState(): UseModalStateReturn {
   // Modal visibility state
   const [modals, setModals] = useState<ModalState>({
     modelSettings: false,
@@ -98,50 +89,6 @@ export function useModalState(transcriptModelConfig?: TranscriptModelProps): Use
       modelSelector: '',
     });
   }, []);
-
-  // Listen for model download completion to auto-close modal
-  useEffect(() => {
-    let disposed = false;
-    let cleanup: (() => void) | undefined;
-    const setupDownloadListeners = async () => {
-      const unlisteners: (() => void)[] = [];
-
-      try {
-        // Listen for Whisper model download complete
-        const unlistenWhisper = await listen<{ modelName: string }>('model-download-complete', (event) => {
-          const { modelName } = event.payload;
-          console.log('[useModalState] Whisper model download complete:', modelName);
-
-          // Auto-close modal if the downloaded model matches the selected one
-          if (transcriptModelConfig?.provider === 'localWhisper' && transcriptModelConfig?.model === modelName) {
-            toast.success('Model ready! Closing window...', { duration: 1500 });
-            if (closeTimerRef.current) clearTimeout(closeTimerRef.current);
-            closeTimerRef.current = setTimeout(() => hideModal('modelSelector'), 1500);
-          }
-        });
-        if (disposed) {
-          unlistenWhisper();
-          return;
-        }
-        unlisteners.push(unlistenWhisper);
-        cleanup = () => {
-          unlisteners.forEach(unsub => unsub());
-        };
-      } catch (error) {
-        if (!disposed) console.error('Failed to listen for model download completion:', error);
-      }
-    };
-
-    void setupDownloadListeners();
-    return () => {
-      disposed = true;
-      cleanup?.();
-      if (closeTimerRef.current) {
-        clearTimeout(closeTimerRef.current);
-        closeTimerRef.current = null;
-      }
-    };
-  }, [transcriptModelConfig, hideModal]);
 
   return {
     modals,

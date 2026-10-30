@@ -5,7 +5,7 @@ A modern desktop application for recording, transcribing, and analyzing meetings
 ## Features
 
 - Real-time audio recording from both microphone and system audio
-- Live transcription using Whisper ASR (locally running)
+- Live transcription using FluidAudio speech models (locally running on Core ML)
 - Native desktop integration using Tauri
 - Speaker diarization support
 - Rich text editor for note-taking
@@ -13,12 +13,12 @@ A modern desktop application for recording, transcribing, and analyzing meetings
 
 ## Prerequisites
 
-Minutes is Mac-only: Apple Silicon, macOS 13 or later.
+Minutes is Mac-only: Apple Silicon, macOS 13 or later; transcription needs macOS 15 or later.
 
 - Node.js (v18 or later)
 - Rust (latest stable)
 - pnpm (v9.15.9)
-- [Xcode Command Line Tools](https://developer.apple.com/download/all/?q=xcode)
+- Xcode 16 or later (Swift 6 toolchain for the speech-helper sidecar; build it with `bash speech-helper/build.sh release`)
 
 
 ## Project Structure

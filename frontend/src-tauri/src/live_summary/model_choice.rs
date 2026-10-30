@@ -5,9 +5,9 @@
 //! Macs with 16 GB or more, unless the user picked "Same as summary model".
 //! Nothing here downloads without the user asking: onboarding's checkbox or
 //! the Settings section calls in. An onboarding opt-in waits until the
-//! required models (Parakeet and the summary model) are on disk, survives
-//! the app reloading or restarting, and is dropped if the user later picks
-//! the summary model for live notes.
+//! required models (the speech models and the summary model) are on disk,
+//! survives the app reloading or restarting, and is dropped if the user later
+//! picks the summary model for live notes.
 
 use std::time::Duration;
 
@@ -84,13 +84,13 @@ pub enum PendingStep {
 }
 
 pub fn pending_step(
-    parakeet_ready: bool,
+    speech_ready: bool,
     summary_ready: bool,
     live_notes_ready: bool,
 ) -> PendingStep {
     if live_notes_ready {
         PendingStep::Done
-    } else if parakeet_ready && summary_ready {
+    } else if speech_ready && summary_ready {
         PendingStep::Start
     } else {
         PendingStep::Wait
@@ -164,7 +164,7 @@ pub async fn set_live_notes_model<R: Runtime>(
 }
 
 /// Onboarding's opt-in: live notes on the live notes model, downloaded once
-/// Parakeet and `summary_model` are on disk.
+/// the speech models and `summary_model` are on disk.
 #[tauri::command]
 pub async fn request_live_notes_download_after_setup<R: Runtime>(
     app: AppHandle<R>,
@@ -204,9 +204,7 @@ async fn run_pending_download<R: Runtime>(app: &AppHandle<R>) {
         let Some(summary_model) = read_string(app, PENDING_KEY) else {
             return;
         };
-        let parakeet_ready = crate::parakeet_engine::commands::parakeet_has_available_models()
-            .await
-            .unwrap_or(false);
+        let speech_ready = crate::audio::speech::models::batch_ready(app);
         let ready = |model: String| {
             builtin_ai_is_model_ready(
                 app.clone(),
@@ -217,7 +215,7 @@ async fn run_pending_download<R: Runtime>(app: &AppHandle<R>) {
         };
         let summary_ready = ready(summary_model).await.unwrap_or(false);
         let live_notes_ready = ready(LIVE_NOTES_MODEL.to_string()).await.unwrap_or(false);
-        match pending_step(parakeet_ready, summary_ready, live_notes_ready) {
+        match pending_step(speech_ready, summary_ready, live_notes_ready) {
             PendingStep::Wait => tokio::time::sleep(PENDING_POLL).await,
             PendingStep::Done => {
                 let _ = write(app, PENDING_KEY, None);

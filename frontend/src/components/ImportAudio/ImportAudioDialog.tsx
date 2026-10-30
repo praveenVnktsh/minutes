@@ -1,17 +1,14 @@
-import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Upload,
-  Globe,
+  Languages,
   Loader2,
   AlertCircle,
   CheckCircle2,
   X,
-  Cpu,
   FileAudio,
   Clock,
   HardDrive,
-  ChevronDown,
-  ChevronUp,
 } from 'lucide-react';
 import {
   Dialog,
@@ -23,20 +20,12 @@ import {
 } from '../ui/dialog';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '../ui/select';
 import { toast } from 'sonner';
-import { useConfig } from '@/contexts/ConfigContext';
 import { useImportAudio, ImportResult } from '@/hooks/useImportAudio';
 import { useRouter } from 'next/navigation';
 import { useSidebar } from '../Sidebar/SidebarProvider';
-import { LANGUAGES } from '@/constants/languages';
-import { useTranscriptionModels, ModelOption } from '@/hooks/useTranscriptionModels';
+import { useTranscriptAvailability } from '@/lib/speechModels';
+import { TranscriptionUnsupportedNotice } from '@/components/TranscriptionUnsupportedNotice';
 import { cn } from '@/lib/utils';
 import { panel, progress as progressClasses, toneText } from '@/lib/theme-classes';
 
@@ -74,27 +63,16 @@ export function ImportAudioDialog({
 }: ImportAudioDialogProps) {
   const router = useRouter();
   const { refetchMeetings } = useSidebar();
-  const { selectedLanguage, transcriptModelConfig } = useConfig();
+  const availability = useTranscriptAvailability(open);
+  const transcriptBlocked = availability === 'missing' || availability === 'unsupported';
 
   const [title, setTitle] = useState('');
-  const [selectedLang, setSelectedLang] = useState(selectedLanguage || 'auto');
-  const [showAdvanced, setShowAdvanced] = useState(false);
   const [titleModifiedByUser, setTitleModifiedByUser] = useState(false);
 
   // Always start as false — represents "dialog has not yet been opened".
   // Do NOT initialize from the `open` prop: if the component mounts with open=true
   // (e.g. drag-drop path), we still need the initialization effect to run.
   const prevOpenRef = useRef(false);
-
-  // Use centralized model fetching hook
-  const {
-    availableModels,
-    selectedModelKey,
-    setSelectedModelKey,
-    loadingModels,
-    fetchModels,
-    resetSelection,
-  } = useTranscriptionModels(transcriptModelConfig);
 
   const handleImportComplete = useCallback((result: ImportResult) => {
     toast.success(`Import complete! ${result.segments_count} segments created.`);
@@ -136,11 +114,8 @@ export function ImportAudioDialog({
     // Only initialize when transitioning from closed (false) to open (true)
     if (open && !wasOpen) {
       reset();
-      resetSelection();
       setTitle('');
       setTitleModifiedByUser(false);
-      setSelectedLang(selectedLanguage || 'auto');
-      setShowAdvanced(false);
 
       // Validate preselected file if provided
       if (preselectedFile) {
@@ -150,11 +125,8 @@ export function ImportAudioDialog({
           }
         });
       }
-
-      // Fetch available models using centralized hook
-      fetchModels();
     }
-  }, [open, preselectedFile, selectedLanguage, transcriptModelConfig, reset, resetSelection, validateFile, fetchModels]);
+  }, [open, preselectedFile, reset, validateFile]);
 
   // Update title when fileInfo changes
   useEffect(() => {
@@ -162,22 +134,6 @@ export function ImportAudioDialog({
       setTitle(fileInfo.filename);
     }
   }, [fileInfo, title, titleModifiedByUser]);
-
-  const selectedModel = useMemo((): ModelOption | undefined => {
-    if (!selectedModelKey) return undefined;
-    const colonIndex = selectedModelKey.indexOf(':');
-    if (colonIndex === -1) return undefined;
-    const provider = selectedModelKey.slice(0, colonIndex);
-    const name = selectedModelKey.slice(colonIndex + 1);
-    return availableModels.find((m) => m.provider === provider && m.name === name);
-  }, [selectedModelKey, availableModels]);
-  const isParakeetModel = selectedModel?.provider === 'parakeet';
-
-  useEffect(() => {
-    if (isParakeetModel && selectedLang !== 'auto') {
-      setSelectedLang('auto');
-    }
-  }, [isParakeetModel, selectedLang]);
 
   const handleSelectFile = async () => {
     const info = await selectFile();
@@ -189,13 +145,8 @@ export function ImportAudioDialog({
   const handleStartImport = async () => {
     if (!fileInfo) return;
 
-    await startImport(
-      fileInfo.path,
-      title || fileInfo.filename,
-      isParakeetModel ? null : selectedLang === 'auto' ? null : selectedLang,
-      selectedModel?.name || null,
-      selectedModel?.provider || null
-    );
+    // One model, English only: the backend ignores language/model/provider.
+    await startImport(fileInfo.path, title || fileInfo.filename, null, null, null);
   };
 
   const handleCancel = async () => {
@@ -327,85 +278,16 @@ export function ImportAudioDialog({
                 </div>
               )}
 
-              {/* Advanced options (collapsible) */}
               {fileInfo && (
-                <div className="border rounded-lg">
-                  <button
-                    onClick={() => setShowAdvanced(!showAdvanced)}
-                    className="w-full flex items-center justify-between p-3 text-sm font-medium text-ink hover:bg-surface-2"
-                  >
-                    <span>Advanced Options</span>
-                    {showAdvanced ? (
-                      <ChevronUp className="h-4 w-4" />
-                    ) : (
-                      <ChevronDown className="h-4 w-4" />
-                    )}
-                  </button>
-
-                  {showAdvanced && (
-                    <div className="p-3 pt-0 space-y-4 border-t">
-                      {/* Language selector */}
-                      {!isParakeetModel ? (
-                        <div className="space-y-2">
-                          <div className="flex items-center gap-2">
-                            <Globe className="h-4 w-4 text-muted-foreground" />
-                            <span className="text-sm font-medium">Language</span>
-                          </div>
-                          <Select value={selectedLang} onValueChange={setSelectedLang}>
-                            <SelectTrigger className="w-full">
-                              <SelectValue placeholder="Select language" />
-                            </SelectTrigger>
-                            <SelectContent className="max-h-60">
-                              {LANGUAGES.map((lang) => (
-                                <SelectItem key={lang.code} value={lang.code}>
-                                  {lang.name}
-                                </SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
-                        </div>
-                      ) : (
-                        <div className="space-y-2">
-                          <div className="flex items-center gap-2">
-                            <Globe className="h-4 w-4 text-muted-foreground" />
-                            <span className="text-sm font-medium">Language</span>
-                          </div>
-                          <p className="text-xs text-muted-foreground">
-                            Language selection isn't supported for Parakeet. It always uses automatic detection.
-                          </p>
-                        </div>
-                      )}
-
-                      {/* Model selector */}
-                      {availableModels.length > 0 && (
-                        <div className="space-y-2">
-                          <div className="flex items-center gap-2">
-                            <Cpu className="h-4 w-4 text-muted-foreground" />
-                            <span className="text-sm font-medium">Model</span>
-                          </div>
-                          <Select
-                            value={selectedModelKey}
-                            onValueChange={setSelectedModelKey}
-                            disabled={loadingModels}
-                          >
-                            <SelectTrigger className="w-full">
-                              <SelectValue placeholder={loadingModels ? 'Loading models...' : 'Select model'} />
-                            </SelectTrigger>
-                            <SelectContent>
-                              {availableModels.map((model) => (
-                                <SelectItem
-                                  key={`${model.provider}:${model.name}`}
-                                  value={`${model.provider}:${model.name}`}
-                                >
-                                  {model.displayName} ({Math.round(model.size_mb)} MB)
-                                </SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
-                        </div>
-                      )}
-                    </div>
-                  )}
+                <p className="flex items-center gap-2 text-sm text-ink-muted">
+                  <Languages className="h-4 w-4" />
+                  Transcribed with Parakeet (English)
+                </p>
+              )}
+              {availability === 'unsupported' && <TranscriptionUnsupportedNotice />}
+              {availability === 'missing' && (
+                <div className={cn(panel.warning, 'rounded-lg p-3 text-sm')}>
+                  The transcript model is not downloaded yet. Download it in Settings → Transcription.
                 </div>
               )}
             </>
@@ -446,7 +328,7 @@ export function ImportAudioDialog({
               </Button>
               <Button
                 onClick={handleStartImport}
-                disabled={!fileInfo}
+                disabled={!fileInfo || transcriptBlocked}
               >
                 <Upload className="h-4 w-4 mr-2" />
                 Import

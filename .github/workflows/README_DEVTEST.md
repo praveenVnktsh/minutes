@@ -51,7 +51,7 @@ To download them, open the completed run in the **Actions** tab and use the **Ar
 
 ## Hardware Acceleration
 
-Whisper uses Metal and CoreML; the llama-helper sidecar is built with `--features metal`. See `ACCELERATION_GUIDE.md`.
+The speech-helper sidecar (FluidAudio) runs on Core ML; the llama-helper sidecar is built with `--features metal`. See `ACCELERATION_GUIDE.md`.
 
 ## Troubleshooting
 

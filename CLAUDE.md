@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Meetily** is a privacy-first AI meeting assistant that captures, transcribes, and summarizes meetings entirely on local infrastructure. The supported application is the Tauri desktop app with a Rust core.
 
-**Mac-only**: Minutes runs on Apple Silicon Macs with macOS 13+. Windows and Linux support has been removed; the Rust crate refuses to compile for other targets. Do not add Windows/Linux code paths, `cfg(target_os = ...)` branches for them, or non-Apple GPU backends.
+**Mac-only**: Minutes runs on Apple Silicon Macs with macOS 13+; transcription (the `speech-helper` sidecar) needs macOS 15+ and is cleanly unavailable below it (`speech::helper::os_supported()`). Windows and Linux support has been removed; the Rust crate refuses to compile for other targets. Do not add Windows/Linux code paths, `cfg(target_os = ...)` branches for them, or non-Apple GPU backends.
 
 1. **Frontend**: Tauri-based desktop application (Rust + Next.js + TypeScript)
 2. **Rust Backend**: Tauri commands, audio capture, transcription, storage, and summarization orchestration
@@ -14,8 +14,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### Key Technology Stack
 - **Desktop App**: Tauri 2.x (Rust) + Next.js 14 + React 18
-- **Audio Processing**: Rust (cpal, whisper-rs, professional audio mixing)
-- **Transcription**: Whisper.cpp / whisper-rs and Parakeet paths in the Tauri app
+- **Audio Processing**: Rust (cpal, professional audio mixing)
+- **Transcription**: `speech-helper` Swift sidecar built on FluidAudio (Core ML): Nemotron streaming for live text, Parakeet TDT v2 for the final pass, Silero VAD, pyannote community-1 diarization
 - **App API Surface**: Tauri commands and events, not a separate FastAPI service
 - **LLM Integration**: Ollama (local), Claude, Groq, OpenRouter
 
@@ -29,7 +29,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ./clean_run.sh              # Clean build and run with info logging
 ./clean_run.sh debug        # Run with debug logging
 ./clean_build.sh            # Production build
-bash scripts/build-local-macos.sh   # Local unsigned .app bundle with Metal (pnpm tauri:build:local:mac)
+bash scripts/build-local-macos.sh   # Local unsigned .app bundle (builds both sidecars) (pnpm tauri:build:local:mac)
 
 # Manual Commands
 pnpm install                # Install dependencies
@@ -37,9 +37,7 @@ pnpm run dev                # Next.js dev server (port 3118)
 pnpm run tauri:dev          # Full Tauri development mode
 pnpm run tauri:build        # Production build
 
-# Explicit GPU feature builds (Metal + CoreML are already on by default)
-pnpm run tauri:dev:metal    # Metal GPU
-pnpm run tauri:dev:coreml   # CoreML
+bash ../speech-helper/build.sh debug   # build and stage the speech-helper sidecar (needed before tauri dev)
 ```
 
 ### Service Endpoints
@@ -53,8 +51,8 @@ pnpm run tauri:dev:coreml   # CoreML
 ┌─────────────────────────────────────────────────────────────────┐
 │                    Frontend (Tauri Desktop App)                  │
 │  ┌──────────────────┐  ┌─────────────────┐  ┌────────────────┐ │
-│  │   Next.js UI     │  │  Rust Backend   │  │ Whisper Engine │ │
-│  │  (React/TS)      │←→│  (Audio + IPC)  │←→│  (Local STT)   │ │
+│  │   Next.js UI     │  │  Rust Backend   │  │ Speech Helper │ │
+│  │  (React/TS)      │←→│  (Audio + IPC)  │←→│  (FluidAudio)  │ │
 │  └──────────────────┘  └─────────────────┘  └────────────────┘ │
 │         ↑ Tauri Events           ↑ Audio Pipeline               │
 └─────────────────────────────────────────────────────────────────┘
@@ -79,10 +77,10 @@ Raw Audio (Mic + System)
     │ (Pre-mixed)     │        │ (VAD-filtered)      │
     └─────────────────┘        └─────────────────────┘
               ↓                          ↓
-    RecordingSaver.save()      WhisperEngine.transcribe()
+    RecordingSaver.save()      speech-helper (FluidAudio)
 ```
 
-**Key Insight**: The pipeline performs **professional audio mixing** (RMS-based ducking, clipping prevention) for recording, while simultaneously applying **Voice Activity Detection (VAD)** to send only speech segments to Whisper for transcription.
+**Key Insight**: The pipeline performs **professional audio mixing** (RMS-based ducking, clipping prevention) for recording, while simultaneously applying **Voice Activity Detection (VAD)** to send only speech segments to the speech-helper for transcription.
 
 ### Audio Device Modularization (Recently Completed)
 
@@ -101,6 +99,7 @@ audio/
 │   ├── microphone.rs          # Microphone capture stream
 │   ├── system.rs              # System audio capture stream
 │   └── core_audio.rs          # macOS ScreenCaptureKit integration
+├── speech/                    # speech-helper client, model download, commands
 ├── pipeline.rs                # Audio mixing and VAD processing
 ├── recording_manager.rs       # High-level recording coordination
 ├── recording_commands.rs      # Tauri command interface
@@ -156,20 +155,13 @@ await listen<TranscriptUpdate>('transcript-update', (event) => {
 });
 ```
 
-### Whisper Model Management
+### Speech Helper and Model Management
 
-**Model Storage Locations**:
-- **Development**: `frontend/models/`
-- **Production**: `~/Library/Application Support/Meetily/models/`
+All speech models run in the `speech-helper` Swift sidecar (`speech-helper/`, product `speech-helper`, built by `speech-helper/build.sh [release|debug]` and staged at `frontend/src-tauri/binaries/speech-helper-<triple>`). It wraps FluidAudio (Core ML): Nemotron streaming for live transcription, Parakeet TDT v2 for the final pass and imports, Silero VAD, and pyannote community-1 diarization. The Rust client and model management live in `frontend/src-tauri/src/audio/speech/`.
 
-**Model Loading** (frontend/src-tauri/src/whisper_engine/whisper_engine.rs):
-```rust
-pub async fn load_model(&self, model_name: &str) -> Result<()> {
-    // Uses Metal + CoreML on Apple Silicon
-}
-```
+**Model Storage**: `~/Library/Application Support/<bundle id>/models/fluidaudio/` (Rust downloads pinned revisions there; the helper loads them offline).
 
-**GPU Acceleration**: Metal + CoreML, always enabled (whisper-rs is declared with both features for macOS). The llama-helper sidecar is built with `--features metal`.
+**GPU Acceleration**: Core ML (Neural Engine, GPU, CPU), no build flag. The llama-helper sidecar is built with `--features metal`.
 
 ## Critical Development Patterns
 
@@ -290,7 +282,7 @@ RUST_LOG=debug ./clean_run.sh
 ## Platform Notes (macOS, Apple Silicon only)
 
 - **Audio Capture**: Uses ScreenCaptureKit for system audio (macOS 13+)
-- **GPU**: Metal + CoreML automatically enabled
+- **GPU**: Core ML for speech (speech-helper), Metal for llama-helper
 - **Permissions**: Requires microphone + screen recording permissions
 - **System Audio**: Requires virtual audio device (BlackHole) for system capture
 
@@ -300,14 +292,12 @@ RUST_LOG=debug ./clean_run.sh
 - Use `perf_debug!()` / `perf_trace!()` for hot-path logging (zero cost in release)
 - Batch audio metrics using `AudioMetricsBatcher` (pipeline.rs)
 - Pre-allocate buffers with `AudioBufferPool` (buffer_pool.rs)
-- VAD filtering reduces Whisper load by ~70% (only processes speech)
+- VAD filtering (Silero, in speech-helper) keeps non-speech away from the recognizer
 
-### Whisper Transcription
-- **Model Selection**: Balance accuracy vs speed
-  - Development: `base` or `small` (fast iteration)
-  - Production: `medium` or `large-v3` (best quality)
-- **GPU Acceleration**: 5-10x faster than CPU
-- **Parallel Processing**: Available in `whisper_engine/parallel_processor.rs` for batch workloads
+### Speech Transcription
+- **Live**: Nemotron streaming (560 ms chunks) in speech-helper; one stream per source (microphone, system)
+- **Final pass / import**: Parakeet TDT v2, batch mode, on Core ML
+- **Diarization**: pyannote community-1 via FluidAudio; the offline diarizer is only reliable on macOS 15, hence the helper's minimum (the app itself runs on 13; don't set `minimumSystemVersion` in tauri.conf.json, since the updater would move older Macs onto a build that won't launch)
 
 ### Frontend Performance
 - React state updates batched via Sidebar context
@@ -318,9 +308,9 @@ RUST_LOG=debug ./clean_run.sh
 
 1. **Audio Chunk Size**: Pipeline expects consistent 48kHz sample rate. Resampling happens at capture time.
 
-2. **Platform Audio Quirks**: ScreenCaptureKit requires macOS 13+ and screen recording permission.
+2. **Platform Audio Quirks**: ScreenCaptureKit requires macOS 13+ (transcription needs macOS 15+ for FluidAudio) and screen recording permission.
 
-3. **Whisper Model Loading**: Models are loaded once and cached. Changing models requires app restart or manual unload/reload.
+3. **Speech Model Loading**: speech-helper loads its Core ML models once per process and caches them. Models must be downloaded under `models/fluidaudio/` before the helper can load them (it never downloads itself).
 
 4. **No Separate Backend Dependency**: Meeting persistence, transcription, and LLM features are handled by the Tauri app. Do not reintroduce a Python/FastAPI backend as a supported requirement.
 
@@ -356,5 +346,6 @@ RUST_LOG=debug ./clean_run.sh
 - [frontend/src/app/page.tsx](frontend/src/app/page.tsx) - Main recording interface
 - [frontend/src/components/Sidebar/SidebarProvider.tsx](frontend/src/components/Sidebar/SidebarProvider.tsx) - Global state management
 
-**Whisper Integration**:
-- [frontend/src-tauri/src/whisper_engine/whisper_engine.rs](frontend/src-tauri/src/whisper_engine/whisper_engine.rs) - Whisper model management and transcription
+**Speech Integration**:
+- [speech-helper/](speech-helper/) - Swift sidecar wrapping FluidAudio (ASR, VAD, diarization)
+- [frontend/src-tauri/src/audio/speech/](frontend/src-tauri/src/audio/speech/) - Rust client, model download and Tauri commands for the helper

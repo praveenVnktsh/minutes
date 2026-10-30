@@ -85,7 +85,8 @@ async fn download(url: &str, sha256: &str, path: &Path) -> anyhow::Result<()> {
         .await?;
     tokio::fs::write(&partial, &bytes).await?;
     let check = partial.clone();
-    let actual = tokio::task::spawn_blocking(move || super::model_manager::sha256_file(&check)).await??;
+    let actual =
+        tokio::task::spawn_blocking(move || super::model_manager::sha256_file(&check)).await??;
     if !actual.eq_ignore_ascii_case(sha256) {
         let _ = tokio::fs::remove_file(&partial).await;
         anyhow::bail!("checksum mismatch (got {actual})");

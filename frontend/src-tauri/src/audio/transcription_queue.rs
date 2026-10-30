@@ -1,5 +1,5 @@
 // Transcription task queue - processes import/retranscribe jobs sequentially
-// Prevents Whisper/Parakeet engine contention by ensuring only one task runs at a time
+// Runs one task at a time, so jobs never contend for the batch speech-helper
 
 use log::{error, info, warn};
 use once_cell::sync::Lazy;
@@ -41,7 +41,9 @@ pub struct TranscriptionTask {
     // Retranscribe-specific fields
     pub meeting_id: Option<String>,
     pub meeting_folder_path: Option<String>,
-    // Shared fields
+    // Shared fields. Kept so tasks queued by older versions still deserialize,
+    // and passed through, but not used to pick an engine: every task is
+    // transcribed in English with Parakeet in the speech-helper.
     pub language: Option<String>,
     pub model: Option<String>,
     pub provider: Option<String>,
@@ -448,6 +450,15 @@ impl TranscriptionQueue {
         self.active_task.lock().await.is_some()
     }
 
+    /// The id of the task being processed, if any.
+    pub async fn active_task_id(&self) -> Option<String> {
+        self.active_task
+            .lock()
+            .await
+            .as_ref()
+            .map(|task| task.task_id.clone())
+    }
+
     /// Start the queue worker loop
     pub fn start_worker<R: Runtime>(self: Arc<Self>, app: AppHandle<R>) {
         let queue = self.clone();
@@ -610,9 +621,9 @@ async fn process_import_task<R: Runtime>(app: &AppHandle<R>, task: &Transcriptio
     cancel_watcher.abort();
     app.unlisten(progress_bridge);
     disable_controls(&task.task_id);
-    // Free the engine (Whisper turbo is ~1.6 GB) before anything waits on
-    // the outcome; the next queued task loads what it needs.
-    super::common::unload_engine_after_batch(task.provider.as_deref() == Some("parakeet")).await;
+    // Stop the batch speech-helper (~1.5 GB) before anything waits on the
+    // outcome; the next queued task starts it again.
+    super::common::unload_engine_after_batch().await;
 
     match result {
         Ok(import_result) => {
@@ -812,9 +823,9 @@ async fn process_retranscribe_task<R: Runtime>(app: &AppHandle<R>, task: &Transc
     cancel_watcher.abort();
     app.unlisten(progress_bridge);
     disable_controls(&task.task_id);
-    // Free the engine (Whisper turbo is ~1.6 GB) before anything waits on
-    // the outcome; the next queued task loads what it needs.
-    super::common::unload_engine_after_batch(task.provider.as_deref() == Some("parakeet")).await;
+    // Stop the batch speech-helper (~1.5 GB) before anything waits on the
+    // outcome; the next queued task starts it again.
+    super::common::unload_engine_after_batch().await;
 
     match result {
         Ok(retranscription_result) => {

@@ -1,18 +1,10 @@
 # GPU Acceleration Guide
 
-Minutes is Mac-only (Apple Silicon, macOS 13+), and transcription always runs on the GPU through Apple's frameworks.
+Minutes is Mac-only (Apple Silicon, macOS 13+; transcription needs macOS 15+), and transcription always runs on Apple's frameworks.
 
 ## Backends
 
-Minutes uses the `whisper-rs` library with two Apple backends:
+*   **Core ML (speech-helper):** Speech recognition, voice activity detection and speaker diarization run in the `speech-helper` Swift sidecar through [FluidAudio](https://github.com/FluidInference/FluidAudio), which schedules its models on the Neural Engine, GPU and CPU. There is no build flag; the sidecar is built by `speech-helper/build.sh`.
+*   **Metal (llama-helper):** The built-in summary models run in the llama-helper sidecar, built with `--features metal`. `frontend/scripts/build-local-macos.sh` and the CI workflows do this for you.
 
-*   **Metal:** GPU acceleration on Apple Silicon.
-*   **Core ML:** An additional acceleration layer for Apple Silicon.
-
-Both are enabled unconditionally: the macOS dependency section of `frontend/src-tauri/Cargo.toml` declares `whisper-rs` with the `metal` and `coreml` features, so a plain `pnpm tauri:dev` or `pnpm tauri:build` already uses them.
-
-The llama-helper sidecar (built-in summary models) is built with `--features metal`. `scripts/build-local-macos.sh` and the CI workflows do this for you.
-
-## Cargo Features
-
-The `metal` and `coreml` Cargo features remain as explicit opt-ins for scripts such as `pnpm tauri:dev:metal` and `pnpm tauri:dev:coreml`. `openmp` is available for whisper.cpp's OpenMP CPU threading but is not used by default.
+The Rust crate has no GPU Cargo features.
