@@ -7,6 +7,7 @@ const originalConfig = { ...await import('../../src/contexts/ConfigContext') };
 const originalNavigation = { ...await import('next/navigation') };
 const originalToast = { ...await import('sonner') };
 const originalRecordingState = { ...await import('../../src/contexts/RecordingStateContext') };
+const originalRecordingController = { ...await import('../../src/contexts/RecordingControllerContext') };
 const originalPreferences = { ...await import('../../src/lib/summary-language-preferences') };
 
 let nativeSummary: SummaryProcessResponse;
@@ -46,6 +47,10 @@ mock.module('next/navigation', () => ({ useRouter: () => ({ push }) }));
 mock.module('sonner', () => ({ toast: { info() {}, error() {}, success() {}, warning() {} } }));
 mock.module('../../src/contexts/RecordingStateContext', () => ({
   useRecordingState: () => ({ isRecording: false }),
+}));
+mock.module('../../src/contexts/RecordingControllerContext', () => ({
+  ...originalRecordingController,
+  useRecordingController: () => ({ command: null, activeMeetingId: null }),
 }));
 mock.module('../../src/lib/summary-language-preferences', () => ({
   readMeetingSummaryLanguage: async () => ({ language: 'en', storage: 'metadata' }),
@@ -107,6 +112,7 @@ afterAll(() => {
   mock.module('next/navigation', () => originalNavigation);
   mock.module('sonner', () => originalToast);
   mock.module('../../src/contexts/RecordingStateContext', () => originalRecordingState);
+  mock.module('../../src/contexts/RecordingControllerContext', () => originalRecordingController);
   mock.module('../../src/lib/summary-language-preferences', () => originalPreferences);
 });
 

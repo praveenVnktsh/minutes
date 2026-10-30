@@ -18,6 +18,8 @@ import { LiveNotes, LiveNotesNotice } from '@/components/MeetingDetails/LiveNote
 import { FloatingRecordingControls } from '@/components/MeetingDetails/FloatingRecordingControls';
 import { useContinueRecording } from '@/components/MeetingDetails/useContinueRecording';
 import { useMeetingActivity } from '@/contexts/MeetingActivityContext';
+import { useRecordingState } from '@/contexts/RecordingStateContext';
+import { useRecordingController } from '@/contexts/RecordingControllerContext';
 import {
   liveNotesTarget,
   meetingNotesTarget,
@@ -105,6 +107,17 @@ export default function PageContent({
     ? latestTerminalActivity.error
     : null;
   const summaryActivity = activity.getSummaryActivity(meeting.id);
+  const recordingState = useRecordingState();
+  const controller = useRecordingController();
+  // Stopping this meeting: the header banner is the page's one progress surface,
+  // so the floating pill and the shell's activity card stay quiet here.
+  const isFinishingThisMeeting = isRecordingThisMeeting && (
+    controller.command === 'stop'
+    || controller.command === 'finalize'
+    || recordingState.isProcessing
+    || recordingState.isSaving
+    || activity.recording?.status === 'saving'
+  );
   const finalPass = useFinalPassWaiting(meeting.id);
   const [liveFolderPath, setLiveFolderPath] = useState<string | null>(null);
 
@@ -278,10 +291,21 @@ export default function PageContent({
       <Loader2 className="h-3.5 w-3.5 animate-spin" /> {(() => {
         // Over an existing transcript the pass is improving it, in the background.
         const label = meetingData.transcripts.length > 0 ? 'Improving transcript' : 'Transcribing';
+        if (inFlightActivity?.stage === 'waiting') return `${label}: paused while recording`;
         return inFlightActivity?.progress_percentage == null
           ? `${label}…`
           : `${label} ${Math.round(inFlightActivity.progress_percentage)}%`;
       })()}
+      {inFlightActivity?.controls_available && (
+        <button
+          type="button"
+          className="ml-1 font-semibold underline-offset-2 hover:underline"
+          onClick={() => void activity.cancelTranscription(inFlightActivity.task_id)
+            .catch((error: unknown) => toast.error(`Could not cancel transcription: ${String(error)}`))}
+        >
+          Cancel
+        </button>
+      )}
     </span>
   ) : activityError ? <span role="alert" className="text-xs font-medium text-error">{activityError}</span>
   : finalPass.waiting ? (
@@ -356,6 +380,11 @@ export default function PageContent({
           createdAt={meeting.created_at}
           notes={<LiveNotes />}
           notesNotice={<LiveNotesNotice />}
+          statusBanner={isFinishingThisMeeting ? (
+            <span className={`flex shrink-0 items-center gap-1.5 rounded-full px-3 py-1.5 text-[11px] font-medium ${badge.info}`} role="status">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" /> {recordingState.isSaving ? 'Saving meeting…' : 'Finishing your meeting…'}
+            </span>
+          ) : undefined}
           transcript={<LiveTranscriptPanel />}
           assistant={
             <CopilotPanel
@@ -369,7 +398,7 @@ export default function PageContent({
           titlePending={meetingMutations[meeting.id]?.rename?.status === 'pending'}
           titleError={meetingMutations[meeting.id]?.rename?.error}
         />
-        <FloatingRecordingControls />
+        <FloatingRecordingControls hideWhileFinishing />
       </motion.div>
     );
   }
