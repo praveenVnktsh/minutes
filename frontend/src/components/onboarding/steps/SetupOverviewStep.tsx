@@ -79,7 +79,7 @@ export function SetupOverviewStep() {
       title="Setup Overview"
       description="Minutes requires that you download the Transcription & Summarization AI models for the software to work."
       step={2}
-      totalSteps={4}
+      totalSteps={5}
     >
       <div className="flex flex-col items-center space-y-10">
         {/* Steps Card */}

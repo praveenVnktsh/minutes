@@ -1,16 +1,8 @@
 use log::{error, info};
-use serde::Serialize;
-use std::path::PathBuf;
 use tauri::{AppHandle, Emitter, Manager};
 
 use super::manager::DatabaseManager;
 use crate::state::AppState;
-
-#[derive(Serialize)]
-pub struct DatabaseCheckResult {
-    pub exists: bool,
-    pub size: u64,
-}
 
 /// Check if this is the first launch (no database exists yet)
 #[tauri::command]
@@ -20,94 +12,7 @@ pub async fn check_first_launch(app: AppHandle) -> Result<bool, String> {
         .map_err(|e| format!("Failed to check first launch: {}", e))
 }
 
-/// Check for legacy database in the default app data directory
-#[tauri::command]
-pub async fn check_default_legacy_database(app: AppHandle) -> Result<Option<String>, String> {
-    let app_data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("Failed to get app data dir: {}", e))?;
-
-    let legacy_db = app_data_dir.join("meeting_minutes.db");
-    info!("Checking for default legacy database at: {:?}", legacy_db);
-
-    if legacy_db.exists() && legacy_db.is_file() {
-        let path_str = legacy_db.to_string_lossy().to_string();
-        info!("Found default legacy database: {}", path_str);
-        Ok(Some(path_str))
-    } else {
-        info!("No default legacy database found");
-        Ok(None)
-    }
-}
-
-/// Check if the Homebrew database exists and return its size
-/// This is specifically for detecting old Python backend installations
-#[tauri::command]
-pub async fn check_homebrew_database(path: String) -> Result<Option<DatabaseCheckResult>, String> {
-    let db_path = PathBuf::from(&path);
-
-    info!("Checking for Homebrew database at: {}", path);
-
-    // Check if file exists and is a regular file
-    if db_path.exists() && db_path.is_file() {
-        // Get file metadata to check size
-        match std::fs::metadata(&db_path) {
-            Ok(metadata) => {
-                let size = metadata.len();
-                info!("Found Homebrew database: {} ({} bytes)", path, size);
-
-                // Only consider it valid if it has content (not empty)
-                if size > 0 {
-                    Ok(Some(DatabaseCheckResult { exists: true, size }))
-                } else {
-                    info!("Database file exists but is empty");
-                    Ok(None)
-                }
-            }
-            Err(e) => {
-                error!("Failed to read database metadata: {}", e);
-                Ok(None)
-            }
-        }
-    } else {
-        info!("No database found at Homebrew location");
-        Ok(None)
-    }
-}
-
-/// Import legacy database and initialize the database manager
-#[tauri::command]
-pub async fn import_and_initialize_database(
-    app: AppHandle,
-    legacy_db_path: String,
-) -> Result<(), String> {
-    info!(
-        "Starting import of legacy database from: {}",
-        legacy_db_path
-    );
-
-    // Import and get initialized manager
-    let db_manager = DatabaseManager::import_legacy_database(&app, &legacy_db_path)
-        .await
-        .map_err(|e| {
-            error!("Failed to import legacy database: {}", e);
-            format!("Failed to import database: {}", e)
-        })?;
-
-    // Update app state with the new manager
-    app.manage(AppState { db_manager });
-
-    info!("Legacy database imported and initialized successfully");
-
-    // Emit event to notify frontend that database is ready
-    app.emit("database-initialized", ())
-        .map_err(|e| format!("Failed to emit database-initialized event: {}", e))?;
-
-    Ok(())
-}
-
-/// Initialize a fresh database (for users who don't want to import)
+/// Initialize the database on first launch
 #[tauri::command]
 pub async fn initialize_fresh_database(app: AppHandle) -> Result<(), String> {
     info!("Initializing fresh database");
