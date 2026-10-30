@@ -3,7 +3,7 @@
 import { Transcript, TranscriptSegmentData } from '@/types';
 import { VirtualizedTranscriptView } from '@/components/VirtualizedTranscriptView';
 import { TranscriptButtonGroup } from './TranscriptButtonGroup';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { toast } from 'sonner';
@@ -18,6 +18,24 @@ import { toneText } from '@/lib/theme-classes';
 import { FINAL_PASS_COMPLETE_EVENT, type FinalPassComplete } from '@/lib/liveTranscriptionModels';
 import { SpeakerStatusNotice } from './SpeakerStatusNotice';
 import { ModelProvenanceNote } from './ModelProvenanceNote';
+
+/**
+ * The one status line under the transcript header: a playback error first,
+ * then the lock while AI notes are written, then the speaker status.
+ */
+export function TranscriptStatusLine({
+  playerError,
+  locked,
+  speakerNotice,
+}: {
+  playerError?: string | null;
+  locked: boolean;
+  speakerNotice: ReactNode;
+}) {
+  if (playerError) return <p role="alert" className={`mt-1 text-[11px] ${toneText.error}`}>{playerError}</p>;
+  if (locked) return <p className="mt-2 text-[11px] text-[var(--ink-subtle)]">Transcript is locked while the AI notes are written.</p>;
+  return <>{speakerNotice}</>;
+}
 
 export function findSegmentIdAtTime(
   segments: Array<{ id: string; timestamp: number; endTime?: number }>,
@@ -101,6 +119,7 @@ export function TranscriptPanel({
   const [showSpeakerDialog, setShowSpeakerDialog] = useState(false);
   const [speakerOptions, setSpeakerOptions] = useState<SpeakerIdentity[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
+  const [searchOpen, setSearchOpen] = useState(false);
   const [audioPath, setAudioPath] = useState<string | null>(null);
   const [scrubTime, setScrubTime] = useState<number | null>(null);
   // The position last asked for, remembered so the clicked line lights up
@@ -428,14 +447,28 @@ export function TranscriptPanel({
           onOpenSpeakerManager={() => setShowSpeakerDialog(true)}
           locked={locked}
           isEnhancing={transcriptionProgress?.kind === 'retranscription'}
+          searchOpen={searchOpen}
+          onToggleSearch={() => {
+            if (searchOpen) setSearchQuery('');
+            setSearchOpen(!searchOpen);
+          }}
+          leading={meetingId ? <ModelProvenanceNote meetingId={meetingId} /> : undefined}
         />
-        <div className="mt-3 flex items-center gap-2">
+        {searchOpen && <div className="mt-3 flex items-center gap-2">
           <div className="relative min-w-0 flex-1">
             <Search className="absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--ink-subtle)]" />
             <input
               value={searchQuery}
               onChange={(event) => setSearchQuery(event.target.value)}
+              autoFocus
+              aria-label="Search transcript"
               onKeyDown={(event) => {
+                if (event.key === 'Escape') {
+                  event.preventDefault();
+                  setSearchQuery('');
+                  setSearchOpen(false);
+                  return;
+                }
                 if (event.key === 'Enter') {
                   event.preventDefault();
                   goToMatch(event.shiftKey ? -1 : 1);
@@ -482,7 +515,7 @@ export function TranscriptPanel({
               </button>
             </div>
           )}
-        </div>
+        </div>}
         {audioPath && (
           <AudioScrubber
             currentTime={playbackTime}
@@ -493,25 +526,22 @@ export function TranscriptPanel({
             onScrubCommit={handleScrubCommit}
           />
         )}
-        {player.error && (
-          <p className={`mt-1 text-[11px] ${toneText.error}`}>{player.error}</p>
-        )}
-        {meetingId && meetingFolderPath && convertedSegments.length > 0 && !isRecording && (
-          <SpeakerStatusNotice
-            status={diarizationStatus}
-            progress={isDiarizingPass && transcriptionProgress ? {
-              percent: transcriptionProgress.percent,
-              indeterminate: transcriptionProgress.indeterminate,
-              label: transcriptionProgress.stageLabel,
-            } : null}
-            isStarting={isStartingDiarization}
-            onRetry={() => void handleRetryDiarization()}
-          />
-        )}
-        {meetingId && <ModelProvenanceNote meetingId={meetingId} />}
-        {locked && convertedSegments.length > 0 && (
-          <p className="mt-2 text-[11px] text-[var(--ink-subtle)]">Transcript is locked while the AI notes are written.</p>
-        )}
+        <TranscriptStatusLine
+          playerError={player.error}
+          locked={locked && convertedSegments.length > 0}
+          speakerNotice={meetingId && meetingFolderPath && convertedSegments.length > 0 && !isRecording ? (
+            <SpeakerStatusNotice
+              status={diarizationStatus}
+              progress={isDiarizingPass && transcriptionProgress ? {
+                percent: transcriptionProgress.percent,
+                indeterminate: transcriptionProgress.indeterminate,
+                label: transcriptionProgress.stageLabel,
+              } : null}
+              isStarting={isStartingDiarization}
+              onRetry={() => void handleRetryDiarization()}
+            />
+          ) : null}
+        />
       </div>
 
       {/* Transcript content - use virtualized view for better performance */}
