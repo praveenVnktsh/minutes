@@ -24,6 +24,7 @@ export function MeetingsLibrary() {
     catalogError,
     searchStatus,
     searchError,
+    searchTranscripts,
     selectMeetings,
     selectSearchResults,
     refetchMeetings,
@@ -38,9 +39,6 @@ export function MeetingsLibrary() {
     runImportAction,
     openMeeting,
     isNavigating,
-    meetingSearchQuery: query,
-    setMeetingSearchQuery: setQuery,
-    isMeetingSearchPending,
     recordingActionDisabled,
     meetingSearchFocusRequest,
     consumeMeetingSearchFocus,
@@ -49,7 +47,14 @@ export function MeetingsLibrary() {
   const debugMode = useDebugMode()
   const [filter, setFilter] = useState<LibraryFilter>('all')
   const [actionError, setActionError] = useState<string | null>(null)
+  // The library owns its search: nothing else in the shell shares this query.
+  const [query, setQuery] = useState('')
   const searchRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    const timer = setTimeout(() => void searchTranscripts(query), 250)
+    return () => clearTimeout(timer)
+  }, [query, searchTranscripts])
 
   useEffect(() => {
     if (meetingSearchFocusRequest == null || !searchRef.current) return
@@ -67,7 +72,7 @@ export function MeetingsLibrary() {
     ? meetings.filter((meeting) => meeting.archived)
     : meetings
   const loading = catalogStatus === 'loading'
-  const searching = query.trim() && isMeetingSearchPending
+  const searching = query.trim() && searchStatus === 'searching'
 
   const runMutation = async (action: () => Promise<void>) => {
     setActionError(null)

@@ -38,7 +38,6 @@ mock.module('@/contexts/ShellContext', () => ({
     recordingActionLabel: 'Return to recording', runRecordingAction,
     runImportAction,
     openMeeting, isNavigating: false, navigationError: null,
-    meetingSearchQuery: '', setMeetingSearchQuery: () => {}, isMeetingSearchPending: false,
     recordingActionDisabled: false,
     meetingSearchFocusRequest: null, consumeMeetingSearchFocus,
   }),

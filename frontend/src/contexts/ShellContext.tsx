@@ -45,9 +45,7 @@ interface ShellContextValue {
   isNavigating: boolean;
   navigationError: Error | null;
   retryNavigation: () => Promise<void>;
-  meetingSearchQuery: string;
-  setMeetingSearchQuery: (query: string) => void;
-  isMeetingSearchPending: boolean;
+  /** Opens the library and focuses its search box (the ⌘K palette's "Search meetings"). */
   focusMeetingsSearch: () => Promise<void>;
   meetingSearchFocusRequest: number | null;
   consumeMeetingSearchFocus: (requestId: number) => void;
@@ -68,7 +66,6 @@ export function ShellProvider({ children }: { children: React.ReactNode }) {
   const [collapsed, setCollapsedState] = useState(false);
   const [theme, setThemeState] = useState<AppTheme>(readTheme);
   const [compact, setCompact] = useState(false);
-  const [meetingSearchQuery, setMeetingSearchQuery] = useState('');
   const [meetingSearchFocusIntent, setMeetingSearchFocusIntent] = useState<MeetingSearchFocusIntent | null>(null);
   const meetingSearchFocusRequestRef = useRef(0);
   // Remembers the user's own collapse choice so leaving compact mode restores it.
@@ -83,7 +80,7 @@ export function ShellProvider({ children }: { children: React.ReactNode }) {
     navigationError,
   } = useMeetingNavigation();
   const { openImportDialog } = useImportDialog();
-  const { currentMeeting, searchTranscripts, searchStatus } = useSidebar();
+  const { currentMeeting } = useSidebar();
   const retryNavigationRef = useRef<(() => Promise<void>) | null>(null);
 
   useLayoutEffect(() => {
@@ -103,11 +100,6 @@ export function ShellProvider({ children }: { children: React.ReactNode }) {
     window.addEventListener('resize', applyViewport);
     return () => window.removeEventListener('resize', applyViewport);
   }, []);
-
-  useEffect(() => {
-    const timer = setTimeout(() => void searchTranscripts(meetingSearchQuery), 250);
-    return () => clearTimeout(timer);
-  }, [meetingSearchQuery, searchTranscripts]);
 
   useEffect(() => {
     setMeetingSearchFocusIntent((current) => {
@@ -236,9 +228,6 @@ export function ShellProvider({ children }: { children: React.ReactNode }) {
     isNavigating,
     navigationError,
     retryNavigation,
-    meetingSearchQuery,
-    setMeetingSearchQuery,
-    isMeetingSearchPending: searchStatus === 'searching',
     focusMeetingsSearch,
     meetingSearchFocusRequest: meetingSearchFocusIntent?.requestId ?? null,
     consumeMeetingSearchFocus,
@@ -247,9 +236,7 @@ export function ShellProvider({ children }: { children: React.ReactNode }) {
     compact,
     isNavigating,
     navigationError,
-    meetingSearchQuery,
     meetingSearchFocusIntent,
-    searchStatus,
     consumeMeetingSearchFocus,
     focusMeetingsSearch,
     navigate,
