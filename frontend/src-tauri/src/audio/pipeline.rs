@@ -27,8 +27,6 @@ pub static RECORDING_LEVEL: AtomicU32 = AtomicU32::new(0);
 pub fn recording_level() -> f32 {
     f32::from_bits(RECORDING_LEVEL.load(Ordering::Relaxed))
 }
-use super::batch_processor::AudioMetricsBatcher;
-use crate::batch_audio_metric;
 use anyhow::Result;
 use log::{debug, error, info, warn};
 use rubato::{
@@ -835,8 +833,6 @@ pub struct AudioPipeline {
     // Performance optimization: reduce logging frequency
     last_summary_time: std::time::Instant,
     processed_chunks: u64,
-    // Smart batching for audio metrics
-    metrics_batcher: Option<AudioMetricsBatcher>,
     // PROFESSIONAL AUDIO MIXING: Ring buffer + RMS-based mixer
     ring_buffer: AudioMixerRingBuffer,
     mixer: ProfessionalAudioMixer,
@@ -934,8 +930,6 @@ impl AudioPipeline {
             // Performance optimization: reduce logging frequency
             last_summary_time: std::time::Instant::now(),
             processed_chunks: 0,
-            // Initialize metrics batcher for smart batching
-            metrics_batcher: Some(AudioMetricsBatcher::new()),
             // Initialize professional audio mixing
             ring_buffer,
             mixer,
@@ -978,22 +972,6 @@ impl AudioPipeline {
                     // PERFORMANCE OPTIMIZATION: Eliminate per-chunk logging overhead
                     // Logging in hot paths causes severe performance degradation
                     self.processed_chunks += 1;
-
-                    // Smart batching: collect metrics instead of logging every chunk
-                    if let Some(ref batcher) = self.metrics_batcher {
-                        let avg_level = chunk.data.iter().map(|&x| x.abs()).sum::<f32>()
-                            / chunk.data.len() as f32;
-                        let duration_ms =
-                            chunk.data.len() as f64 / chunk.sample_rate as f64 * 1000.0;
-
-                        batch_audio_metric!(
-                            Some(batcher),
-                            chunk.chunk_id,
-                            chunk.data.len(),
-                            duration_ms,
-                            avg_level
-                        );
-                    }
 
                     // CRITICAL: Log summary only every 200 chunks OR every 60 seconds (99.5% reduction)
                     // This eliminates I/O overhead in the audio processing hot path

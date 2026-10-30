@@ -14,7 +14,6 @@ pub mod permissions;
 pub mod device_detection;
 
 // New simplified audio system
-pub mod batch_processor;
 pub mod buffer_pool;
 pub mod device_monitor; // NEW: Device disconnect/reconnect monitoring
 pub mod echo_canceller; // Mic echo cancellation for the live transcription path

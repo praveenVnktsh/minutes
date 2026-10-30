@@ -875,21 +875,36 @@ mod resume_tests {
 // RECORDING COMMANDS
 // ============================================================================
 
-/// Start recording with default devices
-pub async fn start_recording<R: Runtime>(app: AppHandle<R>) -> Result<String, String> {
-    start_recording_with_meeting_name(app, None, None).await
+/// Which microphone and system audio a recording opens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordingDevices {
+    /// The devices saved in recording preferences, falling back to the
+    /// system defaults.
+    Preferred,
+    /// These devices; `None` means the system default, not the saved
+    /// preference.
+    Named {
+        microphone: Option<String>,
+        system: Option<String>,
+    },
 }
 
-/// Start recording with default devices and optional meeting name.
+/// Start recording with the preferred devices
+pub async fn start_recording<R: Runtime>(app: AppHandle<R>) -> Result<String, String> {
+    start_recording_with_devices_and_meeting(app, RecordingDevices::Preferred, None, None).await
+}
+
+/// Start recording with the given devices and optional meeting name.
 /// With `resume_meeting_id`, records into that saved meeting instead of a new one.
-pub async fn start_recording_with_meeting_name<R: Runtime>(
+pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     app: AppHandle<R>,
+    devices: RecordingDevices,
     meeting_name: Option<String>,
     resume_meeting_id: Option<String>,
 ) -> Result<String, String> {
     info!(
-        "Starting recording with default devices, meeting: {:?}, resume: {:?}",
-        meeting_name, resume_meeting_id
+        "Starting recording with devices: {:?}, meeting: {:?}, resume: {:?}",
+        devices, meeting_name, resume_meeting_id
     );
     // The settings "Test Mic" meter must not hold the microphone the recording opens.
     super::level_monitor::stop_monitoring();
@@ -929,32 +944,38 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     )
     .map_err(|e| e.to_string())?;
 
-    // Load recording preferences to get auto_save AND device preferences
-    let (auto_save, preferred_mic_name, preferred_system_name) =
-        match super::recording_preferences::load_recording_preferences(&app).await {
-            Ok(prefs) => {
-                info!("📋 Loaded recording preferences: auto_save={}, preferred_mic={:?}, preferred_system={:?}",
-                      prefs.auto_save, prefs.preferred_mic_device, prefs.preferred_system_device);
-                (
-                    prefs.auto_save,
-                    prefs.preferred_mic_device,
-                    prefs.preferred_system_device,
-                )
-            }
-            Err(e) => {
-                warn!(
-                    "Failed to load recording preferences, using defaults: {}",
-                    e
-                );
-                (true, None, None)
-            }
-        };
+    // Load recording preferences for auto_save (and the saved devices, which
+    // only `RecordingDevices::Preferred` uses).
+    let prefs = match super::recording_preferences::load_recording_preferences(&app).await {
+        Ok(prefs) => {
+            info!("📋 Loaded recording preferences: auto_save={}, preferred_mic={:?}, preferred_system={:?}",
+                  prefs.auto_save, prefs.preferred_mic_device, prefs.preferred_system_device);
+            Some(prefs)
+        }
+        Err(e) => {
+            warn!(
+                "Failed to load recording preferences, defaulting to auto_save=true and default devices: {}",
+                e
+            );
+            None
+        }
+    };
+    let auto_save = prefs.as_ref().map_or(true, |prefs| prefs.auto_save);
+    let (mic_device_name, system_device_name) = match &devices {
+        RecordingDevices::Preferred => (
+            prefs.as_ref().and_then(|p| p.preferred_mic_device.clone()),
+            prefs
+                .as_ref()
+                .and_then(|p| p.preferred_system_device.clone()),
+        ),
+        RecordingDevices::Named { microphone, system } => (microphone.clone(), system.clone()),
+    };
 
-    let system_device = resolve_system_or_default(preferred_system_name.as_deref());
+    let system_device = resolve_system_or_default(system_device_name.as_deref());
 
     prepare_audio_for_recording(system_device.as_deref()).await?;
 
-    let microphone_device = resolve_mic_or_default(&app, preferred_mic_name.as_deref());
+    let microphone_device = resolve_mic_or_default(&app, mic_device_name.as_deref());
 
     // Async-first approach - no more blocking operations!
     info!("🚀 Starting async recording initialization");
@@ -1001,7 +1022,7 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
         }
     });
 
-    // Start recording with resolved devices (replaces start_recording_with_defaults_and_auto_save call)
+    // Start recording with resolved devices and the auto_save setting
     let transcription_receiver = match manager
         .start_recording(microphone_device, system_device, auto_save)
         .await
@@ -1109,12 +1130,28 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     }
 
     // Emit success event
+    let (message, device_labels) = match devices {
+        RecordingDevices::Preferred => (
+            "Recording started successfully with parallel processing",
+            [
+                "Default Microphone".to_string(),
+                "Default System Audio".to_string(),
+            ],
+        ),
+        RecordingDevices::Named { microphone, system } => (
+            "Recording started with custom devices and parallel processing",
+            [
+                microphone.unwrap_or_else(|| "Default Microphone".to_string()),
+                system.unwrap_or_else(|| "Default System Audio".to_string()),
+            ],
+        ),
+    };
     if let Err(error) = app.emit(
         "recording-started",
         serde_json::json!({
-            "message": "Recording started successfully with parallel processing",
+            "message": message,
             "session_id": session_id,
-            "devices": ["Default Microphone", "Default System Audio"],
+            "devices": device_labels,
             "workers": 3
         }),
     ) {
@@ -1125,256 +1162,6 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     crate::tray::update_tray_menu(&app);
 
     info!("✅ Recording started successfully with async-first approach");
-
-    Ok(session_id)
-}
-
-/// Start recording with specific devices and optional meeting name.
-/// With `resume_meeting_id`, records into that saved meeting instead of a new one.
-pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
-    app: AppHandle<R>,
-    mic_device_name: Option<String>,
-    system_device_name: Option<String>,
-    meeting_name: Option<String>,
-    resume_meeting_id: Option<String>,
-) -> Result<String, String> {
-    info!(
-        "Starting recording with specific devices: mic={:?}, system={:?}, meeting={:?}, resume={:?}",
-        mic_device_name, system_device_name, meeting_name, resume_meeting_id
-    );
-    // The settings "Test Mic" meter must not hold the microphone the recording opens.
-    super::level_monitor::stop_monitoring();
-
-    cleanup_stopped_capture(&app).await?;
-    let _engine_lifecycle_guard = super::common::acquire_engine_lifecycle_lock().await;
-
-    if IS_RECORDING_STOPPING.load(Ordering::SeqCst) {
-        return Err("Recording is still stopping".to_string());
-    }
-
-    // Check if already recording
-    let current_recording_state = IS_RECORDING.load(Ordering::SeqCst);
-    info!("🔍 IS_RECORDING state check: {}", current_recording_state);
-    if current_recording_state {
-        return Err("Recording already in progress".to_string());
-    }
-
-    // Resolve the saved meeting before any startup side effects, so a meeting
-    // that cannot be resumed fails without flashing the STARTING state.
-    let resume = match resume_meeting_id.as_deref() {
-        Some(meeting_id) => Some(resolve_resume_target(&app, meeting_id).await?),
-        None => None,
-    };
-
-    validate_transcription_engine_before_capture(&app).await?;
-    // Until the recording is live, any early return releases what was just
-    // loaded for live text.
-    let mut prepared_live = transcription::live::PreparedLive::new();
-
-    // Notify frontend that startup has begun (surfaces STARTING state)
-    app.emit(
-        "recording-starting",
-        serde_json::json!({
-            "message": "Recording initialization started"
-        }),
-    )
-    .map_err(|e| e.to_string())?;
-
-    let system_device = resolve_system_or_default(system_device_name.as_deref());
-
-    prepare_audio_for_recording(system_device.as_deref()).await?;
-
-    let mic_device = resolve_mic_or_default(&app, mic_device_name.as_deref());
-
-    // Async-first approach for custom devices - no more blocking operations!
-    info!("🚀 Starting async recording initialization with custom devices");
-
-    // Create new recording manager
-    let mut manager = RecordingManager::new();
-    let session_id = crate::meeting_activity::new_recording_session_id();
-    crate::meeting_activity::start_recording(&app, session_id.clone());
-
-    // Load recording preferences to check auto_save setting
-    let auto_save = match super::recording_preferences::load_recording_preferences(&app).await {
-        Ok(prefs) => {
-            info!(
-                "📋 Loaded recording preferences: auto_save={}",
-                prefs.auto_save
-            );
-            prefs.auto_save
-        }
-        Err(e) => {
-            warn!(
-                "Failed to load recording preferences, defaulting to auto_save=true: {}",
-                e
-            );
-            true // Default to saving if preferences can't be loaded
-        }
-    };
-
-    // Always ensure a meeting name is set so incremental saver initializes.
-    // A resumed meeting keeps its saved title and records into its own folder.
-    let (resume_target, resumed_title) = resume.unzip();
-    let effective_meeting_name = resumed_title
-        .or_else(|| meeting_name.clone())
-        .unwrap_or_else(|| {
-            let now = chrono::Local::now();
-            format!("Meeting {}", now.format("%Y-%m-%d_%H-%M-%S"))
-        });
-    manager.set_meeting_name(Some(effective_meeting_name));
-    if resume_target.is_some() {
-        manager.set_resume_target(resume_target);
-    }
-
-    // Set up error callback
-    let app_for_error = app.clone();
-    let session_for_error = session_id.clone();
-    let state_for_error = manager.get_state().clone();
-    manager.set_error_callback(move |error| {
-        let _ = app_for_error.emit("recording-error", error.user_message());
-        if !state_for_error.is_recording() {
-            crate::meeting_activity::fail_recording(
-                &app_for_error,
-                &session_for_error,
-                error.user_message().to_string(),
-            );
-            let _ = app_for_error.emit(
-                "recording-session-error",
-                serde_json::json!({
-                    "session_id": session_for_error.clone(),
-                    "error": error.user_message(),
-                }),
-            );
-        }
-    });
-
-    // Start recording with specified devices and auto_save setting
-    let transcription_receiver = match manager
-        .start_recording(mic_device, system_device, auto_save)
-        .await
-    {
-        Ok(receiver) => receiver,
-        Err(error) => {
-            let error = map_recording_start_error(&app, error);
-            crate::meeting_activity::finish_recording(&app, &session_id, Some(error.clone()));
-            return Err(error);
-        }
-    };
-    if !manager.get_state().is_recording() {
-        let error = manager
-            .get_state()
-            .get_last_error()
-            .map(|error| error.user_message().to_string())
-            .unwrap_or_else(|| "Audio capture stopped during initialization".to_string());
-        crate::meeting_activity::finish_recording(&app, &session_id, Some(error.clone()));
-        return Err(error);
-    }
-
-    // Take the device event receiver BEFORE storing manager globally.
-    // A background task will process device events (hot-swap) without frontend polling.
-    let device_event_receiver = manager.take_device_event_receiver();
-    let session = manager.get_state().clone();
-
-    // Store the manager globally to keep it alive
-    {
-        let mut global_manager = RECORDING_MANAGER.lock().unwrap();
-        *global_manager = Some(RecordingSession {
-            manager,
-            session_id: session_id.clone(),
-        });
-    }
-
-    // Spawn background device event processor (mic-disconnect fallback).
-    if let Some(receiver) = device_event_receiver {
-        spawn_device_event_processor(app.clone(), receiver, session.clone());
-    }
-
-    // Flip recording live + reset per-session flags (speech-detected latch,
-    // mic-recovery budget). Shared with the other start path — see helper.
-    finalize_recording_start(&app, session_id.clone());
-    prepared_live.disarm();
-
-    let live_transcription_enabled =
-        super::pipeline::LIVE_TRANSCRIPTION_ENABLED.load(Ordering::SeqCst);
-    // Start the live worker for this recording's plan (streaming Nemotron or
-    // a chunked engine). Without a usable engine the recording carries on as
-    // in deferred mode, and the final pass transcribes it afterwards.
-    let pending_receiver = if live_transcription_enabled {
-        match transcription::live::start_worker(&app, transcription_receiver).await {
-            Ok((task_handle, model)) => {
-                *TRANSCRIPTION_TASK.lock().unwrap() = Some(task_handle);
-                // Best-effort: record which model is actually transcribing this
-                // session for the metadata.json provenance note (PRA-577).
-                if let Some(model) = model {
-                    record_live_transcription_model(model);
-                }
-                None
-            }
-            Err(receiver) => Some(receiver),
-        }
-    } else {
-        Some(transcription_receiver)
-    };
-    if pending_receiver.is_none() {
-        // Listen for transcript updates so live history survives page reloads.
-        use tauri::Listener;
-        let listener_id = app.listen("transcript-update", move |event: tauri::Event| {
-            // Parse the transcript update from the event payload
-            if let Ok(update) = serde_json::from_str::<TranscriptUpdate>(event.payload()) {
-                // Create structured transcript segment
-                let segment = crate::audio::recording_saver::TranscriptSegment {
-                    id: format!("seg_{}", update.sequence_id),
-                    text: update.text.clone(),
-                    audio_start_time: update.audio_start_time,
-                    audio_end_time: update.audio_end_time,
-                    duration: update.duration,
-                    display_time: update.timestamp.clone(), // Use wall-clock timestamp for display
-                    confidence: update.confidence,
-                    sequence_id: update.sequence_id,
-                    speaker: Some(update.source.clone()),
-                };
-
-                store_transcript_segment(segment);
-            }
-        });
-        let mut global_listener = TRANSCRIPT_LISTENER_ID.lock().unwrap();
-        *global_listener = Some(listener_id);
-        info!("✅ Transcript-update event listener registered for history persistence");
-    } else {
-        // Hold onto the receiver so live transcription can be enabled mid-meeting.
-        *PENDING_TRANSCRIPTION_RECEIVER.lock().unwrap() = pending_receiver;
-        *TRANSCRIPTION_TASK.lock().unwrap() = None;
-        *TRANSCRIPT_LISTENER_ID.lock().unwrap() = None;
-        info!("⏺️ Deferred transcription mode active; recording audio without loading a live transcription engine");
-    }
-
-    if !session.is_recording() {
-        return Err(session
-            .get_last_error()
-            .map(|error| error.user_message().to_string())
-            .unwrap_or_else(|| "Audio capture stopped during initialization".to_string()));
-    }
-
-    // Emit success event
-    if let Err(error) = app.emit(
-        "recording-started",
-        serde_json::json!({
-            "message": "Recording started with custom devices and parallel processing",
-            "session_id": session_id,
-            "devices": [
-                mic_device_name.unwrap_or_else(|| "Default Microphone".to_string()),
-                system_device_name.unwrap_or_else(|| "Default System Audio".to_string())
-            ],
-            "workers": 3
-        }),
-    ) {
-        warn!("Recording started but the recording-started event failed: {error}");
-    }
-
-    // Update tray menu to reflect recording state
-    crate::tray::update_tray_menu(&app);
-
-    info!("✅ Recording started with custom devices using async-first approach");
 
     Ok(session_id)
 }
