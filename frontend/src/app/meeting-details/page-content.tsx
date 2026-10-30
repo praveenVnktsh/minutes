@@ -6,7 +6,7 @@ import type { MeetingActivity, MeetingActivityStatus } from '@/types/meetingActi
 import { useSidebar } from '@/components/Sidebar/SidebarProvider';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { Copy, Download, Loader2, MoreHorizontal, Sparkles, Square } from 'lucide-react';
+import { Copy, Download, Loader2, Mic, MoreHorizontal, Sparkles, Square } from 'lucide-react';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { TranscriptPanel } from '@/components/MeetingDetails/TranscriptPanel';
 import { MeetingWorkspace } from '@/components/MeetingDetails/MeetingWorkspace';
@@ -16,6 +16,7 @@ import { MeetingNotesEditor } from '@/components/MeetingDetails/MeetingNotesEdit
 import { LiveTranscriptPanel } from '@/components/MeetingDetails/LiveTranscriptPanel';
 import { LiveNotes, LiveNotesNotice } from '@/components/MeetingDetails/LiveNotes';
 import { FloatingRecordingControls } from '@/components/MeetingDetails/FloatingRecordingControls';
+import { useContinueRecording } from '@/components/MeetingDetails/useContinueRecording';
 import { useMeetingActivity } from '@/contexts/MeetingActivityContext';
 import {
   liveNotesTarget,
@@ -256,6 +257,8 @@ export default function PageContent({
     || summaryGeneration.summaryStatus === 'summarizing'
     || summaryGeneration.summaryStatus === 'regenerating';
   const showAssistant = true;
+  // Hidden while any recording runs and while the AI notes are being written.
+  const continueRecording = useContinueRecording(meeting.id, isSummaryActive);
   const peopleCount = new Set(
     meetingData.transcripts.map((t: any) => t.speaker_id ?? t.speaker).filter(Boolean)
   ).size;
@@ -363,8 +366,6 @@ export default function PageContent({
           assistantLabel="Copilot"
           peopleCount={0}
           onTitleChange={handleTitleChange}
-          onRegenerateTitle={titleRegeneration.regenerateTitle}
-          titleRegenerating={titleRegeneration.isRegenerating}
           titlePending={meetingMutations[meeting.id]?.rename?.status === 'pending'}
           titleError={meetingMutations[meeting.id]?.rename?.error}
         />
@@ -388,6 +389,16 @@ export default function PageContent({
           peopleCount={peopleCount}
           statusBanner={statusBanner}
           toolbarActions={notesMenu}
+          titleActions={continueRecording.available ? (
+            <button
+              type="button"
+              onClick={() => void continueRecording.continueRecording()}
+              disabled={continueRecording.pending}
+              className="ml-2 flex h-8 shrink-0 items-center gap-1.5 rounded-full bg-surface-2 px-3 text-xs font-medium text-ink-muted hover:text-ink focus-visible:ring-2 focus-visible:ring-focus disabled:opacity-50"
+            >
+              <Mic className="h-3.5 w-3.5" /> Continue recording
+            </button>
+          ) : undefined}
           onTitleChange={handleTitleChange}
           onRegenerateTitle={titleRegeneration.regenerateTitle}
           titleRegenerating={titleRegeneration.isRegenerating}

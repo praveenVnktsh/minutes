@@ -15,9 +15,7 @@ import {
 import { Copy, FolderOpen, Link2, Loader2, Mic, MoreHorizontal, RefreshCw, UserRoundCog, Users } from 'lucide-react';
 import { toast } from 'sonner';
 import { RetranscribeDialog } from './RetranscribeDialog';
-import { useConfig } from '@/contexts/ConfigContext';
-import { useOptionalRecordingController } from '@/contexts/RecordingControllerContext';
-import { useRecordingState } from '@/contexts/RecordingStateContext';
+import { useContinueRecording } from './useContinueRecording';
 
 
 interface TranscriptButtonGroupProps {
@@ -44,29 +42,11 @@ export function TranscriptButtonGroup({
   locked = false,
   isEnhancing = false,
 }: TranscriptButtonGroupProps) {
-  const { betaFeatures } = useConfig();
-  const recordingController = useOptionalRecordingController();
-  const { isRecording, isStopping, isProcessing, isSaving, isStartingRecording } = useRecordingState();
+  const continueRecording = useContinueRecording(meetingId, locked);
   const [showRetranscribeDialog, setShowRetranscribeDialog] = useState(false);
   const [isIdentifyingSpeakers, setIsIdentifyingSpeakers] = useState(false);
   // "Copy meeting link" only needs meetingId, so it alone keeps the menu non-empty.
   const hasMoreActions = !locked && Boolean(meetingId);
-  // No recording in progress anywhere in the app (this meeting or any other) — a resume would
-  // otherwise collide with the recording that's already running.
-  const isRecordingIdle = !isRecording && !isStopping && !isProcessing && !isSaving && !isStartingRecording;
-  const canResumeMeeting = Boolean(meetingId) && !locked && Boolean(recordingController) && isRecordingIdle;
-
-  const handleResumeMeeting = useCallback(async () => {
-    if (!meetingId || !recordingController) return;
-    try {
-      await recordingController.resumeMeeting(meetingId);
-    } catch (error) {
-      // The controller already surfaces user-facing feedback for a failed resume
-      // (its feedback banner), so we only log here to avoid double-reporting.
-      console.warn('Resume meeting failed:', error);
-    }
-  }, [meetingId, recordingController]);
-
   const handleIdentifySpeakers = useCallback(async (numSpeakers: number | null) => {
     if (!meetingId || isIdentifyingSpeakers) return;
     setIsIdentifyingSpeakers(true);
@@ -150,21 +130,21 @@ export function TranscriptButtonGroup({
           </Button>
         )}
 
-        {canResumeMeeting && (
+        {continueRecording.available && (
           <Button
             size="sm"
             variant="ghost"
             className="h-8 rounded-full bg-[var(--surface-2)] px-3 text-[var(--ink-muted)] hover:bg-[var(--surface-2)]"
-            onClick={() => void handleResumeMeeting()}
-            disabled={recordingController?.isCommandPending || isEnhancing}
-            title="Resume meeting"
+            onClick={() => void continueRecording.continueRecording()}
+            disabled={continueRecording.pending || isEnhancing}
+            title="Continue recording"
           >
             <Mic className="@[22rem]:mr-2" size={18} />
-            <span className="hidden @[22rem]:inline">Resume</span>
+            <span className="hidden @[22rem]:inline">Continue recording</span>
           </Button>
         )}
 
-        {betaFeatures.importAndRetranscribe && meetingId && meetingFolderPath && !locked && (
+        {meetingId && meetingFolderPath && !locked && (
           <Button
             size="sm"
             variant="ghost"
@@ -173,8 +153,8 @@ export function TranscriptButtonGroup({
               setShowRetranscribeDialog(true);
             }}
             disabled={isEnhancing}
-            title={isEnhancing ? 'Enhancing transcript…' : 'Enhance transcript'}
-            aria-label={isEnhancing ? 'Enhancing transcript…' : 'Enhance transcript'}
+            title={isEnhancing ? 'Re-transcribing…' : 'Re-transcribe'}
+            aria-label={isEnhancing ? 'Re-transcribing…' : 'Re-transcribe'}
           >
             {isEnhancing ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw size={18} />}
           </Button>
@@ -224,7 +204,7 @@ export function TranscriptButtonGroup({
         </DropdownMenu>}
       </div>
 
-      {betaFeatures.importAndRetranscribe && meetingId && meetingFolderPath && (
+      {meetingId && meetingFolderPath && (
         <RetranscribeDialog
           open={showRetranscribeDialog}
           onOpenChange={setShowRetranscribeDialog}

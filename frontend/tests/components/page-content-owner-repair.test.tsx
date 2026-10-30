@@ -55,6 +55,9 @@ mock.module('../../src/lib/summary-language-preferences', () => ({
 mock.module('../../src/lib/autoSummary', () => ({
   validateSummaryModel: async () => {}, loadSummaryNotesContext: async () => '',
 }));
+mock.module('../../src/components/MeetingDetails/useContinueRecording', () => ({
+  useContinueRecording: () => ({ available: false, pending: false, continueRecording: async () => {} }),
+}));
 mock.module('../../src/hooks/meeting-details/useTemplates', () => ({ useTemplates: () => ({
   availableTemplates: [], selectedTemplate: 'standard_meeting', handleTemplateSelection() {},
 }) }));

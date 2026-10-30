@@ -45,6 +45,7 @@ export function MeetingWorkspace({
   assistantLabel = 'Chat',
   peopleCount,
   toolbarActions,
+  titleActions,
   onTitleChange,
   titlePending = false,
   titleError,
@@ -66,6 +67,8 @@ export function MeetingWorkspace({
   assistantLabel?: string;
   peopleCount: number;
   toolbarActions?: ReactNode;
+  /** Actions beside the title (Continue recording). */
+  titleActions?: ReactNode;
   onTitleChange?: (title: string) => void | Promise<void>;
   titlePending?: boolean;
   titleError?: string | null;
@@ -328,6 +331,7 @@ export function MeetingWorkspace({
                 {titleRegenerating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
               </button>
             )}
+            {titleActions}
           </div>
           {(dateSubtitle || peopleCount > 0) && (
             <p className="mt-0.5 text-xs text-ink-subtle">
