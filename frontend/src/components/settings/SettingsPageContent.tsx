@@ -10,6 +10,7 @@ import { PreferenceSettings } from '@/components/PreferenceSettings';
 import { RecordingSettings } from '@/components/RecordingSettings';
 import { SummaryModelSettings } from '@/components/SummaryModelSettings';
 import { TranscriptSettings } from '@/components/TranscriptSettings';
+import { TranscriptLanguageSettings } from '@/components/TranscriptLanguageSettings';
 import { LiveTranscriptionModelSettings } from '@/components/LiveTranscriptionModelSettings';
 import { WebhookSettings } from '@/components/WebhookSettings';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -78,6 +79,7 @@ export function SettingsPageContent() {
             <TabsContent value="general" className="mt-6"><PreferenceSettings /></TabsContent>
             <TabsContent value="recording" className="mt-6"><RecordingSettings /></TabsContent>
             <TabsContent value="transcription" className="mt-6">
+              <TranscriptLanguageSettings />
               <LiveTranscriptionModelSettings />
               <TranscriptSettings transcriptModelConfig={transcriptModelConfig} setTranscriptModelConfig={setTranscriptModelConfig} />
             </TabsContent>
