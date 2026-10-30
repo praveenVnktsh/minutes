@@ -891,6 +891,8 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
         "Starting recording with default devices, meeting: {:?}, resume: {:?}",
         meeting_name, resume_meeting_id
     );
+    // The settings "Test Mic" meter must not hold the microphone the recording opens.
+    super::level_monitor::stop_monitoring();
 
     cleanup_stopped_capture(&app).await?;
     let _engine_lifecycle_guard = super::common::acquire_engine_lifecycle_lock().await;
@@ -1140,6 +1142,8 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
         "Starting recording with specific devices: mic={:?}, system={:?}, meeting={:?}, resume={:?}",
         mic_device_name, system_device_name, meeting_name, resume_meeting_id
     );
+    // The settings "Test Mic" meter must not hold the microphone the recording opens.
+    super::level_monitor::stop_monitoring();
 
     cleanup_stopped_capture(&app).await?;
     let _engine_lifecycle_guard = super::common::acquire_engine_lifecycle_lock().await;
