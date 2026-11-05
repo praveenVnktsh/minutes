@@ -17,9 +17,14 @@ afterAll(() => {
 })
 
 let selectedDeviceWrites: Array<{ micDevice: string | null; systemDevice: string | null }> = []
+let savedPreferences: Array<Record<string, unknown>> = []
 
 mock.module('@tauri-apps/api/core', () => ({
-  invoke: async (command: string) => {
+  invoke: async (command: string, args?: { preferences?: Record<string, unknown> }) => {
+    if (command === 'set_recording_preferences' && args?.preferences) {
+      savedPreferences.push(args.preferences)
+      return undefined
+    }
     if (command === 'get_recording_preferences') {
       return {
         save_folder: '/recordings',
@@ -70,7 +75,24 @@ const { RecordingSettings } = await import('./RecordingSettings')
 describe('RecordingSettings and the setup check', () => {
   beforeEach(() => {
     selectedDeviceWrites = []
+    savedPreferences = []
     panelProps = {}
+  })
+
+  test('the menu bar recording indicator is off unless switched on, and the switch saves it', async () => {
+    let renderer!: ReturnType<typeof create>
+    await act(async () => {
+      renderer = create(<RecordingSettings />)
+    })
+    const toggle = renderer.root.find(
+      (node) => node.props['aria-label'] === 'Show the recording indicator in the menu bar' && typeof node.props.onCheckedChange === 'function',
+    )
+    expect(Boolean(toggle.props.checked)).toBe(false)
+    await act(async () => {
+      await toggle.props.onCheckedChange(true)
+    })
+    expect(savedPreferences.at(-1)?.show_menu_bar_indicator).toBe(true)
+    await act(async () => renderer.unmount())
   })
 
   test('a device chosen inside the check reaches the in-memory selection the start path reads', async () => {

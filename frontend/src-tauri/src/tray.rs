@@ -35,6 +35,34 @@ pub fn set_meeting_detected<R: Runtime>(app: &AppHandle<R>, app_name: Option<Str
     update_tray_menu(app);
 }
 
+/// Whether the menu bar shows the red recording dot and timer while recording
+/// (the "Show recording indicator in the menu bar" recording preference).
+static MENU_BAR_INDICATOR: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn menu_bar_indicator_enabled() -> bool {
+    MENU_BAR_INDICATOR.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Turn the menu bar recording indicator on or off and redraw the tray.
+pub fn set_menu_bar_indicator<R: Runtime>(app: &AppHandle<R>, enabled: bool) {
+    let previous = MENU_BAR_INDICATOR.swap(enabled, std::sync::atomic::Ordering::Relaxed);
+    if previous != enabled {
+        update_tray_menu(app);
+    }
+}
+
+/// The state the menu bar icon draws: with the indicator off, a recording or
+/// paused meeting keeps the normal idle icon.
+fn displayed_icon_state(state: RecordingState, indicator_enabled: bool) -> RecordingState {
+    match state {
+        RecordingState::Recording | RecordingState::Paused if !indicator_enabled => {
+            RecordingState::Stopped
+        }
+        other => other,
+    }
+}
+
 /// Format an elapsed duration as `M:SS`, or `H:MM:SS` once it passes an hour.
 pub fn format_elapsed(total_seconds: u64) -> String {
     let hours = total_seconds / 3600;
@@ -100,6 +128,16 @@ pub fn create_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     // Update tray menu with actual recording state after creation
     update_tray_menu(app);
 
+    // Apply the saved menu bar indicator preference.
+    let app_for_prefs = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Ok(prefs) =
+            crate::audio::recording_preferences::load_recording_preferences(&app_for_prefs).await
+        {
+            set_menu_bar_indicator(&app_for_prefs, prefs.show_menu_bar_indicator);
+        }
+    });
+
     // Reflect the live recording duration in the menu bar / tooltip
     start_tray_timer(app);
 
@@ -135,7 +173,11 @@ pub fn start_tray_timer<R: Runtime>(app: &AppHandle<R>) {
                 let paused = crate::audio::recording_commands::is_recording_paused().await;
                 let state_text = if paused { "paused" } else { "recording" };
 
-                let _ = tray.set_title(Some(elapsed.clone()));
+                if menu_bar_indicator_enabled() {
+                    let _ = tray.set_title(Some(elapsed.clone()));
+                } else {
+                    let _ = tray.set_title(None::<&str>);
+                }
                 let _ = tray.set_tooltip(Some(format!(
                     "{} — {} ({})",
                     crate::APP_NAME,
@@ -615,7 +657,10 @@ fn tray_icon(state: RecordingState, detected: bool) -> (Image<'static>, bool) {
 
 fn update_tray_status<R: Runtime>(tray: &tauri::tray::TrayIcon<R>, state: RecordingState) {
     let detected = matches!(state, RecordingState::Stopped) && detected_meeting().is_some();
-    let (icon, icon_as_template) = tray_icon(state, detected);
+    let (icon, icon_as_template) = tray_icon(
+        displayed_icon_state(state, menu_bar_indicator_enabled()),
+        detected,
+    );
     if let Err(error) = tray.set_icon_with_as_template(Some(icon), icon_as_template) {
         log::warn!("Tray: Failed to set status icon: {}", error);
     }
@@ -883,10 +928,25 @@ pub(crate) fn focus_main_window<R: Runtime>(app: &AppHandle<R>) {
 #[cfg(test)]
 mod tests {
     use super::{
-        format_elapsed, recent_meeting_label, tray_icon, tray_tooltip, truncate_title,
-        RecordingState,
+        displayed_icon_state, format_elapsed, recent_meeting_label, tray_icon, tray_tooltip,
+        truncate_title, RecordingState,
     };
     use chrono::TimeZone;
+
+    #[test]
+    fn menu_bar_icon_stays_idle_while_recording_unless_the_indicator_is_on() {
+        for state in [RecordingState::Recording, RecordingState::Paused] {
+            assert_eq!(displayed_icon_state(state, false), RecordingState::Stopped);
+            assert_eq!(displayed_icon_state(state, true), state);
+        }
+        for state in [
+            RecordingState::Stopped,
+            RecordingState::Starting,
+            RecordingState::Stopping,
+        ] {
+            assert_eq!(displayed_icon_state(state, false), state);
+        }
+    }
 
     #[test]
     fn elapsed_time_uses_compact_under_an_hour() {
