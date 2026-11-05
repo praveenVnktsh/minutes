@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect } from 'react';
-import { ArrowLeft, Wrench, Database, FlaskConical, Mic, Settings2, Sparkles, Webhook } from 'lucide-react';
+import { ArrowLeft, Database, FlaskConical, Mic, Settings2, Sparkles, Webhook } from 'lucide-react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { AppearanceSetting } from '@/components/AppearanceSetting';
 import { BetaSettings } from '@/components/BetaSettings';
@@ -22,8 +22,8 @@ const TABS = [
   // The id stays 'summary' so existing settingsHref('summary') deep links keep working.
   { value: 'summary', label: 'AI notes', icon: Sparkles },
   { value: 'integrations', label: 'Integrations', icon: Webhook },
-  { value: 'beta', label: 'Beta', icon: FlaskConical },
-  { value: 'developer', label: 'Developer', icon: Wrench },
+  // Beta and Developer were one tab's worth each; the old 'beta' id still lands here.
+  { value: 'developer', label: 'Labs & Developer', icon: FlaskConical },
 ] as const;
 
 export function SettingsPageContent() {
@@ -32,12 +32,15 @@ export function SettingsPageContent() {
   const requestedSection = searchParams.get('section');
   const activeSection = resolveSettingsSection(requestedSection);
 
+  // An unknown section goes to General, and an old alias (beta) to its tab's own id.
   useEffect(() => {
-    if (!isSettingsSection(requestedSection)) router.replace(settingsHref('general'));
-  }, [requestedSection, router]);
+    if (requestedSection !== activeSection) router.replace(settingsHref(activeSection));
+  }, [activeSection, requestedSection, router]);
 
   const changeSection = (section: string) => {
-    if (isSettingsSection(section) && section !== activeSection) router.push(settingsHref(section));
+    if (!isSettingsSection(section)) return;
+    const next = resolveSettingsSection(section);
+    if (next !== activeSection) router.push(settingsHref(next));
   };
 
   return (
@@ -78,8 +81,16 @@ export function SettingsPageContent() {
             <TabsContent value="transcription" className="mt-6"><TranscriptSettings /></TabsContent>
             <TabsContent value="summary" className="mt-6"><SummaryModelSettings /></TabsContent>
             <TabsContent value="integrations" className="mt-6"><CalendarSettings /><WebhookSettings /></TabsContent>
-            <TabsContent value="beta" className="mt-6"><BetaSettings /></TabsContent>
-            <TabsContent value="developer" className="mt-6"><DeveloperSettings /></TabsContent>
+            <TabsContent value="developer" className="mt-6 space-y-10">
+              <section aria-label="Labs" className="space-y-4">
+                <h2 className="text-lg font-semibold">Labs</h2>
+                <BetaSettings />
+              </section>
+              <section aria-label="Developer" className="space-y-4">
+                <h2 className="text-lg font-semibold">Developer</h2>
+                <DeveloperSettings />
+              </section>
+            </TabsContent>
           </Tabs>
         </div>
       </main>

@@ -1,4 +1,4 @@
-use crate::api::{TranscriptSearchResult, TranscriptSegment};
+use crate::api::{MeetingTranscriptMatch, TranscriptSearchResult, TranscriptSegment};
 use chrono::Utc;
 use sqlx::{Connection, Error as SqlxError, SqlitePool};
 use tracing::{error, info};
@@ -170,6 +170,45 @@ impl TranscriptsRepository {
         Ok(results)
     }
 
+    /// The rows of one meeting whose text contains `query` (case-insensitive,
+    /// taken literally: `%` and `_` are not wildcards), ordered like the
+    /// paginated transcript (by audio start time).
+    pub async fn search_meeting_transcript(
+        pool: &SqlitePool,
+        meeting_id: &str,
+        query: &str,
+    ) -> Result<Vec<MeetingTranscriptMatch>, SqlxError> {
+        let query = query.trim();
+        if query.is_empty() || meeting_id.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        let escaped = query
+            .to_lowercase()
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let pattern = format!("%{}%", escaped);
+
+        let rows = sqlx::query_as::<_, (String, Option<f64>)>(
+            "SELECT id, audio_start_time
+             FROM transcripts
+             WHERE meeting_id = ? AND LOWER(transcript) LIKE ? ESCAPE '\\'
+             ORDER BY audio_start_time ASC",
+        )
+        .bind(meeting_id)
+        .bind(&pattern)
+        .fetch_all(pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|(id, audio_start_time)| MeetingTranscriptMatch {
+                id,
+                audio_start_time,
+            })
+            .collect())
+    }
+
     /// Helper function to extract a snippet of text around the first match of a query.
     fn get_match_context(transcript: &str, query: &str) -> String {
         let transcript_lower = transcript.to_lowercase();
@@ -320,5 +359,113 @@ mod tests {
         .unwrap();
 
         assert_eq!(transcript_count(&pool, &meeting_id).await, 1);
+    }
+
+    /// The text of each matched row, looked up by the id the search returned.
+    async fn matched_texts(pool: &SqlitePool, matches: &[MeetingTranscriptMatch]) -> Vec<String> {
+        let mut texts = Vec::new();
+        for found in matches {
+            let (text,) =
+                sqlx::query_as::<_, (String,)>("SELECT transcript FROM transcripts WHERE id = ?")
+                    .bind(&found.id)
+                    .fetch_one(pool)
+                    .await
+                    .unwrap();
+            texts.push(text);
+        }
+        texts
+    }
+
+    #[tokio::test]
+    async fn meeting_search_covers_every_row_in_transcript_order() {
+        let pool = test_pool().await;
+        // More rows than one page of the panel, with the matches far apart.
+        let mut segments: Vec<TranscriptSegment> = (0..250)
+            .map(|index| {
+                segment(
+                    &format!("filler line {}", index),
+                    index as f64,
+                    index as f64 + 0.5,
+                )
+            })
+            .collect();
+        segments[3].text = "Budget review".to_string();
+        segments[240].text = "the BUDGET is final".to_string();
+        let meeting_id =
+            TranscriptsRepository::save_transcript(&pool, "Planning", &segments, None, None, false)
+                .await
+                .unwrap();
+        TranscriptsRepository::save_transcript(
+            &pool,
+            "Other",
+            &[segment("budget elsewhere", 0.0, 1.0)],
+            None,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+
+        let matches =
+            TranscriptsRepository::search_meeting_transcript(&pool, &meeting_id, " budget ")
+                .await
+                .unwrap();
+        assert_eq!(
+            matches
+                .iter()
+                .map(|found| found.audio_start_time)
+                .collect::<Vec<_>>(),
+            vec![Some(3.0), Some(240.0)]
+        );
+        assert_eq!(
+            matched_texts(&pool, &matches).await,
+            vec![
+                "Budget review".to_string(),
+                "the BUDGET is final".to_string()
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn meeting_search_takes_wildcards_literally_and_ignores_blank_queries() {
+        let pool = test_pool().await;
+        let segments = [
+            segment("50% done", 0.0, 1.0),
+            segment("fully done", 1.0, 2.0),
+            segment("snake_case", 2.0, 3.0),
+            segment("snakeXcase", 3.0, 4.0),
+        ];
+        let meeting_id = TranscriptsRepository::save_transcript(
+            &pool,
+            "Wildcards",
+            &segments,
+            None,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+
+        let percent = TranscriptsRepository::search_meeting_transcript(&pool, &meeting_id, "0%")
+            .await
+            .unwrap();
+        assert_eq!(
+            matched_texts(&pool, &percent).await,
+            vec!["50% done".to_string()]
+        );
+        let underscore =
+            TranscriptsRepository::search_meeting_transcript(&pool, &meeting_id, "e_c")
+                .await
+                .unwrap();
+        assert_eq!(
+            matched_texts(&pool, &underscore).await,
+            vec!["snake_case".to_string()]
+        );
+        assert!(
+            TranscriptsRepository::search_meeting_transcript(&pool, &meeting_id, "   ")
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 }

@@ -5,11 +5,23 @@ import { useRecordingState } from '@/contexts/RecordingStateContext';
 import { useRecordingController } from '@/contexts/RecordingControllerContext';
 import { SIDEBAR_COLLAPSED_WIDTH, SIDEBAR_WIDTH, useShell } from '@/contexts/ShellContext';
 
-/** Floating recording bar shown over the workspace while a meeting is recording. */
-export function FloatingRecordingControls({ onStopInitiated }: { onStopInitiated?: () => void }) {
+/**
+ * Floating recording bar shown over the workspace while a meeting is recording.
+ * With `hideWhileFinishing` the bar steps aside once the meeting is stopping,
+ * because the page's header banner already says so.
+ */
+export function FloatingRecordingControls({
+  onStopInitiated,
+  hideWhileFinishing = false,
+}: {
+  onStopInitiated?: () => void;
+  hideWhileFinishing?: boolean;
+}) {
   const recordingState = useRecordingState();
   const controller = useRecordingController();
   const { collapsed } = useShell();
+
+  if (hideWhileFinishing && recordingState.isProcessing) return null;
 
   return (
     <div

@@ -58,7 +58,7 @@ mock.module('@/components/Sidebar/SidebarProvider', () => ({
     refetchMeetings: async () => {},
   }),
 }))
-mock.module('@/contexts/MeetingActivityContext', () => ({ ...originalActivity, useMeetingActivity: () => ({ activeMeetingId: null, getMeetingActivities: () => [] }) }))
+mock.module('@/contexts/MeetingActivityContext', () => ({ ...originalActivity, useMeetingActivity: () => ({ activeMeetingId: null, getMeetingActivities: () => [], getSummaryActivity: () => null }) }))
 mock.module('@/hooks/useDebugMode', () => ({ ...originalDebug, useDebugMode: () => false }))
 mock.module('next/navigation', () => ({ ...originalNextNavigation, usePathname: () => pathname }))
 
@@ -66,7 +66,7 @@ const originalWindow = globalThis.window
 const originalDocument = globalThis.document
 const originalLocalStorage = globalThis.localStorage
 const { ShellNavigationError, ShellProvider, handleShellActionError, useShell } = await import('./ShellContext')
-const { default: SimpleSidebar } = await import('@/components/SimpleSidebar')
+const { default: SimpleSidebar, selectRecentMeetings } = await import('@/components/SimpleSidebar')
 const { MeetingsLibrary } = await import('@/components/MeetingsLibrary')
 
 let current!: ReturnType<typeof useShell>
@@ -170,7 +170,7 @@ describe('ShellProvider shared actions', () => {
     await act(async () => renderer!.unmount())
   })
 
-  test('shares one search owner and disables recording actions during finalization', async () => {
+  test('disables recording actions during finalization', async () => {
     command = 'finalize'
     isCommandPending = true
     let renderer: ReturnType<typeof create>
@@ -179,10 +179,6 @@ describe('ShellProvider shared actions', () => {
     expect(current.recordingActionDisabled).toBe(true)
     await act(async () => current.runRecordingAction())
     expect(startRecording).not.toHaveBeenCalled()
-
-    await act(async () => current.setMeetingSearchQuery('roadmap'))
-    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 300)) })
-    expect(searchTranscripts).toHaveBeenLastCalledWith('roadmap')
     await act(async () => renderer!.unmount())
   })
 
@@ -206,21 +202,30 @@ describe('ShellProvider shared actions', () => {
     expect(reported).toEqual(['archive failed'])
   })
 
-  test('keeps sidebar and library search inputs on one query', async () => {
+  test('leaves search to the library: the sidebar rail has no search box', async () => {
     let renderer: ReturnType<typeof create>
     await act(async () => {
       renderer = create(<ShellProvider><SimpleSidebar /><MeetingsLibrary /></ShellProvider>)
     })
     searchTranscripts.mockClear()
-    let inputs = renderer!.root.findAllByProps({ 'aria-label': 'Search meetings' })
-    expect(inputs).toHaveLength(2)
+    const inputs = renderer!.root.findAllByProps({ 'aria-label': 'Search meetings' })
+    expect(inputs).toHaveLength(1)
     await act(async () => inputs[0].props.onChange({ target: { value: 'roadmap' } }))
-    inputs = renderer!.root.findAllByProps({ 'aria-label': 'Search meetings' })
-    expect(inputs.map((input) => input.props.value)).toEqual(['roadmap', 'roadmap'])
+    expect(renderer!.root.findByProps({ 'aria-label': 'Search meetings' }).props.value).toBe('roadmap')
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 300)) })
     expect(searchTranscripts).toHaveBeenCalledTimes(1)
     expect(searchTranscripts).toHaveBeenCalledWith('roadmap')
     await act(async () => renderer!.unmount())
+  })
+
+  test('the rail lists at most five recent unarchived meetings, newest first', () => {
+    const meetings = Array.from({ length: 8 }, (_, index) => ({
+      id: `m${index}`,
+      title: `Meeting ${index}`,
+      created_at: `2026-10-0${index + 1}T10:00:00Z`,
+      archived: index === 7,
+    }))
+    expect(selectRecentMeetings(meetings).map((meeting) => meeting.id)).toEqual(['m6', 'm5', 'm4', 'm3', 'm2'])
   })
 
   test('carries library focus across route commit, consumes it once, and clears stale intent', async () => {

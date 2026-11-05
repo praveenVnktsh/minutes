@@ -119,17 +119,52 @@ async fn start_recording<R: Runtime>(
     request_id: Option<String>,
     resume_meeting_id: Option<String>,
 ) -> Result<RecordingStarted, String> {
+    // Unset devices mean the system defaults here, not the saved preferences.
+    let devices = audio::recording_commands::RecordingDevices::Named {
+        microphone: mic_device_name,
+        system: system_device_name,
+    };
+    start_recording_command(
+        app,
+        StartCommand::StartRecording,
+        devices,
+        meeting_name,
+        request_id,
+        resume_meeting_id,
+    )
+    .await
+}
+
+/// The two start commands differ in a few ways the frontend has always seen,
+/// so the shared body keeps each command's own behaviour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartCommand {
+    /// `start_recording`: refuses an active recording before touching audio,
+    /// sets `RECORDING_FLAG`, and prefixes errors with "Failed to start recording: ".
+    StartRecording,
+    /// `start_recording_with_devices_and_meeting`: returns the audio layer's
+    /// error unchanged.
+    WithDevices,
+}
+
+async fn start_recording_command<R: Runtime>(
+    app: AppHandle<R>,
+    command: StartCommand,
+    devices: audio::recording_commands::RecordingDevices,
+    meeting_name: Option<String>,
+    request_id: Option<String>,
+    resume_meeting_id: Option<String>,
+) -> Result<RecordingStarted, String> {
     let request_id = begin_recording_request(request_id)?;
-    log_info!("🔥 CALLED start_recording with meeting: {:?}", meeting_name);
     log_info!(
-        "📋 Backend received parameters - mic: {:?}, system: {:?}, meeting: {:?}, resume: {:?}",
-        mic_device_name,
-        system_device_name,
+        "🚀 {:?} called - devices: {:?}, meeting: {:?}, resume: {:?}",
+        command,
+        devices,
         meeting_name,
         resume_meeting_id
     );
 
-    if is_recording().await {
+    if command == StartCommand::StartRecording && is_recording().await {
         let error = "Recording already in progress".to_string();
         if let Some(request_id) = request_id {
             let _ = meeting_prompt::acknowledge_recording_request(
@@ -142,19 +177,19 @@ async fn start_recording<R: Runtime>(
         return Err(error);
     }
 
-    // Call the actual audio recording system with meeting name
     match audio::recording_commands::start_recording_with_devices_and_meeting(
         app.clone(),
-        mic_device_name,
-        system_device_name,
+        devices,
         meeting_name.clone(),
         resume_meeting_id,
     )
     .await
     {
         Ok(session_id) => {
-            RECORDING_FLAG.store(true, Ordering::SeqCst);
-            tray::update_tray_menu(&app);
+            if command == StartCommand::StartRecording {
+                RECORDING_FLAG.store(true, Ordering::SeqCst);
+                tray::update_tray_menu(&app);
+            }
 
             if let Some(request_id) = request_id {
                 if let Err(error) =
@@ -180,20 +215,21 @@ async fn start_recording<R: Runtime>(
             if let Err(e) = notifications::commands::show_recording_started_notification(
                 &app,
                 &notification_manager_state,
-                meeting_name.clone(),
+                meeting_name,
             )
             .await
             {
                 log_error!("Failed to show recording started notification: {}", e);
-            } else {
-                log_info!("Successfully showed recording started notification");
             }
 
             Ok(RecordingStarted { session_id })
         }
         Err(e) => {
             log_error!("Failed to start audio recording: {}", e);
-            let error = format!("Failed to start recording: {}", e);
+            let error = match command {
+                StartCommand::StartRecording => format!("Failed to start recording: {}", e),
+                StartCommand::WithDevices => e,
+            };
             if let Some(request_id) = request_id {
                 let _ = meeting_prompt::acknowledge_recording_request(
                     app,
@@ -370,93 +406,23 @@ async fn start_recording_with_devices_and_meeting<R: Runtime>(
     request_id: Option<String>,
     resume_meeting_id: Option<String>,
 ) -> Result<RecordingStarted, String> {
-    let request_id = begin_recording_request(request_id)?;
-    log_info!("🚀 CALLED start_recording_with_devices_and_meeting - Mic: {:?}, System: {:?}, Meeting: {:?}, Resume: {:?}",
-             mic_device_name, system_device_name, meeting_name, resume_meeting_id);
-
-    // Clone meeting_name for notification use later
-    let meeting_name_for_notification = meeting_name.clone();
-
-    // Call the recording module functions that support meeting names
-    let recording_result = match (mic_device_name.clone(), system_device_name.clone()) {
-        (None, None) => {
-            log_info!(
-                "No devices specified, starting with defaults and meeting: {:?}",
-                meeting_name
-            );
-            audio::recording_commands::start_recording_with_meeting_name(
-                app.clone(),
-                meeting_name,
-                resume_meeting_id,
-            )
-            .await
-        }
-        _ => {
-            log_info!(
-                "Starting with specified devices: mic={:?}, system={:?}, meeting={:?}",
-                mic_device_name,
-                system_device_name,
-                meeting_name
-            );
-            audio::recording_commands::start_recording_with_devices_and_meeting(
-                app.clone(),
-                mic_device_name,
-                system_device_name,
-                meeting_name,
-                resume_meeting_id,
-            )
-            .await
+    // With no device named, use the saved preferences; once either is named,
+    // the other unset one means the system default.
+    let devices = match (mic_device_name, system_device_name) {
+        (None, None) => audio::recording_commands::RecordingDevices::Preferred,
+        (microphone, system) => {
+            audio::recording_commands::RecordingDevices::Named { microphone, system }
         }
     };
-
-    match recording_result {
-        Ok(session_id) => {
-            log_info!("Recording started successfully via tauri command");
-
-            if let Some(request_id) = request_id {
-                if let Err(error) =
-                    meeting_prompt::associate_started_session(&request_id, &session_id)
-                {
-                    log_error!("Failed to associate recording request: {}", error);
-                }
-                if let Err(error) = meeting_prompt::acknowledge_recording_request(
-                    app.clone(),
-                    request_id,
-                    true,
-                    None,
-                ) {
-                    log_error!("Failed to acknowledge recording request: {}", error);
-                }
-            }
-
-            // Show recording started notification through NotificationManager
-            // This respects user's notification preferences
-            let notification_manager_state = app.state::<NotificationManagerState<R>>();
-            if let Err(e) = notifications::commands::show_recording_started_notification(
-                &app,
-                &notification_manager_state,
-                meeting_name_for_notification.clone(),
-            )
-            .await
-            {
-                log_error!("Failed to show recording started notification: {}", e);
-            }
-
-            Ok(RecordingStarted { session_id })
-        }
-        Err(e) => {
-            log_error!("Failed to start recording via tauri command: {}", e);
-            if let Some(request_id) = request_id {
-                let _ = meeting_prompt::acknowledge_recording_request(
-                    app,
-                    request_id,
-                    false,
-                    Some(e.clone()),
-                );
-            }
-            Err(e)
-        }
-    }
+    start_recording_command(
+        app,
+        StartCommand::WithDevices,
+        devices,
+        meeting_name,
+        request_id,
+        resume_meeting_id,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -848,6 +814,7 @@ pub fn run() {
             api::api_discard_meeting,
             api::api_get_meeting_audio_path,
             api::api_search_transcripts,
+            api::api_search_meeting_transcript,
             api::api_get_model_config,
             api::api_save_model_config,
             api::api_get_api_key,

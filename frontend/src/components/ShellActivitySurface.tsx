@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { usePathname } from 'next/navigation'
 import { Minimize2, Pause, Play, Square, X } from 'lucide-react'
 import { MeetingActivityFeedback } from '@/app/_components/StatusOverlays'
@@ -50,7 +50,14 @@ export function ShellActivitySurface() {
   // would duplicate the pause/stop controls there.
   const isOnLiveWorkspace = Boolean(workspaceMeetingId) && workspaceMeetingId === controller.activeMeetingId
   const showRecording = recordingState.isRecording && !commandIsFinalizing && !isOnLiveWorkspace
-  const showFinalizing = commandIsFinalizing || (!recordingState.isRecording && (recordingState.isProcessing || recordingState.isSaving))
+  // The meeting being finished keeps its header banner as the one progress
+  // surface, so like the recording card this only shows elsewhere. The id is
+  // remembered because the native session can clear it before saving ends.
+  const finishingMeetingIdRef = useRef<string | null>(null)
+  if (controller.activeMeetingId) finishingMeetingIdRef.current = controller.activeMeetingId
+  const isOnFinishingWorkspace = Boolean(workspaceMeetingId) && workspaceMeetingId === finishingMeetingIdRef.current
+  const showFinalizing = !isOnFinishingWorkspace
+    && (commandIsFinalizing || (!recordingState.isRecording && (recordingState.isProcessing || recordingState.isSaving)))
 
   if (!showRecording && !showFinalizing && allWork.length === 0) return null
   if (minimized) {

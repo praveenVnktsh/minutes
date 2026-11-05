@@ -1,5 +1,6 @@
 'use client';
 
+import { Info } from 'lucide-react';
 import { useModelProvenance } from '@/hooks/useModelProvenance';
 
 /** Maps a provider/engine id to a human-friendly label; unknown ids pass through unchanged. */
@@ -23,8 +24,8 @@ interface ModelProvenanceNoteProps {
 }
 
 /**
- * A small, unobtrusive note reporting which models transcribed, diarized and
- * enhanced (summarized) a meeting. Renders nothing while none of that is known.
+ * A small info icon whose tooltip reports which models transcribed, diarized
+ * and wrote AI notes for a meeting. Renders nothing while none of that is known.
  */
 export function ModelProvenanceNote({ meetingId }: ModelProvenanceNoteProps) {
   const provenance = useModelProvenance(meetingId);
@@ -46,9 +47,16 @@ export function ModelProvenanceNote({ meetingId }: ModelProvenanceNoteProps) {
 
   if (parts.length === 0) return null;
 
+  const text = parts.join(' · ');
   return (
-    <p className="mt-2 text-[11px] text-[var(--ink-subtle)]">
-      {parts.join(' · ')}
-    </p>
+    <span
+      role="img"
+      tabIndex={0}
+      title={text}
+      aria-label={`Models: ${text}`}
+      className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[var(--ink-subtle)] hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus"
+    >
+      <Info className="h-4 w-4" />
+    </span>
   );
 }

@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { LiveSource } from '@/lib/liveSource';
 import type { Tone } from '@/lib/theme-classes';
+import { formatClock } from '@/lib/format';
 
 /** One live summary entry. Times are audio time from the recording start. */
 export type TimelineKind = 'point' | 'decision' | 'action';
@@ -66,12 +67,7 @@ export const liveTimelineApi = {
 
 /** `mm:ss`, or `h:mm:ss` past the hour. */
 export function formatTimelineTime(ms: number): string {
-  const total = Math.max(0, Math.floor(ms / 1000));
-  const hours = Math.floor(total / 3600);
-  const minutes = Math.floor((total % 3600) / 60);
-  const seconds = total % 60;
-  const pad = (value: number) => String(value).padStart(2, '0');
-  return hours > 0 ? `${hours}:${pad(minutes)}:${pad(seconds)}` : `${pad(minutes)}:${pad(seconds)}`;
+  return formatClock(ms / 1000, { hours: true });
 }
 
 /** Whether a snapshot belongs on the panel showing `current`: a newer

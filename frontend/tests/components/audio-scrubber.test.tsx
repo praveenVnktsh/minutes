@@ -4,9 +4,9 @@ import { act, create } from 'react-test-renderer';
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
   AudioScrubber,
-  formatClock,
   timeFromClientX,
 } from '../../src/components/MeetingDetails/AudioScrubber';
+import { formatClock } from '../../src/lib/format';
 
 const rect = {
   left: 0,

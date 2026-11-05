@@ -292,7 +292,6 @@ RUST_LOG=debug ./clean_run.sh
 
 ### Audio Processing
 - Use `perf_debug!()` / `perf_trace!()` for hot-path logging (zero cost in release)
-- Batch audio metrics using `AudioMetricsBatcher` (pipeline.rs)
 - Pre-allocate buffers with `AudioBufferPool` (buffer_pool.rs)
 - VAD filtering (Silero, in speech-helper) keeps non-speech away from the recognizer
 

@@ -28,6 +28,7 @@ import { useTranscriptAvailability } from '@/lib/speechModels';
 import { TranscriptionUnsupportedNotice } from '@/components/TranscriptionUnsupportedNotice';
 import { cn } from '@/lib/utils';
 import { panel, progress as progressClasses, toneText } from '@/lib/theme-classes';
+import { formatBytes, formatClock } from '@/lib/format';
 
 
 interface ImportAudioDialogProps {
@@ -35,24 +36,6 @@ interface ImportAudioDialogProps {
   onOpenChange: (open: boolean) => void;
   preselectedFile?: string | null;
   onComplete?: () => void;
-}
-
-function formatDuration(seconds: number): string {
-  const hours = Math.floor(seconds / 3600);
-  const minutes = Math.floor((seconds % 3600) / 60);
-  const secs = Math.floor(seconds % 60);
-
-  if (hours > 0) {
-    return `${hours}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-  }
-  return `${minutes}:${secs.toString().padStart(2, '0')}`;
-}
-
-function formatFileSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
 
 export function ImportAudioDialog({
@@ -231,11 +214,11 @@ export function ImportAudioDialog({
                       <div className="flex items-center gap-4 text-sm text-ink-muted mt-1">
                         <span className="flex items-center gap-1">
                           <Clock className="h-3.5 w-3.5" />
-                          {formatDuration(fileInfo.duration_seconds)}
+                          {formatClock(fileInfo.duration_seconds, { hours: true, padMinutes: false })}
                         </span>
                         <span className="flex items-center gap-1">
                           <HardDrive className="h-3.5 w-3.5" />
-                          {formatFileSize(fileInfo.size_bytes)}
+                          {formatBytes(fileInfo.size_bytes)}
                         </span>
                         <span className="font-medium text-ink">{fileInfo.format}</span>
                       </div>

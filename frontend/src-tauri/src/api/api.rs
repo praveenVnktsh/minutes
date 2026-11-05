@@ -50,6 +50,14 @@ pub struct TranscriptSearchResult {
     pub timestamp: String,
 }
 
+/// One transcript row of a meeting that matches an in-meeting search, in
+/// transcript order (the order the transcript panel pages rows in).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MeetingTranscriptMatch {
+    pub id: String,
+    pub audio_start_time: Option<f64>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ModelConfig {
     pub provider: String,
@@ -427,6 +435,28 @@ pub async fn api_search_transcripts<R: Runtime>(
             Err(format!("Failed to search transcripts: {}", e))
         }
     }
+}
+
+/// Searches one meeting's whole transcript (not only the rows the panel has
+/// loaded) and returns the matching rows' ids and start times, in order.
+#[tauri::command]
+pub async fn api_search_meeting_transcript<R: Runtime>(
+    _app: AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+    meeting_id: String,
+    query: String,
+) -> Result<Vec<MeetingTranscriptMatch>, String> {
+    let pool = state.db_manager.pool();
+    TranscriptsRepository::search_meeting_transcript(pool, &meeting_id, &query)
+        .await
+        .map_err(|e| {
+            log_error!(
+                "Error searching the transcript of meeting {}: {}",
+                meeting_id,
+                e
+            );
+            format!("Failed to search the transcript: {}", e)
+        })
 }
 
 #[tauri::command]

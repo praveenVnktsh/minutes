@@ -7,6 +7,7 @@ import { StatusFeedback } from '@/components/ui/status-feedback';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
 import { useRecordingController } from '@/contexts/RecordingControllerContext';
 import { RecordingWaveform } from '@/components/RecordingWaveform';
+import { formatClock } from '@/lib/format';
 
 interface RecordingControlsProps {
   isRecording: boolean;
@@ -15,14 +16,6 @@ interface RecordingControlsProps {
   onStopInitiated?: () => void;
   isRecordingDisabled: boolean;
   isParentProcessing: boolean;
-}
-
-function formatTime(time: number): string {
-  const hours = Math.floor(time / 3600);
-  const minutes = Math.floor((time % 3600) / 60);
-  const seconds = Math.floor(time % 60);
-  const pad = (n: number) => n.toString().padStart(2, '0');
-  return hours > 0 ? `${hours}:${pad(minutes)}:${pad(seconds)}` : `${pad(minutes)}:${pad(seconds)}`;
 }
 
 export const RecordingControls: React.FC<RecordingControlsProps> = ({
@@ -83,7 +76,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
               <div className="flex items-center gap-2.5 pl-3">
                 <span className={`h-2 w-2 flex-none rounded-full ${recordingState.isPaused ? 'bg-paused' : 'animate-pulse bg-recording'}`} />
                 <span className="font-mono text-sm font-semibold tabular-nums text-ink">
-                  {formatTime(recordingState.activeDuration ?? recordingState.recordingDuration ?? 0)}
+                  {formatClock(recordingState.activeDuration ?? recordingState.recordingDuration ?? 0, { hours: true })}
                 </span>
                 {recordingState.isPaused ? <span className="sr-only">Paused</span> : null}
               </div>

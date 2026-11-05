@@ -147,6 +147,20 @@ describe('ShellActivitySurface', () => {
     renderer.unmount()
   })
 
+  test('leaves the finishing card to the meeting page while you are on it', () => {
+    activeMeetingId = 'finishing-meeting'
+    pathname = '/meeting-details'
+    currentMeeting = { id: 'finishing-meeting' }
+    const onPage = create(<ShellActivitySurface />)
+    expect(JSON.stringify(onPage.toJSON())).not.toContain('Saving meeting')
+    onPage.unmount()
+
+    currentMeeting = { id: 'other-meeting' }
+    const elsewhere = create(<ShellActivitySurface />)
+    expect(JSON.stringify(elsewhere.toJSON())).toContain('Saving meeting')
+    elsewhere.unmount()
+  })
+
   test('dismissing an activity card hides it and reveals the next queued card', async () => {
     const renderer = create(<ShellActivitySurface />)
     expect(JSON.stringify(renderer.toJSON())).toContain('Show 4 more activities')

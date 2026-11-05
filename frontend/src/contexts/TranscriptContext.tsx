@@ -7,6 +7,7 @@ import { useRecordingState } from './RecordingStateContext';
 import { transcriptService } from '@/services/transcriptService';
 import { recordingService } from '@/services/recordingService';
 import { indexedDBService } from '@/services/indexedDBService';
+import { bracketedClock } from '@/lib/format';
 
 export interface TranscriptContextType {
   transcripts: Transcript[];
@@ -462,16 +463,8 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
   // Copy transcript to clipboard with recording-relative timestamps
   const copyTranscript = useCallback(() => {
     // Format timestamps as recording-relative [MM:SS] instead of wall-clock time
-    const formatTime = (seconds: number | undefined): string => {
-      if (seconds === undefined) return '[--:--]';
-      const totalSecs = Math.floor(seconds);
-      const mins = Math.floor(totalSecs / 60);
-      const secs = totalSecs % 60;
-      return `[${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}]`;
-    };
-
     const fullTranscript = transcripts
-      .map(t => `${formatTime(t.audio_start_time)}${t.speaker ? ` [${t.speaker === 'mic' ? 'You' : t.speaker === 'system' ? 'Others' : t.speaker}]` : ''} ${t.text}`)
+      .map(t => `${bracketedClock(t.audio_start_time)}${t.speaker ? ` [${t.speaker === 'mic' ? 'You' : t.speaker === 'system' ? 'Others' : t.speaker}]` : ''} ${t.text}`)
       .join('\n');
     navigator.clipboard.writeText(fullTranscript);
 

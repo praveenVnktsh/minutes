@@ -106,4 +106,19 @@ describe('RecordingSettings and the setup check', () => {
       { micDevice: 'Scarlett Solo (input)', systemDevice: 'BlackHole 2ch (output)' },
     ])
   })
+
+  test('groups the tab into Audio, Meeting detection and Devices, with the capture backend under Advanced', async () => {
+    let renderer!: ReturnType<typeof create>
+    await act(async () => {
+      renderer = create(<RecordingSettings />)
+    })
+    const sections = renderer.root.findAll((node) => node.type === 'section').map((node) => node.props['aria-label'])
+    expect(sections).toEqual(['Audio', 'Meeting detection', 'Devices'])
+    const advanced = renderer.root.findByType('details')
+    expect(JSON.stringify(renderer.toJSON())).toContain('Advanced')
+    // Folded away, and not even mounted, until opened.
+    expect(advanced.props.open).toBeUndefined()
+    expect(renderer.root.findAll((node) => (node.type as { name?: string }).name === 'AudioBackendSelector')).toHaveLength(0)
+    await act(async () => renderer.unmount())
+  })
 })

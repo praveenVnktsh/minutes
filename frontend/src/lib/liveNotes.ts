@@ -1,4 +1,5 @@
 import type { AiBlocks } from '@/lib/aiRawNotes';
+import { formatClock } from '@/lib/format';
 
 export interface LiveNote {
   id: string;
@@ -36,8 +37,7 @@ export function createEmptyLiveNotesDocument(meetingStartedAtMs = Date.now()): L
 }
 
 export function formatNoteTimestamp(seconds: number): string {
-  const wholeSeconds = Math.max(0, Math.floor(seconds));
-  return `${Math.floor(wholeSeconds / 60).toString().padStart(2, '0')}:${(wholeSeconds % 60).toString().padStart(2, '0')}`;
+  return formatClock(seconds);
 }
 
 export function createLiveNote(timestampSeconds: number): LiveNote {
