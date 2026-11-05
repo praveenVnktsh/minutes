@@ -1,6 +1,6 @@
 # Building Minutes from Source
 
-Minutes is Mac-only: it builds and runs on Apple Silicon Macs with macOS 13 or later. Windows and Linux are not supported, and the Rust crate refuses to compile for any other target.
+Minutes is Mac-only: it builds and runs on Apple Silicon Macs with macOS 13 or later; transcription (the `speech-helper` sidecar) needs macOS 15 or later. Windows and Linux are not supported, and the Rust crate refuses to compile for any other target.
 
 ## 1. Install Dependencies
 
@@ -16,7 +16,7 @@ npm install -g pnpm@9.15.9
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
-Install Xcode and select it with `xcode-select`. The PR Check script also needs [Bun](https://bun.sh) on `PATH`.
+Install Xcode 16 or later (the Swift 6 toolchain FluidAudio needs) and select it with `xcode-select`. The PR Check script also needs [Bun](https://bun.sh) on `PATH`.
 
 ## 2. Install Frontend Dependencies
 
@@ -36,11 +36,11 @@ pnpm tauri:dev
 # Production build
 pnpm tauri:build
 
-# Local Apple Silicon app bundle with Metal, unsigned, no updater artifacts
+# Local Apple Silicon app bundle (builds both sidecars), unsigned, no updater artifacts
 pnpm tauri:build:local:mac    # runs scripts/build-local-macos.sh
 ```
 
-Whisper is always built with Metal and CoreML on macOS, and the llama-helper sidecar is built with `--features metal`. See [GPU_ACCELERATION.md](GPU_ACCELERATION.md).
+Speech recognition, VAD and diarization run in the `speech-helper` Swift sidecar (FluidAudio, Core ML), built by `speech-helper/build.sh [release|debug]`. The llama-helper sidecar is built with `--features metal`. See [GPU_ACCELERATION.md](GPU_ACCELERATION.md).
 
 ## Build Output Location
 

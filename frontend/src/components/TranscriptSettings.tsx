@@ -1,306 +1,261 @@
-import { useState, useEffect } from 'react';
-import { invoke } from '@tauri-apps/api/core';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
-import { Input } from './ui/input';
-import { Textarea } from './ui/textarea';
+'use client';
+
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { listen } from '@tauri-apps/api/event';
+import { toast } from 'sonner';
+import { Download, FolderOpen } from 'lucide-react';
 import { Button } from './ui/button';
 import { Label } from './ui/label';
-import { Eye, EyeOff, Lock, Unlock } from 'lucide-react';
-import { ModelManager } from './WhisperModelManager';
-import { ParakeetModelManager } from './ParakeetModelManager';
-import { SaveFeedback, type SaveFeedbackState } from './ui/status-feedback';
-import { toneText } from '@/lib/theme-classes';
+import { TranscriptModelCard } from './TranscriptModelCard';
+import { TranscriptionUnsupportedNotice } from './TranscriptionUnsupportedNotice';
+import { FinalPassTimingSettings, LiveEngineSettings } from './LiveTranscriptionModelSettings';
+import { BYTES_PER_MIB, formatBytes } from '@/lib/download-display';
+import { cn } from '@/lib/utils';
+import { panel } from '@/lib/theme-classes';
+import {
+  SPEECH_MODEL_DOWNLOAD_PROGRESS_EVENT,
+  SPEECH_MODEL_PURPOSE,
+  missingSpeechBytes,
+  speechModel,
+  speechModelCardStatus,
+  speechModelsApi,
+  transcriptionOsSupported,
+  type SpeechModelDownloadProgressEvent,
+  type SpeechModelKind,
+  type SpeechModelsStatus,
+} from '@/lib/speechModels';
 
+type ProgressByKind = Partial<Record<SpeechModelKind, SpeechModelDownloadProgressEvent>>;
 
-export interface TranscriptModelProps {
-    provider: 'localWhisper' | 'parakeet' | 'deepgram' | 'elevenLabs' | 'groq' | 'openai';
-    model: string;
-    apiKey?: string | null;
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
-export interface TranscriptSettingsProps {
-    transcriptModelConfig: TranscriptModelProps;
-    setTranscriptModelConfig: (config: TranscriptModelProps) => void;
-    onModelSelect?: () => void;
+/** A stand-in event so a card shows progress the moment its download is asked for. */
+function pendingProgress(kind: SpeechModelKind, sizeBytes: number): SpeechModelDownloadProgressEvent {
+  return {
+    modelId: '',
+    kind,
+    progress: 0,
+    downloadedMb: 0,
+    totalMb: sizeBytes / BYTES_PER_MIB,
+    speedMbps: 0,
+    etaSeconds: null,
+    status: 'downloading',
+    error: null,
+  };
 }
 
-export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelConfig, onModelSelect }: TranscriptSettingsProps) {
-    const [apiKey, setApiKey] = useState<string | null>(transcriptModelConfig.apiKey || null);
-    const [showApiKey, setShowApiKey] = useState<boolean>(false);
-    const [isApiKeyLocked, setIsApiKeyLocked] = useState<boolean>(true);
-    const [isLockButtonVibrating, setIsLockButtonVibrating] = useState<boolean>(false);
-    const [uiProvider, setUiProvider] = useState<TranscriptModelProps['provider']>(transcriptModelConfig.provider);
-    const [vocabulary, setVocabulary] = useState<string>('');
-    const [savedVocabulary, setSavedVocabulary] = useState<string>('');
-    const [vocabularySaveState, setVocabularySaveState] = useState<SaveFeedbackState | null>(null);
-    const vocabularyFeedbackState = vocabularySaveState === 'saving' || vocabularySaveState === 'error'
-        ? vocabularySaveState
-        : vocabulary !== savedVocabulary
-            ? 'unsaved'
-            : vocabularySaveState;
+function Section({ title, description, children }: { title: string; description: string; children: ReactNode }) {
+  return (
+    <section className="space-y-3">
+      <div>
+        <Label className="mb-1 block text-sm font-medium text-ink">{title}</Label>
+        <p className="mx-1 text-xs text-ink-muted">{description}</p>
+      </div>
+      {children}
+    </section>
+  );
+}
 
-    useEffect(() => {
-        invoke('api_get_transcription_vocabulary')
-            .then((value) => {
-                const text = (value as string) || '';
-                setVocabulary(text);
-                setSavedVocabulary(text);
-            })
-            .catch((err) => console.error('Failed to load transcription vocabulary:', err));
-    }, []);
+/**
+ * Settings → Transcription: the four speech models the app runs (all English,
+ * all on this Mac), where the live model runs, and when the transcript is
+ * redone after a meeting. There is nothing to choose between; each model is
+ * downloaded or not.
+ */
+export function TranscriptSettings() {
+  const [status, setStatus] = useState<SpeechModelsStatus | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [progress, setProgress] = useState<ProgressByKind>({});
+  const progressRef = useRef(progress);
+  progressRef.current = progress;
+  const [cancelling, setCancelling] = useState(false);
 
-    const handleSaveVocabulary = async () => {
-        setVocabularySaveState('saving');
-        try {
-            await invoke('api_set_transcription_vocabulary', { vocabulary });
-            setSavedVocabulary(vocabulary);
-            setVocabularySaveState('saved');
-        } catch (err) {
-            console.error('Failed to save transcription vocabulary:', err);
-            setVocabularySaveState('error');
-        }
+  const refresh = useCallback(async () => {
+    try {
+      setStatus(await speechModelsApi.status());
+      setLoadError(null);
+    } catch (error) {
+      console.error('Failed to load the speech models:', error);
+      setLoadError(errorText(error));
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+    const unlisten = listen<SpeechModelDownloadProgressEvent>(SPEECH_MODEL_DOWNLOAD_PROGRESS_EVENT, (event) => {
+      const update = event.payload;
+      setProgress((previous) => ({ ...previous, [update.kind]: update }));
+      if (update.status !== 'downloading') {
+        if (update.status !== 'completed') setCancelling(false);
+        void refresh();
+      }
+    });
+    return () => {
+      void unlisten.then((fn) => fn());
     };
+  }, [refresh]);
 
-    // Sync uiProvider when backend config changes (e.g., after model selection or initial load)
-    useEffect(() => {
-        setUiProvider(transcriptModelConfig.provider);
-    }, [transcriptModelConfig.provider]);
+  const downloading =
+    Object.values(progress).some((event) => event?.status === 'downloading')
+    || (status?.models.some((model) => model.downloading) ?? false);
 
-    useEffect(() => {
-        if (transcriptModelConfig.provider === 'localWhisper' || transcriptModelConfig.provider === 'parakeet') {
-            setApiKey(null);
+  const download = useCallback(async (kinds?: SpeechModelKind[]) => {
+    const requested = (status?.models ?? []).filter(
+      (model) => !model.downloaded && (!kinds || kinds.includes(model.kind)),
+    );
+    setProgress((previous) => {
+      const next = { ...previous };
+      for (const model of requested) next[model.kind] = pendingProgress(model.kind, model.sizeBytes);
+      return next;
+    });
+    try {
+      await speechModelsApi.download(kinds);
+    } catch (error) {
+      // A failed model reports itself through its progress event; anything
+      // else (another download already running, no network) only lands here.
+      console.warn('Speech model download did not finish:', error);
+      const reported = requested.some((model) => {
+        const state = progressRef.current[model.kind]?.status;
+        return state === 'error' || state === 'cancelled';
+      });
+      if (!reported) toast.error('Could not download the speech models', { description: errorText(error) });
+    } finally {
+      // Nothing is downloading once the call returns: clear the stand-ins of
+      // models a cancel or failure left queued.
+      setProgress((previous) => {
+        const next = { ...previous };
+        for (const model of requested) {
+          if (next[model.kind]?.status === 'downloading') delete next[model.kind];
         }
-    }, [transcriptModelConfig.provider]);
+        return next;
+      });
+      setCancelling(false);
+      void refresh();
+    }
+  }, [status, refresh]);
 
-    const fetchApiKey = async (provider: string) => {
-        try {
+  const cancel = useCallback(() => {
+    setCancelling(true);
+    speechModelsApi.cancelDownload().catch((error) => {
+      setCancelling(false);
+      console.error('Failed to cancel the speech model download:', error);
+    });
+  }, []);
 
-            const data = await invoke('api_get_transcript_api_key', { provider }) as string;
+  const remove = useCallback(async (kind: SpeechModelKind) => {
+    try {
+      await speechModelsApi.deleteModel(kind);
+      setProgress((previous) => {
+        const next = { ...previous };
+        delete next[kind];
+        return next;
+      });
+    } catch (error) {
+      toast.error('Could not delete the model', { description: errorText(error) });
+    } finally {
+      void refresh();
+    }
+  }, [refresh]);
 
-            setApiKey(data || '');
-        } catch (err) {
-            console.error('Error fetching API key:', err);
-            setApiKey(null);
-        }
-    };
-    const modelOptions = {
-        localWhisper: [], // Model selection handled by ModelManager component
-        parakeet: [], // Model selection handled by ParakeetModelManager component
-        deepgram: ['nova-2-phonecall'],
-        elevenLabs: ['eleven_multilingual_v2'],
-        groq: ['llama-3.3-70b-versatile'],
-        openai: ['gpt-4o'],
-    };
-    const requiresApiKey = transcriptModelConfig.provider === 'deepgram' || transcriptModelConfig.provider === 'elevenLabs' || transcriptModelConfig.provider === 'openai' || transcriptModelConfig.provider === 'groq';
+  const openFolder = useCallback(() => {
+    speechModelsApi.openFolder().catch((error) => {
+      toast.error('Could not open the models folder', { description: errorText(error) });
+    });
+  }, []);
 
-    const handleInputClick = () => {
-        if (isApiKeyLocked) {
-            setIsLockButtonVibrating(true);
-            setTimeout(() => setIsLockButtonVibrating(false), 500);
-        }
-    };
-
-    const handleWhisperModelSelect = (modelName: string) => {
-        // Always update config when model is selected, regardless of current provider
-        // This ensures the model is set when user switches back
-        setTranscriptModelConfig({
-            ...transcriptModelConfig,
-            provider: 'localWhisper', // Ensure provider is set correctly
-            model: modelName
-        });
-        // Close modal after selection
-        if (onModelSelect) {
-            onModelSelect();
-        }
-    };
-
-    const handleParakeetModelSelect = (modelName: string) => {
-        // Always update config when model is selected, regardless of current provider
-        // This ensures the model is set when user switches back
-        setTranscriptModelConfig({
-            ...transcriptModelConfig,
-            provider: 'parakeet', // Ensure provider is set correctly
-            model: modelName
-        });
-        // Close modal after selection
-        if (onModelSelect) {
-            onModelSelect();
-        }
-    };
-
+  const card = (kind: SpeechModelKind) => {
+    const model = speechModel(status, kind);
+    if (!model) return null;
+    const event = progress[kind] ?? null;
+    const cardStatus = speechModelCardStatus(model, event);
+    const isDownloading = typeof cardStatus === 'object' && 'Downloading' in cardStatus;
     return (
-        <div>
-            <div>
-                {/* <div className="flex justify-between items-center mb-4">
-                    <h3 className="text-lg font-semibold text-ink">Transcript Settings</h3>
-                </div> */}
-                <div className="space-y-4 pb-6">
-                    <div>
-                        <Label className="block text-sm font-medium text-ink mb-1">
-                            Final transcript model
-                        </Label>
-                        <p className="text-xs text-ink-muted mb-2 mx-1">
-                            Re-transcribes the whole recording after each meeting and becomes the kept transcript.
-                            Whisper is recommended: it handles accents well and uses your custom vocabulary.
-                        </p>
-                        <div className="flex space-x-2 mx-1">
-                            <Select
-                                value={uiProvider}
-                                onValueChange={(value) => {
-                                    const provider = value as TranscriptModelProps['provider'];
-                                    setUiProvider(provider);
-                                    if (provider !== 'localWhisper' && provider !== 'parakeet') {
-                                        fetchApiKey(provider);
-                                    }
-                                }}
-                            >
-                                <SelectTrigger aria-label="Transcription provider" className='focus:ring-2 focus:ring-focus'>
-                                    <SelectValue placeholder="Select provider" />
-                                </SelectTrigger>
-                                <SelectContent>
-                                    <SelectItem value="localWhisper">Whisper (Recommended)</SelectItem>
-                                    <SelectItem value="parakeet">Parakeet</SelectItem>
-                                    {/* <SelectItem value="deepgram">☁️ Deepgram (Backup)</SelectItem>
-                                    <SelectItem value="elevenLabs">☁️ ElevenLabs</SelectItem>
-                                    <SelectItem value="groq">☁️ Groq</SelectItem>
-                                    <SelectItem value="openai">☁️ OpenAI</SelectItem> */}
-                                </SelectContent>
-                            </Select>
+      <TranscriptModelCard
+        key={kind}
+        displayName={model.displayName}
+        details={`${SPEECH_MODEL_PURPOSE[kind]} · ${formatBytes(model.sizeBytes)}`}
+        status={cardStatus}
+        sizeMb={model.sizeBytes / BYTES_PER_MIB}
+        isSelected
+        isRecommended={false}
+        isCancelling={cancelling && isDownloading}
+        deleteDisabled={downloading}
+        downloadDisabled={downloading}
+        onSelect={() => {}}
+        onDownload={() => void download([kind])}
+        onCancel={cancel}
+        onDelete={() => void remove(kind)}
+      />
+    );
+  };
 
-                            {uiProvider !== 'localWhisper' && uiProvider !== 'parakeet' && (
-                                <Select
-                                    value={transcriptModelConfig.model}
-                                    onValueChange={(value) => {
-                                        const model = value as TranscriptModelProps['model'];
-                                        setTranscriptModelConfig({ ...transcriptModelConfig, provider: uiProvider, model });
-                                    }}
-                                >
-                                    <SelectTrigger aria-label="Transcription model" className='focus:ring-2 focus:ring-focus'>
-                                        <SelectValue placeholder="Select model" />
-                                    </SelectTrigger>
-                                    <SelectContent>
-                                        {modelOptions[uiProvider].map((model) => (
-                                            <SelectItem key={model} value={model}>{model}</SelectItem>
-                                        ))}
-                                    </SelectContent>
-                                </Select>
-                            )}
+  const live = speechModel(status, 'live-asr');
+  const missingBytes = missingSpeechBytes(status);
+  // Before macOS 15 the models cannot run, so there is nothing to download.
+  const osSupported = transcriptionOsSupported(status);
 
-                        </div>
-                    </div>
+  return (
+    <div className="space-y-8 pb-6">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <p className="mx-1 text-xs text-ink-muted">
+          Transcription runs on this Mac in English. Nothing leaves your computer.
+        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          {osSupported && missingBytes > 0 && (
+            <Button variant="outline" size="sm" disabled={downloading} onClick={() => void download()}>
+              <Download className="h-4 w-4" />
+              Download all ({formatBytes(missingBytes)})
+            </Button>
+          )}
+          <Button variant="ghost" size="sm" onClick={openFolder}>
+            <FolderOpen className="h-4 w-4" />
+            Open folder
+          </Button>
+        </div>
+      </div>
 
-                    {uiProvider === 'localWhisper' && (
-                        <div className="mt-6">
-                            <ModelManager
-                                selectedModel={transcriptModelConfig.provider === 'localWhisper' ? transcriptModelConfig.model : undefined}
-                                onModelSelect={handleWhisperModelSelect}
-                                autoSave={true}
-                            />
-                        </div>
-                    )}
+      {loadError && (
+        <div className={cn(panel.error, 'rounded-lg p-3 text-sm')}>
+          Could not read the speech models: {loadError}
+        </div>
+      )}
 
-                    {uiProvider === 'parakeet' && (
-                        <div className="mt-6">
-                            <ParakeetModelManager
-                                selectedModel={transcriptModelConfig.provider === 'parakeet' ? transcriptModelConfig.model : undefined}
-                                onModelSelect={handleParakeetModelSelect}
-                                autoSave={true}
-                            />
-                        </div>
-                    )}
+      {!osSupported && <TranscriptionUnsupportedNotice />}
 
-                    {uiProvider === 'localWhisper' && (
-                        <div className="mt-6">
-                            <Label htmlFor="transcription-vocabulary" className="block text-sm font-medium text-ink mb-1">
-                                Custom vocabulary
-                            </Label>
-                            <p className="text-xs text-ink-muted mb-2 mx-1">
-                                Names, acronyms, and product terms to bias Whisper. Separate with commas.
-                            </p>
-                            <Textarea
-                                id="transcription-vocabulary"
-                                className="mx-1 focus:ring-2 focus:ring-focus"
-                                rows={3}
-                                value={vocabulary}
-                                onChange={(e) => {
-                                    setVocabulary(e.target.value);
-                                    setVocabularySaveState(current => current === 'saving' ? current : null);
-                                }}
-                                disabled={vocabularySaveState === 'saving'}
-                                placeholder="e.g. Minutes, OKR, Kubernetes, Acme Corp"
-                            />
-                            <div className="mx-1 mt-2 flex flex-wrap items-center gap-3">
-                                <Button
-                                    type="button"
-                                    size="sm"
-                                    onClick={handleSaveVocabulary}
-                                    disabled={vocabulary === savedVocabulary || vocabularySaveState === 'saving'}
-                                >
-                                    {vocabularySaveState === 'saving' ? 'Saving…' : 'Save vocabulary'}
-                                </Button>
-                                {vocabularyFeedbackState && (
-                                    <SaveFeedback
-                                        state={vocabularyFeedbackState}
-                                        labels={{ unsaved: 'Vocabulary changes not saved', saving: 'Saving vocabulary', saved: 'Vocabulary saved', error: 'Could not save vocabulary; draft preserved' }}
-                                    />
-                                )}
-                            </div>
-                        </div>
-                    )}
+      {osSupported && (
+        <>
+          <Section
+            title="Live transcription"
+            description="Streams text while you record. After the meeting, the transcript is redone with Parakeet."
+          >
+            {card('live-asr')}
+            {live && !live.downloaded && progress['live-asr']?.status !== 'downloading' && (
+              <p className="mx-1 text-xs text-ink-muted">
+                Until it is downloaded, meetings are recorded without live text and transcribed afterwards.
+              </p>
+            )}
+            <LiveEngineSettings />
+          </Section>
 
+          <Section
+            title="Transcript after meetings"
+            description="Both are needed to transcribe a meeting after it ends, to import audio and to re-transcribe."
+          >
+            {card('final-asr')}
+            {card('vad')}
+            <FinalPassTimingSettings />
+          </Section>
 
-                    {requiresApiKey && (
-                        <div>
-                            <Label className="block text-sm font-medium text-ink mb-1">
-                                API Key
-                            </Label>
-                            <div className="relative mx-1">
-                                <Input
-                                    type={showApiKey ? "text" : "password"}
-                                    className={`pr-24 focus:ring-2 focus:ring-focus ${isApiKeyLocked ? 'bg-surface-2 cursor-not-allowed' : ''
-                                        }`}
-                                    value={apiKey || ''}
-                                    onChange={(e) => setApiKey(e.target.value)}
-                                    disabled={isApiKeyLocked}
-                                    onClick={handleInputClick}
-                                    placeholder="Enter your API key"
-                                />
-                                {isApiKeyLocked && (
-                                    <div
-                                        onClick={handleInputClick}
-                                        className="absolute inset-0 flex items-center justify-center bg-surface-2 bg-opacity-50 rounded-md cursor-not-allowed"
-                                    />
-                                )}
-                                <div className="absolute inset-y-0 right-0 pr-1 flex items-center">
-                                    <Button
-                                        type="button"
-                                        variant="ghost"
-                                        size="icon"
-                                        onClick={() => setIsApiKeyLocked(!isApiKeyLocked)}
-                                        className={`transition-colors duration-200 ${isLockButtonVibrating ? `animate-vibrate ${toneText.error}` : ''
-                                            }`}
-                                        title={isApiKeyLocked ? "Unlock to edit" : "Lock to prevent editing"}
-                                    >
-                                        {isApiKeyLocked ? <Lock className="h-4 w-4" /> : <Unlock className="h-4 w-4" />}
-                                    </Button>
-                                    <Button
-                                        type="button"
-                                        variant="ghost"
-                                        size="icon"
-                                        onClick={() => setShowApiKey(!showApiKey)}
-                                    >
-                                        {showApiKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                                    </Button>
-                                </div>
-                            </div>
-                        </div>
-                    )}
-                </div>
-            </div>
-        </div >
-    )
+          <Section
+            title="Speakers"
+            description="Labels who said what after each meeting. Without it, transcripts have no speaker names."
+          >
+            {card('diarization')}
+          </Section>
+        </>
+      )}
+    </div>
+  );
 }
-
-
-
-

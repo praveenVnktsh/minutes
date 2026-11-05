@@ -5,6 +5,7 @@ import { OnboardingContainer } from '../OnboardingContainer';
 import { useOnboarding } from '@/contexts/OnboardingContext';
 import { formatBytes } from '@/lib/download-display';
 import { onboardingDownloadTotal } from '@/lib/liveNotesOnboarding';
+import { TranscriptionUnsupportedNotice } from '@/components/TranscriptionUnsupportedNotice';
 import {
   Tooltip,
   TooltipContent,
@@ -18,7 +19,8 @@ const SIZE_UNKNOWN = 'Checking size…';
 export function SetupOverviewStep() {
   const {
     goNext,
-    parakeetSizeBytes,
+    speechSizeBytes,
+    transcriptionSupported,
     summaryModelSizeBytes,
     liveNotesModelSizeBytes,
     liveNotesOptIn,
@@ -26,33 +28,36 @@ export function SetupOverviewStep() {
     selectedSummaryModel,
     startBackgroundDownloads,
   } = useOnboarding();
-  const steps = [
+  // Before macOS 15 the speech models cannot run, so their download is left out entirely.
+  const allSteps = [
     {
-      number: 1,
       type: 'transcription',
-      title: 'Download Transcription Engine',
-      sizeBytes: parakeetSizeBytes,
-      note: 'Required — setup waits for this one.',
+      title: 'Download Speech Models',
+      sizeBytes: speechSizeBytes,
+      note: 'Required — setup waits for the transcript models; live text and speakers follow in the background.',
     },
     {
-      number: 2,
       type: 'summarization',
       title: 'Download Summarization Engine',
       sizeBytes: summaryModelSizeBytes,
       note: 'Continues in the background — you can start using Minutes before it finishes.',
     },
     {
-      number: 3,
       type: 'live-notes',
       title: 'Live Notes Engine (optional)',
       sizeBytes: liveNotesModelSizeBytes,
-      note: 'A small, faster model for notes while you record. Downloads after the two above finish.',
+      note: transcriptionSupported
+        ? 'A small, faster model for notes while you record. Downloads after the two above finish.'
+        : 'A small, faster model for notes while you record. Downloads after the one above finishes.',
     },
   ];
+  const steps = allSteps
+    .filter((step) => transcriptionSupported || step.type !== 'transcription')
+    .map((step, index) => ({ ...step, number: index + 1 }));
 
   // A total is only honest once its numbers are real, so a half-known total is no total.
   const total = onboardingDownloadTotal(
-    parakeetSizeBytes,
+    transcriptionSupported ? speechSizeBytes : 0,
     summaryModelSizeBytes,
     liveNotesModelSizeBytes,
     liveNotesOptIn,
@@ -65,7 +70,7 @@ export function SetupOverviewStep() {
     // summary model, which the next screen picks up, and the next screen also reports and
     // retries failures — so navigate either way.
     startBackgroundDownloads({
-      includeParakeet: true,
+      includeSpeech: transcriptionSupported,
       includeSummary: true,
       summaryModel: selectedSummaryModel,
     }).catch((error) => {
@@ -77,11 +82,15 @@ export function SetupOverviewStep() {
   return (
     <OnboardingContainer
       title="Setup Overview"
-      description="Minutes requires that you download the Transcription & Summarization AI models for the software to work."
+      description="Minutes requires that you download the speech and summarization AI models for the software to work."
       step={2}
       totalSteps={5}
     >
       <div className="flex flex-col items-center space-y-10">
+        {!transcriptionSupported && (
+          <TranscriptionUnsupportedNotice className="w-full max-w-md" />
+        )}
+
         {/* Steps Card */}
         <div className="w-full max-w-md bg-surface-raised rounded-lg border border-hairline p-4">
           <div className="space-y-4">

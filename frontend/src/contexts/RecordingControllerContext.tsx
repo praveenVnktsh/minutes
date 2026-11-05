@@ -27,16 +27,13 @@ import {
 } from '@/lib/liveTranscription';
 import { LIVE_NOTES_FALLBACK_FOLDER_KEY, LIVE_NOTES_FALLBACK_KEY } from '@/lib/liveNotes';
 import {
-  getProviderCommands,
-  hasDownloadingModel,
-  type ModelWithStatus,
-} from '@/lib/transcription-model-readiness';
+  recordingWithoutLiveTextMessage,
+  speechModelsApi,
+  speechReadiness,
+  type SpeechReadiness,
+} from '@/lib/speechModels';
 import { markDeferredMeetingForAutoSummary } from '@/lib/autoSummary';
-import {
-  finalPassNotice,
-  finalPassTookOver,
-  type LiveTranscriptionSettings,
-} from '@/lib/liveTranscriptionModels';
+import { finalPassNotice, finalPassTookOver, finalPassWaitsForModels } from '@/lib/liveTranscriptionModels';
 import { toast } from 'sonner';
 import { showRecordingNotification } from '@/lib/recordingNotification';
 import {
@@ -147,10 +144,6 @@ interface LifecycleOperation {
 }
 
 class LifecycleBusyError extends Error {}
-
-interface TranscriptConfig {
-  provider?: string;
-}
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -363,7 +356,7 @@ export function RecordingControllerProvider({
   feedbackManagedGlobally?: boolean;
 }) {
   const router = useRouter();
-  const { selectedDevices, betaFeatures, selectedLanguage, transcriptModelConfig } = useConfig();
+  const { selectedDevices, betaFeatures } = useConfig();
   const { recording, activeMeetingId: authoritativeMeetingId, snapshot, rehydrate } = useMeetingActivity();
   const recordingState = useRecordingState();
   const {
@@ -475,30 +468,10 @@ export function RecordingControllerProvider({
     setFeedback({ kind, title, message: messageOf(error), settingsSection });
   }, []);
 
-  // Whether any engine can produce live text. The backend falls back from the
-  // configured final model to any downloaded engine (and the live model), so
-  // every one of them counts, starting with the configured provider.
-  const checkModelReady = useCallback(async (): Promise<'ready' | 'downloading' | 'missing'> => {
-    const config = await invoke<TranscriptConfig | null>('api_get_transcript_config').catch(() => null);
-    const preferred = config?.provider || 'parakeet';
-    const providers = [preferred, ...['localWhisper', 'parakeet'].filter((provider) => provider !== preferred)];
-    let downloading = false;
-    for (const provider of providers) {
-      const commands = getProviderCommands(provider);
-      if (!commands) continue;
-      try {
-        await invoke(commands.initialize);
-        if (await invoke<boolean>(commands.hasAvailableModels)) return 'ready';
-        const models = await invoke<ModelWithStatus[]>(commands.getAvailableModels).catch(() => []);
-        downloading ||= hasDownloadingModel(models);
-      } catch {
-        // Try the next engine.
-      }
-    }
-    const live = await invoke<LiveTranscriptionSettings | null>('get_live_transcription_settings').catch(() => null);
-    if (live?.liveModelStatus?.downloaded) return 'ready';
-    downloading ||= Boolean(live?.liveModelStatus?.downloading);
-    return downloading ? 'downloading' : 'missing';
+  // Whether the meeting can be transcribed: live, or afterwards by the
+  // transcript models. Either one is enough to record.
+  const checkModelReady = useCallback(async (): Promise<SpeechReadiness> => {
+    return speechReadiness(await speechModelsApi.status().catch(() => null));
   }, []);
 
   const persistStartedSession = useCallback(async (session: SessionRecord) => {
@@ -562,13 +535,12 @@ export function RecordingControllerProvider({
       await invoke('set_live_transcription_enabled', { enabled: liveTranscription });
       if (liveTranscription) {
         // A missing model never stops a recording: the backend records
-        // without live text and the final pass transcribes it afterwards.
+        // without live text and queues the final pass, which runs on its own
+        // once the speech models finish downloading.
         const readiness = await checkModelReady();
         if (readiness !== 'ready') {
           toast.warning('Recording without live text', {
-            description: readiness === 'downloading'
-              ? 'The transcription model is still downloading. The meeting is transcribed once it finishes.'
-              : 'No transcription model is downloaded yet. Download one in Settings → Transcription; the recording is kept.',
+            description: recordingWithoutLiveTextMessage(readiness),
           });
         }
       }
@@ -837,19 +809,17 @@ export function RecordingControllerProvider({
           return;
         }
 
-        const passLanguage = selectedLanguage === 'auto' || selectedLanguage === 'auto-translate'
-          ? null
-          : selectedLanguage;
         // The final pass re-transcribes the whole recording with the final
         // model, replaces the live transcript and rediarizes; its completion
         // (final-transcript-pass-complete / the task turning ready) drives the
         // summary. Deferred mode forces it, since it is the only transcription.
+        // Transcription is English-only, so no language is passed.
         const startFinalPass = async (force: boolean): Promise<unknown> => {
           if (!session.folderPath) return null;
           const result = await invoke('start_final_transcript_pass', {
             meetingId: savedMeetingId,
             meetingFolderPath: session.folderPath,
-            language: passLanguage,
+            language: null,
             force,
           }).catch((error) => {
             console.warn('Final transcript pass could not be queued:', error);
@@ -862,13 +832,16 @@ export function RecordingControllerProvider({
         let finalPassQueued = false;
         if (!finalization.postProcessingStarted && deferred) {
           if (!session.folderPath) throw new Error('The recording has no audio folder for deferred transcription.');
-          if (!finalPassTookOver(await startFinalPass(true))) {
+          const started = await startFinalPass(true);
+          // A pass waiting for the speech models runs once they download;
+          // retranscribing now would only fail for the same missing model.
+          if (!finalPassTookOver(started) && !finalPassWaitsForModels(started)) {
             await invoke('start_retranscription_command', {
               meetingId: savedMeetingId,
               meetingFolderPath: session.folderPath,
-              language: passLanguage,
-              model: transcriptModelConfig.model || null,
-              provider: transcriptModelConfig.provider || null,
+              language: null,
+              model: null,
+              provider: null,
             });
           }
           markDeferredMeetingForAutoSummary(savedMeetingId);
@@ -970,11 +943,8 @@ export function RecordingControllerProvider({
     recordingState,
     refetchMeetings,
     reportError,
-    selectedLanguage,
     setCurrentMeeting,
     setIsMeetingActive,
-    transcriptModelConfig.model,
-    transcriptModelConfig.provider,
     runLifecycle,
   ]);
   finalizeHandlerRef.current = finalizeRecording;

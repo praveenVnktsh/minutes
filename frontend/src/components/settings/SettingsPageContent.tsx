@@ -11,11 +11,8 @@ import { PreferenceSettings } from '@/components/PreferenceSettings';
 import { RecordingSettings } from '@/components/RecordingSettings';
 import { SummaryModelSettings } from '@/components/SummaryModelSettings';
 import { TranscriptSettings } from '@/components/TranscriptSettings';
-import { TranscriptLanguageSettings } from '@/components/TranscriptLanguageSettings';
-import { LiveTranscriptionModelSettings } from '@/components/LiveTranscriptionModelSettings';
 import { WebhookSettings } from '@/components/WebhookSettings';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { useConfig } from '@/contexts/ConfigContext';
 import { isSettingsSection, resolveSettingsSection, settingsHref } from './settingsSections';
 
 const TABS = [
@@ -32,7 +29,6 @@ const TABS = [
 export function SettingsPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const { transcriptModelConfig, setTranscriptModelConfig } = useConfig();
   const requestedSection = searchParams.get('section');
   const activeSection = resolveSettingsSection(requestedSection);
 
@@ -79,11 +75,7 @@ export function SettingsPageContent() {
 
             <TabsContent value="general" className="mt-6 space-y-6"><AppearanceSetting /><PreferenceSettings /></TabsContent>
             <TabsContent value="recording" className="mt-6"><RecordingSettings /></TabsContent>
-            <TabsContent value="transcription" className="mt-6">
-              <TranscriptLanguageSettings />
-              <LiveTranscriptionModelSettings />
-              <TranscriptSettings transcriptModelConfig={transcriptModelConfig} setTranscriptModelConfig={setTranscriptModelConfig} />
-            </TabsContent>
+            <TabsContent value="transcription" className="mt-6"><TranscriptSettings /></TabsContent>
             <TabsContent value="summary" className="mt-6"><SummaryModelSettings /></TabsContent>
             <TabsContent value="integrations" className="mt-6"><CalendarSettings /><WebhookSettings /></TabsContent>
             <TabsContent value="beta" className="mt-6"><BetaSettings /></TabsContent>

@@ -3,6 +3,7 @@ import {
   applyPartial,
   finalPassNotice,
   finalPassTookOver,
+  finalPassWaitsForModels,
   orderedPartials,
   type FinalPassStarted,
 } from './liveTranscriptionModels';
@@ -12,8 +13,8 @@ const queued: FinalPassStarted = {
   taskId: 'task-1',
   skipReason: null,
   message: null,
-  provider: 'localWhisper',
-  model: 'large-v3-turbo-q5_0',
+  provider: 'parakeet',
+  model: 'parakeet-tdt-0.6b-v2-coreml',
   fallbackNotice: null,
 };
 
@@ -29,12 +30,25 @@ describe('finalPassTookOver', () => {
   });
 });
 
+describe('finalPassWaitsForModels', () => {
+  test('only a pass waiting for the speech models', () => {
+    expect(finalPassWaitsForModels({ ...queued, status: 'waiting', taskId: null, waitingFor: 'models' })).toBe(true);
+    expect(finalPassWaitsForModels({ ...queued, status: 'waiting', taskId: null, waitingFor: 'power' })).toBe(false);
+    // Older builds only waited for power and sent no field.
+    expect(finalPassWaitsForModels({ ...queued, status: 'waiting', taskId: null })).toBe(false);
+    expect(finalPassWaitsForModels(queued)).toBe(false);
+    expect(finalPassWaitsForModels(null)).toBe(false);
+  });
+});
+
 describe('finalPassNotice', () => {
-  test('reports a fallback engine and meaningful skips, but not a disabled pass', () => {
+  test('reports a fallback notice and meaningful skips, but not a disabled pass', () => {
     expect(finalPassNotice(queued)).toBeNull();
-    expect(finalPassNotice({ ...queued, fallbackNotice: 'Whisper is not downloaded' })).toBe(
-      'Whisper is not downloaded',
-    );
+    // Builds without the field queue silently.
+    const withoutNotice: FinalPassStarted = { ...queued };
+    delete withoutNotice.fallbackNotice;
+    expect(finalPassNotice(withoutNotice)).toBeNull();
+    expect(finalPassNotice({ ...queued, fallbackNotice: 'Older engine used' })).toBe('Older engine used');
     expect(
       finalPassNotice({ ...queued, status: 'skipped', skipReason: 'no_engine', message: 'No model' }),
     ).toBe('No model');

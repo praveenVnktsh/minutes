@@ -63,7 +63,7 @@ function channelReport(
 function modelReport(outcome: ModelCheckOutcome): ModelReport {
   return {
     outcome,
-    modelName: outcome === 'loaded' ? 'parakeet-tdt-0.6b-v3' : null,
+    modelName: outcome === 'loaded' ? 'parakeet-tdt-0.6b-v2-coreml' : null,
     detail: null,
   };
 }
@@ -223,7 +223,7 @@ describe('describeModelOutcome', () => {
   test('names the model it loaded and asks for nothing', () => {
     const { message, fix } = describeModelOutcome(modelReport('loaded'));
 
-    expect(message).toContain('parakeet-tdt-0.6b-v3');
+    expect(message).toContain('parakeet-tdt-0.6b-v2-coreml');
     expect(fix).toBeUndefined();
   });
 

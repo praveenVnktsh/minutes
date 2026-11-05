@@ -1,5 +1,3 @@
-import { DEFAULT_WHISPER_MODEL } from '@/constants/modelDefaults';
-
 export type ModelProvider =
   | 'ollama'
   | 'groq'
@@ -12,6 +10,7 @@ export type ModelProvider =
 export interface ModelConfig {
   provider: ModelProvider;
   model: string;
+  /** Unused since Whisper was removed; the save command still takes it. */
   whisperModel: string;
   apiKey?: string | null;
   ollamaEndpoint?: string | null;
@@ -58,6 +57,6 @@ export function mergeProviderKeyHydration(
 export const DEFAULT_MODEL_CONFIG: ModelConfig = {
   provider: 'builtin-ai',
   model: 'qwen3.5:4b',
-  whisperModel: DEFAULT_WHISPER_MODEL,
+  whisperModel: '',
   ollamaEndpoint: null,
 };

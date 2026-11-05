@@ -1,6 +1,7 @@
 //! The automatic final transcript pass: after a recording is saved, re-run the
-//! final model over the whole recording through the transcription queue. The
-//! result replaces the live transcript and diarization reruns on it.
+//! final model (Parakeet TDT v2 in the batch speech-helper) over the whole
+//! recording through the transcription queue. The result replaces the live
+//! transcript and diarization reruns on it.
 //!
 //! Every outcome ends with [`COMPLETE_EVENT`], the hook for anything that
 //! should run on the kept transcript (the auto-summary, and the planned
@@ -11,14 +12,19 @@ use log::{info, warn};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
+use super::common::{FINAL_MODEL, FINAL_PROVIDER};
 use super::transcription_queue::{get_queue, TaskStatus, TaskType, TranscriptionTask};
 use super::transcription_settings::{self as settings, FinalPassDecision, FinalPassSkip};
+use crate::audio::speech::models::{self as speech_models, Availability};
 
 pub const COMPLETE_EVENT: &str = "final-transcript-pass-complete";
 pub const TASK_TITLE: &str = "Final transcript";
 /// `{ meeting_id, waiting }`: a meeting's pass started or stopped waiting for
 /// the Mac to be plugged in.
 pub const WAITING_EVENT: &str = "final-transcript-pass-waiting";
+/// What a waiting pass waits for (`FinalPassStarted::waiting_for`).
+pub const WAITING_FOR_POWER: &str = "power";
+pub const WAITING_FOR_MODELS: &str = "models";
 /// How often the power watcher checks for waiting passes.
 const POWER_POLL: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -37,14 +43,18 @@ pub struct FinalPassComplete {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FinalPassStarted {
-    /// "queued", "waiting" (for the Mac to be plugged in) or "skipped".
+    /// "queued", "waiting" (see `waiting_for`) or "skipped".
     pub status: &'static str,
+    /// For "waiting": "power" (the Mac to be plugged in) or "models" (the
+    /// transcript models to finish downloading).
+    pub waiting_for: Option<&'static str>,
     pub task_id: Option<String>,
     pub skip_reason: Option<FinalPassSkip>,
     pub message: Option<String>,
     pub provider: Option<String>,
     pub model: Option<String>,
-    /// Set when the configured final model was missing and another was used.
+    /// Always `None`: there is one final model, so nothing falls back. Kept
+    /// on the wire for the frontend's type.
     pub fallback_notice: Option<String>,
 }
 
@@ -111,9 +121,7 @@ async fn queue_final_pass<R: Runtime>(
 
     let timing = settings::load_final_pass_timing(app);
     let saving_power = crate::quiet_work::saving_power_now();
-    let preferred = settings::configured_final_model(app).await;
-    let available = settings::availability().await;
-    let engine = settings::choose_final_engine(&preferred, &available);
+    let models = speech_models::availability(app, &speech_models::BATCH_KINDS);
 
     match settings::decide_final_pass(
         timing,
@@ -121,9 +129,33 @@ async fn queue_final_pass<R: Runtime>(
         force,
         has_revisions,
         has_transcripts,
-        engine,
+        models,
     ) {
-        FinalPassDecision::WaitForPower(choice) => {
+        FinalPassDecision::WaitForModels => {
+            mark_waiting_for_models(
+                pool,
+                &meeting_id,
+                &meeting_folder_path,
+                language.as_deref(),
+                force,
+            )
+            .await
+            .map_err(|error| format!("Could not record the waiting final pass: {error}"))?;
+            info!("Final pass for {meeting_id} waits for the transcript models to download");
+            // Not (or no longer) waiting for power.
+            emit_waiting(app, &meeting_id, false);
+            Ok(FinalPassStarted {
+                status: "waiting",
+                waiting_for: Some(WAITING_FOR_MODELS),
+                task_id: None,
+                skip_reason: None,
+                message: Some(WAITING_FOR_MODELS_MESSAGE.to_string()),
+                provider: Some(FINAL_PROVIDER.to_string()),
+                model: Some(FINAL_MODEL.to_string()),
+                fallback_notice: None,
+            })
+        }
+        FinalPassDecision::WaitForPower => {
             mark_waiting(pool, &meeting_id, &meeting_folder_path, language.as_deref())
                 .await
                 .map_err(|error| format!("Could not record the waiting final pass: {error}"))?;
@@ -131,18 +163,20 @@ async fn queue_final_pass<R: Runtime>(
             emit_waiting(app, &meeting_id, true);
             Ok(FinalPassStarted {
                 status: "waiting",
+                waiting_for: Some(WAITING_FOR_POWER),
                 task_id: None,
                 skip_reason: None,
                 message: Some(WAITING_MESSAGE.to_string()),
-                provider: Some(choice.engine.provider),
-                model: Some(choice.engine.model),
-                fallback_notice: choice.fallback_notice,
+                provider: Some(FINAL_PROVIDER.to_string()),
+                model: Some(FINAL_MODEL.to_string()),
+                fallback_notice: None,
             })
         }
         FinalPassDecision::Skip(reason) => {
             info!("Final pass skipped for {meeting_id}: {reason:?}");
             Ok(FinalPassStarted {
                 status: "skipped",
+                waiting_for: None,
                 task_id: None,
                 skip_reason: Some(reason),
                 message: Some(reason.message().to_string()),
@@ -151,7 +185,7 @@ async fn queue_final_pass<R: Runtime>(
                 fallback_notice: None,
             })
         }
-        FinalPassDecision::Run(choice) => {
+        FinalPassDecision::Run => {
             // Durable before it is queued: the queue is in memory, and a quit
             // before the pass replaces the transcript must not lose it.
             if let Err(error) = mark_queued(
@@ -179,24 +213,22 @@ async fn queue_final_pass<R: Runtime>(
                 meeting_id: Some(meeting_id.clone()),
                 meeting_folder_path: Some(meeting_folder_path.clone()),
                 language,
-                model: Some(choice.engine.model.clone()),
-                provider: Some(choice.engine.provider.clone()),
+                model: Some(FINAL_MODEL.to_string()),
+                provider: Some(FINAL_PROVIDER.to_string()),
                 final_pass: true,
             };
             let task_id = get_queue().enqueue(app, task).await;
             emit_waiting(app, &meeting_id, false);
-            info!(
-                "Final pass queued for {meeting_id} with {} (task {task_id})",
-                choice.engine.display_name()
-            );
+            info!("Final pass queued for {meeting_id} with {FINAL_MODEL} (task {task_id})");
             Ok(FinalPassStarted {
                 status: "queued",
+                waiting_for: None,
                 task_id: Some(task_id),
                 skip_reason: None,
                 message: None,
-                provider: Some(choice.engine.provider),
-                model: Some(choice.engine.model),
-                fallback_notice: choice.fallback_notice,
+                provider: Some(FINAL_PROVIDER.to_string()),
+                model: Some(FINAL_MODEL.to_string()),
+                fallback_notice: None,
             })
         }
     }
@@ -204,6 +236,8 @@ async fn queue_final_pass<R: Runtime>(
 
 pub const WAITING_MESSAGE: &str =
     "The transcript will be improved when your Mac is plugged in and out of Low Power Mode.";
+pub const WAITING_FOR_MODELS_MESSAGE: &str =
+    "The transcript will be improved once the speech models finish downloading.";
 
 fn emit_waiting<R: Runtime>(app: &AppHandle<R>, meeting_id: &str, waiting: bool) {
     let payload = serde_json::json!({ "meeting_id": meeting_id, "waiting": waiting });
@@ -303,6 +337,9 @@ pub async fn keep_live_transcript<R: Runtime>(
     if let Err(error) = super::diarization::run_for_meeting(app, meeting_id, None).await {
         warning.push_str(&format!(". Speaker identification unavailable: {error}"));
     }
+    // The diarization started the batch helper again after the pass stopped
+    // it; stop it unless another queued task needs it.
+    super::common::release_batch_helper(Some(&task.task_id)).await;
     crate::meeting_activity::set_task_warning(app, &task.task_id, Some(warning.clone()));
     crate::meeting_activity::update_task(
         app,
@@ -365,7 +402,7 @@ pub(crate) async fn mark_queued(
         meeting_folder_path,
         language,
         force,
-        false,
+        Waiting::No,
     )
     .await
 }
@@ -377,7 +414,42 @@ pub(crate) async fn mark_waiting(
     meeting_folder_path: &str,
     language: Option<&str>,
 ) -> sqlx::Result<()> {
-    upsert(pool, meeting_id, meeting_folder_path, language, false, true).await
+    upsert(
+        pool,
+        meeting_id,
+        meeting_folder_path,
+        language,
+        false,
+        Waiting::ForPower,
+    )
+    .await
+}
+
+/// Record a pass that waits for the transcript models to download. `force`
+/// is kept for when it is queued.
+pub(crate) async fn mark_waiting_for_models(
+    pool: &sqlx::SqlitePool,
+    meeting_id: &str,
+    meeting_folder_path: &str,
+    language: Option<&str>,
+    force: bool,
+) -> sqlx::Result<()> {
+    upsert(
+        pool,
+        meeting_id,
+        meeting_folder_path,
+        language,
+        force,
+        Waiting::ForModels,
+    )
+    .await
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Waiting {
+    No,
+    ForPower,
+    ForModels,
 }
 
 async fn upsert(
@@ -386,21 +458,22 @@ async fn upsert(
     meeting_folder_path: &str,
     language: Option<&str>,
     force: bool,
-    waiting: bool,
+    waiting: Waiting,
 ) -> sqlx::Result<()> {
     sqlx::query(
-        "INSERT INTO pending_final_passes (meeting_id, meeting_folder_path, language, force, queued_at, waiting_for_power) \
-         VALUES (?, ?, ?, ?, ?, ?) \
+        "INSERT INTO pending_final_passes (meeting_id, meeting_folder_path, language, force, queued_at, waiting_for_power, waiting_for_models) \
+         VALUES (?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(meeting_id) DO UPDATE SET meeting_folder_path = excluded.meeting_folder_path, \
          language = excluded.language, force = excluded.force, queued_at = excluded.queued_at, \
-         waiting_for_power = excluded.waiting_for_power",
+         waiting_for_power = excluded.waiting_for_power, waiting_for_models = excluded.waiting_for_models",
     )
     .bind(meeting_id)
     .bind(meeting_folder_path)
     .bind(language)
     .bind(force)
     .bind(chrono::Utc::now().to_rfc3339())
-    .bind(waiting)
+    .bind(waiting == Waiting::ForPower)
+    .bind(waiting == Waiting::ForModels)
     .execute(pool)
     .await?;
     Ok(())
@@ -426,13 +499,29 @@ pub(crate) async fn waiting_passes(pool: &sqlx::SqlitePool) -> sqlx::Result<Vec<
     .await
 }
 
-/// Drop a waiting pass that will not run (turned off, edited, no model):
-/// the meeting keeps its live transcript, diarized when the meeting ended.
+/// Passes waiting for the transcript models, oldest first.
+pub(crate) async fn waiting_for_models_passes(
+    pool: &sqlx::SqlitePool,
+) -> sqlx::Result<Vec<PendingFinalPass>> {
+    sqlx::query_as::<_, PendingFinalPass>(
+        "SELECT meeting_id, meeting_folder_path, language, force, attempts FROM pending_final_passes \
+         WHERE waiting_for_models = 1 ORDER BY queued_at",
+    )
+    .fetch_all(pool)
+    .await
+}
+
+/// Drop a waiting pass (for power or models) that will not run (turned off,
+/// edited, no model): the meeting keeps its live transcript, diarized when
+/// the meeting ended.
 async fn drop_waiting(pool: &sqlx::SqlitePool, meeting_id: &str) -> sqlx::Result<()> {
-    sqlx::query("DELETE FROM pending_final_passes WHERE meeting_id = ? AND waiting_for_power = 1")
-        .bind(meeting_id)
-        .execute(pool)
-        .await?;
+    sqlx::query(
+        "DELETE FROM pending_final_passes WHERE meeting_id = ? \
+         AND (waiting_for_power = 1 OR waiting_for_models = 1)",
+    )
+    .bind(meeting_id)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -469,9 +558,10 @@ pub fn init_power_watcher<R: Runtime>(app: &AppHandle<R>) {
                     warn!("Final pass: could not list waiting passes: {error}");
                     Vec::new()
                 });
+                let recording = crate::audio::recording_commands::is_recording().await;
                 let step = watcher_step(
                     crate::quiet_work::saving_power_now(),
-                    crate::audio::recording_commands::is_recording().await,
+                    recording,
                     waiting.len(),
                 );
                 if step == WatcherStep::QueueWaiting {
@@ -480,32 +570,96 @@ pub fn init_power_watcher<R: Runtime>(app: &AppHandle<R>) {
                             "Final pass: the Mac is plugged in, running the waiting pass for {}",
                             pass.meeting_id
                         );
-                        match queue_final_pass(
-                            &app,
-                            pass.meeting_id.clone(),
-                            pass.meeting_folder_path.clone(),
-                            pass.language.clone(),
-                            false,
-                        )
-                        .await
-                        {
-                            Ok(started) if started.status == "skipped" => {
-                                if let Err(error) = drop_waiting(&pool, &pass.meeting_id).await {
-                                    warn!("Final pass: could not drop a waiting pass: {error}");
-                                }
-                                emit_waiting(&app, &pass.meeting_id, false);
-                            }
-                            Ok(_) => {}
-                            Err(error) => warn!(
-                                "Final pass: could not queue the waiting pass for {}: {error}",
-                                pass.meeting_id
-                            ),
-                        }
+                        queue_waiting(&app, &pool, &pass, false).await;
                     }
+                }
+                // Also catches models that arrived while a meeting was being
+                // recorded, or a download that was cancelled for good.
+                if !recording {
+                    run_waiting_for_models(&app, &pool).await;
                 }
             }
             tokio::time::sleep(POWER_POLL).await;
         }
+    });
+}
+
+/// Queue a waiting pass. One that will no longer run is dropped; one that
+/// still waits (for power or models) is recorded as such again.
+async fn queue_waiting<R: Runtime>(
+    app: &AppHandle<R>,
+    pool: &sqlx::SqlitePool,
+    pass: &PendingFinalPass,
+    force: bool,
+) {
+    match queue_final_pass(
+        app,
+        pass.meeting_id.clone(),
+        pass.meeting_folder_path.clone(),
+        pass.language.clone(),
+        force,
+    )
+    .await
+    {
+        Ok(started) if started.status == "skipped" => {
+            if let Err(error) = drop_waiting(pool, &pass.meeting_id).await {
+                warn!("Final pass: could not drop a waiting pass: {error}");
+            }
+            emit_waiting(app, &pass.meeting_id, false);
+        }
+        Ok(_) => {}
+        Err(error) => warn!(
+            "Final pass: could not queue the waiting pass for {}: {error}",
+            pass.meeting_id
+        ),
+    }
+}
+
+/// Serialises [`run_waiting_for_models`], so the watcher and a finished
+/// download never queue the same pass twice.
+static WAITING_FOR_MODELS_TURN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Queue the passes that waited for the transcript models, once the models
+/// are on disk (or will not come: then they are dropped and the live
+/// transcript stays). Each is decided afresh, so on battery a pass moves on
+/// to waiting for power.
+async fn run_waiting_for_models<R: Runtime>(app: &AppHandle<R>, pool: &sqlx::SqlitePool) {
+    let _turn = WAITING_FOR_MODELS_TURN.lock().await;
+    if speech_models::availability(app, &speech_models::BATCH_KINDS) == Availability::Coming {
+        return;
+    }
+    let waiting = match waiting_for_models_passes(pool).await {
+        Ok(waiting) => waiting,
+        Err(error) => {
+            warn!("Final pass: could not list passes waiting for the models: {error}");
+            return;
+        }
+    };
+    for pass in waiting {
+        info!(
+            "Final pass: the transcript models are ready, running the waiting pass for {}",
+            pass.meeting_id
+        );
+        queue_waiting(app, pool, &pass, pass.force).await;
+    }
+}
+
+/// The transcript models finished downloading: queue the passes that waited
+/// for them, unless a meeting is being recorded (the power watcher queues
+/// them after it).
+pub fn spawn_waiting_for_models<R: Runtime>(app: &AppHandle<R>) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if crate::audio::recording_commands::is_recording().await {
+            return;
+        }
+        let Some(pool) = app
+            .try_state::<crate::state::AppState>()
+            .map(|state| state.db_manager.pool().clone())
+        else {
+            return;
+        };
+        run_waiting_for_models(&app, &pool).await;
     });
 }
 
@@ -539,7 +693,7 @@ pub(crate) async fn interrupted_passes(
     let since = (chrono::Utc::now() - chrono::Duration::days(RESUME_WINDOW_DAYS)).to_rfc3339();
     sqlx::query_as::<_, PendingFinalPass>(
         "SELECT meeting_id, meeting_folder_path, language, force, attempts FROM pending_final_passes \
-         WHERE queued_at >= ? AND waiting_for_power = 0 ORDER BY queued_at",
+         WHERE queued_at >= ? AND waiting_for_power = 0 AND waiting_for_models = 0 ORDER BY queued_at",
     )
     .bind(since)
     .fetch_all(pool)
@@ -597,6 +751,9 @@ pub fn init_resume_worker<R: Runtime>(app: &AppHandle<R>) {
                 return;
             }
         };
+        // While the transcript models download (right after an upgrade) a
+        // pass waits for them instead of spending an attempt.
+        let models = speech_models::availability(&app, &speech_models::BATCH_KINDS);
         for pass in pending {
             let outcome = if pass.attempts >= RESUME_MAX_ATTEMPTS {
                 warn!(
@@ -608,17 +765,26 @@ pub fn init_resume_worker<R: Runtime>(app: &AppHandle<R>) {
                     pass.attempts
                 ))
             } else {
-                info!(
-                    "Final pass resume: the pass for {} was interrupted, queuing it again",
-                    pass.meeting_id
-                );
-                if let Err(error) = record_resume_attempt(&pool, &pass.meeting_id).await {
-                    // Without the count a crashing pass could loop; skip it this launch.
-                    warn!(
-                        "Final pass resume: could not count the attempt for {}: {error}",
+                if models == Availability::Coming {
+                    // Not counted: a pass that only waits cannot have crashed
+                    // the app.
+                    info!(
+                        "Final pass resume: the pass for {} was interrupted; it waits for the transcript models",
                         pass.meeting_id
                     );
-                    continue;
+                } else {
+                    info!(
+                        "Final pass resume: the pass for {} was interrupted, queuing it again",
+                        pass.meeting_id
+                    );
+                    if let Err(error) = record_resume_attempt(&pool, &pass.meeting_id).await {
+                        // Without the count a crashing pass could loop; skip it this launch.
+                        warn!(
+                            "Final pass resume: could not count the attempt for {}: {error}",
+                            pass.meeting_id
+                        );
+                        continue;
+                    }
                 }
                 match queue_final_pass(
                     &app,
@@ -629,7 +795,7 @@ pub fn init_resume_worker<R: Runtime>(app: &AppHandle<R>) {
                 )
                 .await
                 {
-                    // Queued again, or waiting for power once more.
+                    // Queued again, or waiting (for power or the models).
                     Ok(started) if started.status != "skipped" => Ok(()),
                     Ok(started) => Err(started
                         .message
@@ -709,7 +875,53 @@ mod tests {
         ))
         .await
         .unwrap();
+        pool.execute(include_str!(
+            "../../migrations/20261030000000_add_pending_final_pass_waiting_for_models.sql"
+        ))
+        .await
+        .unwrap();
         pool
+    }
+
+    #[tokio::test]
+    async fn a_pass_waiting_for_the_models_is_not_resumed_and_keeps_force() {
+        let pool = pool().await;
+        mark_waiting_for_models(&pool, "m1", "/tmp/m1", Some("en"), true)
+            .await
+            .unwrap();
+        mark_waiting(&pool, "m2", "/tmp/m2", None).await.unwrap();
+        // Neither startup's resume nor "waiting for power" picks it up.
+        assert!(interrupted_passes(&pool).await.unwrap().is_empty());
+        assert!(!is_waiting(&pool, "m1").await.unwrap());
+        let waiting = waiting_for_models_passes(&pool).await.unwrap();
+        assert_eq!(waiting.len(), 1);
+        assert_eq!(waiting[0].meeting_id, "m1");
+        assert!(waiting[0].force);
+        assert_eq!(waiting[0].attempts, 0);
+
+        // On battery once the models arrive: it moves on to waiting for power.
+        mark_waiting(&pool, "m1", "/tmp/m1", Some("en"))
+            .await
+            .unwrap();
+        assert!(waiting_for_models_passes(&pool).await.unwrap().is_empty());
+        assert_eq!(waiting_passes(&pool).await.unwrap().len(), 2);
+
+        // Queued: an ordinary pending pass again.
+        mark_waiting_for_models(&pool, "m2", "/tmp/m2", None, false)
+            .await
+            .unwrap();
+        mark_queued(&pool, "m2", "/tmp/m2", None, false)
+            .await
+            .unwrap();
+        assert!(waiting_for_models_passes(&pool).await.unwrap().is_empty());
+        assert_eq!(interrupted_passes(&pool).await.unwrap().len(), 1);
+
+        // A models-waiting pass that will not run is dropped.
+        mark_waiting_for_models(&pool, "m2", "/tmp/m2", None, false)
+            .await
+            .unwrap();
+        drop_waiting(&pool, "m2").await.unwrap();
+        assert!(waiting_for_models_passes(&pool).await.unwrap().is_empty());
     }
 
     #[tokio::test]
