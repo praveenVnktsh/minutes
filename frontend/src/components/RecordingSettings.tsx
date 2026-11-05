@@ -27,6 +27,7 @@ export interface RecordingPreferences {
   min_meeting_duration_seconds: number;
   preferred_mic_device: string | null;
   preferred_system_device: string | null;
+  show_menu_bar_indicator: boolean;
 }
 
 interface RecordingSettingsProps {
@@ -86,7 +87,8 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
     automatic_record_prompt: true,
     min_meeting_duration_seconds: 10,
     preferred_mic_device: null,
-    preferred_system_device: null
+    preferred_system_device: null,
+    show_menu_bar_indicator: false
   });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -152,6 +154,15 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
     const newPreferences = { ...preferences, automatic_record_prompt: enabled };
     setPreferences(newPreferences);
     if (!await savePreferences(newPreferences, 'Meeting detection preference')) {
+      setPreferences(previous);
+    }
+  };
+
+  const handleMenuBarIndicatorToggle = async (enabled: boolean) => {
+    const previous = preferences;
+    const newPreferences = { ...preferences, show_menu_bar_indicator: enabled };
+    setPreferences(newPreferences);
+    if (!await savePreferences(newPreferences, 'Menu bar indicator preference')) {
       setPreferences(previous);
     }
   };
@@ -334,6 +345,22 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
             aria-label="Show the live transcription switch"
             checked={betaFeatures.liveTranscription}
             onCheckedChange={(checked) => toggleBetaFeature('liveTranscription', checked)}
+          />
+        </div>
+
+        <div className="flex items-center justify-between p-4 border rounded-lg">
+          <div className="flex-1 pr-4">
+            <div className="font-medium">Recording indicator in the menu bar</div>
+            <div className="text-sm text-ink-muted">
+              Turn the menu bar icon red and show the elapsed time while recording. When this is
+              off, the icon stays as it is; pause and stop are still in its menu.
+            </div>
+          </div>
+          <Switch
+            aria-label="Show the recording indicator in the menu bar"
+            checked={preferences.show_menu_bar_indicator ?? false}
+            onCheckedChange={handleMenuBarIndicatorToggle}
+            disabled={saving}
           />
         </div>
       </SettingsCard>

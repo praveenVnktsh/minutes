@@ -26,6 +26,10 @@ pub struct RecordingPreferences {
     pub preferred_system_device: Option<String>,
     #[serde(default)]
     pub system_audio_backend: Option<String>,
+    /// Show the red recording dot and timer in the menu bar while recording.
+    /// Off by default: the menu bar keeps the normal Minutes icon.
+    #[serde(default)]
+    pub show_menu_bar_indicator: bool,
 }
 
 impl Default for RecordingPreferences {
@@ -39,6 +43,7 @@ impl Default for RecordingPreferences {
             preferred_mic_device: None,
             preferred_system_device: None,
             system_audio_backend: Some("coreaudio".to_string()),
+            show_menu_bar_indicator: false,
         }
     }
 }
@@ -179,6 +184,8 @@ pub async fn save_recording_preferences<R: Runtime>(
         .map_err(|e| anyhow::anyhow!("Failed to save store to disk: {}", e))?;
 
     info!("Successfully persisted recording preferences to disk");
+
+    crate::tray::set_menu_bar_indicator(app, preferences.show_menu_bar_indicator);
 
     // Save backend preference to global config
     if let Some(backend_str) = &preferences.system_audio_backend {
