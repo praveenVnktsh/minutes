@@ -68,7 +68,7 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
-      # whisper.cpp and llama.cpp dominate a cold build. Caching target/ is
+      # llama.cpp dominates a cold build. Caching target/ is
       # what keeps this cheap enough to run on every pull request.
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2

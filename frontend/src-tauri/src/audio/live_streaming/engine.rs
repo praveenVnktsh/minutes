@@ -1,10 +1,11 @@
 //! The loaded Nemotron streaming engine, shared by recordings.
 //!
-//! Which engine runs follows Settings → Advanced → Live transcription engine
-//! (`LiveEngineChoice`): Core ML on the GPU or Neural Engine through the
-//! `nemotron-helper` sidecar, or sherpa-onnx on the CPU. A choice whose model
-//! or helper is missing, or that fails to load, falls back to the others in
-//! [`candidates`] order, so live text keeps working.
+//! The engine is Nemotron Speech Streaming 0.6B on Core ML, run by FluidAudio
+//! in the `speech-helper` sidecar's live role. Settings → Advanced → Live
+//! transcription engine (`LiveEngineChoice`) picks the GPU or the Neural
+//! Engine. Without the downloaded model or the helper there is no live
+//! engine, and meetings are recorded without live text (the final pass
+//! transcribes them).
 //!
 //! Loading takes a few seconds and ~1 GB, so the engine is created once per
 //! recording (or reused if still loaded) and unloaded when the recording
@@ -15,79 +16,44 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
 use log::{info, warn};
-use sherpa_onnx::{OnlineRecognizer, OnlineRecognizerConfig};
 use tauri::{AppHandle, Runtime};
 
-use super::model::{self, Bundle};
-use super::native::{self, Compute, NativeRecognizer};
-use super::recognizer::{Recognizer, SherpaRecognizer};
+use super::native::NativeRecognizer;
+use super::recognizer::Recognizer;
+use crate::audio::speech::helper::{self, Compute, Role};
+use crate::audio::speech::models::{self, ModelKind};
 use crate::audio::transcription_settings::{load_settings, LiveEngineChoice};
 
-/// Intra-op threads. Two streams are decoded as one batch, and more threads
-/// than this contend with capture and the UI without speeding decode up.
-const NUM_THREADS: i32 = 2;
-
 /// What Auto runs: the Neural Engine. Measured on an M5 with two real
-/// meeting clips (two streams): the same words as the GPU (both ~3% from the
-/// CPU export), ~5% CPU against ~9% for the GPU and ~160% for sherpa, ready
-/// in ~0.5 s against ~13–15 s for the GPU (its shaders compile on every
-/// launch), and it leaves the GPU to the final pass and the built-in LLM.
-/// It also kept up in Low Power Mode on a loaded machine, where the CPU
-/// engine fell behind. See the design doc's "Engines" section.
+/// meeting clips (two streams): the same words as the GPU, ~5% CPU against
+/// ~9% for the GPU, ready in ~0.5 s against ~13–15 s for the GPU (its
+/// shaders compile on every launch), and it leaves the GPU to the final pass
+/// and the built-in LLM. It also kept up in Low Power Mode on a loaded
+/// machine. See the design doc's "Engines" section.
 pub const AUTO_COMPUTE: Compute = Compute::NeuralEngine;
 
-/// An engine the live model can run on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Backend {
-    Native(Compute),
-    Sherpa,
-}
+/// Provenance id of the live model: its directory in the FluidAudio models
+/// store (`audio/speech/models.rs`).
+pub const MODEL_ID: &str = "nemotron-speech-streaming-en-0.6b-coreml";
 
-impl Backend {
-    fn bundle(self) -> &'static Bundle {
-        match self {
-            Self::Native(_) => &model::COREML,
-            Self::Sherpa => &model::SHERPA,
-        }
+/// Where the live model runs for `choice`.
+pub fn compute_for(choice: LiveEngineChoice) -> Compute {
+    match choice {
+        LiveEngineChoice::Auto => AUTO_COMPUTE,
+        LiveEngineChoice::Gpu => Compute::Gpu,
+        LiveEngineChoice::NeuralEngine => Compute::NeuralEngine,
     }
-}
-
-/// Engines to try for `choice`, best first, given what is on disk. The chosen
-/// one comes first; the rest are fallbacks so live text keeps working.
-pub fn candidates(
-    choice: LiveEngineChoice,
-    coreml_ready: bool,
-    sherpa_ready: bool,
-) -> Vec<Backend> {
-    let preferred = match choice {
-        LiveEngineChoice::Auto => Backend::Native(AUTO_COMPUTE),
-        LiveEngineChoice::Gpu => Backend::Native(Compute::Gpu),
-        LiveEngineChoice::NeuralEngine => Backend::Native(Compute::NeuralEngine),
-        LiveEngineChoice::Cpu => Backend::Sherpa,
-    };
-    let mut order = vec![preferred];
-    match preferred {
-        Backend::Native(_) => order.push(Backend::Sherpa),
-        Backend::Sherpa => order.push(Backend::Native(AUTO_COMPUTE)),
-    }
-    order
-        .into_iter()
-        .filter(|backend| match backend {
-            Backend::Native(_) => coreml_ready,
-            Backend::Sherpa => sherpa_ready,
-        })
-        .collect()
 }
 
 pub struct StreamingEngine {
     pub recognizer: Box<dyn Recognizer>,
-    pub backend: Backend,
+    pub compute: Compute,
 }
 
 impl StreamingEngine {
-    /// Provenance id of the model bundle this engine runs.
+    /// Provenance id of the model this engine runs.
     pub fn model_id(&self) -> &'static str {
-        self.backend.bundle().id
+        MODEL_ID
     }
 
     pub fn device(&self) -> &'static str {
@@ -97,99 +63,45 @@ impl StreamingEngine {
 
 static ENGINE: Mutex<Option<Arc<StreamingEngine>>> = Mutex::new(None);
 
-fn path_string(dir: &Path, name: &str) -> Option<String> {
-    Some(dir.join(name).to_string_lossy().into_owned())
-}
-
-/// sherpa-onnx on the CPU, from the sherpa bundle in `dir`.
-pub fn create(dir: &Path) -> Result<StreamingEngine> {
-    let mut config = OnlineRecognizerConfig::default();
-    config.model_config.transducer.encoder = path_string(dir, model::ENCODER);
-    config.model_config.transducer.decoder = path_string(dir, model::DECODER);
-    config.model_config.transducer.joiner = path_string(dir, model::JOINER);
-    config.model_config.tokens = path_string(dir, model::TOKENS);
-    config.model_config.num_threads = NUM_THREADS;
-    config.decoding_method = Some("greedy_search".to_string());
-    // Segmentation is done on token times (see `gate::next_commit`); sherpa's
-    // endpoint + reset was measured to drop words at utterance boundaries.
-    config.enable_endpoint = false;
-    let recognizer = OnlineRecognizer::create(&config)
-        .ok_or_else(|| anyhow!("sherpa-onnx could not load the Nemotron streaming model"))?;
-    Ok(StreamingEngine {
-        recognizer: Box::new(SherpaRecognizer::new(recognizer)),
-        backend: Backend::Sherpa,
-    })
-}
-
-/// Core ML in the helper, from the Core ML bundle in `dir`.
-pub fn create_native(dir: &Path, compute: Compute) -> Result<StreamingEngine> {
-    let helper = native::resolve_helper().ok_or_else(|| anyhow!("nemotron-helper is missing"))?;
-    Ok(StreamingEngine {
-        recognizer: Box::new(NativeRecognizer::spawn(&helper, dir, compute)?),
-        backend: Backend::Native(compute),
-    })
-}
-
-fn load(backend: Backend, dir: &Path) -> Result<StreamingEngine> {
-    match backend {
-        Backend::Native(compute) => create_native(dir, compute),
-        Backend::Sherpa => create(dir),
+/// The helper's live role on `models_dir` (the FluidAudio models directory,
+/// holding [`MODEL_ID`]), on `compute`. Returns at once; the models load in
+/// the helper.
+pub fn create_native(models_dir: &Path, compute: Compute) -> Result<StreamingEngine> {
+    if helper::resolve_helper().is_none() {
+        return Err(anyhow!("speech-helper is missing"));
     }
+    Ok(StreamingEngine {
+        recognizer: Box::new(NativeRecognizer::spawn(models_dir, compute)?),
+        compute,
+    })
 }
 
-/// Load the engine the setting asks for (falling back as [`candidates`]
-/// says), or reuse the loaded one if it is that engine. Blocking (seconds):
-/// call it from `spawn_blocking` or before capture starts.
+/// The Auto engine on `models_dir`, for tests and developer tools that point
+/// at a models directory themselves.
+pub fn create(models_dir: &Path) -> Result<StreamingEngine> {
+    create_native(models_dir, AUTO_COMPUTE)
+}
+
+/// Start the engine the setting asks for, or reuse the loaded one if it runs
+/// there. Spawns the helper (the model loads in the background, and the
+/// first decode waits for it): call it from `spawn_blocking` or before
+/// capture starts.
 pub fn get_or_load<R: Runtime>(app: &AppHandle<R>) -> Result<Arc<StreamingEngine>> {
-    let choice = load_settings(app).live_engine;
-    let helper = native::resolve_helper().is_some();
-    let order = candidates(
-        choice,
-        helper && model::COREML.is_downloaded(app),
-        model::SHERPA.is_downloaded(app),
-    );
+    let compute = compute_for(load_settings(app).live_engine);
     let mut guard = ENGINE.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(engine) = guard.as_ref() {
-        if order.first() == Some(&engine.backend) {
+        if engine.compute.arg() == compute.arg() {
             return Ok(engine.clone());
         }
     }
     *guard = None;
-    if order.is_empty() {
+    if !models::is_downloaded(app, ModelKind::LiveAsr) {
         return Err(anyhow!("The Nemotron live model is not downloaded"));
     }
-    let mut last_error = None;
-    for backend in order {
-        let dir = backend.bundle().dir(app)?;
-        let started = std::time::Instant::now();
-        match load(backend, &dir) {
-            Ok(engine) => {
-                info!(
-                    "Nemotron streaming model loaded on {} in {:.1}s",
-                    engine.device(),
-                    started.elapsed().as_secs_f32()
-                );
-                let engine = Arc::new(engine);
-                *guard = Some(engine.clone());
-                return Ok(engine);
-            }
-            Err(error) => {
-                warn!("Nemotron live engine {backend:?} failed to load: {error:#}");
-                last_error = Some(error);
-            }
-        }
-    }
-    Err(last_error.unwrap_or_else(|| anyhow!("no live engine")))
-}
-
-/// The CPU engine, for a recording whose Core ML helper failed mid-meeting.
-pub fn load_cpu_fallback<R: Runtime>(app: &AppHandle<R>) -> Result<Arc<StreamingEngine>> {
-    let dir = model::SHERPA.dir(app)?;
-    if !model::SHERPA.is_downloaded_in(&dir) {
-        return Err(anyhow!("the CPU live model is not downloaded"));
-    }
-    let engine = Arc::new(create(&dir)?);
-    *ENGINE.lock().unwrap_or_else(|e| e.into_inner()) = Some(engine.clone());
+    let dir = models::dir(app)?;
+    let engine = Arc::new(create_native(&dir, compute)?);
+    info!("Nemotron streaming model starting on {}", engine.device());
+    *guard = Some(engine.clone());
     Ok(engine)
 }
 
@@ -198,15 +110,24 @@ pub fn is_loaded() -> bool {
 }
 
 /// Drop the cached engine. A worker still holding an `Arc` keeps it alive
-/// until it finishes (a helper process exits when its engine is dropped).
+/// until it finishes (the helper process exits when its engine is dropped).
 pub fn unload() {
-    if ENGINE
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .take()
-        .is_some()
-    {
+    let engine = ENGINE.lock().unwrap_or_else(|e| e.into_inner()).take();
+    if engine.is_some() {
         info!("Nemotron streaming model unloaded");
+        drop_in_background(engine);
+    }
+}
+
+/// Drop an engine handle on its own thread: dropping the last one waits up
+/// to 2 s for the helper to exit, which must not stall an async worker.
+/// Callers may be sync or async, so a plain thread rather than tokio's pool.
+pub fn drop_in_background<T: Send + 'static>(value: T) {
+    let spawned = std::thread::Builder::new()
+        .name("live-engine-drop".into())
+        .spawn(move || drop(value));
+    if let Err(error) = spawned {
+        warn!("Could not release the live engine in the background: {error}");
     }
 }
 
@@ -218,19 +139,16 @@ pub fn unload() {
 /// there is nothing to gain for it and it is skipped.
 pub fn spawn_prepare<R: Runtime>(app: AppHandle<R>, startup: bool) {
     let compute = match load_settings(&app).live_engine {
-        LiveEngineChoice::Cpu => return,
         LiveEngineChoice::Gpu if startup => return,
-        LiveEngineChoice::Gpu => Compute::Gpu,
-        LiveEngineChoice::NeuralEngine => Compute::NeuralEngine,
-        LiveEngineChoice::Auto => AUTO_COMPUTE,
+        choice => compute_for(choice),
     };
-    let (Some(helper), Ok(dir)) = (native::resolve_helper(), model::COREML.dir(&app)) else {
-        return;
-    };
-    if !model::COREML.is_downloaded_in(&dir) {
+    if helper::resolve_helper().is_none() || !models::is_downloaded(&app, ModelKind::LiveAsr) {
         return;
     }
-    std::thread::spawn(move || match native::prepare(&helper, &dir, compute) {
+    let Ok(dir) = models::dir(&app) else {
+        return;
+    };
+    std::thread::spawn(move || match helper::prepare(Role::Live, &dir, compute) {
         Ok(seconds) => info!(
             "Nemotron Core ML ({}) prepared in {seconds:.1}s",
             compute.arg()
@@ -244,35 +162,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_chosen_engine_comes_first_and_the_other_is_the_fallback() {
-        use LiveEngineChoice::*;
-        assert_eq!(
-            candidates(Gpu, true, true),
-            vec![Backend::Native(Compute::Gpu), Backend::Sherpa]
-        );
-        assert_eq!(
-            candidates(NeuralEngine, true, true),
-            vec![Backend::Native(Compute::NeuralEngine), Backend::Sherpa]
-        );
-        assert_eq!(
-            candidates(Auto, true, true),
-            vec![Backend::Native(AUTO_COMPUTE), Backend::Sherpa]
-        );
-        assert_eq!(
-            candidates(Cpu, true, true),
-            vec![Backend::Sherpa, Backend::Native(AUTO_COMPUTE)]
-        );
-    }
-
-    #[test]
-    fn missing_models_drop_out_of_the_order() {
-        use LiveEngineChoice::*;
-        // An existing user on Auto before the Core ML download finishes.
-        assert_eq!(candidates(Auto, false, true), vec![Backend::Sherpa]);
-        assert_eq!(
-            candidates(Cpu, true, false),
-            vec![Backend::Native(AUTO_COMPUTE)]
-        );
-        assert!(candidates(Gpu, false, false).is_empty());
+    fn each_choice_runs_on_its_device_and_auto_on_the_neural_engine() {
+        assert_eq!(compute_for(LiveEngineChoice::Auto).arg(), "ane");
+        assert_eq!(compute_for(LiveEngineChoice::NeuralEngine).arg(), "ane");
+        assert_eq!(compute_for(LiveEngineChoice::Gpu).arg(), "gpu");
     }
 }

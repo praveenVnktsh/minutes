@@ -3,8 +3,8 @@
 //! Ignored by default; run one engine per process so usage can be sampled:
 //!
 //! ```text
-//! LIVE_BENCH_AUDIO=meeting-48k.f32 LIVE_BENCH_ENGINE=gpu|ane|cpu \
-//! NEMOTRON_STREAMING_MODEL_DIR=... NEMOTRON_COREML_MODEL_DIR=... \
+//! LIVE_BENCH_AUDIO=meeting-48k.f32 LIVE_BENCH_ENGINE=gpu|ane \
+//! NEMOTRON_COREML_MODEL_DIR=<FluidAudio models dir> \
 //! [LIVE_BENCH_SECONDS=600] [LIVE_BENCH_PACED=1] [LIVE_BENCH_OUT=out.json] \
 //! cargo test -p meetily --lib live_streaming::bench -- --ignored --nocapture
 //! ```
@@ -20,8 +20,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::engine::{self, StreamingEngine};
-use super::native::Compute;
 use super::transcriber::{LiveEvent, Source, StreamingTranscriber};
+use crate::audio::speech::helper::Compute;
 
 fn percentile(values: &mut [f64], p: f64) -> f64 {
     if values.is_empty() {
@@ -32,15 +32,15 @@ fn percentile(values: &mut [f64], p: f64) -> f64 {
 }
 
 fn load_engine(kind: &str) -> StreamingEngine {
-    let dir = |key: &str| std::path::PathBuf::from(std::env::var(key).expect(key));
-    match kind {
-        "cpu" => engine::create(&dir("NEMOTRON_STREAMING_MODEL_DIR")).expect("sherpa loads"),
-        "gpu" => engine::create_native(&dir("NEMOTRON_COREML_MODEL_DIR"), Compute::Gpu)
-            .expect("helper loads"),
-        "ane" => engine::create_native(&dir("NEMOTRON_COREML_MODEL_DIR"), Compute::NeuralEngine)
-            .expect("helper loads"),
+    let dir = std::path::PathBuf::from(
+        std::env::var("NEMOTRON_COREML_MODEL_DIR").expect("NEMOTRON_COREML_MODEL_DIR"),
+    );
+    let compute = match kind {
+        "gpu" => Compute::Gpu,
+        "ane" => Compute::NeuralEngine,
         other => panic!("unknown engine {other}"),
-    }
+    };
+    engine::create_native(&dir, compute).expect("helper starts")
 }
 
 #[test]
@@ -106,7 +106,11 @@ fn live_engine_on_a_recording() {
                 }
             }
         }
-        assert!(transcriber.failure().is_none(), "{:?}", transcriber.failure());
+        assert!(
+            transcriber.failure().is_none(),
+            "{:?}",
+            transcriber.failure()
+        );
     }
     transcriber.finish(&mut events);
     let wall = started.elapsed().as_secs_f64();

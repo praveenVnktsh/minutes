@@ -48,7 +48,9 @@ where
 {
     let value = f64::deserialize(deserializer)?;
     if !value.is_finite() {
-        return Err(serde::de::Error::custom("meetingStartedAtMs must be a finite number"));
+        return Err(serde::de::Error::custom(
+            "meetingStartedAtMs must be a finite number",
+        ));
     }
     Ok(value.round() as i64)
 }
@@ -250,8 +252,14 @@ mod whole_ms_tests {
 
     #[test]
     fn a_fractional_start_time_is_rounded_not_rejected() {
-        assert_eq!(doc("1792265893512.629").unwrap().meeting_started_at_ms, 1792265893513);
-        assert_eq!(doc("1792265893512").unwrap().meeting_started_at_ms, 1792265893512);
+        assert_eq!(
+            doc("1792265893512.629").unwrap().meeting_started_at_ms,
+            1792265893513
+        );
+        assert_eq!(
+            doc("1792265893512").unwrap().meeting_started_at_ms,
+            1792265893512
+        );
     }
 }
 

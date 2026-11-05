@@ -36,7 +36,7 @@
 ## Why Minutes
 
 - **Notes while it happens, not a report after.** A model fine-tuned for meeting notes adds topics, points and decisions as people talk, next to your own lines, which it never rewrites. When the meeting ends, a second fine-tuned model writes the wrap-up: summary, decisions, action items, open questions.
-- **Everything on-device.** Whisper/Parakeet transcription, speaker diarization, and the note models run on your Mac. No account, no cloud.
+- **Everything on-device.** Nemotron/Parakeet transcription, speaker diarization, and the note models run on your Mac. No account, no cloud.
 - **One screen from start to finish.** Hit record and the meeting workspace opens immediately — notes, live transcript, and chat live together with a floating record bar.
 
 ## Features
@@ -66,8 +66,7 @@
 - Both adapters are open: [live notes](https://huggingface.co/praveenvnktsh00/minutes-notes-gemma4-e2b) and [wrap-up](https://huggingface.co/praveenvnktsh00/minutes-tidy-gemma4-e2b) on Hugging Face (Apache 2.0, trained on the AMI Meeting Corpus). The app downloads them with the Gemma 4 E2B model.
 
 ### Transcription and models
-- **Whisper.cpp / whisper-rs** and **NVIDIA Parakeet** paths, running locally.
-- **GPU acceleration**: Metal + CoreML on Apple Silicon.
+- **NVIDIA Nemotron** (streaming, live) and **Parakeet TDT** (final pass) through [FluidAudio](https://github.com/FluidInference/FluidAudio), with Silero VAD and speaker diarization, running locally on Core ML.
 - **Built-in AI** models (Gemma 4 E2B for live notes, Qwen 3.5 for chat and summaries) plus **Ollama**.
 - Optional external providers (**Claude, Groq, OpenRouter**) when you configure them.
 - **Speaker diarization** with an editable speaker manager and reassignment.
@@ -87,13 +86,13 @@ Click to download the latest version directly:
 | **macOS** (Apple Silicon) | [**minutes-macos-arm64.dmg**](https://github.com/praveenvnktsh/minutes/releases/latest/download/minutes-macos-arm64.dmg) |
 
 All releases and notes: [github.com/praveenvnktsh/minutes/releases/latest](https://github.com/praveenvnktsh/minutes/releases/latest).
-**Minutes is Mac-only: Apple Silicon, macOS 13 or later.** Windows and Linux are not supported, and the code no longer builds for them.
+**Minutes is Mac-only: Apple Silicon, macOS 13 or later; transcription needs macOS 15 or later.** Windows and Linux are not supported, and the code no longer builds for them.
 
 > **macOS first launch:** Minutes isn't notarized yet, so macOS may warn that it "could not verify it is free of malware". To open it, **right-click the app → Open → Open**, or run `xattr -dr com.apple.quarantine /Applications/minutes.app` once.
 
 ## Quick start
 
-On an Apple Silicon Mac, install Rust, Node.js, pnpm 9.15.9, and Xcode (select it with `xcode-select`).
+On an Apple Silicon Mac, install Rust, Node.js, pnpm 9.15.9, and Xcode 16 or later (select it with `xcode-select`). The `speech-helper` Swift sidecar is built by `speech-helper/build.sh`.
 
 ```bash
 git clone https://github.com/praveenvnktsh/minutes.git
@@ -117,7 +116,7 @@ See [docs/BUILDING.md](docs/BUILDING.md) for details.
 flowchart LR
   UI["Next.js / React UI"] <-->|Tauri commands & events| Core["Rust core"]
   Core --> Audio["Audio capture (mic + system)"]
-  Core --> STT["Local STT (Whisper / Parakeet)"]
+  Core --> STT["Local STT (speech-helper / FluidAudio)"]
   Core --> Diar["Speaker diarization"]
   Core --> LLM["Local LLM (built-in / Ollama)"]
   Core --> DB[("SQLite: meetings, transcripts, notes")]
@@ -145,4 +144,4 @@ Issues and pull requests are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 Minutes is distributed under the [MIT License](LICENSE.md). The original MIT copyright notice is retained as required by that license. Third-party code, libraries, and models retain their respective licenses and attribution.
 
-Built on open-source work including [whisper.cpp](https://github.com/ggerganov/whisper.cpp), [Screenpipe](https://github.com/mediar-ai/screenpipe), and NVIDIA Parakeet model tooling.
+Built on open-source work including [FluidAudio](https://github.com/FluidInference/FluidAudio), [Screenpipe](https://github.com/mediar-ai/screenpipe), and NVIDIA Nemotron and Parakeet models.

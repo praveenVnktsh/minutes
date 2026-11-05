@@ -1,5 +1,5 @@
 //! Pure helpers for the streaming worker: a per-source silence gate and the
-//! mapping from sherpa's segment times onto the recording timeline.
+//! mapping from the recognizer's segment times onto the recording timeline.
 //!
 //! The streaming model wants continuous audio, but decoding silence still
 //! costs a full encoder step every 560 ms per source. In most meetings one
@@ -161,9 +161,10 @@ pub fn segment_bounds(origin: f64, first: f64, last: f64) -> (f64, f64) {
 /// How many tokens are committed after this decode step, or `None` to leave
 /// them pending.
 ///
-/// sherpa's own endpoint + `reset` was measured to drop words in flight at the
-/// boundary, so segmentation happens here instead, on the hypothesis' token
-/// times, and the stream is never reset mid-speech:
+/// Resetting the recognizer at an endpoint was measured (on the former CPU
+/// engine) to drop words in flight at the boundary, so segmentation happens here
+/// instead, on the hypothesis' token times, and the stream is never reset
+/// mid-speech:
 /// - everything pending is committed once no token has arrived for
 ///   [`COMMIT_AFTER_SILENCE_SECONDS`] of stream time;
 /// - pending speech longer than [`MAX_PENDING_SECONDS`] is cut at the widest
@@ -192,7 +193,7 @@ pub fn next_commit(tokens: &[String], times: &[f64], committed: usize, now: f64)
         })
 }
 
-/// The text of `tokens[range]`, as sherpa would join it.
+/// The text of `tokens[range]`, joined as the model's tokens spell it.
 pub fn join_tokens(tokens: &[String]) -> String {
     tokens.concat().trim().to_string()
 }

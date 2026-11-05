@@ -19,15 +19,14 @@ cargo build --manifest-path "$REPO_DIR/Cargo.toml" --release -p llama-helper --f
 mkdir -p "$SIDECAR_DIR"
 cp "$REPO_DIR/target/release/llama-helper" "$SIDECAR_DIR/llama-helper-$TARGET_TRIPLE"
 
-echo "Building nemotron-helper (Core ML live transcription)..."
-bash "$REPO_DIR/nemotron-helper/build.sh" release
+echo "Building speech-helper (FluidAudio: Core ML transcription, VAD, diarization)..."
+bash "$REPO_DIR/speech-helper/build.sh" release
 
 echo "Building the local Minutes app..."
 cd "$FRONTEND_DIR"
 bunx tauri build \
   --bundles app \
   --no-sign \
-  --config '{"build":{"beforeBuildCommand":"bun run build"},"bundle":{"createUpdaterArtifacts":false}}' \
-  --features metal
+  --config '{"build":{"beforeBuildCommand":"bun run build"},"bundle":{"createUpdaterArtifacts":false}}'
 
 echo "Local app: $REPO_DIR/target/release/bundle/macos/minutes.app"

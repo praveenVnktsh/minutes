@@ -1,5 +1,4 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { Mic, Sparkles, Check, Loader2, Download, RefreshCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -8,12 +7,12 @@ import { useOnboarding } from '@/contexts/OnboardingContext';
 import { toast } from 'sonner';
 import { motion, AnimatePresence } from 'framer-motion';
 import { formatBytes, formatBytesPerSecond, formatEta, mibToBytes } from '@/lib/download-display';
-import type { ParakeetDownloadProgressEvent } from '@/lib/parakeet';
+import { speechModelsApi } from '@/lib/speechModels';
+import { TranscriptionUnsupportedNotice } from '@/components/TranscriptionUnsupportedNotice';
 import {
   BUILTIN_AI_DOWNLOAD_PROGRESS_EVENT,
   type BuiltInAIDownloadProgressEvent,
 } from '@/lib/builtin-ai';
-import { DEFAULT_PARAKEET_MODEL } from '@/constants/modelDefaults';
 import { cn } from '@/lib/utils';
 import { badge, panel, progress as progressClasses, toneText } from '@/lib/theme-classes';
 
@@ -27,8 +26,8 @@ import { badge, panel, progress as progressClasses, toneText } from '@/lib/theme
 type DownloadStatus = 'idle' | 'downloading' | 'stopping' | 'completed' | 'cancelled' | 'error';
 
 /** Said out loud before the cancel happens, not after it. */
-const PARAKEET_CANCEL_CONSEQUENCE =
-  'Recording will not work until the transcription engine is downloaded.';
+const SPEECH_CANCEL_CONSEQUENCE =
+  'Meetings cannot be transcribed until the speech models are downloaded.';
 const SUMMARY_CANCEL_CONSEQUENCE =
   'Summaries will fall back to an external provider you configure in settings.';
 
@@ -58,28 +57,36 @@ export function DownloadProgressStep() {
   const {
     goNext,
     selectedSummaryModel,
-    parakeetDownloaded,
-    setParakeetDownloaded,
-    parakeetProgressInfo,
-    parakeetSizeBytes,
+    speechDownloaded,
+    transcriptionSupported,
+    setSpeechDownloaded,
+    speechDownloadState,
+    speechDownloadError,
+    speechProgressInfo,
+    speechSizeBytes,
     summaryModelDownloaded,
     summaryModelProgressInfo,
     summaryModelSizeBytes,
     isBackgroundDownloading,
     startBackgroundDownloads,
-    retryParakeetDownload,
+    retrySpeechDownload,
     retrySummaryDownload,
-    cancelParakeetDownload,
+    cancelSpeechDownload,
     cancelSummaryDownload,
   } = useOnboarding();
 
   // The transfers are authorised by the click on the previous screen, so on arrival a
   // download is either already running, already finished, or was never started at all —
-  // and the last of those has to look different from the first.
-  const [parakeetStatus, setParakeetStatus] = useState<DownloadStatus>(() =>
-    parakeetDownloaded ? 'completed' : isBackgroundDownloading ? 'downloading' : 'idle'
-  );
-  const [parakeetError, setParakeetError] = useState<string | undefined>();
+  // and the last of those has to look different from the first. The speech run's state
+  // lives on the context, which owns the download call; this screen only adds the gap
+  // between asking to cancel and the run reporting it stopped.
+  const [speechStopping, setSpeechStopping] = useState(false);
+  const speechStatus: DownloadStatus =
+    speechStopping && speechDownloadState === 'downloading' ? 'stopping' : speechDownloadState;
+
+  // Before macOS 15 there is no speech download to wait for: the step is skipped and only
+  // the summary engine is shown.
+  const speechReady = speechDownloaded || !transcriptionSupported;
 
   const [summaryStatus, setSummaryStatus] = useState<DownloadStatus>(() =>
     summaryModelDownloaded
@@ -90,7 +97,7 @@ export function DownloadProgressStep() {
   );
   const [summaryError, setSummaryError] = useState<string | undefined>();
 
-  const [confirmingCancel, setConfirmingCancel] = useState<'parakeet' | 'summary' | null>(null);
+  const [confirmingCancel, setConfirmingCancel] = useState<'speech' | 'summary' | null>(null);
 
   const summaryDownloadStartedRef = useRef(false);
   const retryingRef = useRef(false);
@@ -104,22 +111,16 @@ export function DownloadProgressStep() {
       return;
     }
 
-    console.log('[DownloadProgressStep] Retrying Parakeet download');
+    console.log('[DownloadProgressStep] Retrying speech model download');
     retryingRef.current = true;
     setConfirmingCancel(null);
-    setParakeetError(undefined);
-    setParakeetStatus('downloading');
 
     try {
       // Through the context rather than a bare invoke, so the shared in-flight set knows
-      // this transfer is running again.
-      await retryParakeetDownload();
-      // Progress events will update state
+      // this transfer is running again. It returns once the run has settled.
+      await retrySpeechDownload();
     } catch (error) {
       console.error('[DownloadProgressStep] Retry failed:', error);
-      setParakeetStatus('error');
-      setParakeetError(error instanceof Error ? error.message : 'Retry failed');
-
       toast.error('Download retry failed', {
         description: 'Please check your connection and try again.',
       });
@@ -146,7 +147,7 @@ export function DownloadProgressStep() {
     setSummaryStatus('downloading');
 
     try {
-      // Routed through the context like the transcription engine retry above, for the
+      // Routed through the context like the speech model retry above, for the
       // same reason.
       await retrySummaryDownload();
     } catch (error) {
@@ -165,26 +166,25 @@ export function DownloadProgressStep() {
     }
   };
 
-  const handleCancelParakeet = async () => {
+  const handleCancelSpeech = async () => {
     setConfirmingCancel(null);
-    setParakeetStatus('stopping');
+    setSpeechStopping(true);
 
     try {
-      const outcome = await cancelParakeetDownload();
-      // 'pending' means the worker has been asked to stop but has not got there yet, and a
-      // restart is refused until it has — so the card keeps saying "stopping" until the
-      // cancelled progress event arrives.
-      if (outcome === 'cancelled') {
-        setParakeetStatus('cancelled');
-      }
+      // The card says "stopping" until the run reports the models cancelled.
+      await cancelSpeechDownload();
     } catch (error) {
-      console.error('[DownloadProgressStep] Failed to cancel Parakeet download:', error);
-      setParakeetStatus('downloading');
+      console.error('[DownloadProgressStep] Failed to cancel the speech model download:', error);
+      setSpeechStopping(false);
       toast.error('Could not cancel the download', {
-        description: 'The transcription engine is still downloading.',
+        description: 'The speech models are still downloading.',
       });
     }
   };
+
+  useEffect(() => {
+    if (speechDownloadState !== 'downloading') setSpeechStopping(false);
+  }, [speechDownloadState]);
 
   const handleCancelSummary = async () => {
     setConfirmingCancel(null);
@@ -204,7 +204,7 @@ export function DownloadProgressStep() {
 
   // The summary model name resolves asynchronously and may still have been empty when the
   // previous screen fired the downloads, so this catches up once it arrives. It starts the
-  // summary model and nothing else: the transcription engine is started by that click, or
+  // summary model and nothing else: the speech models are started by that click, or
   // by the card's own control here.
   useEffect(() => {
     if (summaryDownloadStartedRef.current) return;
@@ -215,51 +215,6 @@ export function DownloadProgressStep() {
 
     startSummaryDownload();
   }, [selectedSummaryModel, summaryModelDownloaded, summaryStatus]);
-
-  // Listen to Parakeet download progress. The numbers live on the context; what this needs
-  // from the events is which state the card is in.
-  useEffect(() => {
-    const unlistenProgress = listen<ParakeetDownloadProgressEvent>(
-      'parakeet-model-download-progress',
-      (event) => {
-        const { modelName, status } = event.payload;
-        if (modelName !== DEFAULT_PARAKEET_MODEL) return;
-
-        if (status === 'cancelled') {
-          setParakeetStatus('cancelled');
-          return;
-        }
-
-        setParakeetStatus(status === 'completed' ? 'completed' : 'downloading');
-        setParakeetError(undefined);
-      }
-    );
-
-    const unlistenComplete = listen<{ modelName: string }>(
-      'parakeet-model-download-complete',
-      (event) => {
-        if (event.payload.modelName === DEFAULT_PARAKEET_MODEL) {
-          setParakeetStatus('completed');
-        }
-      }
-    );
-
-    const unlistenError = listen<{ modelName: string; error: string }>(
-      'parakeet-model-download-error',
-      (event) => {
-        if (event.payload.modelName === DEFAULT_PARAKEET_MODEL) {
-          setParakeetStatus('error');
-          setParakeetError(event.payload.error);
-        }
-      }
-    );
-
-    return () => {
-      unlistenProgress.then((fn) => fn());
-      unlistenComplete.then((fn) => fn());
-      unlistenError.then((fn) => fn());
-    };
-  }, []);
 
   // Listen to Summary Model download progress
   useEffect(() => {
@@ -292,10 +247,6 @@ export function DownloadProgressStep() {
 
   // The context can learn a model is already on disk without any event reaching this screen.
   useEffect(() => {
-    if (parakeetDownloaded) setParakeetStatus('completed');
-  }, [parakeetDownloaded]);
-
-  useEffect(() => {
     if (summaryModelDownloaded) setSummaryStatus('completed');
   }, [summaryModelDownloaded]);
 
@@ -308,7 +259,7 @@ export function DownloadProgressStep() {
 
     try {
       await startBackgroundDownloads({
-        includeParakeet: false,
+        includeSpeech: false,
         includeSummary: true,
         summaryModel: selectedSummaryModel,
       });
@@ -321,34 +272,33 @@ export function DownloadProgressStep() {
 
   const handleContinue = async () => {
     // Verify actual model availability (catches state drift)
-    try {
-      await invoke('parakeet_init');
-      const actuallyAvailable = await invoke<boolean>('parakeet_has_available_models');
+    // Nothing to verify when this macOS cannot run the speech models.
+    if (transcriptionSupported) {
+      try {
+        const actuallyAvailable = (await speechModelsApi.status()).batchReady;
 
-      if (actuallyAvailable && !parakeetDownloaded) {
-        console.log('[DownloadProgressStep] Model available but state not updated');
-        setParakeetDownloaded(true);
-        setParakeetStatus('completed');
-      } else if (
-        !actuallyAvailable &&
-        (parakeetStatus === 'error' || parakeetStatus === 'cancelled')
-      ) {
-        toast.error('Transcription engine required', {
-          description: 'Please retry the download before continuing.',
-        });
-        return;
+        if (actuallyAvailable && !speechDownloaded) {
+          console.log('[DownloadProgressStep] Speech models available but state not updated');
+          setSpeechDownloaded(true);
+        } else if (!actuallyAvailable && (speechStatus === 'error' || speechStatus === 'cancelled')) {
+          toast.error('Speech models required', {
+            description: 'Please retry the download before continuing.',
+          });
+          return;
+        }
+      } catch (error) {
+        console.warn('[DownloadProgressStep] Failed to verify the speech models:', error);
       }
-    } catch (error) {
-      console.warn('[DownloadProgressStep] Failed to verify model:', error);
     }
 
     // Check if downloads are complete for toast notification
-    const downloadsComplete = parakeetStatus === 'completed' && summaryStatus === 'completed';
+    const downloadsComplete =
+      (!transcriptionSupported || speechStatus === 'completed') && summaryStatus === 'completed';
 
     // Show toast if downloads still in progress
     if (!downloadsComplete) {
       toast.info('Downloads will continue in the background', {
-        description: 'You can start using the app. Recording will be available once speech recognition is ready.',
+        description: 'You can start using the app. The remaining models finish in the background.',
         duration: 5000,
       });
     }
@@ -526,18 +476,18 @@ export function DownloadProgressStep() {
 
   // Every state names what the button is waiting for; a bare spinner says only "wait", and
   // not for what or for how much longer.
-  const continueLabel = parakeetDownloaded
+  const continueLabel = speechReady
     ? 'Continue'
-    : parakeetStatus === 'downloading'
-    ? `Downloading transcription engine… ${Math.round(parakeetProgressInfo.percent)}%`
-    : parakeetStatus === 'stopping'
-    ? 'Stopping transcription engine…'
-    : parakeetStatus === 'cancelled' || parakeetStatus === 'error'
-    ? 'Transcription engine needed to continue'
-    : 'Waiting for transcription engine';
+    : speechStatus === 'downloading'
+    ? `Downloading speech models… ${Math.round(speechProgressInfo.percent)}%`
+    : speechStatus === 'stopping'
+    ? 'Stopping speech models…'
+    : speechStatus === 'cancelled' || speechStatus === 'error'
+    ? 'Speech models needed to continue'
+    : 'Waiting for speech models';
 
   const continueBusy =
-    !parakeetDownloaded && (parakeetStatus === 'downloading' || parakeetStatus === 'stopping');
+    !speechReady && (speechStatus === 'downloading' || speechStatus === 'stopping');
 
   return (
     <OnboardingContainer
@@ -549,23 +499,26 @@ export function DownloadProgressStep() {
       <div className="flex flex-col items-center space-y-6">
         {/* Download Cards */}
         <div className="w-full max-w-lg space-y-4">
-          {renderDownloadCard({
-            title: 'Transcription Engine',
+          {!transcriptionSupported ? (
+            <TranscriptionUnsupportedNotice />
+          ) : renderDownloadCard({
+            title: 'Speech Models',
             icon: <Mic className="w-5 h-5 text-ink-muted" />,
-            status: parakeetStatus,
-            error: parakeetError,
-            percent: parakeetProgressInfo.percent,
-            downloadedBytes: parakeetProgressInfo.downloadedBytes,
-            totalBytes: parakeetProgressInfo.totalBytes,
-            speedMbps: parakeetProgressInfo.speedMbps,
-            etaSeconds: parakeetProgressInfo.etaSeconds,
-            catalogueBytes: parakeetSizeBytes,
-            consequence: PARAKEET_CANCEL_CONSEQUENCE,
-            startLabel: parakeetStatus === 'error' ? 'Try Again' : 'Start download',
-            confirmingCancel: confirmingCancel === 'parakeet',
-            onRequestCancel: () => setConfirmingCancel('parakeet'),
+            status: speechStatus,
+            error: speechDownloadError,
+            percent: speechStatus === 'completed' ? 100 : speechProgressInfo.percent,
+            downloadedBytes: speechProgressInfo.downloadedBytes,
+            totalBytes: speechProgressInfo.totalBytes,
+            speedMbps: speechProgressInfo.speedMbps,
+            etaSeconds: speechProgressInfo.etaSeconds,
+            // The run's own total once it has one; the missing models' size before.
+            catalogueBytes: speechProgressInfo.totalBytes > 0 ? speechProgressInfo.totalBytes : speechSizeBytes,
+            consequence: SPEECH_CANCEL_CONSEQUENCE,
+            startLabel: speechStatus === 'error' ? 'Try Again' : 'Start download',
+            confirmingCancel: confirmingCancel === 'speech',
+            onRequestCancel: () => setConfirmingCancel('speech'),
             onDismissCancel: () => setConfirmingCancel(null),
-            onConfirmCancel: handleCancelParakeet,
+            onConfirmCancel: handleCancelSpeech,
             onStart: handleRetryDownload,
           })}
 
@@ -592,7 +545,7 @@ export function DownloadProgressStep() {
         </div>
 
         {/* The summary model never blocks anyone, so say so while it is still running rather
-            than only once the transcription engine has finished. */}
+            than only once the speech models have finished. */}
         <AnimatePresence>
           {summaryStatus === 'downloading' && (
             <motion.div
@@ -606,12 +559,12 @@ export function DownloadProgressStep() {
                 <Download className="w-5 h-5 text-ink-muted flex-shrink-0 mt-0.5" />
                 <div>
                   <p className="font-medium">
-                    {parakeetDownloaded
+                    {speechReady
                       ? 'You can continue while this finishes'
                       : "The summary engine won't hold you up"}
                   </p>
                   <p className="text-ink mt-1">
-                    {parakeetDownloaded
+                    {speechReady
                       ? 'Download will continue in the background.'
                       : 'It keeps downloading in the background once you continue.'}
                   </p>
@@ -625,7 +578,7 @@ export function DownloadProgressStep() {
         <div className="w-full max-w-sm">
           <Button
             onClick={handleContinue}
-            disabled={!parakeetDownloaded}
+            disabled={!speechReady}
             className="w-full h-11 bg-brand hover:bg-brand text-brand-foreground disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {continueBusy && <Loader2 className="w-4 h-4 animate-spin" />}

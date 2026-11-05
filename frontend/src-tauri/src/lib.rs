@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex as StdMutex;
 use tauri_plugin_deep_link::DeepLinkExt;
-use tauri_plugin_store::StoreExt;
 // Removed unused import
 
 // Performance optimization: Conditional logging macros for hot paths
@@ -45,7 +44,6 @@ pub mod app_logging;
 pub mod audio;
 pub mod calendar;
 pub mod clock;
-pub mod config;
 pub mod console_utils;
 pub mod copilot;
 pub mod database;
@@ -63,7 +61,6 @@ pub mod ollama;
 pub mod onboarding;
 pub mod openai;
 pub mod openrouter;
-pub mod parakeet_engine;
 pub mod quiet_work;
 pub mod replay;
 pub mod shortcuts;
@@ -72,7 +69,6 @@ pub mod summary;
 pub mod tray;
 pub mod utils;
 pub mod webhooks;
-pub mod whisper_engine;
 
 use audio::{list_audio_devices, AudioDevice, PermissionReport};
 use log::{error as log_error, info as log_info};
@@ -380,7 +376,6 @@ fn get_recording_level() -> f32 {
     audio::pipeline::recording_level()
 }
 
-// Whisper commands are now handled by whisper_engine::commands module
 
 #[tauri::command]
 async fn get_audio_devices() -> Result<Vec<AudioDevice>, String> {
@@ -589,23 +584,6 @@ pub fn run() {
                 replay::commands::load(_app.handle())
             });
 
-            // Load the custom transcription vocabulary into the Whisper engine.
-            optional_setup_step("transcription vocabulary", || {
-                match _app.store("store.json") {
-                    Ok(store) => {
-                        if let Some(vocabulary) = store
-                            .get("transcriptionVocabulary")
-                            .and_then(|value| value.as_str().map(str::to_string))
-                        {
-                            whisper_engine::whisper_engine::set_transcription_vocabulary(
-                                vocabulary,
-                            );
-                        }
-                    }
-                    Err(e) => log::warn!("Could not load store.json: {}", e),
-                }
-            });
-
             // Initialize notification system with proper defaults
             log::info!("Initializing notification system...");
             let app_for_notif = _app.handle().clone();
@@ -633,30 +611,6 @@ pub fn run() {
                     Err(e) => {
                         log::error!("Failed to initialize notification manager: {}", e);
                     }
-                }
-            });
-
-            // Set models directory to use app_data_dir (unified storage location)
-            optional_setup_step("whisper models directory", || {
-                whisper_engine::commands::set_models_directory(_app.handle())
-            });
-
-            // Initialize Whisper engine on startup
-            tauri::async_runtime::spawn(async {
-                if let Err(e) = whisper_engine::commands::whisper_init().await {
-                    log::error!("Failed to initialize Whisper engine on startup: {}", e);
-                }
-            });
-
-            // Set Parakeet models directory
-            optional_setup_step("parakeet models directory", || {
-                parakeet_engine::commands::set_models_directory(_app.handle())
-            });
-
-            // Initialize Parakeet engine on startup
-            tauri::async_runtime::spawn(async {
-                if let Err(e) = parakeet_engine::commands::parakeet_init().await {
-                    log::error!("Failed to initialize Parakeet engine on startup: {}", e);
                 }
             });
 
@@ -696,21 +650,16 @@ pub fn run() {
                 return Ok(());
             }
 
+            // Speech models (FluidAudio, Core ML): create the store, point the
+            // batch helper at it (before the queue can run a job), and once onboarding is done migrate retired
+            // settings and fetch missing models in the background.
+            optional_setup_step("speech models", || {
+                audio::speech::models::setup(_app.handle())
+            });
+
             // Initialize transcription queue worker (processes import/retranscribe tasks sequentially)
             optional_setup_step("transcription queue", || {
                 audio::transcription_queue::init_queue_worker(_app.handle())
-            });
-
-            // Live/final transcription defaults: migrate the final model and
-            // fetch missing default models in the background. Onboarding fires
-            // the event when it finishes, since this skips until then.
-            optional_setup_step("default model setup", || {
-                use tauri::Listener;
-                audio::live_streaming::commands::spawn_default_model_setup(_app.handle().clone());
-                let handle = _app.handle().clone();
-                _app.listen(onboarding::ONBOARDING_COMPLETED_EVENT, move |_| {
-                    audio::live_streaming::commands::spawn_default_model_setup(handle.clone());
-                });
             });
 
             // The fine-tuned adapters for the live notes model, when it is
@@ -734,7 +683,6 @@ pub fn run() {
                 audio::diarization::init_resume_worker(_app.handle());
                 audio::final_pass::init_resume_worker(_app.handle());
                 audio::final_pass::init_power_watcher(_app.handle());
-                whisper_engine::coreml_encoder::spawn_setup(_app.handle());
             });
 
             // Deliver durable transcription-complete webhooks in the background.
@@ -795,33 +743,6 @@ pub fn run() {
             get_transcription_status,
             read_audio_file,
             save_transcript,
-            whisper_engine::commands::whisper_init,
-            whisper_engine::commands::whisper_get_available_models,
-            whisper_engine::commands::whisper_load_model,
-            whisper_engine::commands::whisper_get_current_model,
-            whisper_engine::commands::whisper_is_model_loaded,
-            whisper_engine::commands::whisper_has_available_models,
-            whisper_engine::commands::whisper_validate_model_ready,
-            whisper_engine::commands::whisper_transcribe_audio,
-            whisper_engine::commands::whisper_get_models_directory,
-            whisper_engine::commands::whisper_download_model,
-            whisper_engine::commands::whisper_cancel_download,
-            whisper_engine::commands::whisper_delete_corrupted_model,
-            // Parakeet engine commands
-            parakeet_engine::commands::parakeet_init,
-            parakeet_engine::commands::parakeet_get_available_models,
-            parakeet_engine::commands::parakeet_load_model,
-            parakeet_engine::commands::parakeet_get_current_model,
-            parakeet_engine::commands::parakeet_is_model_loaded,
-            parakeet_engine::commands::parakeet_has_available_models,
-            parakeet_engine::commands::parakeet_validate_model_ready,
-            parakeet_engine::commands::parakeet_transcribe_audio,
-            parakeet_engine::commands::parakeet_get_models_directory,
-            parakeet_engine::commands::parakeet_download_model,
-            parakeet_engine::commands::parakeet_retry_download,
-            parakeet_engine::commands::parakeet_cancel_download,
-            parakeet_engine::commands::parakeet_delete_corrupted_model,
-            parakeet_engine::commands::open_parakeet_models_folder,
             get_audio_devices,
             trigger_microphone_permission,
             start_recording_with_devices_and_meeting,
@@ -892,8 +813,6 @@ pub fn run() {
             api::save_text_export,
             api::api_discard_meeting,
             api::api_get_meeting_audio_path,
-            api::api_get_transcription_vocabulary,
-            api::api_set_transcription_vocabulary,
             api::api_search_transcripts,
             api::api_search_meeting_transcript,
             api::api_get_model_config,
@@ -969,7 +888,6 @@ pub fn run() {
             // Database and Models path commands
             database::commands::get_database_directory,
             database::commands::open_database_folder,
-            whisper_engine::commands::open_models_folder,
             // Onboarding commands
             onboarding::get_onboarding_status,
             onboarding::save_onboarding_status_cmd,
@@ -985,10 +903,11 @@ pub fn run() {
             audio::final_pass::set_final_pass_timing,
             audio::live_streaming::commands::get_live_transcription_settings,
             audio::live_streaming::commands::set_live_transcription_settings,
-            audio::live_streaming::commands::live_model_get_status,
-            audio::live_streaming::commands::live_model_download,
-            audio::live_streaming::commands::live_model_cancel_download,
-            audio::live_streaming::commands::live_model_delete,
+            audio::speech::commands::speech_models_status,
+            audio::speech::commands::speech_models_download,
+            audio::speech::commands::speech_models_cancel_download,
+            audio::speech::commands::speech_models_delete,
+            audio::speech::commands::speech_models_open_folder,
             audio::diarization::run_speaker_diarization,
             audio::diarization::get_diarization_status,
             audio::speaker_corrections::get_speaker_identities,

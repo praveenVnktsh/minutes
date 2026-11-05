@@ -4,11 +4,9 @@ import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 const originalNavigation = { ...await import('next/navigation') };
-const originalConfig = { ...await import('../../src/contexts/ConfigContext') };
 const originalTabs = { ...await import('../../src/components/ui/tabs') };
 afterAll(() => {
   mock.module('next/navigation', () => originalNavigation);
-  mock.module('../../src/contexts/ConfigContext', () => originalConfig);
   mock.module('../../src/components/ui/tabs', () => originalTabs);
 });
 
@@ -20,16 +18,13 @@ mock.module('next/navigation', () => ({
   useRouter: () => ({ push, replace, back }),
   useSearchParams: () => ({ get: () => section }),
 }));
-mock.module('../../src/contexts/ConfigContext', () => ({
-  useConfig: () => ({ transcriptModelConfig: { provider: 'parakeet', model: 'parakeet' }, setTranscriptModelConfig() {} }),
-}));
 mock.module('../../src/components/ui/tabs', () => ({
   Tabs: (props: any) => <section data-settings-tabs {...props} />,
   TabsList: (props: any) => <nav {...props} />,
   TabsTrigger: (props: any) => <button {...props} />,
   TabsContent: (props: any) => <div {...props} />,
 }));
-for (const name of ['AppearanceSetting', 'TranscriptLanguageSettings', 'PreferenceSettings', 'RecordingSettings', 'SummaryModelSettings', 'BetaSettings', 'WebhookSettings', 'CalendarSettings', 'DebugSettings', 'DeveloperSettings', 'TranscriptSettings', 'LiveTranscriptionModelSettings']) {
+for (const name of ['AppearanceSetting', 'PreferenceSettings', 'RecordingSettings', 'SummaryModelSettings', 'BetaSettings', 'WebhookSettings', 'CalendarSettings', 'DebugSettings', 'DeveloperSettings', 'TranscriptSettings']) {
   mock.module(`../../src/components/${name}`, () => ({ [name]: () => <div>{name}</div> }));
 }
 
