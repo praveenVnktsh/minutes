@@ -42,9 +42,10 @@ export function MeetingWorkspace({
   transcript,
   assistant,
   showAssistant,
-  assistantLabel = 'Chat',
+  assistantLabel = 'Copilot',
   peopleCount,
   toolbarActions,
+  titleActions,
   onTitleChange,
   titlePending = false,
   titleError,
@@ -62,10 +63,12 @@ export function MeetingWorkspace({
   transcript: ReactNode;
   assistant: ReactNode;
   showAssistant: boolean;
-  /** The dock pill's label: "Copilot" while recording, "Chat" otherwise. */
+  /** The dock pill's label. The assistant is "Copilot" during and after a meeting. */
   assistantLabel?: string;
   peopleCount: number;
   toolbarActions?: ReactNode;
+  /** Actions beside the title (Continue recording). */
+  titleActions?: ReactNode;
   onTitleChange?: (title: string) => void | Promise<void>;
   titlePending?: boolean;
   titleError?: string | null;
@@ -328,6 +331,7 @@ export function MeetingWorkspace({
                 {titleRegenerating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
               </button>
             )}
+            {titleActions}
           </div>
           {(dateSubtitle || peopleCount > 0) && (
             <p className="mt-0.5 text-xs text-ink-subtle">
@@ -386,7 +390,7 @@ export function MeetingWorkspace({
             min={320}
             max={Math.max(320, workspaceWidth - MIN_NOTES_WIDTH)}
             onValueChange={setDockWidth}
-            label="Resize transcript and chat panel"
+            label="Resize transcript and Copilot panel"
             onPointerDown={onColumnDividerPointerDown}
             className="z-10 w-2 bg-transparent"
           />

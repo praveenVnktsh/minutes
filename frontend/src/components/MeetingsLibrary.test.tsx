@@ -36,7 +36,7 @@ mock.module('@/contexts/ShellContext', () => ({
   ...originalShell,
   useShell: () => ({
     recordingActionLabel: 'Return to recording', runRecordingAction,
-    importActionLabel: 'Enable audio import', runImportAction,
+    runImportAction,
     openMeeting, isNavigating: false, navigationError: null,
     meetingSearchQuery: '', setMeetingSearchQuery: () => {}, isMeetingSearchPending: false,
     recordingActionDisabled: false,
@@ -76,7 +76,7 @@ describe('MeetingsLibrary', () => {
     expect(rendered).toContain('Active planning')
     expect(rendered).toContain('Live')
     expect(rendered).toContain('Return to recording')
-    expect(rendered).toContain('Enable audio import')
+    expect(rendered).toContain('Import recording')
     expect(rendered).not.toContain('Archived review')
     expect(rendered).not.toContain('Debug capture')
     await act(async () => renderer!.unmount())
@@ -100,7 +100,7 @@ describe('MeetingsLibrary', () => {
     let renderer: ReturnType<typeof create>
     await act(async () => { renderer = create(<MeetingsLibrary />) })
 
-    const importButton = renderer!.root.findAllByType('button').find((button) => button.children.includes('Enable audio import'))!
+    const importButton = renderer!.root.findAllByType('button').find((button) => button.children.includes('Import recording'))!
     await act(async () => importButton.props.onClick())
     expect(JSON.stringify(renderer!.toJSON())).not.toContain('notes unsaved')
 

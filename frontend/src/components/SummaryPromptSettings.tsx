@@ -25,13 +25,13 @@ const COPY: Record<
   notes: {
     title: 'Notes prompt',
     description:
-      'The instruction sent to the model for meetings where you typed notes: it enriches your notes from the transcript. Edit it to change the tone, structure or focus of generated notes. It applies to summaries generated after you save.',
+      'The instruction sent to the model for meetings where you typed notes: it enriches your notes from the transcript. Edit it to change the tone, structure or focus of AI notes. It applies to AI notes written after you save.',
     noun: 'Notes prompt',
   },
   transcriptOnly: {
     title: 'No-notes prompt',
     description:
-      'The instruction sent to the model for meetings without notes: it writes notes from the transcript alone. It applies to summaries generated after you save.',
+      'The instruction sent to the model for meetings without notes: it writes notes from the transcript alone. It applies to AI notes written after you save.',
     noun: 'No-notes prompt',
   },
 };
@@ -163,8 +163,12 @@ export function SummaryPromptSettings({ kind = 'notes' }: { kind?: SummaryPrompt
           </span>
         )}
       </div>
-      <p id={descriptionId} className="mb-4 text-sm text-ink-muted">
+      <p id={descriptionId} className="mb-2 text-sm text-ink-muted">
         {copy.description}
+      </p>
+      <p className="mb-4 text-xs text-ink-subtle">
+        A custom prompt writes the notes from the whole transcript after the meeting, instead of building on the
+        notes written live.
       </p>
 
       {state.status === 'loading' && <p className="text-sm text-ink-muted">Loading prompt…</p>}

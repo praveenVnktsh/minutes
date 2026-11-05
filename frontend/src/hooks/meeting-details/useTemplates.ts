@@ -34,7 +34,7 @@ export function useTemplates() {
   const handleTemplateSelection = useCallback((templateId: string, templateName: string) => {
     setSelectedTemplate(templateId);
     toast.success('Template selected', {
-      description: `Using "${templateName}" template for summary generation`,
+      description: `Using "${templateName}" template for AI notes`,
     });
   }, []);
 

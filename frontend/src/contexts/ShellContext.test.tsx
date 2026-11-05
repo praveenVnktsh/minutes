@@ -12,18 +12,17 @@ const searchTranscripts = mock(async () => {})
 let sessionId: string | null = null
 let activeMeetingId: string | null = null
 let isRecording = false
-let importEnabled = false
 let command: string | null = null
 let isCommandPending = false
 let isProcessing = false
 let isSaving = false
 let pathname = '/'
+let currentMeetingId: string | null = null
 
 const originalController = { ...await import('@/contexts/RecordingControllerContext') }
 const originalRecording = { ...await import('@/contexts/RecordingStateContext') }
 const originalNavigation = { ...await import('@/hooks/useNavigation') }
 const originalImport = { ...await import('@/contexts/ImportDialogContext') }
-const originalConfig = { ...await import('@/contexts/ConfigContext') }
 const originalTheme = { ...await import('@/lib/theme') }
 const originalSidebar = { ...await import('@/components/Sidebar/SidebarProvider') }
 const originalActivity = { ...await import('@/contexts/MeetingActivityContext') }
@@ -40,12 +39,11 @@ mock.module('@/hooks/useNavigation', () => ({
   useMeetingNavigation: () => ({ navigate, openMeeting, isNavigating: false, navigationError: null }),
 }))
 mock.module('@/contexts/ImportDialogContext', () => ({ ...originalImport, useImportDialog: () => ({ openImportDialog }) }))
-mock.module('@/contexts/ConfigContext', () => ({ ...originalConfig, useConfig: () => ({ betaFeatures: { importAndRetranscribe: importEnabled } }) }))
 mock.module('@/lib/theme', () => ({ ...originalTheme, readTheme: () => 'dark', applyTheme: () => {}, persistAndBroadcastTheme: async () => {} }))
 mock.module('@/components/Sidebar/SidebarProvider', () => ({
   ...originalSidebar,
   useSidebar: () => ({
-    currentMeeting: null,
+    currentMeeting: currentMeetingId ? { id: currentMeetingId, title: 'Meeting' } : null,
     searchTranscripts,
     searchStatus: 'idle',
     searchError: null,
@@ -74,19 +72,19 @@ const { MeetingsLibrary } = await import('@/components/MeetingsLibrary')
 let current!: ReturnType<typeof useShell>
 function Probe() {
   current = useShell()
-  return <div>{current.recordingActionLabel}|{current.importActionLabel}</div>
+  return <div>{current.recordingActionLabel}</div>
 }
 
 beforeEach(() => {
   sessionId = null
   activeMeetingId = null
   isRecording = false
-  importEnabled = false
   command = null
   isCommandPending = false
   isProcessing = false
   isSaving = false
   pathname = '/'
+  currentMeetingId = null
   for (const fn of [startRecording, stopRecording, returnToRecording, openImportDialog, navigate, openMeeting, searchTranscripts]) fn.mockClear()
   navigate.mockImplementation(async () => {})
   openMeeting.mockImplementation(async () => {})
@@ -102,7 +100,6 @@ afterAll(() => {
   mock.module('@/contexts/RecordingStateContext', () => originalRecording)
   mock.module('@/hooks/useNavigation', () => originalNavigation)
   mock.module('@/contexts/ImportDialogContext', () => originalImport)
-  mock.module('@/contexts/ConfigContext', () => originalConfig)
   mock.module('@/lib/theme', () => originalTheme)
   mock.module('@/components/Sidebar/SidebarProvider', () => originalSidebar)
   mock.module('@/contexts/MeetingActivityContext', () => originalActivity)
@@ -120,7 +117,7 @@ describe('ShellProvider shared actions', () => {
   test('starts only when there is no active native session', async () => {
     let renderer: ReturnType<typeof create>
     await act(async () => { renderer = create(<ShellProvider><Probe /></ShellProvider>) })
-    expect(renderer!.root.findByType('div').children.join('')).toContain('New meeting|Enable audio import')
+    expect(renderer!.root.findByType('div').children.join('')).toContain('New meeting')
     await act(async () => current.runRecordingAction())
     expect(startRecording).toHaveBeenCalledWith({ source: 'app_shell' })
     await act(async () => renderer!.unmount())
@@ -144,18 +141,32 @@ describe('ShellProvider shared actions', () => {
     await act(async () => renderer!.unmount())
   })
 
-  test('routes disabled import to canonical Beta settings and opens it when enabled', async () => {
+  test('import always opens the import dialog', async () => {
     let renderer: ReturnType<typeof create>
     await act(async () => { renderer = create(<ShellProvider><Probe /></ShellProvider>) })
     await act(async () => current.runImportAction())
-    expect(navigate).toHaveBeenCalledWith('/settings?section=beta')
-    expect(openImportDialog).not.toHaveBeenCalled()
-
-    importEnabled = true
-    await act(async () => renderer!.update(<ShellProvider><Probe /></ShellProvider>))
-    expect(current.importActionLabel).toBe('Import recording')
-    await act(async () => current.runImportAction())
     expect(openImportDialog).toHaveBeenCalledTimes(1)
+    expect(navigate).not.toHaveBeenCalled()
+    await act(async () => renderer!.unmount())
+  })
+
+  test('shows a non-actionable Recording label on the live meeting workspace', async () => {
+    sessionId = 'session-a'
+    activeMeetingId = 'meeting-a'
+    isRecording = true
+    pathname = '/meeting-details'
+    currentMeetingId = 'meeting-a'
+    let renderer: ReturnType<typeof create>
+    await act(async () => { renderer = create(<ShellProvider><Probe /><SimpleSidebar /></ShellProvider>) })
+    expect(current.recordingActionLabel).toBe('Recording')
+    expect(current.recordingActionDisabled).toBe(true)
+    await act(async () => current.runRecordingAction())
+    expect(returnToRecording).not.toHaveBeenCalled()
+    expect(renderer!.root.findAllByProps({ title: 'Recording' }).some((node) => node.type === 'div')).toBe(true)
+
+    currentMeetingId = 'meeting-b'
+    await act(async () => renderer!.update(<ShellProvider><Probe /><SimpleSidebar /></ShellProvider>))
+    expect(current.recordingActionLabel).toBe('Return to recording')
     await act(async () => renderer!.unmount())
   })
 

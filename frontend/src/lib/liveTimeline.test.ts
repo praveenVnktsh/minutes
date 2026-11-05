@@ -44,7 +44,7 @@ describe('statusNotice', () => {
   test('a refusing provider says why instead of asking for a model', () => {
     const refused = { ...snapshot('a', 'unavailable'), error: 'The summary provider refused the request.' };
     expect(statusNotice(refused)).toEqual({ tone: 'warning', text: 'The summary provider refused the request.' });
-    expect(statusNotice(snapshot('a', 'unavailable'))?.text).toContain('need a summary model');
+    expect(statusNotice(snapshot('a', 'unavailable'))?.text).toContain('need a model');
   });
 
   test('normal states show no notice', () => {

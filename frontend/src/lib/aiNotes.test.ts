@@ -262,4 +262,9 @@ describe('retired setting', () => {
     expect(parseBetaFeatures(null)).toEqual(DEFAULT_BETA_FEATURES);
     expect(parseBetaFeatures({ micEchoCancellation: 'yes' })).toEqual(DEFAULT_BETA_FEATURES);
   });
+
+  test('the old import flag is dropped and the stored live transcription value is kept', () => {
+    const features = parseBetaFeatures({ importAndRetranscribe: false, liveTranscription: false, micEchoCancellation: true });
+    expect(features).toEqual({ liveTranscription: false, micEchoCancellation: true });
+  });
 });

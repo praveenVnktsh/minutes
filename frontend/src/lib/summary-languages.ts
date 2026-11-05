@@ -59,7 +59,3 @@ export function normaliseLanguageCode(raw: string | null | undefined): string | 
   if (SUPPORTED_CODES.has(base)) return base;
   return null;
 }
-
-export function labelForCode(code: string): string {
-  return LANGUAGE_OPTIONS.find((l) => l.code === code)?.label ?? code;
-}

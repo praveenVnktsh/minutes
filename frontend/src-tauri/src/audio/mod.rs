@@ -18,7 +18,7 @@ pub mod buffer_pool;
 pub mod device_monitor; // NEW: Device disconnect/reconnect monitoring
 pub mod echo_canceller; // Mic echo cancellation for the live transcription path
 pub mod incremental_saver; // NEW: Incremental audio saving with checkpoints
-pub mod level_monitor;
+pub mod level_monitor; // The device picker's "Test Mic" input-level meter
 pub mod pipeline;
 pub mod playback_monitor;
 pub mod recording_commands;
@@ -26,7 +26,6 @@ pub mod recording_manager;
 pub mod recording_preferences;
 pub mod recording_saver;
 pub mod recording_state;
-pub mod simple_level_monitor;
 pub mod stream;
 pub mod system_audio_commands;
 pub mod system_detector; // NEW: Playback device detection for BT warnings
@@ -114,7 +113,6 @@ pub use system_audio_commands::{init_system_audio_state, start_system_audio_moni
 pub use buffer_pool::{AudioBufferPool, PooledBuffer};
 pub use device_monitor::{AudioDeviceMonitor, DeviceEvent, DeviceMonitorType};
 pub use encode::{encode_single_audio, AudioInput};
-pub use level_monitor::{AudioLevelData, AudioLevelMonitor, AudioLevelUpdate};
 pub use pipeline::AudioPipelineManager;
 pub use recording_commands::{
     get_transcription_status, is_recording, start_recording, stop_recording, RecordingArgs,

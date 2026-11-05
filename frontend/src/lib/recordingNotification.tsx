@@ -51,7 +51,6 @@ export async function showRecordingNotification(): Promise<void> {
           </div>
         ),
         duration: 10000,
-        position: 'bottom-center',
       });
     }
   } catch (notificationError) {

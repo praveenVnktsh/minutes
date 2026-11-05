@@ -12,8 +12,9 @@ import {
 export function BetaSettings() {
   const { betaFeatures, toggleBetaFeature } = useConfig();
 
-  // Define feature order for display (allows custom ordering)
-  const featureOrder: BetaFeatureKey[] = ['importAndRetranscribe', 'liveTranscription', 'micEchoCancellation'];
+  // Only these flags are shown here. liveTranscription is still stored with the
+  // beta flags for backward compatibility, but its switch lives in Settings › Recording.
+  const featureOrder: BetaFeatureKey[] = ['micEchoCancellation'];
 
   return (
     <div className="space-y-6">

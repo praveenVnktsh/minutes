@@ -226,7 +226,7 @@ export class MeetingActivityStore {
       processId: response.start,
       status,
       response,
-      error: status === 'failed' ? response.error ?? 'Summary generation failed.' : null,
+      error: status === 'failed' ? response.error ?? 'AI notes failed.' : null,
       reconciliationError: null,
     });
     if (isSummaryTerminal(status)) this.stopSummaryPolling(response.meeting_id, response.start);
@@ -302,7 +302,7 @@ export class MeetingActivityStore {
     if (retry) return retry();
     const request = this.summaryRequests.get(meetingId);
     if (request) return this.startSummary(request);
-    throw new Error('No summary attempt is available to retry.');
+    throw new Error('No AI notes attempt is available to retry.');
   };
 
   cancelSummary = async (meetingId: string, processId: string): Promise<boolean> => {
@@ -442,7 +442,7 @@ export class MeetingActivityStore {
       processId: poll.processId,
       status,
       response,
-      error: status === 'failed' ? response.error ?? 'Summary generation failed.' : null,
+      error: status === 'failed' ? response.error ?? 'AI notes failed.' : null,
       reconciliationError: null,
     });
     if (isSummaryTerminal(status)) this.stopSummaryPolling(poll.meetingId, poll.processId);
@@ -464,7 +464,7 @@ export class MeetingActivityStore {
       processId: poll.processId,
       status: 'cancelled',
       response: previous?.response ?? null,
-      error: 'This summary attempt was superseded by a newer process.',
+      error: 'This AI notes attempt was superseded by a newer one.',
       reconciliationError: null,
     });
 

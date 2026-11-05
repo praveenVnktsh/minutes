@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
+import { useMemo, useRef, useState, type MouseEvent } from 'react';
 import { usePathname } from 'next/navigation';
 import {
   Archive,
@@ -11,14 +11,12 @@ import {
   Clapperboard,
   MessageSquare,
   Mic,
-  Moon,
   PanelLeftClose,
   PanelLeftOpen,
   Pin,
   PinOff,
   Search,
   Settings,
-  Sun,
   Upload,
   Video,
   X,
@@ -51,11 +49,8 @@ export default function SimpleSidebar() {
   const {
     collapsed,
     toggleCollapsed,
-    theme,
-    toggleTheme,
     recordingActionLabel,
     runRecordingAction,
-    importActionLabel,
     runImportAction,
     navigate,
     openMeeting,
@@ -94,16 +89,6 @@ export default function SimpleSidebar() {
   };
 
   const catchNavigation = (error: unknown) => handleShellActionError(error, setActionError);
-
-  // Focus the search box when the command palette (or another surface) requests it.
-  useEffect(() => {
-    const onFocusSearch = () => {
-      if (collapsed) toggleCollapsed();
-      setTimeout(() => searchInputRef.current?.focus(), 50);
-    };
-    window.addEventListener('focus-sidebar-search', onFocusSearch);
-    return () => window.removeEventListener('focus-sidebar-search', onFocusSearch);
-  }, [collapsed, toggleCollapsed]);
 
   // Debug recordings are hidden unless debug mode is on.
   const scopedMeetings = useMemo(() => selectMeetings({ includeArchived: true, debugMode }), [debugMode, selectMeetings]);
@@ -278,32 +263,43 @@ export default function SimpleSidebar() {
         </div>
       )}
 
-      {/* New meeting */}
-      <button
-        type="button"
-        onClick={() => void runShellAction(runRecordingAction)}
-        disabled={recordingActionDisabled}
-        title={recordingActionLabel}
-        aria-disabled={recordingActionDisabled}
-        className={`mt-5 flex h-10 items-center gap-2 rounded-xl text-sm font-semibold transition ${collapsed ? 'w-full justify-center px-0' : 'w-full px-3'
-          } ${recordingActionLabel !== 'New meeting'
-            ? 'bg-recording-subtle text-recording hover:opacity-90'
-            : 'bg-brand text-brand-foreground hover:opacity-90'}`}
-      >
-        {recordingActionLabel !== 'New meeting' ? (
+      {/* New meeting. On the live meeting's own workspace it is only a status label. */}
+      {recordingActionLabel === 'Recording' ? (
+        <div
+          role="status"
+          title="Recording"
+          className={`mt-5 flex h-10 items-center gap-2 rounded-xl bg-recording-subtle text-sm font-semibold text-recording ${collapsed ? 'w-full justify-center px-0' : 'w-full px-3'}`}
+        >
           <span className="h-2 w-2 animate-pulse rounded-full bg-recording" />
-        ) : (
-          <Mic className="h-4 w-4" />
-        )}
-        {!collapsed && <span>{recordingActionLabel}</span>}
-      </button>
+          {!collapsed && <span>Recording</span>}
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={() => void runShellAction(runRecordingAction)}
+          disabled={recordingActionDisabled}
+          title={recordingActionLabel}
+          aria-disabled={recordingActionDisabled}
+          className={`mt-5 flex h-10 items-center gap-2 rounded-xl text-sm font-semibold transition ${collapsed ? 'w-full justify-center px-0' : 'w-full px-3'
+            } ${recordingActionLabel !== 'New meeting'
+              ? 'bg-recording-subtle text-recording hover:opacity-90'
+              : 'bg-brand text-brand-foreground hover:opacity-90'}`}
+        >
+          {recordingActionLabel !== 'New meeting' ? (
+            <span className="h-2 w-2 animate-pulse rounded-full bg-recording" />
+          ) : (
+            <Mic className="h-4 w-4" />
+          )}
+          {!collapsed && <span>{recordingActionLabel}</span>}
+        </button>
+      )}
 
       {/* Import recording */}
       {collapsed ? (
           <button
             type="button"
             onClick={() => void runShellAction(runImportAction)}
-            title={importActionLabel}
+            title="Import recording"
             className="mt-2 flex h-10 w-full items-center justify-center rounded-xl text-ink-subtle hover:bg-surface-2 hover:text-ink"
           >
             <Upload className="h-4 w-4" />
@@ -314,7 +310,7 @@ export default function SimpleSidebar() {
             onClick={() => void runShellAction(runImportAction)}
             className="mt-2 flex h-10 w-full items-center gap-3 rounded-xl px-3 text-sm text-ink-muted hover:bg-surface-2 hover:text-ink"
           >
-            <Upload className="h-4 w-4" /> {importActionLabel}
+            <Upload className="h-4 w-4" /> Import recording
           </button>
         )}
 
@@ -437,15 +433,6 @@ export default function SimpleSidebar() {
             aria-label="Settings"
           >
             <Settings className="h-4 w-4" />
-          </button>
-          <button
-            type="button"
-            onClick={toggleTheme}
-            className="rounded-lg p-2 text-ink-subtle hover:bg-surface-2 hover:text-ink"
-            title={theme === 'dark' ? 'Light mode' : 'Dark mode'}
-            aria-label={theme === 'dark' ? 'Use light theme' : 'Use dark theme'}
-          >
-            {theme === 'dark' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
           </button>
           {collapsed && (
             <button

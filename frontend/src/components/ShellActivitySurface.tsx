@@ -113,10 +113,10 @@ export function ShellActivitySurface() {
       ) : (
         <div key={work.id} className="rounded-xl border border-hairline bg-surface-raised p-3 shadow-lg">
           <div className="mb-1 flex items-start gap-2">
-            <p className="min-w-0 flex-1 truncate text-xs font-semibold text-ink">{work.summary.response?.meetingName ?? 'Meeting summary'}</p>
+            <p className="min-w-0 flex-1 truncate text-xs font-semibold text-ink">{work.summary.response?.meetingName ?? 'AI notes'}</p>
             <button
               type="button"
-              aria-label={`Dismiss ${work.summary.response?.meetingName ?? 'Meeting summary'}`}
+              aria-label={`Dismiss ${work.summary.response?.meetingName ?? 'AI notes'}`}
               className="shrink-0 rounded-sm text-ink-muted hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus focus-visible:ring-offset-2"
               onClick={() => {
                 hideKey(work.key)
@@ -136,7 +136,7 @@ export function ShellActivitySurface() {
                 ? () => void cancelSummary(work.summary.meetingId, work.summary.processId!).catch(() => {})
                 : undefined}
           >
-            {work.summary.error ?? (work.summary.status === 'queued' ? 'Summary queued…' : 'Generating summary…')}
+            {work.summary.error ?? (work.summary.status === 'queued' ? 'AI notes queued…' : 'Writing AI notes…')}
           </StatusFeedback>
         </div>
       ))}

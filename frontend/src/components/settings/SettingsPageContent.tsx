@@ -3,9 +3,9 @@
 import { useEffect } from 'react';
 import { ArrowLeft, Wrench, Database, FlaskConical, Mic, Settings2, Sparkles, Webhook } from 'lucide-react';
 import { useRouter, useSearchParams } from 'next/navigation';
+import { AppearanceSetting } from '@/components/AppearanceSetting';
 import { BetaSettings } from '@/components/BetaSettings';
 import { CalendarSettings } from '@/components/CalendarSettings';
-import { DebugSettings } from '@/components/DebugSettings';
 import { DeveloperSettings } from '@/components/DeveloperSettings';
 import { PreferenceSettings } from '@/components/PreferenceSettings';
 import { RecordingSettings } from '@/components/RecordingSettings';
@@ -19,7 +19,8 @@ const TABS = [
   { value: 'general', label: 'General', icon: Settings2 },
   { value: 'recording', label: 'Recording', icon: Mic },
   { value: 'transcription', label: 'Transcription', icon: Database },
-  { value: 'summary', label: 'Summary', icon: Sparkles },
+  // The id stays 'summary' so existing settingsHref('summary') deep links keep working.
+  { value: 'summary', label: 'AI notes', icon: Sparkles },
   { value: 'integrations', label: 'Integrations', icon: Webhook },
   { value: 'beta', label: 'Beta', icon: FlaskConical },
   { value: 'developer', label: 'Developer', icon: Wrench },
@@ -72,12 +73,12 @@ export function SettingsPageContent() {
               </TabsList>
             </div>
 
-            <TabsContent value="general" className="mt-6"><PreferenceSettings /></TabsContent>
+            <TabsContent value="general" className="mt-6 space-y-6"><AppearanceSetting /><PreferenceSettings /></TabsContent>
             <TabsContent value="recording" className="mt-6"><RecordingSettings /></TabsContent>
             <TabsContent value="transcription" className="mt-6"><TranscriptSettings /></TabsContent>
             <TabsContent value="summary" className="mt-6"><SummaryModelSettings /></TabsContent>
             <TabsContent value="integrations" className="mt-6"><CalendarSettings /><WebhookSettings /></TabsContent>
-            <TabsContent value="beta" className="mt-6"><BetaSettings /><div className="mt-6"><DebugSettings /></div></TabsContent>
+            <TabsContent value="beta" className="mt-6"><BetaSettings /></TabsContent>
             <TabsContent value="developer" className="mt-6"><DeveloperSettings /></TabsContent>
           </Tabs>
         </div>

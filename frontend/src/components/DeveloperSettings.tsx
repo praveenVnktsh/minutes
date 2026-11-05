@@ -3,8 +3,10 @@
 import { toast } from 'sonner';
 import { Switch } from '@/components/ui/switch';
 import { setReplaysEnabled, useReplaysEnabled } from '@/lib/developerSettings';
+import { CopilotDebugSetting } from '@/components/CopilotDebugSetting';
+import { DebugSettings } from '@/components/DebugSettings';
 
-/** Settings → Developer: tools for working on Minutes itself. */
+/** Settings → Developer: tools for working on Minutes itself (debug mode, Copilot debug line, Replays). */
 export function DeveloperSettings() {
   const replays = useReplaysEnabled();
   const change = (enabled: boolean) => {
@@ -16,6 +18,8 @@ export function DeveloperSettings() {
   };
   return (
     <div className="space-y-4">
+      <DebugSettings />
+      <CopilotDebugSetting />
       <div className="flex items-center justify-between rounded-lg border border-hairline p-4">
         <div className="flex-1 pr-4">
           <div className="font-medium">Replays</div>

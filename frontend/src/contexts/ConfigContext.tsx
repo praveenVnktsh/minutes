@@ -57,8 +57,6 @@ interface ConfigContextType {
 
 
   // UI preferences
-  showConfidenceIndicator: boolean;
-  toggleConfidenceIndicator: (checked: boolean) => void;
 
   // Beta features
   betaFeatures: BetaFeatures;
@@ -134,15 +132,6 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
   const [selectedDevices, setSelectedDevices] = useState<SelectedDevices>({
     micDevice: null,
     systemDevice: null
-  });
-
-  // UI preferences state
-  const [showConfidenceIndicator, setShowConfidenceIndicator] = useState<boolean>(() => {
-    if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('showConfidenceIndicator');
-      return saved !== null ? saved === 'true' : true;
-    }
-    return true;
   });
 
   // Summary configs
@@ -349,16 +338,6 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     'custom-openai': [],
   };
 
-  // Toggle confidence indicator with localStorage persistence
-  const toggleConfidenceIndicator = useCallback((checked: boolean) => {
-    setShowConfidenceIndicator(checked);
-    if (typeof window !== 'undefined') {
-      localStorage.setItem('showConfidenceIndicator', checked.toString());
-    }
-    // Trigger a custom event to notify other components
-    window.dispatchEvent(new CustomEvent('confidenceIndicatorChanged', { detail: checked }));
-  }, []);
-
   const toggleIsAutoSummary = useCallback((checked: boolean) => {
     setisAutoSummary(checked);
     if (typeof window !== 'undefined') {
@@ -456,8 +435,6 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     updateProviderApiKey,
     selectedDevices,
     setSelectedDevices,
-    showConfidenceIndicator,
-    toggleConfidenceIndicator,
     betaFeatures,
     toggleBetaFeature,
     models,
@@ -480,8 +457,6 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     providerApiKeys,
     updateProviderApiKey,
     selectedDevices,
-    showConfidenceIndicator,
-    toggleConfidenceIndicator,
     betaFeatures,
     toggleBetaFeature,
     models,

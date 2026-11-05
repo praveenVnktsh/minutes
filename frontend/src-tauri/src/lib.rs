@@ -310,34 +310,27 @@ async fn save_transcript(file_path: String, content: String) -> Result<(), Strin
     Ok(())
 }
 
-// Audio level monitoring commands
+// Audio level monitoring commands (the device picker's "Test Mic" meter).
+// `device_name` is the picker's "<name> (input)" value, or None for the default mic.
 #[tauri::command]
 async fn start_audio_level_monitoring<R: Runtime>(
     app: AppHandle<R>,
-    device_names: Vec<String>,
+    device_name: Option<String>,
 ) -> Result<(), String> {
-    log_info!(
-        "Starting audio level monitoring for devices: {:?}",
-        device_names
-    );
-
-    audio::simple_level_monitor::start_monitoring(app, device_names)
+    audio::level_monitor::start_monitoring(app, device_name)
         .await
         .map_err(|e| format!("Failed to start audio level monitoring: {}", e))
 }
 
 #[tauri::command]
 async fn stop_audio_level_monitoring() -> Result<(), String> {
-    log_info!("Stopping audio level monitoring");
-
-    audio::simple_level_monitor::stop_monitoring()
-        .await
-        .map_err(|e| format!("Failed to stop audio level monitoring: {}", e))
+    audio::level_monitor::stop_monitoring();
+    Ok(())
 }
 
 #[tauri::command]
 async fn is_audio_level_monitoring() -> bool {
-    audio::simple_level_monitor::is_monitoring()
+    audio::level_monitor::is_monitoring()
 }
 
 /// Loudness of the audio being recorded right now (RMS of the latest mixed
@@ -924,9 +917,6 @@ pub fn run() {
             audio::permissions::trigger_system_audio_permission_command,
             // Database import commands
             database::commands::check_first_launch,
-            database::commands::check_default_legacy_database,
-            database::commands::check_homebrew_database,
-            database::commands::import_and_initialize_database,
             database::commands::initialize_fresh_database,
             // Database and Models path commands
             database::commands::get_database_directory,

@@ -184,10 +184,10 @@ describe('ShellActivitySurface', () => {
     const renderer = create(<ShellActivitySurface />)
     const showMoreButton = renderer.root.findByProps({ className: 'w-full rounded-lg bg-surface-raised px-3 py-2 text-xs font-semibold text-ink-muted shadow' })
     await act(async () => showMoreButton.props.onClick())
-    const dismissButton = renderer.root.findByProps({ 'aria-label': 'Dismiss Meeting summary' })
+    const dismissButton = renderer.root.findByProps({ 'aria-label': 'Dismiss AI notes' })
     await act(async () => dismissButton.props.onClick())
     expect(dismissSummary).toHaveBeenCalledWith('failed-meeting', 'process-2')
-    expect(JSON.stringify(renderer.toJSON())).not.toContain('Meeting summary')
+    expect(JSON.stringify(renderer.toJSON())).not.toContain('"AI notes"')
     renderer.unmount()
   })
 

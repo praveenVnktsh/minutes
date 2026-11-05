@@ -17,12 +17,9 @@
 
 export interface BetaFeatures {
   /**
-   * Import audio files and retranscribe existing meetings with different language settings
-   * @since v0.3.0
-   */
-  importAndRetranscribe: boolean;
-  /**
-   * Toggle live transcription on/off during recording to save CPU/GPU resources
+   * Show the switch that turns live transcription on/off during recording.
+   * No longer a beta feature: its switch is in Settings › Recording. It stays
+   * in this stored object so existing values keep working.
    * @since v0.3.0
    */
   liveTranscription: boolean;
@@ -35,7 +32,6 @@ export interface BetaFeatures {
 }
 
 export const DEFAULT_BETA_FEATURES: BetaFeatures = {
-  importAndRetranscribe: true, // Default: enabled
   liveTranscription: true, // Deferred transcription mode is available by default
   micEchoCancellation: false, // Opt-in until it has been proven on real calls
 };
@@ -45,8 +41,7 @@ export const DEFAULT_BETA_FEATURES: BetaFeatures = {
  * Human-readable feature names for UI display
  */
 export const BETA_FEATURE_NAMES: Record<keyof BetaFeatures, string> = {
-  importAndRetranscribe: 'Import Audio & Retranscribe',
-  liveTranscription: 'Live Transcription Toggle',
+  liveTranscription: 'Live transcription switch',
   micEchoCancellation: 'Mic Echo Cancellation',
 };
 
@@ -54,7 +49,6 @@ export const BETA_FEATURE_NAMES: Record<keyof BetaFeatures, string> = {
  * Feature descriptions for UI tooltips/help text
  */
 export const BETA_FEATURE_DESCRIPTIONS: Record<keyof BetaFeatures, string> = {
-  importAndRetranscribe: 'Import audio files to transcribe or retranscribe existing meetings with different language settings.',
   liveTranscription: 'Show a toggle to enable/disable live transcription during recording. When off, audio is still recorded but transcription is skipped to save resources.',
   micEchoCancellation: 'When the other side plays through your speakers, remove their voice from the microphone before transcribing, so it is not transcribed twice. Takes effect from the next recording.',
 };
@@ -67,8 +61,9 @@ export type BetaFeatureKey = keyof BetaFeatures;
 
 /**
  * Saved beta features merged over the defaults. Only known flags are kept,
- * so a retired one (like "Write live notes into my notes", now always on)
- * is ignored and dropped the next time the features are saved.
+ * so a retired one (like "Write live notes into my notes" or "Import Audio &
+ * Retranscribe", now always on) is ignored and dropped the next time the
+ * features are saved.
  */
 export function parseBetaFeatures(saved: unknown): BetaFeatures {
   const features: BetaFeatures = { ...DEFAULT_BETA_FEATURES };

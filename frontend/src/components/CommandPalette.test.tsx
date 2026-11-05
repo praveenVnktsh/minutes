@@ -39,7 +39,6 @@ mock.module('@/contexts/ShellContext', () => ({
     toggleTheme: () => {},
     recordingActionLabel: 'New meeting',
     runRecordingAction: async () => {},
-    importActionLabel: 'Import recording',
     runImportAction: async () => {},
     navigate: async () => {},
     openMeeting: async () => {},

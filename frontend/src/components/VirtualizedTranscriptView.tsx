@@ -5,12 +5,9 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { ChevronDown } from "lucide-react";
 import { useAutoScroll } from "@/hooks/useAutoScroll";
 import { useTranscriptStreaming } from "@/hooks/useTranscriptStreaming";
-import { ConfidenceIndicator } from "./ConfidenceIndicator";
-import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
-import { RecordingStatusBar } from "./RecordingStatusBar";
 import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover";
 import { Button } from "./ui/button";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion } from "framer-motion";
 import { TranscriptSegmentData } from "@/types";
 import { isWholesaleReplacement, nearestSegmentIndex } from "@/lib/transcriptAnchor";
 import { JUMP_TO_TIME_EVENT } from "@/lib/liveTimeline";
@@ -29,8 +26,6 @@ export interface VirtualizedTranscriptViewProps {
     isStopping?: boolean;
     /** Enable streaming effect for latest segment */
     enableStreaming?: boolean;
-    /** Show confidence indicators */
-    showConfidence?: boolean;
     /** Completely disable auto-scroll behavior (for meeting details page) */
     disableAutoScroll?: boolean;
 
@@ -230,7 +225,6 @@ const TranscriptSegment = memo(function TranscriptSegment({
     id,
     timestamp,
     text,
-    confidence,
     speaker,
     speakerId,
     speakerOptions,
@@ -242,13 +236,11 @@ const TranscriptSegment = memo(function TranscriptSegment({
     isActiveMatch,
     highlight,
     isStreaming,
-    showConfidence,
     tag,
 }: {
     id: string;
     timestamp: number;
     text: string;
-    confidence?: number;
     speaker?: string;
     speakerId?: string;
     speakerOptions?: Array<{ speaker_id: string; display_name: string }>;
@@ -260,7 +252,6 @@ const TranscriptSegment = memo(function TranscriptSegment({
     isActiveMatch?: boolean;
     highlight?: string;
     isStreaming: boolean;
-    showConfidence: boolean;
     tag?: string;
 }) {
     const displayText = cleanStopWords(text) || (text.trim() === '' ? '[Silence]' : text);
@@ -350,29 +341,20 @@ const TranscriptSegment = memo(function TranscriptSegment({
             className={`mb-3 rounded-lg px-2 -mx-2 transition-colors ${highlightClass}${onSeek ? ' cursor-pointer' : ''}${isStreaming ? ' animate-rise-in' : ''}`}
         >
             <div className="flex items-start gap-2">
-                <Tooltip>
-                    <TooltipTrigger asChild>
-                        {onSeek ? (
-                            <button
-                                type="button"
-                                onClick={() => onSeek(timestamp)}
-                                title="Play from here"
-                                className="mt-1 min-w-[50px] flex-shrink-0 text-left font-mono text-[11.5px] tabular-nums text-ink-subtle hover:text-ink"
-                            >
-                                {formatRecordingTime(timestamp)}
-                            </button>
-                        ) : (
-                            <span className="mt-1 min-w-[50px] flex-shrink-0 font-mono text-[11.5px] tabular-nums text-ink-subtle">
-                                {formatRecordingTime(timestamp)}
-                            </span>
-                        )}
-                    </TooltipTrigger>
-                    <TooltipContent>
-                        {confidence !== undefined && showConfidence && (
-                            <ConfidenceIndicator confidence={confidence} showIndicator={showConfidence} />
-                        )}
-                    </TooltipContent>
-                </Tooltip>
+                {onSeek ? (
+                    <button
+                        type="button"
+                        onClick={() => onSeek(timestamp)}
+                        title="Play from here"
+                        className="mt-1 min-w-[50px] flex-shrink-0 text-left font-mono text-[11.5px] tabular-nums text-ink-subtle hover:text-ink"
+                    >
+                        {formatRecordingTime(timestamp)}
+                    </button>
+                ) : (
+                    <span className="mt-1 min-w-[50px] flex-shrink-0 font-mono text-[11.5px] tabular-nums text-ink-subtle">
+                        {formatRecordingTime(timestamp)}
+                    </span>
+                )}
                 <div className="flex-1">
                     {speaker && (
                         <EditableSpeakerLabel
@@ -403,7 +385,6 @@ const VirtualizedTranscriptViewImpl: React.FC<VirtualizedTranscriptViewProps> = 
     isProcessing = false,
     isStopping = false,
     enableStreaming = false,
-    showConfidence = true,
     disableAutoScroll = false,
     hasMore = false,
     isLoadingMore = false,
@@ -629,17 +610,7 @@ const VirtualizedTranscriptViewImpl: React.FC<VirtualizedTranscriptViewProps> = 
 
     return (
         <div ref={scrollRef} className="flex flex-col h-full overflow-y-auto px-4 py-2">
-            {/* Recording Status Bar - Sticky at top, always visible when recording */}
-            <AnimatePresence>
-                {isRecording && (
-                    <div className="sticky top-0 z-10 bg-surface-raised pb-2">
-                        <RecordingStatusBar isPaused={isPaused} />
-                    </div>
-                )}
-            </AnimatePresence>
-
-            {/* Content - add padding when recording to prevent overlap */}
-            <div className={isRecording ? 'pt-2' : ''}>
+            <div>
             {segments.length === 0 ? (
                 // Empty state
                 <motion.div
@@ -697,7 +668,6 @@ const VirtualizedTranscriptViewImpl: React.FC<VirtualizedTranscriptViewProps> = 
                                         id={segment.id}
                                         timestamp={segment.timestamp}
                                         text={getDisplayText(segment)}
-                                        confidence={segment.confidence}
                                         speaker={segment.speaker}
                                         speakerId={segment.speakerId}
                                         speakerOptions={speakerOptions}
@@ -709,7 +679,6 @@ const VirtualizedTranscriptViewImpl: React.FC<VirtualizedTranscriptViewProps> = 
                                         isActiveMatch={segment.id === activeMatchId}
                                         highlight={highlightQuery}
                                         isStreaming={isStreaming}
-                                        showConfidence={showConfidence}
                                         tag={segmentTags?.get(segment.id)}
                                     />
                                 </div>
@@ -764,7 +733,6 @@ const VirtualizedTranscriptViewImpl: React.FC<VirtualizedTranscriptViewProps> = 
                                         id={segment.id}
                                         timestamp={segment.timestamp}
                                         text={getDisplayText(segment)}
-                                        confidence={segment.confidence}
                                         speaker={segment.speaker}
                                         speakerId={segment.speakerId}
                                         speakerOptions={speakerOptions}
@@ -776,7 +744,6 @@ const VirtualizedTranscriptViewImpl: React.FC<VirtualizedTranscriptViewProps> = 
                                         isActiveMatch={segment.id === activeMatchId}
                                         highlight={highlightQuery}
                                         isStreaming={isStreaming}
-                                        showConfidence={showConfidence}
                                         tag={segmentTags?.get(segment.id)}
                                     />
                                 </motion.div>

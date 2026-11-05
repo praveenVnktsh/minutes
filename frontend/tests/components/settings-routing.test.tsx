@@ -24,7 +24,7 @@ mock.module('../../src/components/ui/tabs', () => ({
   TabsTrigger: (props: any) => <button {...props} />,
   TabsContent: (props: any) => <div {...props} />,
 }));
-for (const name of ['PreferenceSettings', 'RecordingSettings', 'SummaryModelSettings', 'BetaSettings', 'WebhookSettings', 'CalendarSettings', 'DebugSettings', 'DeveloperSettings', 'TranscriptSettings']) {
+for (const name of ['AppearanceSetting', 'PreferenceSettings', 'RecordingSettings', 'SummaryModelSettings', 'BetaSettings', 'WebhookSettings', 'CalendarSettings', 'DebugSettings', 'DeveloperSettings', 'TranscriptSettings']) {
   mock.module(`../../src/components/${name}`, () => ({ [name]: () => <div>{name}</div> }));
 }
 

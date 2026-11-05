@@ -26,10 +26,8 @@ import { handleShellActionError, useShell } from '@/contexts/ShellContext';
 import { useDebugMode } from '@/hooks/useDebugMode';
 import { copyMeetingLink } from '@/lib/clipboard';
 
-const RECENT_MEETINGS_SHOWN = 8;
-
 /**
- * Cmd/Ctrl+K command palette for jumping to meetings and common actions.
+ * ⌘K command palette for jumping to meetings and common actions.
  */
 export function CommandPalette() {
   const [open, setOpen] = useState(false);
@@ -38,7 +36,6 @@ export function CommandPalette() {
     toggleTheme,
     recordingActionLabel,
     runRecordingAction,
-    importActionLabel,
     runImportAction,
     navigate,
     openMeeting,
@@ -119,10 +116,12 @@ export function CommandPalette() {
         <CommandEmpty>No results found.</CommandEmpty>
 
         <CommandGroup heading="Actions">
-          <CommandItem disabled={recordingActionDisabled} onSelect={() => runCommand(runRecordingAction)}>
-            <Mic />
-            {recordingActionLabel}
-          </CommandItem>
+          {recordingActionLabel !== 'Recording' && (
+            <CommandItem disabled={recordingActionDisabled} onSelect={() => runCommand(runRecordingAction)}>
+              <Mic />
+              {recordingActionLabel}
+            </CommandItem>
+          )}
           <CommandItem onSelect={() => runCommand(() => navigate('/'))}>
             <FileText />
             Open Meetings
@@ -139,7 +138,7 @@ export function CommandPalette() {
           </CommandItem>
           <CommandItem onSelect={() => runCommand(runImportAction)}>
             <Import />
-            {importActionLabel}
+            Import recording
           </CommandItem>
           <CommandItem onSelect={() => runCommand(toggleTheme, true)}>
             <SunMoon />
@@ -172,8 +171,8 @@ export function CommandPalette() {
         {meetings.length > 0 && (
           <>
             <CommandSeparator />
-            <CommandGroup heading="Recent meetings">
-              {meetings.slice(0, RECENT_MEETINGS_SHOWN).map((meeting) => (
+            <CommandGroup heading="Meetings">
+              {meetings.map((meeting) => (
                 <CommandItem
                   key={meeting.id}
                   value={`${meeting.title} ${meeting.id}`}
@@ -191,7 +190,7 @@ export function CommandPalette() {
       </CommandList>
 
       <div className="flex items-center justify-end border-t px-3 py-2">
-        <CommandShortcut>⌘ / Ctrl + K</CommandShortcut>
+        <CommandShortcut>⌘K</CommandShortcut>
       </div>
     </CommandDialog>
   );

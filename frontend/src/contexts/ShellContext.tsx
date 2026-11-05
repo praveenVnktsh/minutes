@@ -6,8 +6,6 @@ import { useRecordingController } from '@/contexts/RecordingControllerContext';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
 import { useMeetingNavigation } from '@/hooks/useNavigation';
 import { useImportDialog } from '@/contexts/ImportDialogContext';
-import { useConfig } from '@/contexts/ConfigContext';
-import { settingsHref } from '@/components/settings/settingsSections';
 import { useSidebar, type CurrentMeeting } from '@/components/Sidebar/SidebarProvider';
 import { applyTheme, persistAndBroadcastTheme, readTheme, type AppTheme } from '@/lib/theme';
 
@@ -37,10 +35,10 @@ interface ShellContextValue {
   toggleTheme: () => void;
   /** True when the window is narrow; the sidebar auto-collapses and docks stack. */
   compact: boolean;
-  recordingActionLabel: 'New meeting' | 'Return to recording' | 'Stop recording' | 'Starting meeting' | 'Finishing meeting';
+  /** 'Recording' means the user is already on the live meeting's workspace: there is nothing to do. */
+  recordingActionLabel: 'New meeting' | 'Recording' | 'Return to recording' | 'Stop recording' | 'Starting meeting' | 'Finishing meeting';
   recordingActionDisabled: boolean;
   runRecordingAction: () => Promise<void>;
-  importActionLabel: 'Import recording' | 'Enable audio import';
   runImportAction: () => Promise<void>;
   navigate: (href: string) => Promise<void>;
   openMeeting: (meeting: CurrentMeeting) => Promise<void>;
@@ -85,8 +83,7 @@ export function ShellProvider({ children }: { children: React.ReactNode }) {
     navigationError,
   } = useMeetingNavigation();
   const { openImportDialog } = useImportDialog();
-  const { betaFeatures } = useConfig();
-  const { searchTranscripts, searchStatus } = useSidebar();
+  const { currentMeeting, searchTranscripts, searchStatus } = useSidebar();
   const retryNavigationRef = useRef<(() => Promise<void>) | null>(null);
 
   useLayoutEffect(() => {
@@ -151,14 +148,22 @@ export function ShellProvider({ children }: { children: React.ReactNode }) {
     || controller.command === 'finalize'
     || recordingState.isProcessing
     || recordingState.isSaving;
-  const recordingActionDisabled = controller.isCommandPending || recordingState.isProcessing || recordingState.isSaving;
+  const onLiveWorkspace = pathname === '/meeting-details'
+    && Boolean(controller.activeMeetingId)
+    && currentMeeting?.id === controller.activeMeetingId;
   const recordingActionLabel = controller.command === 'start'
     ? 'Starting meeting'
     : finalizing
       ? 'Finishing meeting'
       : recordingState.isRecording
-        ? controller.activeMeetingId ? 'Return to recording' : 'Stop recording'
+        ? controller.activeMeetingId
+          ? onLiveWorkspace ? 'Recording' : 'Return to recording'
+          : 'Stop recording'
         : 'New meeting';
+  const recordingActionDisabled = controller.isCommandPending
+    || recordingState.isProcessing
+    || recordingState.isSaving
+    || recordingActionLabel === 'Recording';
   const runRecordingAction = useCallback(async () => {
     if (recordingActionDisabled) return;
     if (recordingState.isRecording) {
@@ -172,7 +177,6 @@ export function ShellProvider({ children }: { children: React.ReactNode }) {
     }
     await controller.startRecording({ source: 'app_shell' }).catch(() => {});
   }, [controller, recordingActionDisabled, recordingState.isRecording]);
-  const importEnabled = betaFeatures.importAndRetranscribe;
   const navigate = useCallback(async (href: string) => {
     // A newer request can supersede navigation before pathname changes.
     setMeetingSearchFocusIntent(null);
@@ -212,12 +216,8 @@ export function ShellProvider({ children }: { children: React.ReactNode }) {
     setMeetingSearchFocusIntent((current) => current?.requestId === requestId ? null : current);
   }, []);
   const runImportAction = useCallback(async () => {
-    if (importEnabled) {
-      openImportDialog();
-      return;
-    }
-    await navigate(settingsHref('beta'));
-  }, [importEnabled, navigate, openImportDialog]);
+    openImportDialog();
+  }, [openImportDialog]);
 
   const value = useMemo<ShellContextValue>(() => ({
     collapsed,
@@ -230,7 +230,6 @@ export function ShellProvider({ children }: { children: React.ReactNode }) {
     recordingActionLabel,
     recordingActionDisabled,
     runRecordingAction,
-    importActionLabel: importEnabled ? 'Import recording' : 'Enable audio import',
     runImportAction,
     navigate,
     openMeeting,
@@ -246,7 +245,6 @@ export function ShellProvider({ children }: { children: React.ReactNode }) {
   }), [
     collapsed,
     compact,
-    importEnabled,
     isNavigating,
     navigationError,
     meetingSearchQuery,
