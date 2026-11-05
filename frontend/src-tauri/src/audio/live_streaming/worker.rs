@@ -4,8 +4,8 @@
 //! runs them through `StreamingTranscriber` on a blocking thread, and emits:
 //! - `transcript-partial` `{source, text, audio_start_time}`: the utterance in
 //!   progress, display only, never saved (empty text clears it);
-//! - `transcript-update`: finished utterances, through the same dedup and
-//!   sequence ids as the chunk worker, so saving and the UI are unchanged.
+//! - `transcript-update`: finished utterances, through the shared dedup and
+//!   sequence ids (`transcription::worker::emit_final_segment`).
 //!
 //! An empty-data chunk is a flush marker (pause or stop) for its source. The
 //! task ends when the pipeline drops its sender, after flushing both sources,
@@ -35,19 +35,10 @@ pub const MAX_BACKLOG_SECONDS: f64 = 20.0;
 static LAST_BACKLOG_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Seconds of audio live transcription has queued: the streaming worker's
-/// backlog at its last decode, or the chunked (Whisper/Parakeet) worker's
-/// queue depth, whichever is larger. 0 when neither runs.
+/// backlog at its last decode. 0 when it is not running.
 pub fn current_backlog_seconds() -> f64 {
-    let streaming = LAST_BACKLOG_MS.load(std::sync::atomic::Ordering::Relaxed);
-    streaming.max(chunked_backlog_ms()) as f64 / 1000.0
+    LAST_BACKLOG_MS.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1000.0
 }
-
-/// Audio (ms) queued in the chunked live worker, per source (microphone,
-/// system). The sources run side by side, so the backlog is the larger one.
-static CHUNKED_QUEUED_MS: [std::sync::atomic::AtomicU64; 2] = [
-    std::sync::atomic::AtomicU64::new(0),
-    std::sync::atomic::AtomicU64::new(0),
-];
 
 /// Decode time and recording time the streaming worker has processed, in
 /// microseconds, since the process started: their ratio over an interval is
@@ -63,48 +54,12 @@ pub fn decode_totals() -> (f64, f64) {
     )
 }
 
-fn chunked_backlog_ms() -> u64 {
-    CHUNKED_QUEUED_MS
-        .iter()
-        .map(|queued| queued.load(std::sync::atomic::Ordering::Relaxed))
-        .max()
-        .unwrap_or(0)
-}
-
-/// Counts one chunk as queued in the chunked live worker until dropped (when
-/// the worker is done with it, whatever the outcome).
-pub struct ChunkedBacklog {
-    source: usize,
-    ms: u64,
-}
-
-impl ChunkedBacklog {
-    pub fn queued(system: bool, samples: usize, sample_rate: u32) -> Self {
-        let ms = (samples as u64 * 1000) / u64::from(sample_rate.max(1));
-        let source = usize::from(system);
-        CHUNKED_QUEUED_MS[source].fetch_add(ms, std::sync::atomic::Ordering::Relaxed);
-        Self { source, ms }
-    }
-}
-
-impl Drop for ChunkedBacklog {
-    fn drop(&mut self) {
-        let queued = &CHUNKED_QUEUED_MS[self.source];
-        let _ = queued.fetch_update(
-            std::sync::atomic::Ordering::Relaxed,
-            std::sync::atomic::Ordering::Relaxed,
-            |current| Some(current.saturating_sub(self.ms)),
-        );
-    }
-}
-
 /// Cancel flag of the running streaming worker, if any.
 static CURRENT_CANCEL: Mutex<Option<Arc<AtomicBool>>> = Mutex::new(None);
 
 /// Bumped on every cancel, so an engine blocked waiting for its models or a
 /// decode (see `native.rs`) can notice a cancel while it waits.
-pub static CANCEL_GENERATION: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+pub static CANCEL_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Ask the running streaming worker to stop now, without decoding what is
 /// still queued. It notices within `RECV_POLL` (or after the decode step in
@@ -282,7 +237,6 @@ mod imp {
             let mut events = Vec::new();
             let mut warned_backlog = false;
             let mut cancelled = false;
-            let mut engine = engine;
             let mut live_text_off = false;
             info!(
                 "🚀 Streaming live transcription started (Nemotron on {})",
@@ -362,29 +316,13 @@ mod imp {
                 if let Some(current) = transcriber.as_mut() {
                     current.decode(&mut events);
                     if let Some(failure) = current.failure().map(str::to_string) {
-                        // The Core ML helper died or hung. Keep what it
-                        // decoded and carry on on the CPU if that model is
-                        // there; the final pass covers any gap either way.
+                        // The helper died or hung. Keep what it decoded and
+                        // drain without live text; the final pass covers the
+                        // rest of the meeting.
                         current.commit_decoded(&mut events);
-                        let sample_rate = current.sample_rate();
                         transcriber = None;
-                        engine = match fallback_engine(&app, &engine) {
-                            Some(cpu) => {
-                                notify_engine_failure(&app, &failure, true);
-                                cpu
-                            }
-                            None => {
-                                notify_engine_failure(&app, &failure, false);
-                                engine
-                            }
-                        };
-                        if engine.backend == crate::audio::live_streaming::engine::Backend::Sherpa {
-                            transcriber =
-                                Some(StreamingTranscriber::new(engine.clone(), sample_rate));
-                        } else {
-                            // No fallback: drain without live text.
-                            live_text_off = true;
-                        }
+                        live_text_off = true;
+                        notify_engine_failure(&app, &failure);
                     }
                 }
                 emit_events(&app, &mut deduper, offset, &mut events);
@@ -419,30 +357,9 @@ mod imp {
         })
     }
 
-    /// The CPU engine to continue on after the Core ML helper failed, if the
-    /// failed engine was not already the CPU one and its model is on disk.
-    fn fallback_engine<R: Runtime>(
-        app: &AppHandle<R>,
-        failed: &Arc<StreamingEngine>,
-    ) -> Option<Arc<StreamingEngine>> {
-        if failed.backend == crate::audio::live_streaming::engine::Backend::Sherpa {
-            return None;
-        }
-        match crate::audio::live_streaming::engine::load_cpu_fallback(app) {
-            Ok(engine) => Some(engine),
-            Err(error) => {
-                warn!("No CPU fallback for live transcription: {error:#}");
-                None
-            }
-        }
-    }
-
-    fn notify_engine_failure<R: Runtime>(app: &AppHandle<R>, failure: &str, recovered: bool) {
-        let message = if recovered {
-            "Live transcription on the GPU/Neural Engine stopped, so it continues on the CPU."
-        } else {
-            "Live transcription stopped. The final transcript after the meeting will include everything."
-        };
+    fn notify_engine_failure<R: Runtime>(app: &AppHandle<R>, failure: &str) {
+        let message =
+            "Live transcription stopped. The final transcript after the meeting will include everything.";
         warn!("{message} ({failure})");
         let _ = app.emit(
             "transcription-error",
@@ -460,9 +377,7 @@ mod imp {
     }
 }
 
-/// Start the streaming worker. Off macOS there is no recognizer to run (the
-/// engine never loads, see `live_streaming`), so this only drains the
-/// receiver until the pipeline closes it.
+/// Start the streaming worker on a loaded engine.
 pub fn start_streaming_transcription_task<R: Runtime>(
     app: AppHandle<R>,
     receiver: UnboundedReceiver<AudioChunk>,
@@ -493,18 +408,6 @@ mod tests {
             chunk_id: 0,
             device_type: device,
         }
-    }
-
-    #[test]
-    fn the_chunked_queue_counts_toward_the_backlog_until_each_chunk_is_done() {
-        let before = current_backlog_seconds();
-        let system = ChunkedBacklog::queued(true, 48_000 * 6, 48_000);
-        let mic = ChunkedBacklog::queued(false, 48_000 * 2, 48_000);
-        assert!(current_backlog_seconds() >= before.max(6.0) - 1e-9);
-        drop(system);
-        assert!(current_backlog_seconds() < 6.0);
-        drop(mic);
-        assert!(chunked_backlog_ms() == 0 || current_backlog_seconds() < 2.0);
     }
 
     #[test]

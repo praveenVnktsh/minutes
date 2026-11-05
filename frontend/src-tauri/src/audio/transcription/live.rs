@@ -1,117 +1,75 @@
-//! The live transcription plan of the current recording: which model streams
-//! text, loaded before capture so a load failure can still fall back, and the
-//! worker that runs it.
+//! The live transcription plan of the current recording: Nemotron streaming in
+//! the speech helper, or no live text. The engine is loaded before capture,
+//! since the pipeline fixes its mode when it starts, and the worker that runs
+//! it is started here.
 //!
-//! Nothing here fails a recording. A missing or broken model degrades to the
-//! chunked engine or to no live text, and the user gets a notice; the final
-//! pass after the meeting produces the kept transcript either way.
+//! Nothing here fails a recording. A missing or broken model means no live
+//! text, and the user gets a notice; the final pass after the meeting
+//! produces the kept transcript either way.
 
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use log::{info, warn};
 use tauri::{AppHandle, Emitter, Runtime};
 use tokio::sync::mpsc::UnboundedReceiver;
 
-use super::engine::TranscriptionEngine;
 use crate::audio::live_streaming::{self, engine::StreamingEngine};
 use crate::audio::model_provenance::TranscriptionModel;
 use crate::audio::pipeline::{LIVE_STREAMING_MODE, LIVE_TRANSCRIPTION_ENABLED};
-use crate::audio::transcription_settings::{self as settings, EngineChoice, LivePlan};
 use crate::audio::AudioChunk;
-use std::sync::atomic::Ordering;
 
-enum Loaded {
-    Streaming(Arc<StreamingEngine>),
-    Chunked(TranscriptionEngine),
+/// Provenance provider of live transcripts.
+const STREAMING_PROVIDER: &str = "nemotron-streaming";
+
+const NOT_DOWNLOADED_NOTICE: &str = "The live model is not downloaded yet, so this meeting is recorded without live text. It is transcribed afterwards.";
+
+/// How live transcription runs for one recording.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LivePlan {
+    /// Nemotron streaming on continuous audio.
+    Streaming,
+    /// No live engine; record without live text. An empty notice is not shown.
+    Unavailable { notice: String },
 }
 
-struct SessionPlan {
-    plan: LivePlan,
-    loaded: Option<Loaded>,
-}
-
-static SESSION_PLAN: Mutex<Option<SessionPlan>> = Mutex::new(None);
-
-/// Provider of the chunked engine a live recording is transcribing with right
-/// now, if any. Whisper and Parakeet engines are process-wide, so a final pass
-/// on the same engine family must not run alongside it (it would swap the
-/// loaded model under the recording).
-static CHUNKED_LIVE_PROVIDER: Mutex<Option<String>> = Mutex::new(None);
-
-pub fn chunked_live_provider() -> Option<String> {
-    CHUNKED_LIVE_PROVIDER
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone()
-}
-
-fn set_chunked_live_provider(provider: Option<String>) {
-    *CHUNKED_LIVE_PROVIDER
-        .lock()
-        .unwrap_or_else(|e| e.into_inner()) = provider;
-}
-
-/// Claims the engine family for a recording before its chunked model is
-/// loaded, so a running pass on the same family pauses before the swap
-/// rather than after the worker starts (the gap covered device setup, and a
-/// pass could transcribe with the swapped-in model meanwhile). Dropping the
-/// claim without [`Self::keep`] releases it, so a failed load or an abandoned
-/// start never leaves passes paused.
-struct ChunkedClaim {
-    kept: bool,
-}
-
-impl ChunkedClaim {
-    fn new(provider: &str) -> Self {
-        set_chunked_live_provider(Some(provider.to_string()));
-        Self { kept: false }
+impl LivePlan {
+    /// The plan before anything is loaded.
+    fn initial(live_ready: bool) -> Self {
+        if live_ready {
+            Self::Streaming
+        } else {
+            Self::Unavailable {
+                notice: NOT_DOWNLOADED_NOTICE.to_string(),
+            }
+        }
     }
 
-    fn keep(mut self) {
-        self.kept = true;
-    }
-}
-
-impl Drop for ChunkedClaim {
-    fn drop(&mut self) {
-        if !self.kept {
-            set_chunked_live_provider(None);
+    fn notice(&self) -> Option<&str> {
+        match self {
+            Self::Streaming => None,
+            Self::Unavailable { notice } if notice.is_empty() => None,
+            Self::Unavailable { notice } => Some(notice),
         }
     }
 }
 
-/// Provider of a chunked engine loaded for a recording that is about to start
-/// (prepared, worker not running yet).
-pub fn prepared_chunked_provider() -> Option<String> {
-    let session = SESSION_PLAN.lock().unwrap_or_else(|e| e.into_inner());
-    match session.as_ref() {
-        Some(SessionPlan {
-            plan: LivePlan::Chunked(choice),
-            loaded: Some(Loaded::Chunked(_)),
-        }) => Some(choice.engine.provider.clone()),
-        _ => None,
-    }
+struct SessionPlan {
+    plan: LivePlan,
+    engine: Option<Arc<StreamingEngine>>,
 }
 
-/// The chunked engine family a recording holds, whether it is starting
-/// (claimed or prepared) or running. Batch jobs must not unload it.
-pub fn chunked_engine_in_use() -> Option<String> {
-    prepared_chunked_provider().or_else(chunked_live_provider)
+static SESSION_PLAN: Mutex<Option<SessionPlan>> = Mutex::new(None);
+
+fn take_session() -> Option<SessionPlan> {
+    SESSION_PLAN
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
 }
 
-fn is_parakeet(provider: &str) -> bool {
-    provider == settings::PROVIDER_PARAKEET
-}
-
-/// Whether a pass on `pass_provider` would share an engine with the live
-/// recording's chunked engine. The streaming (Nemotron) recognizer is separate
-/// and never conflicts.
-pub fn live_conflicts(live_provider: Option<&str>, pass_provider: Option<&str>) -> bool {
-    match (live_provider, pass_provider) {
-        (Some(live), Some(pass)) => is_parakeet(live) == is_parakeet(pass),
-        (Some(live), None) => !is_parakeet(live), // a pass without a provider uses Whisper
-        _ => false,
-    }
+fn store_session(session: SessionPlan) {
+    *SESSION_PLAN.lock().unwrap_or_else(|e| e.into_inner()) = Some(session);
 }
 
 /// Tell the user about a degraded live path without failing anything. The
@@ -129,28 +87,6 @@ fn notify<R: Runtime>(app: &AppHandle<R>, message: &str) {
     );
 }
 
-async fn load_chunked<R: Runtime>(
-    app: &AppHandle<R>,
-    choice: &EngineChoice,
-) -> anyhow::Result<TranscriptionEngine> {
-    let model = Some(choice.engine.model.as_str());
-    if choice.engine.is_parakeet() {
-        crate::parakeet_engine::commands::parakeet_init()
-            .await
-            .map_err(anyhow::Error::msg)?;
-        Ok(TranscriptionEngine::Parakeet(
-            crate::audio::retranscription::get_or_init_parakeet(app, model).await?,
-        ))
-    } else {
-        crate::whisper_engine::commands::whisper_init()
-            .await
-            .map_err(anyhow::Error::msg)?;
-        Ok(TranscriptionEngine::Whisper(
-            crate::audio::retranscription::get_or_init_whisper(app, model).await?,
-        ))
-    }
-}
-
 async fn load_streaming<R: Runtime>(app: &AppHandle<R>) -> anyhow::Result<Arc<StreamingEngine>> {
     let app = app.clone();
     tokio::task::spawn_blocking(move || live_streaming::engine::get_or_load(&app))
@@ -158,71 +94,38 @@ async fn load_streaming<R: Runtime>(app: &AppHandle<R>) -> anyhow::Result<Arc<St
         .map_err(|e| anyhow::anyhow!("Live model load panicked: {e}"))?
 }
 
-/// Load `plan`'s engine. A failed load falls back down the plan ladder
-/// (streaming → chunked → none), so the returned plan is what will run.
-async fn load_plan<R: Runtime>(app: &AppHandle<R>, plan: LivePlan) -> (LivePlan, Option<Loaded>) {
-    let mut plan = plan;
-    if plan == LivePlan::Streaming {
-        match load_streaming(app).await {
-            Ok(engine) => return (plan, Some(Loaded::Streaming(engine))),
-            Err(error) => {
-                warn!("Nemotron live model failed to load: {error:#}");
-                let final_model = settings::configured_final_model(app).await;
-                let available = settings::availability().await;
-                plan = settings::resolve_live_plan(
-                    settings::LiveModelChoice::NemotronStreaming,
-                    false,
-                    &final_model,
-                    &available,
-                );
-            }
-        }
+/// Load `plan`'s engine. A failed load turns the plan into no live text, so
+/// the returned plan is what will run.
+async fn load_plan<R: Runtime>(
+    app: &AppHandle<R>,
+    plan: LivePlan,
+) -> (LivePlan, Option<Arc<StreamingEngine>>) {
+    if plan != LivePlan::Streaming {
+        return (plan, None);
     }
-    if let LivePlan::Chunked(choice) = &plan {
-        let claim = ChunkedClaim::new(&choice.engine.provider);
-        match load_chunked(app, choice).await {
-            Ok(engine) => {
-                claim.keep();
-                return (plan, Some(Loaded::Chunked(engine)));
-            }
-            Err(error) => {
-                drop(claim);
-                warn!(
-                    "Live engine {} failed to load: {error:#}",
-                    choice.engine.display_name()
-                );
-                plan = LivePlan::Unavailable {
+    match load_streaming(app).await {
+        Ok(engine) => (plan, Some(engine)),
+        Err(error) => {
+            warn!("Nemotron live model failed to load: {error:#}");
+            (
+                LivePlan::Unavailable {
                     notice: format!(
-                        "Live text is off for this meeting: {} could not be loaded. The recording continues and is transcribed afterwards.",
-                        choice.engine.display_name()
+                        "Live text is off for this meeting: the live model could not be loaded ({error}). The recording continues and is transcribed afterwards."
                     ),
-                };
-            }
+                },
+                None,
+            )
         }
-    }
-    (plan, None)
-}
-
-fn plan_notice(plan: &LivePlan) -> Option<String> {
-    match plan {
-        LivePlan::Streaming => None,
-        LivePlan::Chunked(choice) => choice.fallback_notice.clone(),
-        LivePlan::Unavailable { notice } => Some(notice.clone()),
     }
 }
 
 /// Decide (and, when live text is on, load) the live path for a recording
 /// about to start. Sets the pipeline's streaming mode to match. Never fails.
 pub async fn prepare_for_recording<R: Runtime>(app: &AppHandle<R>) {
-    let current = settings::load_settings(app);
-    let nemotron_ready = live_streaming::model::is_usable(app);
-    let final_model = settings::configured_final_model(app).await;
-    let available = settings::availability().await;
-    let plan =
-        settings::resolve_live_plan(current.live_model, nemotron_ready, &final_model, &available);
+    let plan = LivePlan::initial(crate::audio::speech::models::live_ready(app));
 
     let live_enabled = LIVE_TRANSCRIPTION_ENABLED.load(Ordering::SeqCst);
-    let (plan, loaded) = if live_enabled {
+    let (plan, engine) = if live_enabled {
         load_plan(app, plan).await
     } else {
         (plan, None)
@@ -231,41 +134,26 @@ pub async fn prepare_for_recording<R: Runtime>(app: &AppHandle<R>) {
     info!(
         "Live transcription plan: {} (live text {})",
         match &plan {
-            LivePlan::Streaming => "Nemotron streaming".to_string(),
-            LivePlan::Chunked(choice) => format!("chunked {}", choice.engine.display_name()),
-            LivePlan::Unavailable { .. } => "unavailable".to_string(),
+            LivePlan::Streaming => "Nemotron streaming",
+            LivePlan::Unavailable { .. } => "unavailable",
         },
         if live_enabled { "on" } else { "deferred" }
     );
+    // With live text deferred, a streaming plan still sets the mode, so live
+    // text turned on mid-meeting can load the engine then.
     LIVE_STREAMING_MODE.store(plan == LivePlan::Streaming, Ordering::SeqCst);
     if live_enabled {
-        if let Some(notice) = plan_notice(&plan) {
-            notify(app, &notice);
+        if let Some(notice) = plan.notice() {
+            notify(app, notice);
         }
     }
-    *SESSION_PLAN.lock().unwrap_or_else(|e| e.into_inner()) = Some(SessionPlan { plan, loaded });
+    store_session(SessionPlan { plan, engine });
 }
 
-/// `streaming_model` is the bundle the loaded streaming engine runs (the Core
-/// ML or the CPU export of the same model).
-fn provenance(plan: &LivePlan, streaming_model: Option<&str>) -> Option<TranscriptionModel> {
-    match plan {
-        LivePlan::Streaming => Some(TranscriptionModel {
-            provider: "nemotron-streaming".to_string(),
-            model: streaming_model
-                .unwrap_or(live_streaming::model::SHERPA.id)
-                .to_string(),
-        }),
-        LivePlan::Chunked(choice) => Some(TranscriptionModel {
-            provider: if choice.engine.is_parakeet() {
-                "parakeet"
-            } else {
-                "whisper"
-            }
-            .to_string(),
-            model: choice.engine.model.clone(),
-        }),
-        LivePlan::Unavailable { .. } => None,
+fn provenance(model_id: &str) -> TranscriptionModel {
+    TranscriptionModel {
+        provider: STREAMING_PROVIDER.to_string(),
+        model: model_id.to_string(),
     }
 }
 
@@ -278,44 +166,25 @@ pub async fn start_worker<R: Runtime>(
     receiver: UnboundedReceiver<AudioChunk>,
 ) -> Result<(tokio::task::JoinHandle<()>, Option<TranscriptionModel>), UnboundedReceiver<AudioChunk>>
 {
-    let session = SESSION_PLAN
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .take();
-    let (plan, loaded) = match session {
+    let (plan, engine) = match take_session() {
         Some(SessionPlan {
             plan,
-            loaded: Some(loaded),
-        }) => (plan, Some(loaded)),
-        Some(SessionPlan { plan, loaded: None }) => {
+            engine: Some(engine),
+        }) => (plan, Some(engine)),
+        Some(SessionPlan { plan, engine: None }) => {
             // Live text was enabled mid-meeting. The pipeline's mode is fixed,
-            // so a streaming plan may only fall back to nothing here.
-            let was_streaming = plan == LivePlan::Streaming;
-            let (mut plan, loaded) = load_plan(app, plan).await;
-            if was_streaming && plan != LivePlan::Streaming {
-                plan = LivePlan::Unavailable {
-                    notice: "The Nemotron live model could not be loaded, so live text stays off for this meeting. It is transcribed afterwards.".to_string(),
-                };
+            // so only a streaming plan can load an engine now.
+            let (plan, engine) = load_plan(app, plan).await;
+            if let Some(notice) = plan.notice() {
+                notify(app, notice);
             }
-            if let Some(notice) = plan_notice(&plan) {
-                notify(app, &notice);
-            }
-            let loaded = if matches!(plan, LivePlan::Unavailable { .. }) {
-                None
-            } else {
-                loaded
-            };
-            (plan, loaded)
+            (plan, engine)
         }
         None => {
             warn!("No live plan prepared for this recording; preparing one now");
             prepare_for_recording(app).await;
-            let retry = SESSION_PLAN
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .take();
-            match retry {
-                Some(SessionPlan { plan, loaded }) => (plan, loaded),
+            match take_session() {
+                Some(SessionPlan { plan, engine }) => (plan, engine),
                 None => (
                     LivePlan::Unavailable {
                         notice: String::new(),
@@ -326,65 +195,36 @@ pub async fn start_worker<R: Runtime>(
         }
     };
 
-    let streaming_model = match &loaded {
-        Some(Loaded::Streaming(engine)) => Some(engine.model_id()),
-        _ => None,
-    };
-    let model = provenance(&plan, streaming_model);
-    let outcome = match loaded {
-        Some(Loaded::Streaming(engine)) => Ok((
-            live_streaming::start_streaming_transcription_task(app.clone(), receiver, engine),
-            model,
-        )),
-        Some(Loaded::Chunked(engine)) => {
-            // Already claimed when the model was loaded; set again in case
-            // the plan was prepared by an older path.
-            if let LivePlan::Chunked(choice) = &plan {
-                set_chunked_live_provider(Some(choice.engine.provider.clone()));
-            }
+    let outcome = match engine {
+        Some(engine) => {
+            let model = provenance(engine.model_id());
             Ok((
-                super::worker::start_transcription_task_with_engine(app.clone(), receiver, engine),
-                model,
+                live_streaming::start_streaming_transcription_task(app.clone(), receiver, engine),
+                Some(model),
             ))
         }
         None => {
-            set_chunked_live_provider(None);
             LIVE_TRANSCRIPTION_ENABLED.store(false, Ordering::SeqCst);
             Err(receiver)
         }
     };
-    // Keep the plan (without the engine handle) for the stop path's unload.
-    *SESSION_PLAN.lock().unwrap_or_else(|e| e.into_inner()) =
-        Some(SessionPlan { plan, loaded: None });
+    // Keep the plan (without the engine handle) in case live text is turned
+    // off and on again during this recording.
+    store_session(SessionPlan { plan, engine: None });
     outcome
 }
 
 /// Drop what [`prepare_for_recording`] loaded for a recording that then
-/// failed to start: the Nemotron recognizer cache, or the chunked engine's
-/// model (unless a queued task is using the engines). Nothing else would
-/// release them, since the stop path only runs for a started recording.
+/// failed to start. Nothing else would release it, since the stop path only
+/// runs for a started recording.
 pub fn abandon_prepared() {
-    let session = SESSION_PLAN
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .take();
+    let session = take_session();
     LIVE_STREAMING_MODE.store(false, Ordering::SeqCst);
-    live_streaming::engine::unload();
-    set_chunked_live_provider(None);
-    if let Some(Loaded::Chunked(engine)) = session.and_then(|s| s.loaded) {
-        let parakeet = matches!(engine, TranscriptionEngine::Parakeet(_));
-        drop(engine);
+    if let Some(engine) = session.and_then(|s| s.engine) {
         info!("Recording did not start: releasing the prepared live engine");
-        tauri::async_runtime::spawn(async move {
-            if crate::audio::transcription_queue::get_queue()
-                .has_active_task()
-                .await
-            {
-                return;
-            }
-            crate::audio::common::unload_engine_after_batch(parakeet).await;
-        });
+        live_streaming::engine::drop_in_background(engine);
     }
+    live_streaming::engine::unload();
 }
 
 /// Releases the prepared live engine on drop unless [`Self::disarm`]ed, so
@@ -419,15 +259,12 @@ impl Drop for PreparedLive {
 }
 
 /// Free the live engine after a recording, so the final pass has the memory.
-/// Returns the provider of the chunked engine the recording used, if any, for
-/// the stop path to unload; a streaming recording loaded none.
-pub fn release_after_recording() -> Option<String> {
+pub fn release_after_recording() {
+    if let Some(session) = take_session() {
+        live_streaming::engine::drop_in_background(session);
+    }
     live_streaming::engine::unload();
     LIVE_STREAMING_MODE.store(false, Ordering::SeqCst);
-    CHUNKED_LIVE_PROVIDER
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .take()
 }
 
 #[cfg(test)]
@@ -435,45 +272,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_streaming_or_idle_recording_never_conflicts_with_a_pass() {
-        assert!(!live_conflicts(None, Some("localWhisper")));
-        assert!(!live_conflicts(None, Some("parakeet")));
-        assert!(!live_conflicts(None, None));
+    fn a_downloaded_live_model_streams() {
+        assert_eq!(LivePlan::initial(true), LivePlan::Streaming);
+        assert_eq!(LivePlan::initial(true).notice(), None);
     }
 
     #[test]
-    fn a_chunked_load_claims_the_engine_until_it_is_kept_or_dropped() {
-        // Regression: the provider was only published when the worker
-        // started, after the model was loaded, so a pass on the same family
-        // did not pause while the recording swapped its model.
-        let claim = ChunkedClaim::new("localWhisper");
-        assert!(live_conflicts(
-            chunked_live_provider().as_deref(),
-            Some("localWhisper")
-        ));
-        drop(claim);
-        assert_eq!(chunked_live_provider(), None);
-
-        // A batch job's unload must see a starting recording's claim, before
-        // is_recording turns true.
-        let claim = ChunkedClaim::new("localWhisper");
-        assert_eq!(chunked_engine_in_use().as_deref(), Some("localWhisper"));
-        drop(claim);
-        assert_eq!(chunked_engine_in_use(), None);
-
-        ChunkedClaim::new("parakeet").keep();
-        assert_eq!(chunked_live_provider().as_deref(), Some("parakeet"));
-        assert_eq!(release_after_recording().as_deref(), Some("parakeet"));
-        assert_eq!(chunked_live_provider(), None);
+    fn without_the_live_model_the_meeting_is_recorded_without_live_text() {
+        let plan = LivePlan::initial(false);
+        assert!(matches!(plan, LivePlan::Unavailable { .. }));
+        let notice = plan.notice().expect("the user is told why");
+        assert!(notice.contains("not downloaded"), "{notice}");
+        assert!(notice.contains("transcribed afterwards"), "{notice}");
     }
 
     #[test]
-    fn only_the_same_engine_family_conflicts() {
-        assert!(live_conflicts(Some("localWhisper"), Some("localWhisper")));
-        assert!(live_conflicts(Some("parakeet"), Some("parakeet")));
-        assert!(live_conflicts(Some("localWhisper"), None));
-        assert!(!live_conflicts(Some("parakeet"), Some("localWhisper")));
-        assert!(!live_conflicts(Some("localWhisper"), Some("parakeet")));
-        assert!(!live_conflicts(Some("parakeet"), None));
+    fn an_empty_notice_is_not_shown() {
+        let plan = LivePlan::Unavailable {
+            notice: String::new(),
+        };
+        assert_eq!(plan.notice(), None);
+    }
+
+    #[test]
+    fn live_transcripts_are_attributed_to_nemotron_streaming() {
+        let model = provenance("nemotron-speech-streaming-en-0.6b-coreml");
+        assert_eq!(model.provider, "nemotron-streaming");
+        assert_eq!(model.model, "nemotron-speech-streaming-en-0.6b-coreml");
     }
 }

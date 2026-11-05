@@ -3,7 +3,6 @@ pub mod audio_processing;
 pub mod decoder;
 pub mod encode;
 pub mod ffmpeg;
-pub mod vad;
 
 // Modularized device management
 pub mod capture;
@@ -18,7 +17,6 @@ pub mod batch_processor;
 pub mod buffer_pool;
 pub mod device_monitor; // NEW: Device disconnect/reconnect monitoring
 pub mod echo_canceller; // Mic echo cancellation for the live transcription path
-pub mod hardware_detector;
 pub mod incremental_saver; // NEW: Incremental audio saving with checkpoints
 pub mod level_monitor;
 pub mod pipeline;
@@ -33,8 +31,12 @@ pub mod stream;
 pub mod system_audio_commands;
 pub mod system_detector; // NEW: Playback device detection for BT warnings
 
-// Transcription module (provider abstraction, engine management, worker pool)
+// Live transcription plan, transcript emission and dedup.
 pub mod transcription;
+
+// The FluidAudio speech-helper sidecar: process, protocol, batch client,
+// model store and its commands.
+pub mod speech;
 
 // Shared utilities for import and retranscription
 pub(crate) mod common;
@@ -52,7 +54,7 @@ pub mod import;
 // Live (streaming) transcription with the Nemotron streaming model.
 pub mod live_streaming;
 
-// Live and final transcription model settings, migration and engine choice.
+// Live engine and final-pass settings.
 pub mod transcription_settings;
 
 // Automatic final transcript pass after a recording.
@@ -63,9 +65,6 @@ pub mod transcription_queue;
 
 // Offline, local speaker diarization for completed recordings.
 pub mod diarization;
-
-// Nemotron-3 (streaming Sortformer) speaker diarization model runner.
-pub mod sortformer;
 
 pub mod speaker_corrections;
 
@@ -115,7 +114,6 @@ pub use system_audio_commands::{init_system_audio_state, start_system_audio_moni
 pub use buffer_pool::{AudioBufferPool, PooledBuffer};
 pub use device_monitor::{AudioDeviceMonitor, DeviceEvent, DeviceMonitorType};
 pub use encode::{encode_single_audio, AudioInput};
-pub use hardware_detector::{AdaptiveWhisperConfig, GpuType, HardwareProfile, PerformanceTier};
 pub use level_monitor::{AudioLevelData, AudioLevelMonitor, AudioLevelUpdate};
 pub use pipeline::AudioPipelineManager;
 pub use recording_commands::{
@@ -132,8 +130,6 @@ pub use stream::AudioStreamManager;
 
 // Export device detection
 pub use device_detection::{calculate_buffer_timeout, InputDeviceKind};
-
-pub use vad::extract_speech_16k;
 
 // Export decoder for retranscription
 pub use decoder::{decode_audio_file, DecodedAudio};

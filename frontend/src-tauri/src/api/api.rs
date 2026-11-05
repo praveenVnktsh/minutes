@@ -1,7 +1,6 @@
 use log::{debug as log_debug, error as log_error, info as log_info, warn as log_warn};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Runtime};
-use tauri_plugin_store::StoreExt;
 
 use crate::{
     database::{
@@ -400,32 +399,6 @@ pub async fn api_get_meeting_audio_path<R: Runtime>(
     }
 }
 
-/// Read the current custom transcription vocabulary.
-#[tauri::command]
-pub async fn api_get_transcription_vocabulary<R: Runtime>(
-    _app: AppHandle<R>,
-) -> Result<String, String> {
-    Ok(crate::whisper_engine::whisper_engine::transcription_vocabulary())
-}
-
-/// Persist and activate a custom transcription vocabulary.
-#[tauri::command]
-pub async fn api_set_transcription_vocabulary<R: Runtime>(
-    app: AppHandle<R>,
-    vocabulary: String,
-) -> Result<(), String> {
-    crate::whisper_engine::whisper_engine::set_transcription_vocabulary(vocabulary.clone());
-
-    let store = app.store("store.json").map_err(|e| e.to_string())?;
-    store.set(
-        "transcriptionVocabulary",
-        serde_json::Value::String(vocabulary),
-    );
-    store.save().map_err(|e| e.to_string())?;
-
-    Ok(())
-}
-
 #[tauri::command]
 pub async fn api_search_transcripts<R: Runtime>(
     _app: AppHandle<R>,
@@ -675,7 +648,7 @@ pub async fn api_get_transcript_config<R: Runtime>(
             log_info!("No transcript config found, returning default.");
             Ok(Some(TranscriptConfig {
                 provider: "parakeet".to_string(),
-                model: crate::config::DEFAULT_PARAKEET_MODEL.to_string(),
+                model: crate::audio::common::FINAL_MODEL.to_string(),
                 api_key: None,
             }))
         }

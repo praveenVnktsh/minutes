@@ -1,0 +1,921 @@
+{
+  "builtTestProducts" : [
+    {
+      "binaryPath" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/nemotron-helperPackageTests.xctest/Contents/MacOS/nemotron-helperPackageTests",
+      "packagePath" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper",
+      "productName" : "nemotron-helperPackageTests"
+    }
+  ],
+  "copyCommands" : {
+
+  },
+  "explicitTargetDependencyImportCheckingMode" : {
+    "none" : {
+
+    }
+  },
+  "generatedSourceTargetSet" : [
+
+  ],
+  "pluginDescriptions" : [
+
+  ],
+  "swiftCommands" : {
+    "C.NemotronCore-arm64-apple-macosx-debug.module" : {
+      "executable" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "fileList" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/NemotronCore.build/sources",
+      "importPath" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/Modules",
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/Sources/NemotronCore/Config.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/Sources/NemotronCore/Mel.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/Sources/NemotronCore/Model.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/Sources/NemotronCore/Protocol.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/Sources/NemotronCore/Resampler.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/Sources/NemotronCore/Vocabulary.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/NemotronCore.build/sources"
+        }
+      ],
+      "isLibrary" : true,
+      "moduleName" : "NemotronCore",
+      "moduleOutputPath" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/Modules/NemotronCore.swiftmodule",
+      "objects" : [
+        "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/NemotronCore.build/Config.swift.o",
+        "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/NemotronCore.build/Mel.swift.o",
+        "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/NemotronCore.build/Model.swift.o",
+        "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/NemotronCore.build/Protocol.swift.o",
+        "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/NemotronCore.build/Resampler.swift.o",
+        "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/NemotronCore.build/Vocabulary.swift.o"
+      ],
+      "otherArguments" : [
+        "-target",
+        "arm64-apple-macosx15.0",
+        "-incremental",
+        "-enable-batch-mode",
+        "-serialize-diagnostics",
+        "-index-store-path",
+        "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/index/store",
+        "-Onone",
+        "-enable-testing",
+        "-j10",
+        "-DSWIFT_PACKAGE",
+        "-DDEBUG",
+        "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+        "-module-cache-path",
+        "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/ModuleCache",
+        "-parseable-output",
+        "-parse-as-library",
+        "-emit-objc-header",
+        "-emit-objc-header-path",
+        "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/NemotronCore.build/include/NemotronCore-Swift.h",
+        "-swift-version",
+        "5",
+        "-plugin-path",
+        "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+        "-sdk",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-I",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-L",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-g",
+        "-Xcc",
+        "-isysroot",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-Xcc",
+        "-fPIC",
+        "-Xcc",
+        "-g",
+        "-package-name",
+        "nemotron_helper"
+      ],
+      "outputFileMapPath" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/NemotronCore.build/output-file-map.json",
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/NemotronCore.build/Config.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/NemotronCore.build/Mel.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/NemotronCore.build/Model.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/NemotronCore.build/Protocol.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/NemotronCore.build/Resampler.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/NemotronCore.build/Vocabulary.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/Modules/NemotronCore.swiftmodule"
+        }
+      ],
+      "prepareForIndexing" : false,
+      "sources" : [
+        "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/Sources/NemotronCore/Config.swift",
+        "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/Sources/NemotronCore/Mel.swift",
+        "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/Sources/NemotronCore/Model.swift",
+        "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/Sources/NemotronCore/Protocol.swift",
+        "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/Sources/NemotronCore/Resampler.swift",
+        "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/Sources/NemotronCore/Vocabulary.swift"
+      ],
+      "tempsPath" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/NemotronCore.build",
+      "wholeModuleOptimization" : false
+    },
+    "C.NemotronCoreTests-arm64-apple-macosx-debug.module" : {
+      "executable" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "fileList" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/NemotronCoreTests.build/sources",
+      "importPath" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/Modules",
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/Tests/NemotronCoreTests/NemotronCoreTests.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/Modules/NemotronCore.swiftmodule"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/NemotronCoreTests.build/sources"
+        }
+      ],
+      "isLibrary" : true,
+      "moduleName" : "NemotronCoreTests",
+      "moduleOutputPath" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/Modules/NemotronCoreTests.swiftmodule",
+      "objects" : [
+        "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/NemotronCoreTests.build/NemotronCoreTests.swift.o"
+      ],
+      "otherArguments" : [
+        "-target",
+        "arm64-apple-macosx15.0",
+        "-incremental",
+        "-enable-batch-mode",
+        "-serialize-diagnostics",
+        "-index-store-path",
+        "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/index/store",
+        "-Onone",
+        "-enable-testing",
+        "-Xfrontend",
+        "-enable-cross-import-overlays",
+        "-j10",
+        "-DSWIFT_PACKAGE",
+        "-DDEBUG",
+        "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+        "-module-cache-path",
+        "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/ModuleCache",
+        "-parseable-output",
+        "-parse-as-library",
+        "-swift-version",
+        "5",
+        "-plugin-path",
+        "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+        "-sdk",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-I",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-L",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-g",
+        "-Xcc",
+        "-isysroot",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-Xcc",
+        "-fPIC",
+        "-Xcc",
+        "-g",
+        "-package-name",
+        "nemotron_helper"
+      ],
+      "outputFileMapPath" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/NemotronCoreTests.build/output-file-map.json",
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/NemotronCoreTests.build/NemotronCoreTests.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/Modules/NemotronCoreTests.swiftmodule"
+        }
+      ],
+      "prepareForIndexing" : false,
+      "sources" : [
+        "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/Tests/NemotronCoreTests/NemotronCoreTests.swift"
+      ],
+      "tempsPath" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/NemotronCoreTests.build",
+      "wholeModuleOptimization" : false
+    },
+    "C.nemotron-helper-arm64-apple-macosx-debug.module" : {
+      "executable" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "fileList" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/nemotron_helper.build/sources",
+      "importPath" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/Modules",
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/Sources/nemotron-helper/main.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/Modules/NemotronCore.swiftmodule"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/nemotron_helper.build/sources"
+        }
+      ],
+      "isLibrary" : false,
+      "moduleName" : "nemotron_helper",
+      "moduleOutputPath" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/Modules/nemotron_helper.swiftmodule",
+      "objects" : [
+        "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/nemotron_helper.build/main.swift.o"
+      ],
+      "otherArguments" : [
+        "-target",
+        "arm64-apple-macosx15.0",
+        "-incremental",
+        "-enable-batch-mode",
+        "-serialize-diagnostics",
+        "-index-store-path",
+        "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/index/store",
+        "-Onone",
+        "-enable-testing",
+        "-j10",
+        "-DSWIFT_PACKAGE",
+        "-DDEBUG",
+        "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+        "-module-cache-path",
+        "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/ModuleCache",
+        "-parseable-output",
+        "-Xfrontend",
+        "-entry-point-function-name",
+        "-Xfrontend",
+        "nemotron_helper_main",
+        "-swift-version",
+        "5",
+        "-plugin-path",
+        "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+        "-sdk",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-I",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-L",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-g",
+        "-Xcc",
+        "-isysroot",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-Xcc",
+        "-fPIC",
+        "-Xcc",
+        "-g",
+        "-package-name",
+        "nemotron_helper"
+      ],
+      "outputFileMapPath" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/nemotron_helper.build/output-file-map.json",
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/nemotron_helper.build/main.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/Modules/nemotron_helper.swiftmodule"
+        }
+      ],
+      "prepareForIndexing" : false,
+      "sources" : [
+        "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/Sources/nemotron-helper/main.swift"
+      ],
+      "tempsPath" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/nemotron_helper.build",
+      "wholeModuleOptimization" : false
+    },
+    "C.nemotron-helperPackageTests-arm64-apple-macosx-debug.module" : {
+      "executable" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "fileList" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/nemotron_helperPackageTests.build/sources",
+      "importPath" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/Modules",
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/nemotron-helperPackageTests.derived/runner.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/Modules/NemotronCoreTests.swiftmodule"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/nemotron_helperPackageTests.build/sources"
+        }
+      ],
+      "isLibrary" : true,
+      "moduleName" : "nemotron_helperPackageTests",
+      "moduleOutputPath" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/Modules/nemotron_helperPackageTests.swiftmodule",
+      "objects" : [
+        "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/nemotron_helperPackageTests.build/runner.swift.o"
+      ],
+      "otherArguments" : [
+        "-target",
+        "arm64-apple-macosx15.0",
+        "-incremental",
+        "-enable-batch-mode",
+        "-serialize-diagnostics",
+        "-index-store-path",
+        "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/index/store",
+        "-Onone",
+        "-enable-testing",
+        "-Xfrontend",
+        "-enable-cross-import-overlays",
+        "-j10",
+        "-DSWIFT_PACKAGE",
+        "-DDEBUG",
+        "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+        "-module-cache-path",
+        "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/ModuleCache",
+        "-parseable-output",
+        "-parse-as-library",
+        "-emit-objc-header",
+        "-emit-objc-header-path",
+        "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/nemotron_helperPackageTests.build/include/nemotron-helperPackageTests-Swift.h",
+        "-plugin-path",
+        "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+        "-sdk",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-I",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-L",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-g",
+        "-Xcc",
+        "-isysroot",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-Xcc",
+        "-fPIC",
+        "-Xcc",
+        "-g",
+        "-package-name",
+        "nemotron_helper"
+      ],
+      "outputFileMapPath" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/nemotron_helperPackageTests.build/output-file-map.json",
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/nemotron_helperPackageTests.build/runner.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/Modules/nemotron_helperPackageTests.swiftmodule"
+        }
+      ],
+      "prepareForIndexing" : false,
+      "sources" : [
+        "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/nemotron-helperPackageTests.derived/runner.swift"
+      ],
+      "tempsPath" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/nemotron_helperPackageTests.build",
+      "wholeModuleOptimization" : false
+    }
+  },
+  "swiftFrontendCommands" : {
+
+  },
+  "swiftTargetScanArgs" : {
+    "NemotronCore" : [
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "-module-name",
+      "NemotronCore",
+      "-package-name",
+      "nemotron_helper",
+      "-c",
+      "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/Sources/NemotronCore/Config.swift",
+      "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/Sources/NemotronCore/Mel.swift",
+      "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/Sources/NemotronCore/Model.swift",
+      "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/Sources/NemotronCore/Protocol.swift",
+      "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/Sources/NemotronCore/Resampler.swift",
+      "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/Sources/NemotronCore/Vocabulary.swift",
+      "-I",
+      "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/Modules",
+      "-target",
+      "arm64-apple-macosx15.0",
+      "-incremental",
+      "-enable-batch-mode",
+      "-serialize-diagnostics",
+      "-index-store-path",
+      "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/index/store",
+      "-Onone",
+      "-enable-testing",
+      "-j10",
+      "-DSWIFT_PACKAGE",
+      "-DDEBUG",
+      "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+      "-module-cache-path",
+      "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/ModuleCache",
+      "-parseable-output",
+      "-parse-as-library",
+      "-emit-objc-header",
+      "-emit-objc-header-path",
+      "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/NemotronCore.build/include/NemotronCore-Swift.h",
+      "-swift-version",
+      "5",
+      "-plugin-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+      "-sdk",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-I",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-L",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-g",
+      "-Xcc",
+      "-isysroot",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-Xcc",
+      "-fPIC",
+      "-Xcc",
+      "-g",
+      "-package-name",
+      "nemotron_helper",
+      "-driver-use-frontend-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+    ],
+    "NemotronCoreTests" : [
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "-module-name",
+      "NemotronCoreTests",
+      "-package-name",
+      "nemotron_helper",
+      "-c",
+      "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/Tests/NemotronCoreTests/NemotronCoreTests.swift",
+      "-I",
+      "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/Modules",
+      "-target",
+      "arm64-apple-macosx15.0",
+      "-incremental",
+      "-enable-batch-mode",
+      "-serialize-diagnostics",
+      "-index-store-path",
+      "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/index/store",
+      "-Onone",
+      "-enable-testing",
+      "-Xfrontend",
+      "-enable-cross-import-overlays",
+      "-j10",
+      "-DSWIFT_PACKAGE",
+      "-DDEBUG",
+      "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+      "-module-cache-path",
+      "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/ModuleCache",
+      "-parseable-output",
+      "-parse-as-library",
+      "-swift-version",
+      "5",
+      "-plugin-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+      "-sdk",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-I",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-L",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-g",
+      "-Xcc",
+      "-isysroot",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-Xcc",
+      "-fPIC",
+      "-Xcc",
+      "-g",
+      "-package-name",
+      "nemotron_helper",
+      "-driver-use-frontend-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+    ],
+    "nemotron_helper" : [
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "-module-name",
+      "nemotron_helper",
+      "-package-name",
+      "nemotron_helper",
+      "-c",
+      "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/Sources/nemotron-helper/main.swift",
+      "-I",
+      "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/Modules",
+      "-target",
+      "arm64-apple-macosx15.0",
+      "-incremental",
+      "-enable-batch-mode",
+      "-serialize-diagnostics",
+      "-index-store-path",
+      "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/index/store",
+      "-Onone",
+      "-enable-testing",
+      "-j10",
+      "-DSWIFT_PACKAGE",
+      "-DDEBUG",
+      "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+      "-module-cache-path",
+      "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/ModuleCache",
+      "-parseable-output",
+      "-Xfrontend",
+      "-entry-point-function-name",
+      "-Xfrontend",
+      "nemotron_helper_main",
+      "-swift-version",
+      "5",
+      "-plugin-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+      "-sdk",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-I",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-L",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-g",
+      "-Xcc",
+      "-isysroot",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-Xcc",
+      "-fPIC",
+      "-Xcc",
+      "-g",
+      "-package-name",
+      "nemotron_helper",
+      "-driver-use-frontend-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+    ],
+    "nemotron_helperPackageTests" : [
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "-module-name",
+      "nemotron_helperPackageTests",
+      "-package-name",
+      "nemotron_helper",
+      "-c",
+      "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/nemotron-helperPackageTests.derived/runner.swift",
+      "-I",
+      "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/Modules",
+      "-target",
+      "arm64-apple-macosx15.0",
+      "-incremental",
+      "-enable-batch-mode",
+      "-serialize-diagnostics",
+      "-index-store-path",
+      "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/index/store",
+      "-Onone",
+      "-enable-testing",
+      "-Xfrontend",
+      "-enable-cross-import-overlays",
+      "-j10",
+      "-DSWIFT_PACKAGE",
+      "-DDEBUG",
+      "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+      "-module-cache-path",
+      "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/ModuleCache",
+      "-parseable-output",
+      "-parse-as-library",
+      "-emit-objc-header",
+      "-emit-objc-header-path",
+      "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/nemotron_helperPackageTests.build/include/nemotron-helperPackageTests-Swift.h",
+      "-plugin-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+      "-sdk",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-I",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-L",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-g",
+      "-Xcc",
+      "-isysroot",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-Xcc",
+      "-fPIC",
+      "-Xcc",
+      "-g",
+      "-package-name",
+      "nemotron_helper",
+      "-driver-use-frontend-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+    ]
+  },
+  "targetDependencyMap" : {
+    "NemotronCore" : [
+
+    ],
+    "NemotronCoreTests" : [
+      "NemotronCore"
+    ],
+    "nemotron_helper" : [
+      "NemotronCore"
+    ],
+    "nemotron_helperPackageTests" : [
+      "NemotronCoreTests",
+      "NemotronCore"
+    ]
+  },
+  "testDiscoveryCommands" : {
+
+  },
+  "testEntryPointCommands" : {
+    "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/nemotron-helperPackageTests.derived/runner.swift" : {
+      "inputs" : [
+
+      ],
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/nemotron-helperPackageTests.derived/runner.swift"
+        }
+      ]
+    }
+  },
+  "traitConfiguration" : {
+    "default" : {
+
+    }
+  },
+  "writeCommands" : {
+    "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/NemotronCore.build/sources" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<sources-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/Sources/NemotronCore/Config.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/Sources/NemotronCore/Mel.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/Sources/NemotronCore/Model.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/Sources/NemotronCore/Protocol.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/Sources/NemotronCore/Resampler.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/Sources/NemotronCore/Vocabulary.swift"
+        }
+      ],
+      "outputFilePath" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/NemotronCore.build/sources"
+    },
+    "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/NemotronCoreTests.build/sources" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<sources-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/Tests/NemotronCoreTests/NemotronCoreTests.swift"
+        }
+      ],
+      "outputFilePath" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/NemotronCoreTests.build/sources"
+    },
+    "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/nemotron-helper-entitlement.plist" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<entitlement-plist>"
+        },
+        {
+          "kind" : "virtual",
+          "name" : "<com.apple.security.get-task-allow>"
+        }
+      ],
+      "outputFilePath" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/nemotron-helper-entitlement.plist"
+    },
+    "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/nemotron-helper.product/Objects.LinkFileList" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<link-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/NemotronCore.build/Config.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/NemotronCore.build/Mel.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/NemotronCore.build/Model.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/NemotronCore.build/Protocol.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/NemotronCore.build/Resampler.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/NemotronCore.build/Vocabulary.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/nemotron_helper.build/main.swift.o"
+        }
+      ],
+      "outputFilePath" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/nemotron-helper.product/Objects.LinkFileList"
+    },
+    "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/nemotron-helperPackageTests.product/Objects.LinkFileList" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<link-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/NemotronCore.build/Config.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/NemotronCore.build/Mel.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/NemotronCore.build/Model.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/NemotronCore.build/Protocol.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/NemotronCore.build/Resampler.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/NemotronCore.build/Vocabulary.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/NemotronCoreTests.build/NemotronCoreTests.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/nemotron_helperPackageTests.build/runner.swift.o"
+        }
+      ],
+      "outputFilePath" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/nemotron-helperPackageTests.product/Objects.LinkFileList"
+    },
+    "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/nemotron_helper.build/sources" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<sources-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/Sources/nemotron-helper/main.swift"
+        }
+      ],
+      "outputFilePath" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/nemotron_helper.build/sources"
+    },
+    "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/nemotron_helperPackageTests.build/sources" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<sources-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/nemotron-helperPackageTests.derived/runner.swift"
+        }
+      ],
+      "outputFilePath" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/nemotron_helperPackageTests.build/sources"
+    },
+    "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt" : {
+      "alwaysOutOfDate" : true,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<swift-get-version>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+        }
+      ],
+      "outputFilePath" : "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+    }
+  }
+}

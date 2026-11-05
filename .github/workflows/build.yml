@@ -145,17 +145,6 @@ jobs:
           prefix-key: v0-rust
           key: ${{ inputs.platform }}-${{ inputs.target }}-v2
 
-      # sherpa-onnx-sys downloads its prebuilt libs into
-      # target/sherpa-onnx-prebuilt/ and skips the download whenever
-      # <archive>/lib/ exists. The restored cache brings that directory back
-      # without the .a files, so the build fails to link `sherpa-onnx-c-api`.
-      # Drop the prebuilt dir and the build-script state so it downloads again.
-      - name: Reset sherpa-onnx build-script state
-        shell: bash
-        run: |
-          rm -rf target/sherpa-onnx-prebuilt target/release/build/sherpa-onnx-sys-* target/*/release/build/sherpa-onnx-sys-* \
-            target/release/.fingerprint/sherpa-onnx-sys-* target/*/release/.fingerprint/sherpa-onnx-sys-*
-
       - name: Install frontend dependencies
         run: |
           cd frontend
@@ -208,9 +197,9 @@ jobs:
           fi
           echo "platform=${patched_platform}" >> $GITHUB_OUTPUT
 
-      - name: Build nemotron-helper sidecar
+      - name: Build speech-helper sidecar
         shell: bash
-        run: bash nemotron-helper/build.sh release
+        run: bash speech-helper/build.sh release
 
       - name: Build llama-helper sidecar
         shell: bash
