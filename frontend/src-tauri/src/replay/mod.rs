@@ -5,8 +5,9 @@
 //! the final pass, diarization and the summary, recording every UI event to
 //! `events.jsonl` and scoring the run against the live storyboard.
 //!
-//! - [`events`], [`script`] and [`report`] are pure and always compiled (their
-//!   tests run in PR Check).
+//! - [`events`], [`script`] and [`report`] are pure and only used by the
+//!   runner and the replay example, so they are built with the `dev-replay`
+//!   feature (PR Check runs their tests with it).
 //! - [`runner`] drives the app headless on Tauri's mock runtime and is only
 //!   built with the `dev-replay` feature:
 //!
@@ -28,11 +29,14 @@
 //! in the browser.
 
 pub mod commands;
+#[cfg(feature = "dev-replay")]
 pub mod events;
 pub mod live_ask;
 pub mod live_copilot;
+#[cfg(feature = "dev-replay")]
 pub mod report;
 pub mod runs;
+#[cfg(feature = "dev-replay")]
 pub mod script;
 pub mod trace;
 

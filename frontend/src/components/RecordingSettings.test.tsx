@@ -46,7 +46,6 @@ mock.module('@/contexts/RecordingStateContext', () => ({
 mock.module('@tauri-apps/plugin-store', () => ({
   Store: { load: async () => ({ get: async () => true, set: async () => {}, save: async () => {} }) },
 }))
-mock.module('@/lib/analytics', () => ({ default: { track: async () => {} } }))
 mock.module('@/components/DeviceSelection', () => ({
   ...originalDeviceSelection,
   DeviceSelection: () => null,

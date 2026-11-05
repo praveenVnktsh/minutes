@@ -11,7 +11,6 @@ import type { MeetingSummary, SummaryProcessResponse } from '../../src/types';
 // below has no useSearchParams, which crashed meeting-details-refresh on import,
 // and the fake invoke broke summary-language-preferences.
 const originalCore = { ...await import('@tauri-apps/api/core') };
-const originalAnalytics = { ...await import('../../src/lib/analytics') };
 const originalPreferences = { ...await import('../../src/lib/summary-language-preferences') };
 const originalToast = { ...await import('sonner') };
 const originalNavigation = { ...await import('next/navigation') };
@@ -19,7 +18,6 @@ const originalRecordingState = { ...await import('../../src/contexts/RecordingSt
 const originalConfig = { ...await import('../../src/contexts/ConfigContext') };
 afterAll(() => {
   mock.module('@tauri-apps/api/core', () => originalCore);
-  mock.module('../../src/lib/analytics', () => originalAnalytics);
   mock.module('../../src/lib/summary-language-preferences', () => originalPreferences);
   mock.module('sonner', () => originalToast);
   mock.module('next/navigation', () => originalNavigation);
@@ -39,11 +37,6 @@ mock.module('../../src/contexts/ConfigContext', () => ({
 }));
 const notify = mock(() => {});
 mock.module('sonner', () => ({ toast: { info: notify, error: notify, success: notify, warning: notify } }));
-const trackCompletion = mock(async (..._args: Parameters<typeof originalAnalytics.default.trackSummaryGenerationCompleted>) => {});
-mock.module('../../src/lib/analytics', () => ({ default: {
-  trackBackendConnection() {}, trackSummaryGenerationStarted: async () => {},
-  trackSummaryGenerationCompleted: trackCompletion,
-} }));
 let startProcess: () => Promise<{ process_id: string }>;
 let getSummary: (meetingId: string) => Promise<SummaryProcessResponse>;
 let cancelProcess: () => Promise<{ cancelled: boolean }>;
@@ -99,7 +92,7 @@ beforeEach(() => {
   configuredModel = 'test';
   configSaving = false;
   configError = null;
-  timers.clear(); notify.mockClear(); trackCompletion.mockClear(); invoke.mockClear();
+  timers.clear(); notify.mockClear(); invoke.mockClear();
   getSummary = async () => response();
   startProcess = async () => ({ process_id: 'attempt-a' });
   cancelProcess = async () => ({ cancelled: true });
@@ -233,7 +226,7 @@ describe('summary state restored when returning to a meeting', () => {
     expect(state.summaryStatus).toBe('completed');
   });
 
-  test('hydrates completed and cancelled records without replaying notifications or analytics', async () => {
+  test('hydrates completed and cancelled records without replaying notifications', async () => {
     await show(response({ status: 'completed', data: { markdown: 'Finished while away' } }));
     expect(state.summaryStatus).toBe('completed');
     expect(text()).toContain('Finished while away');
@@ -243,7 +236,6 @@ describe('summary state restored when returning to a meeting', () => {
     expect(text()).toContain('Restored summary');
     expect(timers.size).toBe(0);
     expect(notify).not.toHaveBeenCalled();
-    expect(trackCompletion).not.toHaveBeenCalled();
   });
 
   test('ignores a response belonging to another meeting', async () => {
@@ -457,17 +449,6 @@ describe('summary state restored when returning to a meeting', () => {
       { meetingId: 'meeting-a', processId: newer },
     ]);
     expect(timers.size).toBe(0);
-  });
-
-  test('completion analytics retain the model used to start the attempt after settings change', async () => {
-    const initial = response({ status: 'idle', start: null });
-    await show(initial);
-    await act(async () => state.handleGenerateSummary());
-    configuredModel = 'different-model';
-    await show(initial);
-    getSummary = async () => response({ status: 'completed', data: { markdown: 'Finished summary' } });
-    await tick();
-    expect(trackCompletion.mock.calls[0]?.slice(0, 3)).toEqual(['ollama', 'test', true]);
   });
 
   test('old in-flight poll cannot stop a resumed poll for the same process', async () => {

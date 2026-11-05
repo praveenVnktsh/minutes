@@ -392,28 +392,6 @@ export class IndexedDBService {
     return transcripts;
   }
 
-  /**
-   * Get transcript count for a meeting
-   */
-  async getTranscriptCount(meetingId: string): Promise<number> {
-    try {
-      if (!this.db) await this.init();
-
-      const transaction = this.db!.transaction(['transcripts'], 'readonly');
-      const store = transaction.objectStore('transcripts');
-      const index = store.index('meetingId');
-
-      return new Promise((resolve, reject) => {
-        const request = index.count(meetingId);
-        request.onsuccess = () => resolve(request.result);
-        request.onerror = () => reject(request.error);
-      });
-    } catch (error) {
-      console.error('Failed to get transcript count from IndexedDB:', error);
-      return 0;
-    }
-  }
-
   // Cleanup operations
 
   /**

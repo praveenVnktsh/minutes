@@ -3,7 +3,6 @@ import { invoke as invokeTauri } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
 import type { MeetingSummary, Transcript } from '@/types';
 import type { LiveNotesDocument } from '@/lib/liveNotes';
-import Analytics from '@/lib/analytics';
 import { writeClipboardText } from '@/lib/clipboard';
 import { legacyAiNotes, notesMarkdown } from '@/lib/aiNotes';
 import {
@@ -38,12 +37,6 @@ async function readAllTranscripts(meetingId: string): Promise<Transcript[]> {
     'api_get_meeting_transcripts',
     args,
   ));
-}
-
-function trackCopy(type: 'summary' | 'transcript', metadata: Record<string, string>): void {
-  void Analytics.trackCopy(type, metadata).catch((error) => {
-    console.error('Failed to record copy analytics:', error);
-  });
 }
 
 export function useCopyOperations({
@@ -84,14 +77,6 @@ export function useCopyOperations({
       const date = meeting.created_at ? `\n\n_${new Date(meeting.created_at).toLocaleString()}_` : '';
       await writeClipboardText(`# Transcript: ${title}${date}\n\n${transcriptMarkdown(allTranscripts)}\n`);
       toast.success('Transcript copied to clipboard');
-      const wordCount = allTranscripts.reduce((count, transcript) => (
-        count + transcript.text.trim().split(/\s+/).filter(Boolean).length
-      ), 0);
-      trackCopy('transcript', {
-        meeting_id: meeting.id,
-        transcript_length: String(allTranscripts.length),
-        word_count: String(wordCount),
-      });
     } catch (error) {
       console.error('Failed to copy transcript:', error);
       toast.error('Failed to copy transcript');
@@ -108,12 +93,11 @@ export function useCopyOperations({
       }
       await writeClipboardText(`# ${title}\n\n${body}\n`);
       toast.success('Notes copied');
-      trackCopy('summary', { meeting_id: meeting.id, with_ai_notes: String(showAiNotes) });
     } catch (error) {
       console.error('Failed to copy notes:', error);
       toast.error('Failed to copy notes');
     }
-  }, [meeting.id, readNotes, showAiNotes, title]);
+  }, [readNotes, title]);
 
   const handleExportMarkdown = useCallback(async () => {
     try {

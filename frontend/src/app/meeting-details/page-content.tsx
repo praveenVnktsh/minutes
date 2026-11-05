@@ -4,7 +4,6 @@ import { motion } from 'framer-motion';
 import { MeetingSummary, SummaryProcessResponse } from '@/types';
 import type { MeetingActivity, MeetingActivityStatus } from '@/types/meetingActivity';
 import { useSidebar } from '@/components/Sidebar/SidebarProvider';
-import Analytics from '@/lib/analytics';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { Copy, Download, Loader2, MoreHorizontal, Sparkles, Square } from 'lucide-react';
@@ -340,11 +339,6 @@ export default function PageContent({
       </PopoverContent>
     </Popover>
   );
-
-  // Track page view
-  useEffect(() => {
-    Analytics.trackPageView('meeting_details');
-  }, []);
 
   if (isRecordingThisMeeting) {
     return (

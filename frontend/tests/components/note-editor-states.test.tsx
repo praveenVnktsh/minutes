@@ -1,5 +1,5 @@
 import { describe, expect, mock, test } from 'bun:test';
-import { createElement, type ComponentType } from 'react';
+import { createElement } from 'react';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import type { LiveNotesDocument } from '../../src/lib/liveNotes';
 
@@ -99,7 +99,6 @@ mock.module('next/dynamic', () => ({
 
 const { MeetingNotesEditor } = await import('../../src/components/MeetingDetails/MeetingNotesEditor');
 const { LiveNotesPad } = await import('../../src/components/LiveNotesPad');
-const TestLiveNotesPad = LiveNotesPad as ComponentType<{ bare?: boolean }>;
 
 async function settle(): Promise<void> {
   await act(async () => {
@@ -164,7 +163,7 @@ describe('note editor state boundaries', () => {
     recordingState = { isRecording: true, recordingDuration: 12 };
     let renderer!: ReactTestRenderer;
     await act(async () => {
-      renderer = create(createElement(TestLiveNotesPad, { bare: true }));
+      renderer = create(createElement(LiveNotesPad));
     });
     await settle();
 

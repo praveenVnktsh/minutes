@@ -5,7 +5,6 @@ import type { SummaryProcessResponse } from '../../src/types';
 const originalCore = { ...await import('@tauri-apps/api/core') };
 const originalConfig = { ...await import('../../src/contexts/ConfigContext') };
 const originalNavigation = { ...await import('next/navigation') };
-const originalAnalytics = { ...await import('../../src/lib/analytics') };
 const originalToast = { ...await import('sonner') };
 const originalRecordingState = { ...await import('../../src/contexts/RecordingStateContext') };
 const originalPreferences = { ...await import('../../src/lib/summary-language-preferences') };
@@ -44,12 +43,6 @@ mock.module('../../src/contexts/ConfigContext', () => ({
 }));
 const push = mock(() => {});
 mock.module('next/navigation', () => ({ useRouter: () => ({ push }) }));
-const analytics = {
-  trackPageView() {}, trackButtonClick() {}, trackCustomPromptUsed: async () => {},
-  trackSummaryGenerationStarted: async () => {}, trackSummaryGenerationCompleted: async () => {},
-  trackBackendConnection() {},
-};
-mock.module('../../src/lib/analytics', () => ({ ...analytics, default: analytics }));
 mock.module('sonner', () => ({ toast: { info() {}, error() {}, success() {}, warning() {} } }));
 mock.module('../../src/contexts/RecordingStateContext', () => ({
   useRecordingState: () => ({ isRecording: false }),
@@ -109,7 +102,6 @@ afterAll(() => {
   mock.module('@tauri-apps/api/core', () => originalCore);
   mock.module('../../src/contexts/ConfigContext', () => originalConfig);
   mock.module('next/navigation', () => originalNavigation);
-  mock.module('../../src/lib/analytics', () => originalAnalytics);
   mock.module('sonner', () => originalToast);
   mock.module('../../src/contexts/RecordingStateContext', () => originalRecordingState);
   mock.module('../../src/lib/summary-language-preferences', () => originalPreferences);

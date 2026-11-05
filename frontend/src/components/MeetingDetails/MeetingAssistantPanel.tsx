@@ -196,7 +196,7 @@ export function MeetingAssistantPanel({
           )}
           {historyState === 'ready' && messages.length === 0 && (
             <div className="py-8">
-              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#e2e9df] text-[#55735c]">
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-success-subtle text-success">
                 <Bot className="h-5 w-5" />
               </div>
               <h3 className="mt-4 text-sm font-semibold text-ink">Ask about this meeting</h3>

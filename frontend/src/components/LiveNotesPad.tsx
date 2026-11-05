@@ -22,10 +22,8 @@ const BlockNotesEditor = dynamic(
 );
 
 export function LiveNotesPad({
-  bare = false,
   aiEntries,
 }: {
-  bare?: boolean;
   /** Experimental: live notes to write into these notes as AI lines. */
   aiEntries?: TimelineEntry[];
 } = {}) {
@@ -112,52 +110,22 @@ export function LiveNotesPad({
     return <div className="flex h-full items-center justify-center text-sm text-ink-subtle">Preparing notes…</div>;
   }
 
-  if (bare) {
-    return (
-      <div className="meeting-notes-editor raw-notes-editor h-full overflow-y-auto">
-        <div className="sticky top-0 z-10 flex justify-end bg-[var(--surface-0)] px-10 py-2">
-          {snapshot.loadState === 'error' && (
-            <StatusFeedback tone="error" actionLabel="Retry" onAction={() => void reloadNotes()} className="mr-auto">
-              Could not refresh notes; showing your local draft
-            </StatusFeedback>
-          )}
-          <SaveFeedback
-            state={snapshot.saveState}
-            actionLabel={snapshot.saveState === 'error' ? 'Retry' : undefined}
-            onAction={snapshot.saveState === 'error' ? () => target && void notePersistenceService.retryNotes(target).catch(() => {}) : undefined}
-          />
-        </div>
-        <div className="mx-auto w-full max-w-[860px] px-10 pb-24 pt-6">
-          <BlockNotesEditor document={snapshot.document} onChange={handleDocumentChange} aiEntries={aiEntries} />
-        </div>
-      </div>
-    );
-  }
-
   return (
-    <div className="flex h-full flex-col bg-[var(--surface-0)]">
-      <div className="flex items-center justify-between px-8 py-4">
-        <div>
-          <div className="text-sm font-medium text-ink">Your notes</div>
-          <div className="text-xs text-[var(--ink-subtle)]">Use / for blocks and Markdown · AI will enrich these after the meeting</div>
-        </div>
-        <div className="flex items-center gap-3">
-          {snapshot.loadState === 'error' && (
-            <StatusFeedback tone="error" actionLabel="Retry" onAction={() => void reloadNotes()}>
-              Showing local draft
-            </StatusFeedback>
-          )}
-          <SaveFeedback
-            state={snapshot.saveState}
-            actionLabel={snapshot.saveState === 'error' ? 'Retry' : undefined}
-            onAction={snapshot.saveState === 'error' ? () => target && void notePersistenceService.retryNotes(target).catch(() => {}) : undefined}
-          />
-        </div>
+    <div className="meeting-notes-editor raw-notes-editor h-full overflow-y-auto">
+      <div className="sticky top-0 z-10 flex justify-end bg-[var(--surface-0)] px-10 py-2">
+        {snapshot.loadState === 'error' && (
+          <StatusFeedback tone="error" actionLabel="Retry" onAction={() => void reloadNotes()} className="mr-auto">
+            Could not refresh notes; showing your local draft
+          </StatusFeedback>
+        )}
+        <SaveFeedback
+          state={snapshot.saveState}
+          actionLabel={snapshot.saveState === 'error' ? 'Retry' : undefined}
+          onAction={snapshot.saveState === 'error' ? () => target && void notePersistenceService.retryNotes(target).catch(() => {}) : undefined}
+        />
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto px-8 pb-36 pt-3">
-        <div className="mx-auto min-h-full max-w-[820px] rounded-2xl bg-[var(--surface-raised)] px-8 py-8 shadow-[0_1px_0_rgba(45,43,37,0.04)]">
-          <BlockNotesEditor document={snapshot.document} onChange={handleDocumentChange} aiEntries={aiEntries} />
-        </div>
+      <div className="mx-auto w-full max-w-[860px] px-10 pb-24 pt-6">
+        <BlockNotesEditor document={snapshot.document} onChange={handleDocumentChange} aiEntries={aiEntries} />
       </div>
     </div>
   );

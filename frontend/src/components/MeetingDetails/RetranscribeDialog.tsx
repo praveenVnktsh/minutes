@@ -11,7 +11,6 @@ import {
 import { Button } from '../ui/button';
 import { invoke } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
-import Analytics from '@/lib/analytics';
 import { useTranscriptAvailability } from '@/lib/speechModels';
 import { TranscriptionUnsupportedNotice } from '@/components/TranscriptionUnsupportedNotice';
 import { cn } from '@/lib/utils';
@@ -48,12 +47,6 @@ export function RetranscribeDialog({
     setIsStarting(true);
 
     try {
-      await Analytics.track('enhance_transcript_started', {
-        language: 'en',
-        model_provider: 'parakeet',
-        model_name: 'parakeet-tdt-0.6b-v2-coreml',
-      });
-
       // One model, English only: the backend ignores language/model/provider.
       await invoke('start_retranscription_command', {
         meetingId,
@@ -68,8 +61,6 @@ export function RetranscribeDialog({
     } catch (err: any) {
       const errorMsg = typeof err === 'string' ? err : (err?.message || String(err));
       toast.error(errorMsg);
-
-      await Analytics.trackError('enhance_transcript_failed', errorMsg);
     } finally {
       setIsStarting(false);
     }

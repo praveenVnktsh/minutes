@@ -35,12 +35,6 @@ pub fn set_meeting_detected<R: Runtime>(app: &AppHandle<R>, app_name: Option<Str
     update_tray_menu(app);
 }
 
-/// Tauri command so the frontend detection can drive the tray badge/menu.
-#[tauri::command]
-pub async fn set_meeting_detected_tray<R: Runtime>(app: AppHandle<R>, app_name: Option<String>) {
-    set_meeting_detected(&app, app_name);
-}
-
 /// Format an elapsed duration as `M:SS`, or `H:MM:SS` once it passes an hour.
 pub fn format_elapsed(total_seconds: u64) -> String {
     let hours = total_seconds / 3600;

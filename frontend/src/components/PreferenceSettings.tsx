@@ -5,7 +5,6 @@ import { Switch } from "./ui/switch"
 import { FolderOpen, Keyboard, X } from "lucide-react"
 import { invoke } from "@tauri-apps/api/core"
 import { toast } from "sonner"
-import Analytics from "@/lib/analytics"
 import { useConfig, NotificationSettings } from "@/contexts/ConfigContext"
 import { UpdateSettings } from "./UpdateSettings"
 import { SaveFeedback, type SaveFeedbackState } from "./ui/status-feedback"
@@ -54,7 +53,6 @@ export function PreferenceSettings() {
   const [notificationsEnabled, setNotificationsEnabled] = useState<boolean | null>(null);
   const [isInitialLoad, setIsInitialLoad] = useState(true);
   const [previousNotificationsEnabled, setPreviousNotificationsEnabled] = useState<boolean | null>(null);
-  const hasTrackedViewRef = useRef(false);
   const [shortcuts, setShortcuts] = useState<{ recording: string; window: string; pause: string } | null>(null);
   const [recordingKey, setRecordingKey] = useState<'recording' | 'window' | 'pause' | null>(null);
   const [shortcutSaveState, setShortcutSaveState] = useState<SaveFeedbackState | null>(null);
@@ -117,32 +115,7 @@ export function PreferenceSettings() {
   // Lazy load preferences on mount (only loads if not already cached)
   useEffect(() => {
     loadPreferences();
-    // Reset tracking ref on mount (every tab visit)
-    hasTrackedViewRef.current = false;
   }, [loadPreferences]);
-
-  // Track preferences viewed analytics on every tab visit (once per mount)
-  useEffect(() => {
-    if (hasTrackedViewRef.current) return;
-
-    const trackPreferencesViewed = async () => {
-      // Wait for notification settings to be available (either from cache or after loading)
-      if (notificationSettings) {
-        await Analytics.track('preferences_viewed', {
-          notifications_enabled: notificationSettings.notification_preferences.show_recording_started ? 'true' : 'false'
-        });
-        hasTrackedViewRef.current = true;
-      } else if (!isLoadingPreferences) {
-        // If not loading and no settings available, track with default value
-        await Analytics.track('preferences_viewed', {
-          notifications_enabled: 'false'
-        });
-        hasTrackedViewRef.current = true;
-      }
-    };
-
-    trackPreferencesViewed();
-  }, [notificationSettings, isLoadingPreferences]);
 
   // Update notificationsEnabled when notificationSettings are loaded from global state
   useEffect(() => {
@@ -183,7 +156,6 @@ export function PreferenceSettings() {
       await updateNotificationSettings(updatedSettings);
       setPreviousNotificationsEnabled(enabled);
       setNotificationSaveState('saved');
-      await Analytics.track('notification_settings_changed', { notifications_enabled: enabled.toString() });
     } catch {
       setNotificationsEnabled(previous);
       setNotificationSaveState('error');
@@ -204,11 +176,6 @@ export function PreferenceSettings() {
           await invoke('open_recordings_folder');
           break;
       }
-
-      // Track storage folder access
-      await Analytics.track('storage_folder_opened', {
-        folder_type: folderType
-      });
     } catch (error) {
       console.error(`Failed to open ${folderType} folder:`, error);
       setFolderError(`Could not open the ${folderType} folder: ${String(error)}`);

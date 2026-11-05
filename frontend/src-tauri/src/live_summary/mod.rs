@@ -514,16 +514,6 @@ pub async fn get_live_timeline() -> Option<TimelineSnapshot> {
     LATEST.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
-/// The current (or last) session's Enhanced notes, so the meeting page can
-/// rehydrate.
-#[tauri::command]
-pub async fn get_live_enhanced() -> Option<EnhancedSnapshot> {
-    LATEST_ENHANCED
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone()
-}
-
 /// Whether a meeting's Enhanced notes are built from its live notes (the
 /// summary then needs no pass over the final transcript, so the stop can
 /// start it at once).

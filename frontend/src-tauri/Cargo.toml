@@ -41,19 +41,12 @@ serde = { version = "1.0", features = ["derive"] }
 anyhow = "1.0"
 once_cell = "1.17.1"
 uuid = { version = "1.0", features = ["v4", "serde"] }
-posthog-rs = "0.3.7"
 hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
 
 # Microphone capture
 cpal = "0.15.3"
-
-# Wav encoding - now using manual WAV creation instead of hound
-# hound = "3.5"
-
-# Cli ! shouldn't be required if using as lib
-clap = { version = "4.3", features = ["derive"] }
 
 # Dates
 chrono = { version = "0.4.31", features = ["serde"] }
@@ -69,9 +62,6 @@ bytemuck = "1.16.1"
 
 # EBU R128 loudness normalization (professional broadcast standard)
 ebur128 = "0.1"
-
-# Noise suppression - RNNoise-based neural network noise reduction
-nnnoiseless = "0.5"
 
 # Acoustic echo cancellation for the live mic transcription path.
 # Pure-Rust port of WebRTC AEC3, so it adds no C++ build step. Needs Rust 1.91.
@@ -90,7 +80,6 @@ reqwest = { version = "0.11", features = ["blocking", "multipart", "json", "stre
 
 # crossbeam
 crossbeam = "0.8.4"
-dashmap = "6.1.0"
 
 # Directories
 dirs = "5.0.1"
@@ -102,7 +91,6 @@ url = "2.5.0"
 # Pinned: 0.17.13 provides Calendar::calendar_events + CalendarEvent recurrence.
 icalendar = { version = "0.17.13", features = ["parser", "recurrence"] }
 rrule = "0.14"
-chrono-tz = "0.10"
 
 
 # System monitoring for resource management
@@ -112,9 +100,7 @@ lazy_static = { version = "1.4.0" }
 realfft = "3.4.0"
 regex = "1.11.0"
 bytes = { version = "1.9.0", features = ["serde"] }
-
 symphonia = { version = "0.5.4", features = ["aac", "isomp4", "mp3", "flac", "ogg", "vorbis", "pcm", "wav", "opt-simd"] }
-rand = "0.8.5"
 rayon = "1.10"
 rubato = "0.15.0"
 ringbuf = "0.4.8"
@@ -143,18 +129,12 @@ tauri-plugin-log = { version = "2.6.0", features = ["colored"] }
 objc = "0.2.7"
 libc = "0.2"           # pthread QoS for quiet post-meeting work
 time = { version = "0.3", features = ["formatting"] }
-core-graphics = "0.23"
 cidre = { git = "https://github.com/yury/cidre", rev = "a9587fa", features = ["av"] }
 futures-channel = "0.3.31"
 
 [dev-dependencies]
+clap = { version = "4.3", features = ["derive"] }  # examples/replay.rs CLI
 tempfile = "3.3.0"
-infer = "0.15"
-criterion = { version = "0.5.1", features = ["async_tokio"] }
-memory-stats = "1.0"
-strsim = "0.10.0"
-futures = "0.3.31"
-tracing-subscriber = "0.3.16"
 
 [patch.crates-io]
 cpal = { git = "https://github.com/RustAudio/cpal", rev = "51c3b43" }
