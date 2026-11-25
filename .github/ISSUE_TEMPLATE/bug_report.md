@@ -21,11 +21,10 @@ assignees: ''
 3. [And so on...]
 
 ## Environment
+- Minutes version: [Settings → General, e.g., 1.5.828]
 - macOS version: [e.g., macOS 15.1]
-- Browser: [e.g., Chrome, Firefox, Safari]
-- Version: [e.g., 1.0.0]
-- Node Version: [e.g., 18.0.0]
-- npm/pnpm Version: [e.g., 8.0.0]
+- Mac: [e.g., MacBook Air M2, 16 GB]
+- Meeting app, if relevant: [e.g., Zoom, Google Meet in Chrome]
 
 ## Screenshots/Videos
 [If applicable, add screenshots or videos to help explain your problem]

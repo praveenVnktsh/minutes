@@ -78,5 +78,5 @@ target/
 
 frontend/src-tauri/binaries/
 # speech-helper (Swift Package Manager)
-speech-helper/.build/
+*/.build/
 speech-helper/.swiftpm/

@@ -34,7 +34,7 @@ Keep unrelated changes separate and never commit API keys, signing keys, recordi
 
 ## Verification
 
-Every pull request to `main` runs **PR Check** (`.github/workflows/pr-check.yml`), and it must pass before the pull request can merge. Merges to `main` publish a canary build that auto-updates immediately, so this check is the gate in front of a release.
+Pull requests must pass **PR Check** before they merge. GitHub Actions is currently disabled on this repository, so PR Check runs locally: the maintainer runs it before merging, and releases are built and signed locally from `main`. Run it yourself before opening a pull request.
 
 To run exactly what PR Check runs, from the repository root:
 
@@ -42,9 +42,9 @@ To run exactly what PR Check runs, from the repository root:
 bash scripts/pr-check.sh
 ```
 
-It typechecks, lints, tests and builds the frontend, then stages the `llama-helper` sidecar, tests and stages the Swift `speech-helper` sidecar (Xcode 16+), and runs the Rust tests. The order matters: the Rust app embeds the built frontend at compile time, and the Tauri build refuses to compile until the sidecar exists. foreman's `board.toml` uses the same script as its test command, so a change that passes it locally is a change CI will pass.
+It typechecks, lints, tests and builds the frontend, then stages the `llama-helper` sidecar, tests and stages the Swift `speech-helper` sidecar (Xcode 16+), and runs the Rust tests. The order matters: the Rust app embeds the built frontend at compile time, and the Tauri build refuses to compile until the sidecar exists. foreman's `board.toml` uses the same script as its test command, so a change that passes it locally passes the gate.
 
-It needs an Apple Silicon Mac, plus `pnpm`, `bun` and a Rust toolchain on `PATH`. Minutes is Mac-only (macOS 13+, transcription 15+), and CI runs the same script on a `macos-latest` runner. See [docs/BUILDING.md](docs/BUILDING.md) for setup.
+It needs an Apple Silicon Mac, plus `pnpm`, `bun` and a Rust toolchain on `PATH`. Minutes is Mac-only (macOS 13+, transcription 15+). The workflow in `.github/workflows/pr-check.yml` runs the same script on a `macos-latest` runner if Actions is turned back on. See [docs/BUILDING.md](docs/BUILDING.md) for setup.
 
 ## License
 
