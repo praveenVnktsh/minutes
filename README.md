@@ -2,146 +2,154 @@
   <img src="docs/assets/banner.png" alt="Minutes — local-first AI meeting notes" width="820" />
 </p>
 
+<h3 align="center">The meeting notetaker that never leaves your Mac.</h3>
+
 <p align="center">
-  <a href="https://github.com/praveenvnktsh/minutes/releases/latest"><img src="https://img.shields.io/github/v/release/praveenvnktsh/minutes?style=for-the-badge&label=download&color=2ea043" alt="Download the latest release" /></a>
-  <img src="https://img.shields.io/badge/platform-macOS%20(Apple%20Silicon)-000000?style=for-the-badge" alt="Platforms" />
-  <img src="https://img.shields.io/badge/stack-Tauri%202%20%C2%B7%20Rust%20%C2%B7%20Next.js-000000?style=for-the-badge" alt="Stack" />
-  <img src="https://img.shields.io/badge/100%25%20local-%26%20private-2ea043?style=for-the-badge" alt="Local-first" />
-  <img src="https://img.shields.io/badge/license-MIT-3b82f6?style=for-the-badge" alt="MIT" />
-  <img src="https://img.shields.io/github/stars/praveenvnktsh/minutes?style=for-the-badge" alt="Stars" />
+  Minutes records your meetings, transcribes them on-device, and writes notes <i>while people talk</i>,<br/>
+  in the same document as yours. No bot in the call. No cloud. No account. Free and open source.
 </p>
 
 <p align="center">
-  <b>Minutes</b> records your meetings, transcribes them locally, and writes notes while people talk, in the same document as yours.<br/>
-  Audio, transcripts, notes, and summaries stay on your machine unless you explicitly configure an external AI provider.
+  <a href="https://github.com/praveenvnktsh/minutes/releases/latest/download/minutes-macos-arm64.dmg"><img src="https://img.shields.io/badge/Download%20for%20macOS-Apple%20Silicon-000000?style=for-the-badge&logo=apple&logoColor=white" alt="Download for macOS (Apple Silicon)" /></a>
 </p>
 
-<p align="center"><b><a href="https://praveenvnktsh.github.io/minutes/">praveenvnktsh.github.io/minutes</a></b></p>
+<p align="center">
+  <a href="https://github.com/praveenvnktsh/minutes/releases/latest"><img src="https://img.shields.io/github/v/release/praveenvnktsh/minutes?style=flat-square&label=release&color=2ea043" alt="Latest release" /></a>
+  <img src="https://img.shields.io/badge/100%25-on--device-2ea043?style=flat-square" alt="100% on-device" />
+  <img src="https://img.shields.io/badge/license-MIT-3b82f6?style=flat-square" alt="MIT license" />
+  <a href="https://github.com/praveenvnktsh/minutes/stargazers"><img src="https://img.shields.io/github/stars/praveenvnktsh/minutes?style=flat-square" alt="GitHub stars" /></a>
+</p>
+
+<p align="center"><b><a href="https://praveenvnktsh.github.io/minutes/">Website</a></b> · <a href="#install">Install</a> · <a href="#how-it-works">How it works</a> · <a href="#faq">FAQ</a> · <a href="#build-from-source">Build from source</a></p>
 
 ---
 
-## Screenshots
-
 <p align="center">
-  <img src="docs/assets/workspace.png" alt="The Minutes meeting workspace: notes on the left, transcript dock on the right" width="100%" />
+  <img src="docs/assets/workspace.png" alt="The Minutes meeting workspace: notes on the left, live transcript on the right" width="100%" />
 </p>
-
-<p align="center">
-  <img src="docs/assets/chat.png" alt="Chat with the meeting" width="49%" />
-  <img src="docs/assets/workspace-light.png" alt="Light theme" width="49%" />
-</p>
-
----
 
 ## Why Minutes
 
-- **Notes while it happens, not a report after.** A model fine-tuned for meeting notes adds topics, points and decisions as people talk, next to your own lines, which it never rewrites. When the meeting ends, a second fine-tuned model writes the wrap-up: summary, decisions, action items, open questions.
-- **Everything on-device.** Nemotron/Parakeet transcription, speaker diarization, and the note models run on your Mac. No account, no cloud.
-- **One screen from start to finish.** Hit record and the meeting workspace opens immediately — notes, live transcript, and chat live together with a floating record bar.
+Most AI notetakers join your call as a bot, upload the audio to someone else's servers, and send a generic report an hour later. Minutes takes the other approach:
+
+- **🔒 Nothing leaves your Mac.** Transcription, speaker identification and the note-taking models all run locally on Apple Silicon. It works in airplane mode. There's no account and no telemetry.
+- **✍️ Notes appear while people are still talking.** A small model fine-tuned for meeting notes adds topics, points and decisions every few seconds, right next to what you type. It never rewrites your lines.
+- **🫥 No bot in the call.** Minutes records your microphone and your computer's audio, so it works with Zoom, Meet, Teams, Slack huddles, or anything else that plays sound. Nobody else sees a "notetaker has joined" message.
+- **🧾 A wrap-up when you stop.** Summary, decisions, action items with owners, and open questions, checked against the transcript before you see them.
+- **💸 Free, forever.** MIT-licensed, with no subscription and no per-seat pricing.
+
+## How it works
+
+1. **Hit record** (or accept the prompt when Minutes notices a meeting starting). Your mic and system audio are captured and mixed so neither drowns out the other.
+2. **Notes write themselves.** Whenever there's a pause, a fine-tuned Gemma 4 E2B model makes a few small edits to the notes: a new topic, a point, a decision, or a fix to its own earlier line. AI lines are marked as its own, and one switch hides them.
+3. **Stop, and get the wrap-up.** A second fine-tuned adapter turns the live notes and your own into a summary, decisions, action items and open questions. Anything the live notes missed is filled in from the transcript first. Minutes also names the meeting, unless you've already renamed it.
+4. **Ask your meeting.** Copilot chats over the transcript and your notes, during the call or long after it: "what did we promise the pilot customers?"
+
+<p align="center">
+  <img src="docs/assets/chat.png" alt="Asking Copilot about a meeting" width="49%" />
+  <img src="docs/assets/workspace-light.png" alt="Light theme" width="49%" />
+</p>
 
 ## Features
 
-### Capture
-- Record **microphone + system audio** together with professional mixing and clipping protection.
-- **Live transcription** on demand, or transcribe after the meeting to stay light on CPU.
-- Voice Activity Detection so only speech reaches the model.
-- Detect supported meetings and offer to start recording automatically.
-- Menu-bar state for idle, recording, and paused.
-
-### The meeting workspace
-- A single workspace from the moment you hit record — with a **floating record bar**.
-- **One notes document**: type during the call; the AI's notes land in the same document, marked as its own. A **Show AI notes** switch hides them (copy and export follow it).
-- Notes stay editable after the meeting, side by side with the transcript.
-- **Live transcript dock** with search and color-coded speaker chips.
-- **Ask your meeting**: a chat that can reference the transcript and your notes.
-- **Collapsible** navigation rail and transcript/chat dock.
-- **Responsive**: narrow windows collapse the rail and dock the transcript/chat at the bottom.
-- **Light and dark** themes.
-
-### Notes
-- **Live AI notes** from Gemma 4 E2B with a LoRA trained for this job: every pause in the conversation it updates the notes with a few compact edits (new topic, point, decision, sub-bullet, fix or drop its own earlier note). Action items are left for the wrap-up, so it keeps up with live transcription on the same Mac.
-- **The wrap-up** when the meeting ends, from a second LoRA on the same model: a short summary, decisions, action items with owners, and open questions, checked against the transcript (numbers must be grounded) before it is used. An owner the meeting never names is left out rather than guessed.
-- Your own lines are never rewritten.
-- The model **names the meeting**; the title stays inline editable.
-- Both adapters are open: [live notes](https://huggingface.co/praveenvnktsh00/minutes-notes-gemma4-e2b) and [wrap-up](https://huggingface.co/praveenvnktsh00/minutes-tidy-gemma4-e2b) on Hugging Face (Apache 2.0, trained on the AMI Meeting Corpus). The app downloads them with the Gemma 4 E2B model.
-
-### Transcription and models
-- **NVIDIA Nemotron** (streaming, live) and **Parakeet TDT** (final pass) through [FluidAudio](https://github.com/FluidInference/FluidAudio), with Silero VAD and speaker diarization, running locally on Core ML.
-- **Built-in AI** models (Gemma 4 E2B for live notes, Qwen 3.5 for chat and summaries) plus **Ollama**.
-- Optional external providers (**Claude, Groq, OpenRouter**) when you configure them.
-- **Speaker diarization** with an editable speaker manager and reassignment.
-- **Import audio** and retranscribe; background transcription queue.
-
-### Data
-- Meetings, transcripts, and notes stored locally in **SQLite**.
-- Full-text transcript search and a meetings list with dates.
-- Signed desktop updates.
-
-## Download
-
-Click to download the latest version directly:
-
-| Platform | Download |
+| | |
 | --- | --- |
-| **macOS** (Apple Silicon) | [**minutes-macos-arm64.dmg**](https://github.com/praveenvnktsh/minutes/releases/latest/download/minutes-macos-arm64.dmg) |
+| **Capture** | Microphone + system audio with mixing and clipping protection · meeting detection with a one-click prompt · optional menu-bar recording indicator · pause and resume · import existing audio files |
+| **Transcription** | Live streaming transcript (NVIDIA Nemotron), or transcribe after the call to keep the laptop cool · high-accuracy final pass (Parakeet TDT v2) · on-device speaker diarization with a speaker manager to name and reassign people · full-text search across every meeting |
+| **Notes** | One document for your notes and the AI's · live AI notes during the meeting · wrap-up with summary, decisions, action items and open questions · editable after the meeting, side by side with the transcript · copy and export |
+| **AI models** | Built-in local models (nothing to install) · [Ollama](https://ollama.com) · optional Claude, Groq or OpenRouter with your own key |
+| **App** | Native Tauri + Rust app · light and dark themes · signed automatic updates · everything stored in a local SQLite database you own |
 
-All releases and notes: [github.com/praveenvnktsh/minutes/releases/latest](https://github.com/praveenvnktsh/minutes/releases/latest).
-**Minutes is Mac-only: Apple Silicon, macOS 13 or later; transcription needs macOS 15 or later.** Windows and Linux are not supported, and the code no longer builds for them.
+### Open models
 
-> **macOS first launch:** Minutes isn't notarized yet, so macOS may warn that it "could not verify it is free of malware". To open it, **right-click the app → Open → Open**, or run `xattr -dr com.apple.quarantine /Applications/minutes.app` once.
+The note-taking adapters are published on Hugging Face under Apache 2.0, trained on the AMI Meeting Corpus:
 
-## Quick start
+- [`minutes-notes-gemma4-e2b`](https://huggingface.co/praveenvnktsh00/minutes-notes-gemma4-e2b): live notes
+- [`minutes-tidy-gemma4-e2b`](https://huggingface.co/praveenvnktsh00/minutes-tidy-gemma4-e2b): the wrap-up
 
-On an Apple Silicon Mac, install Rust, Node.js, pnpm 9.15.9, and Xcode 16 or later (select it with `xcode-select`). The `speech-helper` Swift sidecar is built by `speech-helper/build.sh`.
+Speech runs through [FluidAudio](https://github.com/FluidInference/FluidAudio) on Core ML (Neural Engine and GPU): Nemotron for live text, Parakeet TDT v2 for the final pass, Silero VAD, and pyannote diarization.
+
+## Install
+
+**Requirements:** an Apple Silicon Mac (M1 or later) on macOS 15 or later. The app opens on macOS 13 and 14, but transcription needs 15.
+
+1. Download **[minutes-macos-arm64.dmg](https://github.com/praveenvnktsh/minutes/releases/latest/download/minutes-macos-arm64.dmg)** and drag Minutes into Applications.
+2. **First launch:** Minutes isn't notarized by Apple yet, so macOS will say it can't verify the app. Right-click the app and choose **Open**, then **Open** again. Or run this once:
+   ```bash
+   xattr -dr com.apple.quarantine /Applications/minutes.app
+   ```
+3. Grant **Microphone** and **Screen & System Audio Recording** permissions when asked. macOS requires the second one to capture call audio. Minutes doesn't record your screen.
+4. Let Minutes download its models. Speech models and the built-in AI are a few GB in total, downloaded once from Hugging Face.
+
+After that, updates are signed and install automatically. Windows and Linux are not supported.
+
+## FAQ
+
+<details>
+<summary><b>Does anything get sent to the cloud?</b></summary>
+
+No, unless you choose to. Audio, transcripts and notes stay on your disk. The only network requests are model downloads from Hugging Face and update checks against GitHub Releases. If you add a Claude, Groq or OpenRouter key, the meeting content you send to that provider goes to it, and only to it. See the [privacy policy](PRIVACY_POLICY.md).
+</details>
+
+<details>
+<summary><b>Does it join my call or tell other people they're being recorded?</b></summary>
+
+It doesn't join anything. Minutes records audio on your own machine, the same audio you hear. Whether and how you tell others is up to you; recording-consent laws vary by place, so check the ones that apply to you.
+</details>
+
+<details>
+<summary><b>Which meeting apps does it work with?</b></summary>
+
+Any app that plays audio on your Mac: Zoom, Google Meet, Microsoft Teams, Slack, Discord, FaceTime, a browser tab, or an in-person meeting picked up by your mic.
+</details>
+
+<details>
+<summary><b>Why the security warning on first launch?</b></summary>
+
+Apple charges for the developer account needed to notarize apps, and this project doesn't have one yet. The app is ad-hoc signed and its updates are signed with the project's updater key. The full source is here if you'd rather build it yourself.
+</details>
+
+<details>
+<summary><b>How heavy is it?</b></summary>
+
+Live transcription and live notes run together on the Neural Engine and GPU, and Apple Silicon handles both alongside a video call. On an older or busy machine, turn off live transcription and Minutes will transcribe after the meeting instead.
+</details>
+
+<details>
+<summary><b>Intel Macs, Windows, Linux?</b></summary>
+
+No. Minutes is built around Apple Silicon (Core ML, Metal, ScreenCaptureKit), and the code doesn't build for other platforms.
+</details>
+
+## Build from source
+
+You need an Apple Silicon Mac with Rust, Node.js, pnpm 9.15.9 and Xcode 16 or later (selected with `xcode-select`).
 
 ```bash
 git clone https://github.com/praveenvnktsh/minutes.git
 cd minutes/frontend
 pnpm install --frozen-lockfile
+bash ../speech-helper/build.sh debug   # stage the speech sidecar
 pnpm tauri:dev
 ```
 
-Local Apple Silicon production bundle with Metal:
-
-```bash
-cd frontend
-pnpm tauri:build:local:mac
-```
-
-See [docs/BUILDING.md](docs/BUILDING.md) for details.
-
-## Architecture
+To build a local release bundle, run `pnpm tauri:build:local:mac`. See [docs/BUILDING.md](docs/BUILDING.md) for details and [docs/architecture.md](docs/architecture.md) for how the pieces fit.
 
 ```mermaid
 flowchart LR
   UI["Next.js / React UI"] <-->|Tauri commands & events| Core["Rust core"]
   Core --> Audio["Audio capture (mic + system)"]
-  Core --> STT["Local STT (speech-helper / FluidAudio)"]
-  Core --> Diar["Speaker diarization"]
-  Core --> LLM["Local LLM (built-in / Ollama)"]
+  Core --> STT["speech-helper (FluidAudio, Core ML)"]
+  Core --> LLM["llama-helper (local LLMs on llama.cpp, Metal)"]
   Core --> DB[("SQLite: meetings, transcripts, notes")]
 ```
 
-Minutes is a Tauri 2 desktop app: a Next.js/React interface inside a Rust core. Rust handles audio capture, local inference, persistence, notifications, meeting detection, and updates; all meeting data lives in a local SQLite database. See [docs/architecture.md](docs/architecture.md).
-
-## Privacy
-
-Minutes contains no usage telemetry or analytics code. Audio, transcripts, notes, and summaries stay on your machine. If you configure an external AI provider, the data sent to it is governed by that provider's terms and your configuration. Read the [privacy policy](PRIVACY_POLICY.md).
-
-## Updates
-
-The desktop updater reads signed manifests from this repository's releases:
-
-`https://github.com/praveenvnktsh/minutes/releases/latest/download/latest.json`
-
-Release artifacts are signed with this fork's Tauri updater key; the private key lives outside the repository and in CI secrets.
-
 ## Contributing
 
-Issues and pull requests are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
+Bug reports, ideas and pull requests are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md). The app's **Send feedback** button opens a prefilled issue.
 
 ## License and acknowledgments
 
-Minutes is distributed under the [MIT License](LICENSE.md). The original MIT copyright notice is retained as required by that license. Third-party code, libraries, and models retain their respective licenses and attribution.
+Minutes is [MIT licensed](LICENSE.md). It started as a fork of [Meetily](https://github.com/Zackriya-Solutions/meeting-minutes) by Zackriya Solutions, whose copyright notice is retained, and has since been substantially rewritten. Third-party code and models keep their own licenses.
 
-Built on open-source work including [FluidAudio](https://github.com/FluidInference/FluidAudio), [Screenpipe](https://github.com/mediar-ai/screenpipe), and NVIDIA Nemotron and Parakeet models.
+Built on [FluidAudio](https://github.com/FluidInference/FluidAudio), [Tauri](https://tauri.app), [llama.cpp](https://github.com/ggml-org/llama.cpp), [Screenpipe](https://github.com/mediar-ai/screenpipe), NVIDIA's Nemotron and Parakeet speech models, Google's Gemma 4, and the [AMI Meeting Corpus](https://groups.inf.ed.ac.uk/ami/corpus/).

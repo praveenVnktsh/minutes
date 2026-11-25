@@ -3,9 +3,10 @@
 All notable changes to Minutes are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-Each GitHub release publishes the section below that matches its version.
-
-## [Unreleased]
+From 1.5.4 onward, release notes live on
+[GitHub Releases](https://github.com/praveenvnktsh/minutes/releases). The
+version number is the commit count on `main`, so every merge can ship. The
+entries below cover the early releases.
 
 ## [1.5.3] - 2026-09-16
 
