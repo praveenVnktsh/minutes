@@ -3,17 +3,25 @@
 import { RecordingControls } from '@/components/RecordingControls';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
 import { useRecordingController } from '@/contexts/RecordingControllerContext';
-import { useConfig } from '@/contexts/ConfigContext';
-import { useTranscripts } from '@/contexts/TranscriptContext';
 import { SIDEBAR_COLLAPSED_WIDTH, SIDEBAR_WIDTH, useShell } from '@/contexts/ShellContext';
 
-/** Floating recording bar shown over the workspace while a meeting is recording. */
-export function FloatingRecordingControls({ onStopInitiated }: { onStopInitiated?: () => void }) {
+/**
+ * Floating recording bar shown over the workspace while a meeting is recording.
+ * With `hideWhileFinishing` the bar steps aside once the meeting is stopping,
+ * because the page's header banner already says so.
+ */
+export function FloatingRecordingControls({
+  onStopInitiated,
+  hideWhileFinishing = false,
+}: {
+  onStopInitiated?: () => void;
+  hideWhileFinishing?: boolean;
+}) {
   const recordingState = useRecordingState();
   const controller = useRecordingController();
-  const { selectedDevices } = useConfig();
-  const { meetingTitle } = useTranscripts();
   const { collapsed } = useShell();
+
+  if (hideWhileFinishing && recordingState.isProcessing) return null;
 
   return (
     <div
@@ -24,15 +32,11 @@ export function FloatingRecordingControls({ onStopInitiated }: { onStopInitiated
         <div className="pointer-events-auto">
           <RecordingControls
             isRecording={recordingState.isRecording}
-            barHeights={[]}
             onRecordingStop={() => controller.stopRecording()}
             onRecordingStart={() => controller.startRecording()}
-            onTranscriptReceived={() => {}}
             onStopInitiated={onStopInitiated}
             isRecordingDisabled={false}
             isParentProcessing={recordingState.isProcessing}
-            selectedDevices={selectedDevices}
-            meetingName={meetingTitle}
           />
         </div>
       </div>

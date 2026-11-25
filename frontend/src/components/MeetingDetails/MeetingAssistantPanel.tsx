@@ -3,8 +3,8 @@
 import { FormEvent, KeyboardEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { ArrowUp, Bot, ChevronDown, Sparkles } from 'lucide-react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
+import { CitedMarkdown } from '@/components/MeetingDetails/CitedMarkdown';
+import { liveMomentLabel } from '@/lib/copilot';
 import { toast } from 'sonner';
 import { ModelConfig, ModelSettingsModal } from '@/components/ModelSettingsModal';
 import { Dialog, DialogContent, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
@@ -16,6 +16,10 @@ interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
   createdAt: string;
+  /** Set for moments Copilot saved during the recording. */
+  kind?: string;
+  label?: string;
+  audioMs?: number;
 }
 
 interface ChatOperation {
@@ -143,7 +147,7 @@ export function MeetingAssistantPanel({
       await applyResult(operation);
     } catch (error) {
       applyError(operation, error);
-      toast.error('The meeting assistant could not respond', { description: String(error) });
+      toast.error('Copilot could not respond', { description: String(error) });
     }
   };
 
@@ -158,7 +162,7 @@ export function MeetingAssistantPanel({
     <div className="flex h-full flex-col bg-[var(--surface-1)]">
       <div className="flex items-start justify-between gap-3 px-5 pb-3 pt-5">
         <div>
-          <h2 className="text-sm font-semibold text-ink">AI chat</h2>
+          <h2 className="text-sm font-semibold text-ink">Copilot</h2>
           <p className="mt-0.5 text-[11px] text-[var(--ink-subtle)]">Answers from the notes and transcript</p>
         </div>
         <Dialog open={settingsOpen} onOpenChange={(open) => { if (!isModelConfigSaving) setSettingsOpen(open); }}>
@@ -192,11 +196,11 @@ export function MeetingAssistantPanel({
           )}
           {historyState === 'ready' && messages.length === 0 && (
             <div className="py-8">
-              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#e2e9df] text-[#55735c]">
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-success-subtle text-success">
                 <Bot className="h-5 w-5" />
               </div>
               <h3 className="mt-4 text-sm font-semibold text-ink">Ask about this meeting</h3>
-              <p className="mt-1.5 text-xs leading-5 text-[var(--ink-muted)]">Ask questions about the enhanced notes or transcript.</p>
+              <p className="mt-1.5 text-xs leading-5 text-[var(--ink-muted)]">Ask questions about the AI notes or transcript.</p>
               <div className="mt-5 flex flex-col items-start gap-2">
                 {STARTERS.map((starter) => (
                   <button key={starter} type="button" onClick={() => setInput(starter)} className="rounded-full bg-surface-2 px-3 py-1.5 text-left text-[11px] text-ink-muted hover:bg-surface-raised">
@@ -206,21 +210,27 @@ export function MeetingAssistantPanel({
               </div>
             </div>
           )}
-          {messages.map((message) => (
-            <div key={message.id} className={message.role === 'user' ? 'flex justify-end' : 'flex justify-start'}>
-              <div className={message.role === 'user' ? 'max-w-[88%] rounded-2xl rounded-br-md bg-brand px-3.5 py-2.5 text-xs leading-5 text-brand-foreground' : 'prose prose-sm max-w-full text-xs leading-5 text-[var(--ink-muted)]'}>
-                {message.role === 'assistant'
-                  ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
-                  : message.content}
+          {messages.map((message) => {
+            const live = message.role === 'user' ? liveMomentLabel(message.kind, message.label, message.audioMs) : null;
+            return (
+              <div key={message.id} className={message.role === 'user' ? 'flex flex-col items-end gap-1' : 'flex justify-start'}>
+                {live && (
+                  <span className="text-[10px] font-semibold tracking-[0.06em] text-[var(--ink-subtle)]">{live}</span>
+                )}
+                <div className={message.role === 'user' ? 'max-w-[88%] rounded-2xl rounded-br-md bg-brand px-3.5 py-2.5 text-xs leading-5 text-brand-foreground' : 'prose prose-sm max-w-full text-xs leading-5 text-[var(--ink-muted)]'}>
+                  {message.role === 'assistant'
+                    ? <CitedMarkdown>{message.content}</CitedMarkdown>
+                    : message.content}
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
           {isSending && (
             <div className="flex items-center gap-2 text-sm text-[var(--ink-subtle)]">
               <Sparkles className="h-4 w-4 animate-pulse" /> Reading the meeting…
             </div>
           )}
-          {sendError && <p role="alert" className="text-xs text-error">The meeting assistant could not respond: {sendError}</p>}
+          {sendError && <p role="alert" className="text-xs text-error">Copilot could not respond: {sendError}</p>}
           <div ref={endRef} />
         </div>
       </div>

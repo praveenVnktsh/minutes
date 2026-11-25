@@ -1,9 +1,7 @@
 use anyhow::Result;
-#[cfg(target_os = "macos")]
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use log::{debug, error, info, warn};
 use std::sync::Arc;
-#[cfg(target_os = "macos")]
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -78,16 +76,13 @@ fn propagate_save_result(
 // IO proc starts firing normally. Total cost: ~300 ms added to recording
 // start, ~150 ms added to the disconnect-fallback hot-swap path.
 
-#[cfg(target_os = "macos")]
 const AUDIO_WAKE_DURATION: Duration = Duration::from_millis(300);
 
-#[cfg(target_os = "macos")]
 const AUDIO_WAKE_SWAP_DURATION: Duration = Duration::from_millis(150);
 
 /// Synchronous implementation of the wake. Must be called from a blocking
 /// thread (not directly from async code) because it sleeps 300 ms and does
 /// sync cpal I/O. The async wrapper below routes to it via spawn_blocking.
-#[cfg(target_os = "macos")]
 fn wake_audio_connection_sync(speaker_device_name: &str) -> Result<()> {
     info!(
         "[AUDIO_WAKE] Waking audio via speaker: '{}'",
@@ -160,7 +155,6 @@ fn wake_audio_connection_sync(speaker_device_name: &str) -> Result<()> {
 /// so the 300 ms sleep doesn't block the tokio runtime. Non-fatal — the caller
 /// should log the error and proceed if this fails; recording will still work,
 /// it just may have the 60-90s silent startup on BT.
-#[cfg(target_os = "macos")]
 pub(super) async fn wake_audio_connection(speaker_device_name: &str) -> Result<()> {
     let name = speaker_device_name.to_string();
     tokio::task::spawn_blocking(move || wake_audio_connection_sync(&name))
@@ -178,7 +172,6 @@ pub(super) async fn wake_audio_connection(speaker_device_name: &str) -> Result<(
 ///     found (e.g. the original BT output just disappeared, and we're
 ///     waking the MacBook speakers instead)
 ///   - Still handles both F32 and I16 sample formats for robustness
-#[cfg(target_os = "macos")]
 pub async fn wake_audio_connection_for_swap(speaker_device_name: &str) -> Result<()> {
     let name = speaker_device_name.to_string();
     tokio::task::spawn_blocking(move || {
@@ -411,8 +404,8 @@ impl RecordingManager {
     pub async fn stop_streams_and_force_flush(&mut self) -> Result<()> {
         info!("🚀 Stopping recording streams with IMMEDIATE pipeline flush");
 
-        // CRITICAL: Stop device monitor FIRST to prevent continuous WASAPI polling on Windows
-        // This fixes the slow shutdown issue where device enumeration runs for 90+ seconds
+        // CRITICAL: Stop device monitor FIRST so device enumeration cannot keep
+        // running during shutdown
         if let Some(ref mut monitor) = self.device_monitor {
             info!("Stopping device monitor first...");
             monitor.stop_monitoring().await;
@@ -530,9 +523,19 @@ impl RecordingManager {
     }
 
     /// Pause the current recording session
+    ///
+    /// Once paused, new chunks are dropped, so the pipeline is flushed to transcribe
+    /// speech in progress now instead of holding it until resume. Stays synchronous:
+    /// the command layer calls it while holding a std Mutex guard.
     pub fn pause_recording(&self) -> Result<()> {
         info!("Pausing recording");
-        self.state.pause_recording()
+        self.state.pause_recording()?;
+
+        // The pause is already in effect; a failed flush only delays transcription.
+        if let Err(e) = self.pipeline_manager.flush() {
+            warn!("Failed to flush audio pipeline on pause: {}", e);
+        }
+        Ok(())
     }
 
     /// Resume the current recording session
@@ -628,6 +631,17 @@ impl RecordingManager {
     /// Add a structured transcript segment to be saved later
     pub fn add_transcript_segment(&self, segment: super::recording_saver::TranscriptSegment) {
         self.recording_saver.add_transcript_segment(segment);
+    }
+
+    /// Record the transcription model actually driving this session's live
+    /// transcription, so it lands in the meeting's metadata.json (PRA-577
+    /// model provenance note). Thin forward to the saver, which owns the
+    /// metadata read/merge/write.
+    pub fn record_transcription_model(
+        &mut self,
+        model: crate::audio::model_provenance::TranscriptionModel,
+    ) {
+        self.recording_saver.set_transcription_model(model);
     }
 
     /// Add a transcript chunk to be saved later (legacy method)
@@ -730,7 +744,47 @@ impl Drop for RecordingManager {
 
 #[cfg(test)]
 mod tests {
-    use super::{combine_shutdown_results, propagate_save_result};
+    use super::{
+        combine_shutdown_results, propagate_save_result, AudioDeviceMonitor, AudioPipelineManager,
+        AudioStreamManager, RecordingManager, RecordingSaver, RecordingState,
+    };
+
+    /// A manager with no streams or pipeline started. Built directly rather than via
+    /// `new()`, which resets the process-wide audio time offset other tests use.
+    fn idle_manager() -> RecordingManager {
+        let state = RecordingState::new();
+        let (device_monitor, device_event_receiver) = AudioDeviceMonitor::new();
+        RecordingManager {
+            stream_manager: AudioStreamManager::new(state.clone()),
+            state,
+            pipeline_manager: AudioPipelineManager::new(),
+            recording_saver: RecordingSaver::new(),
+            device_monitor: Some(device_monitor),
+            device_event_receiver: Some(device_event_receiver),
+        }
+    }
+
+    #[test]
+    fn pause_succeeds_even_when_the_pipeline_flush_fails() {
+        let manager = idle_manager();
+        manager.state.start_recording().unwrap();
+
+        // The pipeline was never started, so its flush fails; the pause must still hold.
+        manager.pause_recording().unwrap();
+        assert!(manager.is_paused());
+
+        manager.resume_recording().unwrap();
+        assert!(!manager.is_paused());
+    }
+
+    #[test]
+    fn pause_reports_the_state_error_when_not_recording() {
+        let manager = idle_manager();
+
+        let error = manager.pause_recording().unwrap_err();
+        assert_eq!(error.to_string(), "Cannot pause when not recording");
+        assert!(!manager.is_paused());
+    }
 
     #[test]
     fn force_flush_failure_propagates_to_the_stop_gate() {
@@ -763,7 +817,7 @@ mod tests {
     }
 }
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(test)]
 mod wake_tests {
     use super::*;
 

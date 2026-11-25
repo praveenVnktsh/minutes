@@ -184,6 +184,27 @@ describe('MeetingActivityStore', () => {
     expect(cancelSummary).toHaveBeenCalledWith('meeting-a', 'new-process');
   });
 
+  test('an automatic start never overwrites a summary the user made meanwhile', async () => {
+    // The auto-summary after a final transcript pass uses replaceExisting: false.
+    // A summary generated manually while the pass ran, finished or still
+    // running, must survive it.
+    for (const status of ['completed', 'processing'] as const) {
+      const startSummary = mock(async () => ({ message: 'started', process_id: 'auto-process' }));
+      const store = new MeetingActivityStore({
+        service: { subscribe: async () => () => {} },
+        readSummary: async () => summary('meeting-a', 'manual-process', status),
+        startSummary,
+        cancelSummary: async () => ({ cancelled: true, message: 'cancelled', meeting_id: 'meeting-a' }),
+        setIntervalFn: (callback) => callback,
+        clearIntervalFn: () => {},
+      });
+      const result = await store.startSummary({ ...request(), replaceExisting: false });
+      expect(result.started).toBe(false);
+      expect(result.processId).toBe('manual-process');
+      expect(startSummary).not.toHaveBeenCalled();
+    }
+  });
+
   test('retains start errors for explicit retry and records authoritative cancellation', async () => {
     let starts = 0;
     let stored = summary('meeting-a', '', 'idle');

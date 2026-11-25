@@ -9,7 +9,7 @@ use crate::summary::metadata::{
     write_detected_summary_language_to_metadata, write_summary_language_to_metadata,
 };
 use crate::summary::processor::{clean_llm_markdown_detailed, contains_reasoning_marker};
-use crate::summary::service::SummaryService;
+use crate::summary::service::{SummaryService, INTERRUPTED_SUMMARY_ERROR};
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use log::{error as log_error, info as log_info, warn as log_warn};
 use serde::{Deserialize, Serialize};
@@ -32,6 +32,62 @@ fn next_summary_start(now: DateTime<Utc>) -> DateTime<Utc> {
     *last = Some(next);
     next
 }
+/// Fails a pending summary that no job in this process is running, so the
+/// meeting page stops showing "Generating summary" and offers a retry. Such a
+/// row is left by a quit or crash mid-run (startup also sweeps these) or by a
+/// final status write that failed. Returns true when it failed the row.
+async fn fail_orphaned_pending(pool: &sqlx::SqlitePool, meeting_id: &str) -> bool {
+    let process = match SummaryProcessesRepository::get_summary_data(pool, meeting_id).await {
+        Ok(Some(process)) => process,
+        Ok(None) => return false,
+        Err(error) => {
+            log_warn!("Could not check summary job for {}: {}", meeting_id, error);
+            return false;
+        }
+    };
+    if !process.status.eq_ignore_ascii_case("pending") {
+        return false;
+    }
+    let Some(started_at) = process.start_time else {
+        return false;
+    };
+    if SummaryService::has_active_job(meeting_id, started_at) {
+        return false;
+    }
+    // A start holds this lock from writing the pending row until it registers
+    // its job, so under it a missing job is gone, not merely not yet registered.
+    let _start_guard = SUMMARY_START_LOCK.lock().await;
+    if SummaryService::has_active_job(meeting_id, started_at) {
+        return false;
+    }
+    match SummaryProcessesRepository::update_process_failed(
+        pool,
+        meeting_id,
+        started_at,
+        INTERRUPTED_SUMMARY_ERROR,
+    )
+    .await
+    {
+        Ok(failed) => {
+            if failed {
+                log_warn!(
+                    "Summary for {} was pending with no running job; marked it interrupted",
+                    meeting_id
+                );
+            }
+            failed
+        }
+        Err(error) => {
+            log_error!(
+                "Failed to mark orphaned summary for {} as interrupted: {}",
+                meeting_id,
+                error
+            );
+            false
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SummaryResponse {
     pub status: String,
@@ -387,6 +443,7 @@ pub async fn api_get_summary<R: Runtime>(
         meeting_id
     );
     let pool = state.db_manager.pool();
+    fail_orphaned_pending(pool, &meeting_id).await;
 
     match SummaryProcessesRepository::get_summary_data_for_meeting(pool, &meeting_id).await {
         Ok(Some(process)) => {
@@ -523,6 +580,15 @@ pub async fn api_process_transcript<R: Runtime>(
 
     // ponytail: summary starts are rare; use per-meeting locks only if start contention is measured.
     let _start_guard = SUMMARY_START_LOCK.lock().await;
+    // A meeting that already has finished notes is being re-enhanced: notes
+    // built from live notes then write every section again.
+    let regenerate = SummaryProcessesRepository::get_summary_data(&pool, &m_id)
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|process| {
+            process.status.eq_ignore_ascii_case("completed") && process.result.is_some()
+        });
     let started_at = next_summary_start(Utc::now());
     SummaryProcessesRepository::create_or_reset_process(&pool, &m_id, started_at)
         .await
@@ -563,6 +629,7 @@ pub async fn api_process_transcript<R: Runtime>(
             final_prompt,
             final_template_id,
             summary_language,
+            regenerate,
         )
         .await;
     });
@@ -572,6 +639,24 @@ pub async fn api_process_transcript<R: Runtime>(
         message: "Summary generation started".to_string(),
         process_id: started_at.to_rfc3339_opts(SecondsFormat::Nanos, true),
     })
+}
+
+/// Regenerates a meeting's title from its transcript and saves it
+///
+/// Returns the new title so the UI can update without refetching.
+#[tauri::command]
+pub async fn api_regenerate_meeting_title<R: Runtime>(
+    app: AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+    meeting_id: String,
+) -> Result<String, String> {
+    log_info!(
+        "api_regenerate_meeting_title called for meeting_id: {}",
+        meeting_id
+    );
+
+    let pool = state.db_manager.pool().clone();
+    SummaryService::regenerate_meeting_title(&app, &pool, &meeting_id).await
 }
 
 /// Cancels an ongoing summary generation process
@@ -704,5 +789,69 @@ mod tests {
         }));
         assert_eq!(redacted["markdown"], "Visible\n\nTail");
         assert_eq!(redacted["reasoning_stripped"], true);
+    }
+
+    async fn migrated_pool() -> sqlx::SqlitePool {
+        // One connection: each in-memory connection is its own database.
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        pool
+    }
+
+    async fn status_and_error(
+        pool: &sqlx::SqlitePool,
+        meeting_id: &str,
+    ) -> (String, Option<String>) {
+        sqlx::query_as("SELECT status, error FROM summary_processes WHERE meeting_id = ?")
+            .bind(meeting_id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_pending_summary_without_a_job_is_failed_as_interrupted() {
+        let pool = migrated_pool().await;
+        let meeting_id = MeetingsRepository::create_meeting(&pool, "Orphan", None, false)
+            .await
+            .unwrap();
+        let started_at = next_summary_start(Utc::now());
+        SummaryProcessesRepository::create_or_reset_process(&pool, &meeting_id, started_at)
+            .await
+            .unwrap();
+
+        assert!(fail_orphaned_pending(&pool, &meeting_id).await);
+        assert_eq!(
+            status_and_error(&pool, &meeting_id).await,
+            (
+                "failed".to_string(),
+                Some(INTERRUPTED_SUMMARY_ERROR.to_string())
+            )
+        );
+        // Already terminal: nothing more to do.
+        assert!(!fail_orphaned_pending(&pool, &meeting_id).await);
+    }
+
+    #[tokio::test]
+    async fn a_pending_summary_with_a_running_job_is_left_alone() {
+        let pool = migrated_pool().await;
+        let meeting_id = MeetingsRepository::create_meeting(&pool, "Running", None, false)
+            .await
+            .unwrap();
+        let started_at = next_summary_start(Utc::now());
+        SummaryProcessesRepository::create_or_reset_process(&pool, &meeting_id, started_at)
+            .await
+            .unwrap();
+        let _token = SummaryService::register_cancellation_token(&meeting_id, started_at);
+
+        assert!(!fail_orphaned_pending(&pool, &meeting_id).await);
+        assert_eq!(
+            status_and_error(&pool, &meeting_id).await,
+            ("PENDING".to_string(), None)
+        );
     }
 }

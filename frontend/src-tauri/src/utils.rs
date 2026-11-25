@@ -7,7 +7,6 @@ pub fn format_timestamp(seconds: f64) -> String {
 }
 
 /// Opens macOS System Settings to a specific privacy preference pane
-#[cfg(target_os = "macos")]
 #[tauri::command]
 pub async fn open_system_settings(preference_pane: String) -> Result<(), String> {
     use std::process::Command;

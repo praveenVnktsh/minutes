@@ -82,7 +82,7 @@ beforeEach(() => {
   storedConfig = {
     provider: 'openai',
     model: 'committed-a',
-    whisperModel: 'large-v3',
+    whisperModel: '',
     apiKey: 'openai-a',
     ollamaEndpoint: null,
   };
@@ -96,10 +96,8 @@ beforeEach(() => {
   invokeImplementation = async (command, args) => {
     if (command === 'api_get_model_config') return { ...storedConfig };
     if (command === 'api_get_api_key') return storedKeys[args?.provider as keyof ProviderApiKeys] ?? '';
-    if (command === 'api_get_transcript_config') return null;
     if (command === 'get_ollama_models') return [];
     if (command === 'get_recording_preferences') return null;
-    if (command === 'set_language_preference') return null;
     if (command === 'api_save_model_config') {
       storedConfig = {
         provider: args?.provider as ModelConfig['provider'],

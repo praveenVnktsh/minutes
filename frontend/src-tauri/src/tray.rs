@@ -35,10 +35,32 @@ pub fn set_meeting_detected<R: Runtime>(app: &AppHandle<R>, app_name: Option<Str
     update_tray_menu(app);
 }
 
-/// Tauri command so the frontend detection can drive the tray badge/menu.
-#[tauri::command]
-pub async fn set_meeting_detected_tray<R: Runtime>(app: AppHandle<R>, app_name: Option<String>) {
-    set_meeting_detected(&app, app_name);
+/// Whether the menu bar shows the red recording dot and timer while recording
+/// (the "Show recording indicator in the menu bar" recording preference).
+static MENU_BAR_INDICATOR: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn menu_bar_indicator_enabled() -> bool {
+    MENU_BAR_INDICATOR.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Turn the menu bar recording indicator on or off and redraw the tray.
+pub fn set_menu_bar_indicator<R: Runtime>(app: &AppHandle<R>, enabled: bool) {
+    let previous = MENU_BAR_INDICATOR.swap(enabled, std::sync::atomic::Ordering::Relaxed);
+    if previous != enabled {
+        update_tray_menu(app);
+    }
+}
+
+/// The state the menu bar icon draws: with the indicator off, a recording or
+/// paused meeting keeps the normal idle icon.
+fn displayed_icon_state(state: RecordingState, indicator_enabled: bool) -> RecordingState {
+    match state {
+        RecordingState::Recording | RecordingState::Paused if !indicator_enabled => {
+            RecordingState::Stopped
+        }
+        other => other,
+    }
 }
 
 /// Format an elapsed duration as `M:SS`, or `H:MM:SS` once it passes an hour.
@@ -106,6 +128,16 @@ pub fn create_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     // Update tray menu with actual recording state after creation
     update_tray_menu(app);
 
+    // Apply the saved menu bar indicator preference.
+    let app_for_prefs = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Ok(prefs) =
+            crate::audio::recording_preferences::load_recording_preferences(&app_for_prefs).await
+        {
+            set_menu_bar_indicator(&app_for_prefs, prefs.show_menu_bar_indicator);
+        }
+    });
+
     // Reflect the live recording duration in the menu bar / tooltip
     start_tray_timer(app);
 
@@ -141,7 +173,11 @@ pub fn start_tray_timer<R: Runtime>(app: &AppHandle<R>) {
                 let paused = crate::audio::recording_commands::is_recording_paused().await;
                 let state_text = if paused { "paused" } else { "recording" };
 
-                let _ = tray.set_title(Some(elapsed.clone()));
+                if menu_bar_indicator_enabled() {
+                    let _ = tray.set_title(Some(elapsed.clone()));
+                } else {
+                    let _ = tray.set_title(None::<&str>);
+                }
                 let _ = tray.set_tooltip(Some(format!(
                     "{} — {} ({})",
                     crate::APP_NAME,
@@ -189,17 +225,11 @@ fn set_recording_window_indicators<R: Runtime>(
         let _ = window.set_title(&title);
 
         // Dock badges are macOS-only in Tauri.
-        #[cfg(target_os = "macos")]
-        {
-            let _ = window.set_badge_label(Some("REC".to_string()));
-        }
+        let _ = window.set_badge_label(Some("REC".to_string()));
     } else {
         let _ = window.set_title(crate::APP_NAME);
 
-        #[cfg(target_os = "macos")]
-        {
-            let _ = window.set_badge_label(None);
-        }
+        let _ = window.set_badge_label(None);
     }
 }
 
@@ -312,6 +342,27 @@ pub(crate) fn toggle_recording_handler<R: Runtime>(app: &AppHandle<R>) {
             if let Some(window) = app_clone.get_webview_window("main") {
                 let _ = window.eval("window.location.assign('/')");
             }
+        }
+    });
+}
+
+/// Toggle pause/resume for the active recording (used by the global shortcut).
+///
+/// Does nothing when no recording is active. Otherwise reuses the existing
+/// pause/resume tray handlers, so the tray menu updates the same way either
+/// path already does.
+pub fn toggle_pause_handler<R: Runtime>(app: &AppHandle<R>) {
+    let app_clone = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if !crate::audio::recording_commands::is_recording().await {
+            log::info!("Toggle pause shortcut: no active recording, ignoring");
+            return;
+        }
+
+        if crate::audio::recording_commands::is_recording_paused().await {
+            resume_recording_handler(&app_clone);
+        } else {
+            pause_recording_handler(&app_clone);
         }
     });
 }
@@ -463,8 +514,8 @@ async fn get_current_recording_state() -> RecordingState {
 
 /// Check if recording is allowed based on onboarding status and transcription model availability
 /// Returns true if:
-/// - Onboarding is complete (user may prefer Whisper later), OR
-/// - Parakeet transcription model is ready (downloaded)
+/// - Onboarding is complete (the speech models may still be downloading), OR
+/// - The speech models for the transcript are downloaded
 async fn check_can_record<R: Runtime>(app: &AppHandle<R>) -> bool {
     // First check if onboarding is complete
     let onboarding_complete = match crate::onboarding::load_onboarding_status(app).await {
@@ -478,23 +529,14 @@ async fn check_can_record<R: Runtime>(app: &AppHandle<R>) -> bool {
         }
     };
 
-    // If onboarding is complete, always allow recording
-    // (user may prefer Whisper or have their own transcription setup)
+    // If onboarding is complete, always allow recording (a meeting recorded
+    // before the speech models arrive is transcribed afterwards)
     if onboarding_complete {
         return true;
     }
 
-    // During onboarding, check if Parakeet transcription model is ready
-    match crate::parakeet_engine::commands::parakeet_has_available_models().await {
-        Ok(has_models) => has_models,
-        Err(e) => {
-            log::warn!(
-                "Tray: Failed to check Parakeet models: {}, assuming not ready",
-                e
-            );
-            false
-        }
-    }
+    // During onboarding, check if the speech models are downloaded
+    crate::audio::speech::models::batch_ready(app)
 }
 
 pub async fn update_tray_menu_async<R: Runtime>(app: &AppHandle<R>) {
@@ -615,7 +657,10 @@ fn tray_icon(state: RecordingState, detected: bool) -> (Image<'static>, bool) {
 
 fn update_tray_status<R: Runtime>(tray: &tauri::tray::TrayIcon<R>, state: RecordingState) {
     let detected = matches!(state, RecordingState::Stopped) && detected_meeting().is_some();
-    let (icon, icon_as_template) = tray_icon(state, detected);
+    let (icon, icon_as_template) = tray_icon(
+        displayed_icon_state(state, menu_bar_indicator_enabled()),
+        detected,
+    );
     if let Err(error) = tray.set_icon_with_as_template(Some(icon), icon_as_template) {
         log::warn!("Tray: Failed to set status icon: {}", error);
     }
@@ -823,16 +868,43 @@ pub fn toggle_main_window<R: Runtime>(app: &AppHandle<R>) {
     let minimized = window.is_minimized().unwrap_or(false);
 
     if visible && !minimized {
-        if let Err(error) = window.hide() {
-            log::error!("Failed to hide main window: {}", error);
-        }
+        hide_main_window(app);
     } else {
         focus_main_window(app);
     }
 }
 
+/// Hide the main window and drop the Dock icon, leaving the app reachable from the tray.
+pub(crate) fn hide_main_window<R: Runtime>(app: &AppHandle<R>) {
+    let Some(window) = app.get_webview_window("main") else {
+        log::warn!("Could not find main window");
+        return;
+    };
+
+    if let Err(e) = window.hide() {
+        log::error!("Failed to hide main window: {}", e);
+        return;
+    }
+
+    set_dock_visible(app, false);
+}
+
+/// On macOS, switch between a regular app (Dock icon, app menu) and a tray-only accessory app.
+fn set_dock_visible<R: Runtime>(app: &AppHandle<R>, visible: bool) {
+    let policy = if visible {
+        tauri::ActivationPolicy::Regular
+    } else {
+        tauri::ActivationPolicy::Accessory
+    };
+    if let Err(e) = app.set_activation_policy(policy) {
+        log::error!("Failed to set activation policy: {}", e);
+    }
+}
+
 pub(crate) fn focus_main_window<R: Runtime>(app: &AppHandle<R>) {
     if let Some(window) = app.get_webview_window("main") {
+        set_dock_visible(app, true);
+
         if let Err(e) = window.unminimize() {
             log::error!("Failed to unminimize main window: {}", e);
         }
@@ -856,10 +928,25 @@ pub(crate) fn focus_main_window<R: Runtime>(app: &AppHandle<R>) {
 #[cfg(test)]
 mod tests {
     use super::{
-        format_elapsed, recent_meeting_label, tray_icon, tray_tooltip, truncate_title,
-        RecordingState,
+        displayed_icon_state, format_elapsed, recent_meeting_label, tray_icon, tray_tooltip,
+        truncate_title, RecordingState,
     };
     use chrono::TimeZone;
+
+    #[test]
+    fn menu_bar_icon_stays_idle_while_recording_unless_the_indicator_is_on() {
+        for state in [RecordingState::Recording, RecordingState::Paused] {
+            assert_eq!(displayed_icon_state(state, false), RecordingState::Stopped);
+            assert_eq!(displayed_icon_state(state, true), state);
+        }
+        for state in [
+            RecordingState::Stopped,
+            RecordingState::Starting,
+            RecordingState::Stopping,
+        ] {
+            assert_eq!(displayed_icon_state(state, false), state);
+        }
+    }
 
     #[test]
     fn elapsed_time_uses_compact_under_an_hour() {

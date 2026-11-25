@@ -14,6 +14,11 @@ pub struct ModelMetadata {
     pub context_size: usize,
     pub parameter_count: String,
     pub family: String,
+    /// Whether `context_size` came from the model itself (model_info or a
+    /// num_ctx in its Modelfile). False for the family defaults and the
+    /// 4000-token fallback, which are guesses.
+    #[serde(default)]
+    pub context_known: bool,
 }
 
 /// Response structure from Ollama /api/show endpoint
@@ -190,6 +195,7 @@ async fn fetch_model_info(
     if context_size == ULTIMATE_FALLBACK {
         context_size = parse_num_ctx_from_modelfile(&show_response.modelfile);
     }
+    let context_known = context_size != ULTIMATE_FALLBACK;
 
     // If still not found, try family-based fallback
     if context_size == ULTIMATE_FALLBACK {
@@ -218,6 +224,7 @@ async fn fetch_model_info(
         context_size,
         parameter_count: show_response.details.parameter_size,
         family: show_response.details.family,
+        context_known,
     })
 }
 
@@ -314,6 +321,7 @@ fn get_fallback_metadata(model_name: &str) -> ModelMetadata {
         context_size,
         parameter_count: "unknown".to_string(),
         family,
+        context_known: false,
     }
 }
 

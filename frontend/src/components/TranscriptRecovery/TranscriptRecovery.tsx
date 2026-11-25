@@ -21,6 +21,8 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { MeetingMetadata, StoredTranscript } from '@/services/indexedDBService';
 import { cn } from '@/lib/utils';
+import { toneText } from '@/lib/theme-classes';
+import { formatClock } from '@/lib/format';
 
 interface TranscriptRecoveryProps {
   isOpen: boolean;
@@ -178,11 +180,11 @@ export function TranscriptRecovery({
                       </div>
                       {meeting.folderPath ? (
                         <span title="Audio available">
-                          <CheckCircle2 className="w-4 h-4 text-green-500 flex-shrink-0" />
+                          <CheckCircle2 className={`w-4 h-4 ${toneText.success} flex-shrink-0`} />
                         </span>
                       ) : (
                         <span title="No audio">
-                          <AlertCircle className="w-4 h-4 text-yellow-500 flex-shrink-0" />
+                          <AlertCircle className={`w-4 h-4 ${toneText.warning} flex-shrink-0`} />
                         </span>
                       )}
                     </div>
@@ -212,12 +214,12 @@ export function TranscriptRecovery({
                           : 'Audio only'}
                       </span>
                       {selectedMeeting.folderPath ? (
-                        <span className="flex items-center gap-1 text-green-600">
+                        <span className={`flex items-center gap-1 ${toneText.success}`}>
                           <CheckCircle2 className="w-4 h-4" />
                           Audio available
                         </span>
                       ) : (
-                        <span className="flex items-center gap-1 text-yellow-600">
+                        <span className={`flex items-center gap-1 ${toneText.warning}`}>
                           <AlertCircle className="w-4 h-4" />
                           No audio
                         </span>
@@ -247,10 +249,7 @@ export function TranscriptRecovery({
                               if (isNaN(date.getTime())) {
                                 // If timestamp is invalid, try audio_start_time
                                 if (transcript.audio_start_time !== undefined) {
-                                  const totalSecs = Math.floor(transcript.audio_start_time);
-                                  const mins = Math.floor(totalSecs / 60);
-                                  const secs = totalSecs % 60;
-                                  return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+                                  return formatClock(transcript.audio_start_time);
                                 }
                                 return '--:--';
                               }

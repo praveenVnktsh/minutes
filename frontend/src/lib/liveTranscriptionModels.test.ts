@@ -1,0 +1,84 @@
+import { describe, expect, test } from 'bun:test';
+import {
+  applyPartial,
+  finalPassNotice,
+  finalPassTookOver,
+  finalPassWaitsForModels,
+  orderedPartials,
+  type FinalPassStarted,
+} from './liveTranscriptionModels';
+
+const queued: FinalPassStarted = {
+  status: 'queued',
+  taskId: 'task-1',
+  skipReason: null,
+  message: null,
+  provider: 'parakeet',
+  model: 'parakeet-tdt-0.6b-v2-coreml',
+  fallbackNotice: null,
+};
+
+describe('finalPassTookOver', () => {
+  test('only a queued pass takes over post-processing', () => {
+    expect(finalPassTookOver(queued)).toBe(true);
+    expect(finalPassTookOver({ ...queued, status: 'skipped' })).toBe(false);
+    // Waiting for power: the live transcript gets its speakers and summary now.
+    expect(finalPassTookOver({ ...queued, status: 'waiting', taskId: null })).toBe(false);
+    expect(finalPassTookOver(undefined)).toBe(false);
+    expect(finalPassTookOver(null)).toBe(false);
+    expect(finalPassTookOver('queued')).toBe(false);
+  });
+});
+
+describe('finalPassWaitsForModels', () => {
+  test('only a pass waiting for the speech models', () => {
+    expect(finalPassWaitsForModels({ ...queued, status: 'waiting', taskId: null, waitingFor: 'models' })).toBe(true);
+    expect(finalPassWaitsForModels({ ...queued, status: 'waiting', taskId: null, waitingFor: 'power' })).toBe(false);
+    // Older builds only waited for power and sent no field.
+    expect(finalPassWaitsForModels({ ...queued, status: 'waiting', taskId: null })).toBe(false);
+    expect(finalPassWaitsForModels(queued)).toBe(false);
+    expect(finalPassWaitsForModels(null)).toBe(false);
+  });
+});
+
+describe('finalPassNotice', () => {
+  test('reports a fallback notice and meaningful skips, but not a disabled pass', () => {
+    expect(finalPassNotice(queued)).toBeNull();
+    // Builds without the field queue silently.
+    const withoutNotice: FinalPassStarted = { ...queued };
+    delete withoutNotice.fallbackNotice;
+    expect(finalPassNotice(withoutNotice)).toBeNull();
+    expect(finalPassNotice({ ...queued, fallbackNotice: 'Older engine used' })).toBe('Older engine used');
+    expect(
+      finalPassNotice({ ...queued, status: 'skipped', skipReason: 'no_engine', message: 'No model' }),
+    ).toBe('No model');
+    expect(
+      finalPassNotice({ ...queued, status: 'skipped', skipReason: 'disabled', message: 'Off' }),
+    ).toBeNull();
+    // The meeting header says it waits for power; no toast on top of that.
+    expect(finalPassNotice({ ...queued, status: 'waiting', message: 'Plugged in' })).toBeNull();
+    expect(finalPassNotice(undefined)).toBeNull();
+  });
+});
+
+describe('applyPartial', () => {
+  test('tracks one in-progress line per source and clears it on empty text', () => {
+    let partials = applyPartial({}, { source: 'mic', text: 'hello', audio_start_time: 1 });
+    partials = applyPartial(partials, { source: 'system', text: 'hi there', audio_start_time: 0.5 });
+    partials = applyPartial(partials, { source: 'mic', text: 'hello world', audio_start_time: 1 });
+    expect(orderedPartials(partials)).toEqual([
+      { source: 'system', text: 'hi there', start: 0.5 },
+      { source: 'mic', text: 'hello world', start: 1 },
+    ]);
+    partials = applyPartial(partials, { source: 'mic', text: '  ', audio_start_time: 3 });
+    expect(Object.keys(partials)).toEqual(['system']);
+  });
+
+  test('returns the same object when nothing changed', () => {
+    const partials = applyPartial({}, { source: 'mic', text: 'same', audio_start_time: 2 });
+    expect(applyPartial(partials, { source: 'mic', text: 'same', audio_start_time: 2 })).toBe(partials);
+    const empty = {};
+    expect(applyPartial(empty, { source: 'mic', text: '', audio_start_time: 0 })).toBe(empty);
+  });
+});
+

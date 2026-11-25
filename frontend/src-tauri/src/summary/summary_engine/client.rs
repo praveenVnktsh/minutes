@@ -14,7 +14,8 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use super::models;
-use super::sidecar::SidecarManager;
+use super::sidecar::{OnAbandon, Priority, SidecarError, SidecarManager, SidecarRequest};
+use crate::summary::llm_client::Gate;
 
 // ============================================================================
 // Request/Response Types
@@ -37,14 +38,166 @@ enum Request {
         repeat_penalty: Option<f32>,
         penalty_last_n: Option<i32>,
         stop_tokens: Option<Vec<String>>,
+        seed: Option<u32>,
+        /// Echoed on every reply line; lets the sidecar cancel this request.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        stream: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_prompt: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_prefix_chars: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_anchor_chars: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_context_size: Option<u32>,
+        /// Fewer CPU threads while a recording runs (see [`generation_threads`]).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        n_threads: Option<i32>,
+        /// Flash attention; `None` lets llama.cpp decide.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        flash_attn: Option<bool>,
+        /// KV cache element type ("f16", "q8_0", "q4_0").
+        #[serde(skip_serializing_if = "Option::is_none")]
+        kv_cache_type: Option<&'static str>,
+        /// GBNF the output must follow.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        grammar: Option<&'static str>,
+        /// Stop after this many complete non-empty lines.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        max_lines: Option<u32>,
+        /// GGUF LoRA adapter for this request only.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        lora_path: Option<String>,
+        /// First-token gate (see [`Gate`]).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        gate_token: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        gate_threshold: Option<f32>,
+    },
+    Tokenize {
+        text: String,
+        context_size: Option<u32>,
+        model_path: Option<String>,
     },
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+// The variant name preserves the established `{"type":"response"}` wire protocol.
+#[allow(clippy::enum_variant_names)]
 enum Response {
-    Response { text: String, error: Option<String> },
-    Error { message: String },
+    Response {
+        text: String,
+        error: Option<String>,
+        #[serde(default)]
+        finish_reason: Option<String>,
+        #[serde(default)]
+        prompt_tokens: Option<u32>,
+        #[serde(default)]
+        error_kind: Option<String>,
+        #[serde(default)]
+        completion_tokens: Option<u32>,
+        #[serde(default)]
+        reused_tokens: Option<u32>,
+        #[serde(default)]
+        tokens_per_second: Option<f64>,
+        #[serde(default)]
+        gate_prob: Option<f32>,
+    },
+    TokenCount {
+        count: u32,
+    },
+    Error {
+        message: String,
+    },
+}
+
+/// Fixed sampling seed for built-in generation, so the same prompt gives the same output.
+pub const BUILTIN_SEED: u32 = 42;
+
+/// Error text llama-helper uses when prompt + output budget exceeds the context.
+pub const CONTEXT_OVERFLOW_MARKER: &str = "context overflow";
+
+/// Typed built-in failures callers branch on. They travel inside
+/// `anyhow::Error`; use `downcast_ref` rather than matching message text.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum BuiltinError {
+    /// llama-helper refused the request because prompt + output budget does
+    /// not fit the context (`error_kind: "context_overflow"`).
+    #[error("Generation failed ({CONTEXT_OVERFLOW_MARKER}): {0}")]
+    ContextOverflow(String),
+    /// The helper does not understand the request (an older llama-helper
+    /// without `tokenize`).
+    #[error("Sidecar error: {0}")]
+    UnsupportedRequest(String),
+}
+
+/// A built-in generation result.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BuiltinCompletion {
+    pub text: String,
+    /// True when generation stopped at `max_tokens` rather than at end-of-turn.
+    pub truncated: bool,
+    pub prompt_tokens: Option<u32>,
+    /// The gate token's probability, when the request had a gate. The text
+    /// is exactly the gate token when it passed.
+    pub gate_prob: Option<f32>,
+}
+
+fn parse_generate_response(response_json: &str) -> Result<BuiltinCompletion> {
+    let response: Response = serde_json::from_str(response_json)
+        .with_context(|| format!("Failed to parse response: {}", response_json))?;
+    match response {
+        Response::Response {
+            text,
+            error,
+            finish_reason,
+            prompt_tokens,
+            error_kind,
+            gate_prob,
+            ..
+        } => {
+            if let Some(err_msg) = error {
+                if error_kind.as_deref() == Some("context_overflow") {
+                    return Err(anyhow!(BuiltinError::ContextOverflow(err_msg)));
+                }
+                return Err(anyhow!("Generation failed: {}", err_msg));
+            }
+            // A reply this caller is still waiting for was only cancelled if
+            // another (interactive) request pre-empted it.
+            if finish_reason.as_deref() == Some("cancelled") {
+                return Err(anyhow!(SidecarError::Preempted));
+            }
+            Ok(BuiltinCompletion {
+                text,
+                truncated: finish_reason.as_deref() == Some("length"),
+                prompt_tokens,
+                gate_prob,
+            })
+        }
+        Response::TokenCount { .. } => Err(anyhow!("Unexpected token count response")),
+        Response::Error { message } => Err(anyhow!("Sidecar error: {}", message)),
+    }
+}
+
+fn parse_token_count_response(response_json: &str) -> Result<usize> {
+    let response: Response = serde_json::from_str(response_json)
+        .with_context(|| format!("Failed to parse response: {}", response_json))?;
+    match response {
+        Response::TokenCount { count } => Ok(count as usize),
+        // llama-helper answers a request type it cannot parse with
+        // "Invalid request: unknown variant ...".
+        Response::Error { message } if message.starts_with("Invalid request") => {
+            Err(anyhow!(BuiltinError::UnsupportedRequest(message)))
+        }
+        Response::Error { message } => Err(anyhow!("Sidecar error: {}", message)),
+        Response::Response { error, .. } => Err(anyhow!(
+            "Unexpected generate response to tokenize request: {:?}",
+            error
+        )),
+    }
 }
 
 // ============================================================================
@@ -53,10 +206,15 @@ enum Response {
 
 lazy_static::lazy_static! {
     static ref SIDECAR_MANAGER: Arc<Mutex<Option<Arc<SidecarManager>>>> = Arc::new(Mutex::new(None));
+    /// A second helper for live notes when they run on another model than
+    /// Copilot and summaries, so the two never reload each other's model.
+    static ref LIVE_NOTES_SIDECAR: Arc<Mutex<Option<Arc<SidecarManager>>>> = Arc::new(Mutex::new(None));
 }
 
-// Model path cache to avoid repeated filesystem I/O and model lookups
-static MODEL_PATH_CACHE: Lazy<RwLock<HashMap<String, PathBuf>>> =
+// Model path cache to avoid repeated filesystem I/O and model lookups. Keyed
+// by the data folder and the model name: a replay's sandbox resolves its own
+// models folder and never the app's (nor the app the sandbox's).
+static MODEL_PATH_CACHE: Lazy<RwLock<HashMap<(PathBuf, String), PathBuf>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
 
 /// Initialize the global sidecar manager
@@ -77,10 +235,11 @@ async fn get_sidecar_manager() -> Result<Arc<SidecarManager>> {
 
 /// Get cached model path with read-through caching to avoid repeated filesystem I/O
 fn get_cached_model_path(app_data_dir: &Path, model_name: &str) -> Result<PathBuf> {
+    let key = (app_data_dir.to_path_buf(), model_name.to_string());
     // Try read lock first (fast path for cache hits)
     {
         let cache = MODEL_PATH_CACHE.read().unwrap();
-        if let Some(path) = cache.get(model_name) {
+        if let Some(path) = cache.get(&key) {
             // Verify file still exists before returning cached path
             if path.exists() {
                 return Ok(path.clone());
@@ -92,7 +251,7 @@ fn get_cached_model_path(app_data_dir: &Path, model_name: &str) -> Result<PathBu
     let mut cache = MODEL_PATH_CACHE.write().unwrap();
 
     // Double-check after acquiring write lock (another thread may have updated it)
-    if let Some(path) = cache.get(model_name) {
+    if let Some(path) = cache.get(&key) {
         if path.exists() {
             return Ok(path.clone());
         }
@@ -110,7 +269,7 @@ fn get_cached_model_path(app_data_dir: &Path, model_name: &str) -> Result<PathBu
     }
 
     // Cache the validated path
-    cache.insert(model_name.to_string(), model_path.clone());
+    cache.insert(key, model_path.clone());
     Ok(model_path)
 }
 
@@ -118,44 +277,14 @@ fn get_cached_model_path(app_data_dir: &Path, model_name: &str) -> Result<PathBu
 // Public API
 // ============================================================================
 
-/// Generate text using built-in AI
-///
-/// # Arguments
-/// * `app_data_dir` - Application data directory (for model resolution)
-/// * `model_name` - Model name (e.g., "gemma3:1b")
-/// * `system_prompt` - System instructions for the model
-/// * `user_prompt` - User message/task
-/// * `cancellation_token` - Optional token for cancellation
-///
-/// # Returns
-/// Generated text
-pub async fn generate_with_builtin(
+async fn running_manager(
     app_data_dir: &Path,
     model_name: &str,
-    system_prompt: &str,
-    user_prompt: &str,
-    cancellation_token: Option<&CancellationToken>,
-) -> Result<String> {
-    // Check cancellation at start
-    if let Some(token) = cancellation_token {
-        if token.is_cancelled() {
-            return Err(anyhow!("Generation cancelled before starting"));
-        }
-    }
-
-    log::info!("Built-in AI generation request");
-    log::info!("Model: {}", model_name);
-
-    // Get model definition
+) -> Result<(Arc<SidecarManager>, models::ModelDef, PathBuf)> {
     let model_def = models::get_model_by_name(model_name)
         .ok_or_else(|| anyhow!("Unknown model: {}", model_name))?;
-
     // Resolve model path with caching (avoids repeated filesystem I/O)
     let model_path = get_cached_model_path(app_data_dir, model_name)?;
-
-    // Apply model-specific chat template
-    let formatted_prompt = models::format_prompt(&model_def.template, system_prompt, user_prompt)?;
-    // Get or initialize sidecar manager
     let manager = {
         let mut global_manager = SIDECAR_MANAGER.lock().await;
         if global_manager.is_none() {
@@ -165,25 +294,157 @@ pub async fn generate_with_builtin(
         }
         global_manager.clone().unwrap()
     };
-
-    // Ensure sidecar is running with this model
     manager.ensure_running(model_path.clone()).await?;
+    Ok((manager, model_def, model_path))
+}
 
-    // Check cancellation after sidecar startup
-    if let Some(token) = cancellation_token {
-        if token.is_cancelled() {
-            return Err(anyhow!("Generation cancelled during sidecar startup"));
-        }
+async fn send_cancellable(
+    manager: &SidecarManager,
+    request_json: String,
+    timeout: Duration,
+    cancellation_token: Option<&CancellationToken>,
+    on_abandon: OnAbandon,
+) -> Result<String> {
+    manager
+        .send_request(request_json, timeout, cancellation_token, on_abandon)
+        .await
+}
+
+/// Formats the prompt exactly as `generate_with_builtin` will, so token counts
+/// of it match what llama-helper sees.
+pub fn format_builtin_prompt(
+    model_name: &str,
+    system_prompt: &str,
+    user_prompt: &str,
+) -> Result<String> {
+    let model_def = models::get_model_by_name(model_name)
+        .ok_or_else(|| anyhow!("Unknown model: {}", model_name))?;
+    models::format_prompt(&model_def.template, system_prompt, user_prompt)
+}
+
+/// Counts `text`'s tokens with the built-in model's own tokenizer.
+pub async fn count_builtin_tokens(
+    app_data_dir: &Path,
+    model_name: &str,
+    text: &str,
+    cancellation_token: Option<&CancellationToken>,
+) -> Result<usize> {
+    let (manager, model_def, model_path) = running_manager(app_data_dir, model_name).await?;
+    let request_json = serde_json::to_string(&Request::Tokenize {
+        text: text.to_string(),
+        context_size: Some(model_def.context_size),
+        model_path: Some(model_path.to_string_lossy().to_string()),
+    })?;
+    let response_json = send_cancellable(
+        &manager,
+        request_json,
+        Duration::from_secs(TOKENIZE_TIMEOUT_SECS),
+        cancellation_token,
+        // Counting is cheap and runs under the summary's own cancellation.
+        OnAbandon::StopSidecar,
+    )
+    .await?;
+    parse_token_count_response(&response_json)
+}
+
+const TOKENIZE_TIMEOUT_SECS: u64 = 120;
+
+/// Per-call overrides for [`generate_with_builtin`]. `None` keeps the model's
+/// own sampling defaults, the fixed seed and the standard timeout. Built from
+/// a `GenerationOptions` with `BuiltinGenerateOptions::from(&options)`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BuiltinGenerateOptions {
+    /// Output budget; `None` uses `models::DEFAULT_MAX_TOKENS`.
+    pub max_tokens: Option<u32>,
+    /// Sampling temperature; `None` uses the model's default.
+    pub temperature: Option<f32>,
+    /// Sampling seed; `None` uses [`BUILTIN_SEED`].
+    pub seed: Option<u32>,
+    /// Time the request may take once it reaches the sidecar (waiting for
+    /// another caller's request does not count).
+    pub timeout: Option<Duration>,
+    /// What a timeout or cancellation does to the shared sidecar.
+    pub on_abandon: OnAbandon,
+    /// GGUF LoRA adapter applied to this request only.
+    pub lora_path: Option<PathBuf>,
+    /// First-token gate.
+    pub gate: Option<Gate>,
+    /// Context window; `None` uses the model's (`ModelDef::context_size`).
+    pub context_size: Option<u32>,
+}
+
+impl BuiltinGenerateOptions {
+    /// The request's n_ctx: the override, else the model's own. Every
+    /// request names one, and llama-helper only reloads the model for a new
+    /// one when its GPU offload would change (on Apple Silicon it never does
+    /// for a model that fits), so live notes and the tidy pass can alternate.
+    fn context_size(&self, model_def: &models::ModelDef) -> u32 {
+        self.context_size
+            .filter(|n| *n > 0)
+            .unwrap_or(model_def.context_size)
+    }
+
+    /// The request's `lora_path`, `gate_token` and `gate_threshold`.
+    fn adapter_fields(&self) -> (Option<String>, Option<String>, Option<f32>) {
+        (
+            self.lora_path
+                .as_ref()
+                .map(|path| path.to_string_lossy().to_string()),
+            self.gate.as_ref().map(|gate| gate.token.clone()),
+            self.gate.as_ref().map(|gate| gate.threshold),
+        )
+    }
+}
+
+/// Generate text using built-in AI
+///
+/// # Arguments
+/// * `app_data_dir` - Application data directory (for model resolution)
+/// * `model_name` - Model name (e.g., "gemma3:1b")
+/// * `system_prompt` - System instructions for the model
+/// * `user_prompt` - User message/task
+/// * `options` - Output budget, sampling overrides, timeout and abandon policy
+/// * `cancellation_token` - Optional token for cancellation
+///
+/// # Returns
+/// The generated text, and whether it stopped at the output budget.
+pub async fn generate_with_builtin(
+    app_data_dir: &Path,
+    model_name: &str,
+    system_prompt: &str,
+    user_prompt: &str,
+    options: BuiltinGenerateOptions,
+    cancellation_token: Option<&CancellationToken>,
+) -> Result<BuiltinCompletion> {
+    if cancellation_token.is_some_and(CancellationToken::is_cancelled) {
+        return Err(anyhow!("Generation cancelled before starting"));
+    }
+
+    log::info!("Built-in AI generation request");
+    log::info!("Model: {}", model_name);
+
+    let formatted_prompt = format_builtin_prompt(model_name, system_prompt, user_prompt)?;
+    let (manager, model_def, model_path) = running_manager(app_data_dir, model_name).await?;
+
+    if cancellation_token.is_some_and(CancellationToken::is_cancelled) {
+        return Err(anyhow!("Generation cancelled during sidecar startup"));
     }
 
     // Prepare generation request with model-specific sampling parameters
     let sampling = model_def.sampling.sanitize_for_llama_helper();
+    let max_tokens = options
+        .max_tokens
+        .and_then(|value| i32::try_from(value).ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(models::DEFAULT_MAX_TOKENS);
+    let id = next_request_id();
+    let (lora_path, gate_token, gate_threshold) = options.adapter_fields();
     let request = Request::Generate {
         prompt: formatted_prompt,
-        max_tokens: Some(models::DEFAULT_MAX_TOKENS),
-        context_size: Some(model_def.context_size),
+        max_tokens: Some(max_tokens),
+        context_size: Some(options.context_size(&model_def)),
         model_path: Some(model_path.to_string_lossy().to_string()),
-        temperature: Some(sampling.temperature),
+        temperature: Some(options.temperature.unwrap_or(sampling.temperature)),
         top_k: Some(sampling.top_k),
         top_p: Some(sampling.top_p),
         presence_penalty: Some(sampling.presence_penalty),
@@ -191,67 +452,624 @@ pub async fn generate_with_builtin(
         repeat_penalty: Some(sampling.repeat_penalty),
         penalty_last_n: Some(sampling.penalty_last_n),
         stop_tokens: Some(sampling.stop_tokens),
+        seed: Some(options.seed.unwrap_or(BUILTIN_SEED)),
+        id: Some(id),
+        stream: None,
+        cache_prompt: None,
+        cache_prefix_chars: None,
+        cache_anchor_chars: None,
+        cache_context_size: None,
+        n_threads: generation_threads(),
+        flash_attn: None,
+        kv_cache_type: None,
+        grammar: None,
+        max_lines: None,
+        lora_path,
+        gate_token,
+        gate_threshold,
     };
 
     let request_json = serde_json::to_string(&request)?;
+    let timeout = options
+        .timeout
+        .unwrap_or(Duration::from_secs(models::GENERATION_TIMEOUT_SECS));
 
-    // Send request with timeout
-    let timeout = Duration::from_secs(models::GENERATION_TIMEOUT_SECS);
-
-    log::info!("Sending generation request to sidecar");
-
-    // Race between send_request and cancellation token
-    let response_json = if let Some(token) = cancellation_token {
-        tokio::select! {
-            result = manager.send_request(request_json, timeout) => {
-                result?
+    if options.on_abandon == OnAbandon::Yield {
+        let last_end = *LAST_GENERATION_END
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let delay = background_pacing_delay(
+            last_end,
+            crate::clock::now().into_std(),
+            crate::audio::recording_commands::is_recording_or_stopping(),
+        );
+        if !delay.is_zero() {
+            perf_debug!("Pacing a background generation by {:?}", delay);
+            match cancellation_token {
+                Some(token) => tokio::select! {
+                    _ = token.cancelled() => return Err(anyhow!(SidecarError::Cancelled)),
+                    _ = crate::clock::sleep(delay) => {}
+                },
+                None => crate::clock::sleep(delay).await,
             }
-            _ = token.cancelled() => {
-                log::warn!("Generation cancelled by user, shutting down sidecar");
-                // Shutdown sidecar to stop generation immediately
-                if let Err(e) = manager.shutdown().await {
-                    log::error!("Failed to shutdown sidecar during cancellation: {}", e);
-                }
-                return Err(anyhow!("Generation cancelled by user"));
-            }
-        }
-    } else {
-        manager.send_request(request_json, timeout).await?
-    };
-
-    // Check cancellation before parsing response
-    if let Some(token) = cancellation_token {
-        if token.is_cancelled() {
-            return Err(anyhow!("Generation cancelled"));
         }
     }
+    log::info!("Sending generation request to sidecar (max_tokens: {max_tokens})");
+    let response_json = manager
+        .send(SidecarRequest {
+            json: request_json,
+            id: Some(id),
+            priority: options.on_abandon.priority(),
+            timeout,
+            timeout_includes_queue: false,
+            cancellation_token,
+            on_abandon: options.on_abandon,
+            tokens: None,
+        })
+        .await;
+    note_generation_end();
+    let response_json = response_json?;
 
-    // Parse response
-    let response: Response = serde_json::from_str(&response_json)
-        .with_context(|| format!("Failed to parse response: {}", response_json))?;
+    if cancellation_token.is_some_and(CancellationToken::is_cancelled) {
+        return Err(anyhow!("Generation cancelled"));
+    }
 
-    match response {
-        Response::Response { text, error } => {
-            if let Some(err_msg) = error {
-                Err(anyhow!("Generation failed: {}", err_msg))
-            } else {
-                log::info!("Generation completed: {} chars", text.len());
-                Ok(text)
+    let completion = parse_generate_response(&response_json)?;
+    log::info!(
+        "Generation completed: {} chars, truncated: {}",
+        completion.text.len(),
+        completion.truncated
+    );
+    Ok(completion)
+}
+
+/// n_ctx of the cached context live notes use: Copilot's, so when both run
+/// on the same model they share the helper's one cached context instead of
+/// rebuilding it every time they alternate.
+pub const LIVE_NOTES_CACHE_CONTEXT: u32 = 8192;
+
+/// One live notes request.
+#[derive(Debug, Clone)]
+pub struct LiveNotesRequest<'a> {
+    pub model_name: &'a str,
+    pub system_prompt: &'a str,
+    pub user_prompt: &'a str,
+    /// GBNF the answer must follow.
+    pub grammar: Option<&'static str>,
+    /// Stop after this many lines (the topic line and the notes kept): the
+    /// model's extra notes would be dropped anyway.
+    pub max_lines: Option<u32>,
+    /// Run on the live notes helper (another model than the main helper's).
+    pub own_helper: bool,
+    /// A single call (the tidy pass) rather than a window: no prompt cache,
+    /// so it gets its whole `context_size` instead of the cache's 8192.
+    pub one_off: bool,
+    pub options: BuiltinGenerateOptions,
+}
+
+/// The helper live notes run on: the main one, or their own.
+async fn live_notes_manager(
+    app_data_dir: &Path,
+    model_name: &str,
+    own_helper: bool,
+) -> Result<(Arc<SidecarManager>, models::ModelDef, PathBuf)> {
+    if !own_helper {
+        return running_manager(app_data_dir, model_name).await;
+    }
+    let model_def = models::get_model_by_name(model_name)
+        .ok_or_else(|| anyhow!("Unknown model: {}", model_name))?;
+    let model_path = get_cached_model_path(app_data_dir, model_name)?;
+    let manager = {
+        let mut slot = LIVE_NOTES_SIDECAR.lock().await;
+        if slot.is_none() {
+            log::info!("Starting the live notes helper");
+            *slot = Some(Arc::new(SidecarManager::new(app_data_dir.to_path_buf())?));
+        }
+        slot.clone().unwrap()
+    };
+    manager.ensure_running(model_path.clone()).await?;
+    Ok((manager, model_def, model_path))
+}
+
+/// The cache fields of a live notes request: `cache_prompt`, the prefix and
+/// the cached context's n_ctx.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LiveNotesCache {
+    pub prefix_chars: usize,
+    pub context_size: u32,
+}
+
+/// Whether a live notes request uses llama-helper's prompt cache. Only on
+/// their own helper: on the shared one, their prefix checkpoints would
+/// evict Copilot's anchor and prefix (one slot on 8 GB Macs, three
+/// otherwise, least recently used first), so every Copilot ask after a
+/// window would re-evaluate its whole transcript. There they run uncached,
+/// in a fresh context, as before the live notes model existed.
+pub fn live_notes_cache(
+    own_helper: bool,
+    prefix_chars: usize,
+    model_context_size: u32,
+) -> Option<LiveNotesCache> {
+    own_helper.then(|| LiveNotesCache {
+        prefix_chars,
+        context_size: copilot_cache_context(LIVE_NOTES_CACHE_CONTEXT).min(model_context_size),
+    })
+}
+
+/// A live notes window on a built-in model. On the live notes model's own
+/// helper it keeps the template head and system prompt evaluated between
+/// windows (llama-helper's prefix checkpoint), so each window only evaluates
+/// its own text; on the shared helper it runs uncached (see
+/// [`live_notes_cache`]). It can constrain the answer with a grammar.
+pub async fn generate_live_notes(
+    app_data_dir: &Path,
+    request: LiveNotesRequest<'_>,
+    cancellation_token: Option<&CancellationToken>,
+) -> Result<BuiltinCompletion> {
+    if cancellation_token.is_some_and(CancellationToken::is_cancelled) {
+        return Err(anyhow!("Generation cancelled before starting"));
+    }
+    let LiveNotesRequest {
+        model_name,
+        system_prompt,
+        user_prompt,
+        grammar,
+        max_lines,
+        own_helper,
+        one_off,
+        options,
+    } = request;
+    let (prompt, prefix_chars) =
+        format_builtin_prompt_with_prefix(model_name, system_prompt, "", user_prompt)?;
+    let (manager, model_def, model_path) =
+        live_notes_manager(app_data_dir, model_name, own_helper).await?;
+    let sampling = model_def.sampling.sanitize_for_llama_helper();
+    let id = next_request_id();
+    let context_size = options.context_size(&model_def);
+    let cache = live_notes_cache(own_helper && !one_off, prefix_chars, context_size);
+    let (lora_path, gate_token, gate_threshold) = options.adapter_fields();
+    let request = Request::Generate {
+        prompt,
+        max_tokens: Some(
+            options
+                .max_tokens
+                .and_then(|value| i32::try_from(value).ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(models::DEFAULT_MAX_TOKENS),
+        ),
+        context_size: Some(context_size),
+        model_path: Some(model_path.to_string_lossy().to_string()),
+        temperature: Some(options.temperature.unwrap_or(sampling.temperature)),
+        top_k: Some(sampling.top_k),
+        top_p: Some(sampling.top_p),
+        presence_penalty: Some(sampling.presence_penalty),
+        frequency_penalty: Some(sampling.frequency_penalty),
+        repeat_penalty: Some(sampling.repeat_penalty),
+        penalty_last_n: Some(sampling.penalty_last_n),
+        stop_tokens: Some(sampling.stop_tokens),
+        seed: Some(options.seed.unwrap_or(BUILTIN_SEED)),
+        id: Some(id),
+        stream: None,
+        cache_prompt: cache.map(|_| true),
+        cache_prefix_chars: cache.map(|cache| cache.prefix_chars),
+        cache_anchor_chars: None,
+        cache_context_size: cache.map(|cache| cache.context_size),
+        n_threads: generation_threads(),
+        flash_attn: None,
+        kv_cache_type: None,
+        grammar,
+        max_lines,
+        lora_path,
+        gate_token,
+        gate_threshold,
+    };
+    let timeout = options
+        .timeout
+        .unwrap_or(Duration::from_secs(models::GENERATION_TIMEOUT_SECS));
+    if !own_helper && options.on_abandon == OnAbandon::Yield {
+        // On the shared helper: never back to back with Copilot.
+        let last_end = *LAST_GENERATION_END
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let delay = background_pacing_delay(
+            last_end,
+            crate::clock::now().into_std(),
+            crate::audio::recording_commands::is_recording_or_stopping(),
+        );
+        if !delay.is_zero() {
+            match cancellation_token {
+                Some(token) => tokio::select! {
+                    _ = token.cancelled() => return Err(anyhow!(SidecarError::Cancelled)),
+                    _ = crate::clock::sleep(delay) => {}
+                },
+                None => crate::clock::sleep(delay).await,
             }
         }
+    }
+    let response_json = manager
+        .send(SidecarRequest {
+            json: serde_json::to_string(&request)?,
+            id: Some(id),
+            priority: options.on_abandon.priority(),
+            timeout,
+            timeout_includes_queue: false,
+            cancellation_token,
+            on_abandon: options.on_abandon,
+            tokens: None,
+        })
+        .await;
+    if !own_helper {
+        note_generation_end();
+    }
+    let response_json = response_json?;
+    if cancellation_token.is_some_and(CancellationToken::is_cancelled) {
+        return Err(anyhow!("Generation cancelled"));
+    }
+    parse_generate_response(&response_json)
+}
+
+/// CPU threads llama-helper may use while a recording is live. Live
+/// transcription (Nemotron) decodes on the CPU and measurably falls behind
+/// real time when the helper takes its default (cores / 2 + 2) threads; the
+/// model's weights run on the GPU either way.
+pub const RECORDING_LLM_THREADS: i32 = 2;
+
+/// Thread override for a generate request: fewer while recording.
+pub fn generation_threads() -> Option<i32> {
+    crate::audio::recording_commands::is_recording_or_stopping().then_some(RECORDING_LLM_THREADS)
+}
+
+/// Minimum pause between the end of one built-in generation and the start of
+/// a background (live timeline) one while recording, so the model never runs
+/// back to back with Copilot and live transcription gets the machine.
+pub const BACKGROUND_PACING: Duration = Duration::from_secs(4);
+
+static LAST_GENERATION_END: std::sync::Mutex<Option<std::time::Instant>> =
+    std::sync::Mutex::new(None);
+
+fn note_generation_end() {
+    *LAST_GENERATION_END
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(crate::clock::now().into_std());
+}
+
+/// How long a background request should wait before it starts.
+pub fn background_pacing_delay(
+    last_end: Option<std::time::Instant>,
+    now: std::time::Instant,
+    recording: bool,
+) -> Duration {
+    match last_end {
+        Some(end) if recording => {
+            BACKGROUND_PACING.saturating_sub(now.saturating_duration_since(end))
+        }
+        _ => Duration::ZERO,
+    }
+}
+
+/// The cached Copilot context llama-helper will really use: it caps it at
+/// 4096 tokens on machines with 8 GB of RAM or less (llama-helper's
+/// `cache_limits`), so the app budgets prompts for the same number.
+pub fn copilot_cache_context(requested: u32) -> u32 {
+    copilot_cache_context_for(requested, total_memory_bytes())
+}
+
+/// Pure form of [`copilot_cache_context`].
+pub fn copilot_cache_context_for(requested: u32, total_memory: Option<u64>) -> u32 {
+    const LOW_MEMORY_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+    const LOW_MEMORY_CACHE_CONTEXT: u32 = 4096;
+    match total_memory {
+        Some(bytes) if bytes <= LOW_MEMORY_BYTES => requested.min(LOW_MEMORY_CACHE_CONTEXT),
+        _ => requested,
+    }
+}
+
+pub fn total_memory_bytes() -> Option<u64> {
+    static TOTAL: Lazy<Option<u64>> = Lazy::new(|| {
+        let mut system = sysinfo::System::new();
+        system.refresh_memory();
+        Some(system.total_memory()).filter(|bytes| *bytes > 0)
+    });
+    *TOTAL
+}
+
+/// Ids for generate requests, so the sidecar can cancel one in the helper.
+fn next_request_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The formatted prompt and the byte length of its stable prefix: the
+/// template's head, the system prompt and `user_stable`. llama-helper keeps
+/// that prefix's state between requests.
+pub fn format_builtin_prompt_with_prefix(
+    model_name: &str,
+    system_prompt: &str,
+    user_stable: &str,
+    user_rest: &str,
+) -> Result<(String, usize)> {
+    format_builtin_prompt_with_prefixes(model_name, system_prompt, user_stable, user_rest, 0)
+        .map(|(prompt, prefix, _)| (prompt, prefix))
+}
+
+/// Like [`format_builtin_prompt_with_prefix`], plus the byte length of an
+/// earlier anchor: the prefix up to `user_stable[..anchor]`.
+pub fn format_builtin_prompt_with_prefixes(
+    model_name: &str,
+    system_prompt: &str,
+    user_stable: &str,
+    user_rest: &str,
+    anchor: usize,
+) -> Result<(String, usize, usize)> {
+    let (full, prefix) = prefix_for(model_name, system_prompt, user_stable, user_rest)?;
+    let anchor = anchor.min(user_stable.len());
+    let anchor_chars = if user_stable.is_char_boundary(anchor) {
+        let (_, anchor_chars) = prefix_for(
+            model_name,
+            system_prompt,
+            &user_stable[..anchor],
+            &format!("{}{user_rest}", &user_stable[anchor..]),
+        )?;
+        anchor_chars.min(prefix)
+    } else {
+        0
+    };
+    Ok((full, prefix, anchor_chars))
+}
+
+fn prefix_for(
+    model_name: &str,
+    system_prompt: &str,
+    user_stable: &str,
+    user_rest: &str,
+) -> Result<(String, usize)> {
+    const SENTINEL: &str = "\u{1}COPILOT_USER\u{1}";
+    let model_def = models::get_model_by_name(model_name)
+        .ok_or_else(|| anyhow!("Unknown model: {}", model_name))?;
+    let template = model_def.template.as_str();
+    let marked = models::format_prompt(template, system_prompt, SENTINEL)?;
+    let head_len = marked
+        .find(SENTINEL)
+        .ok_or_else(|| anyhow!("Prompt template has no user slot"))?;
+    let tail_len = marked.len() - head_len - SENTINEL.len();
+    let stable_only = models::format_prompt(template, system_prompt, user_stable)?;
+    let prefix_chars = stable_only.len().saturating_sub(tail_len);
+    let full = models::format_prompt(
+        template,
+        system_prompt,
+        &format!("{user_stable}{user_rest}"),
+    )?;
+    // Escaping can only differ at the seam if a control marker straddles it;
+    // then reuse simply starts earlier.
+    let prefix_chars =
+        if full.as_bytes().get(..prefix_chars) == stable_only.as_bytes().get(..prefix_chars) {
+            prefix_chars
+        } else {
+            head_len
+        };
+    Ok((full, prefix_chars))
+}
+
+/// Settings for one streamed Copilot generation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BuiltinStreamOptions {
+    pub max_tokens: u32,
+    pub temperature: f32,
+    /// Total time allowed, waiting for the sidecar included.
+    pub timeout: Duration,
+    /// n_ctx of the helper's persistent cached context.
+    pub cache_context_size: u32,
+    /// The user asked (a question or quick action): served first and may
+    /// pre-empt a live timeline request. Proactive suggestion work is not:
+    /// it queues like a summary and never stops the timeline.
+    pub interactive: bool,
+}
+
+/// A streamed built-in generation's result and timings.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BuiltinStreamCompletion {
+    pub text: String,
+    pub truncated: bool,
+    pub prompt_tokens: Option<u32>,
+    pub completion_tokens: Option<u32>,
+    pub reused_tokens: Option<u32>,
+    pub tokens_per_second: Option<f64>,
+}
+
+fn parse_stream_response(response_json: &str) -> Result<BuiltinStreamCompletion> {
+    let response: Response = serde_json::from_str(response_json)
+        .with_context(|| format!("Failed to parse response: {}", response_json))?;
+    match response {
+        Response::Response {
+            text,
+            error,
+            finish_reason,
+            prompt_tokens,
+            error_kind,
+            completion_tokens,
+            reused_tokens,
+            tokens_per_second,
+            ..
+        } => {
+            if let Some(err_msg) = error {
+                if error_kind.as_deref() == Some("context_overflow") {
+                    return Err(anyhow!(BuiltinError::ContextOverflow(err_msg)));
+                }
+                return Err(anyhow!("Generation failed: {}", err_msg));
+            }
+            if finish_reason.as_deref() == Some("cancelled") {
+                return Err(anyhow!(SidecarError::Cancelled));
+            }
+            Ok(BuiltinStreamCompletion {
+                text,
+                truncated: finish_reason.as_deref() == Some("length"),
+                prompt_tokens,
+                completion_tokens,
+                reused_tokens,
+                tokens_per_second,
+            })
+        }
+        Response::TokenCount { .. } => Err(anyhow!("Unexpected token count response")),
         Response::Error { message } => Err(anyhow!("Sidecar error: {}", message)),
     }
+}
+
+/// Streams a Copilot answer from the built-in model at interactive priority:
+/// it goes ahead of queued background work and pre-empts an in-flight live
+/// timeline request, but never a summary. Text chunks go to `tokens` as they
+/// arrive. Stop, cancel and timeout cancel the request inside the helper; the
+/// shared sidecar is never killed.
+#[allow(clippy::too_many_arguments)]
+pub async fn generate_with_builtin_stream(
+    app_data_dir: &Path,
+    model_name: &str,
+    system_prompt: &str,
+    user_stable: &str,
+    user_rest: &str,
+    anchor: usize,
+    options: BuiltinStreamOptions,
+    tokens: tokio::sync::mpsc::UnboundedSender<String>,
+    cancellation_token: Option<&CancellationToken>,
+) -> Result<BuiltinStreamCompletion> {
+    let (prompt, prefix_chars, anchor_chars) = format_builtin_prompt_with_prefixes(
+        model_name,
+        system_prompt,
+        user_stable,
+        user_rest,
+        anchor,
+    )?;
+    let (manager, model_def, model_path) = running_manager(app_data_dir, model_name).await?;
+    let sampling = model_def.sampling.sanitize_for_llama_helper();
+    let id = next_request_id();
+    let request = Request::Generate {
+        prompt,
+        max_tokens: Some(i32::try_from(options.max_tokens.max(1)).unwrap_or(i32::MAX)),
+        // The model's own context size, so the helper never reloads the
+        // model between Copilot and summary requests.
+        context_size: Some(model_def.context_size),
+        model_path: Some(model_path.to_string_lossy().to_string()),
+        temperature: Some(options.temperature),
+        top_k: Some(sampling.top_k),
+        top_p: Some(sampling.top_p),
+        presence_penalty: Some(sampling.presence_penalty),
+        frequency_penalty: Some(sampling.frequency_penalty),
+        repeat_penalty: Some(sampling.repeat_penalty),
+        penalty_last_n: Some(sampling.penalty_last_n),
+        stop_tokens: Some(sampling.stop_tokens),
+        seed: Some(BUILTIN_SEED),
+        id: Some(id),
+        stream: Some(true),
+        cache_prompt: Some(true),
+        cache_prefix_chars: Some(prefix_chars),
+        cache_anchor_chars: (anchor_chars > 0).then_some(anchor_chars),
+        cache_context_size: Some(options.cache_context_size.min(model_def.context_size)),
+        n_threads: generation_threads(),
+        flash_attn: None,
+        kv_cache_type: None,
+        grammar: None,
+        max_lines: None,
+        lora_path: None,
+        gate_token: None,
+        gate_threshold: None,
+    };
+    let response_json = manager
+        .send(SidecarRequest {
+            json: serde_json::to_string(&request)?,
+            id: Some(id),
+            priority: if options.interactive {
+                Priority::Interactive
+            } else {
+                Priority::Normal
+            },
+            timeout: options.timeout,
+            timeout_includes_queue: true,
+            cancellation_token,
+            on_abandon: OnAbandon::LetFinish,
+            tokens: Some(tokens),
+        })
+        .await;
+    note_generation_end();
+    parse_stream_response(&response_json?)
+}
+
+/// Set when model settings changed while recording: the live notes helper is
+/// restarted once the recording stops, not under a meeting's live notes.
+static LIVE_NOTES_RESTART_PENDING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// What a settings change does to the live notes helper.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveNotesRestart {
+    /// No recording: restart it now with the main helper.
+    Now,
+    /// A recording is live: keep it until the recording stops.
+    AfterRecording,
+}
+
+pub fn live_notes_restart(recording: bool) -> LiveNotesRestart {
+    if recording {
+        LiveNotesRestart::AfterRecording
+    } else {
+        LiveNotesRestart::Now
+    }
+}
+
+/// After the model settings were saved: the main helper restarts (it drains
+/// its requests first), and the live notes helper too unless a recording is
+/// live, in which case it is restarted when the recording stops
+/// ([`apply_deferred_live_notes_restart`]). Killing it mid-recording would
+/// drop a window and reload the model under live transcription.
+pub async fn restart_sidecars_for_settings_change() -> Result<()> {
+    let recording = crate::audio::recording_commands::is_recording_or_stopping();
+    let live_notes = match live_notes_restart(recording) {
+        LiveNotesRestart::Now => LIVE_NOTES_SIDECAR.lock().await.take(),
+        LiveNotesRestart::AfterRecording => {
+            log::info!(
+                "Model settings changed while recording: the live notes helper restarts after it"
+            );
+            LIVE_NOTES_RESTART_PENDING.store(true, std::sync::atomic::Ordering::SeqCst);
+            None
+        }
+    };
+    let managers = [SIDECAR_MANAGER.lock().await.take(), live_notes];
+    for manager in managers.into_iter().flatten() {
+        drain_and_shutdown(manager);
+    }
+    Ok(())
+}
+
+/// When a recording has stopped: the live notes helper restart a settings
+/// change deferred, if any.
+pub async fn apply_deferred_live_notes_restart() {
+    if crate::audio::recording_commands::is_recording_or_stopping() {
+        return;
+    }
+    if LIVE_NOTES_RESTART_PENDING.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        if let Some(manager) = LIVE_NOTES_SIDECAR.lock().await.take() {
+            log::info!("Restarting the live notes helper deferred by a settings change");
+            drain_and_shutdown(manager);
+        }
+    }
+}
+
+/// Waits for the manager's requests, then stops it, in the background.
+fn drain_and_shutdown(manager: Arc<SidecarManager>) {
+    tokio::spawn(async move {
+        if let Err(e) = manager.shutdown_gracefully().await {
+            log::error!("Error during graceful shutdown: {}", e);
+        }
+    });
 }
 
 /// Shutdown the global sidecar (graceful cleanup)
 /// Detaches the current manager and spawns a background task to drain active requests
 pub async fn shutdown_sidecar_gracefully() -> Result<()> {
-    let manager_opt = {
-        let mut global_manager = SIDECAR_MANAGER.lock().await;
-        global_manager.take()
-    };
+    let managers = [
+        SIDECAR_MANAGER.lock().await.take(),
+        LIVE_NOTES_SIDECAR.lock().await.take(),
+    ];
 
-    if let Some(manager) = manager_opt {
+    for manager in managers.into_iter().flatten() {
         log::info!("Detaching sidecar manager for graceful shutdown");
 
         // Spawn background task to wait for active requests and then kill
@@ -269,12 +1087,12 @@ pub async fn shutdown_sidecar_gracefully() -> Result<()> {
 /// Directly kills the process without waiting for active requests to complete.
 /// This is synchronous and blocks until the sidecar is terminated.
 pub async fn force_shutdown_sidecar() -> Result<()> {
-    let manager_opt = {
-        let mut global_manager = SIDECAR_MANAGER.lock().await;
-        global_manager.take()
-    };
+    let managers = [
+        SIDECAR_MANAGER.lock().await.take(),
+        LIVE_NOTES_SIDECAR.lock().await.take(),
+    ];
 
-    if let Some(manager) = manager_opt {
+    for manager in managers.into_iter().flatten() {
         log::info!("Force shutting down sidecar for app exit");
         // Call shutdown() directly - sends shutdown command and force kills after 3s
         manager.shutdown().await?;
@@ -300,6 +1118,91 @@ pub async fn is_sidecar_healthy() -> bool {
 mod tests {
     use super::*;
 
+    /// llama-helper's checkpoint store as it behaves: the most recently
+    /// used first, at most `slots`.
+    struct Checkpoints {
+        slots: usize,
+        saved: Vec<&'static str>,
+    }
+
+    impl Checkpoints {
+        /// A cache_prompt request: whether `prefix` was restored, then it
+        /// is saved (most recent first).
+        fn request(&mut self, prefix: &'static str) -> bool {
+            let restored = self.saved.contains(&prefix);
+            self.saved.retain(|p| *p != prefix);
+            self.saved.insert(0, prefix);
+            self.saved.truncate(self.slots);
+            restored
+        }
+    }
+
+    #[test]
+    fn live_notes_on_the_shared_helper_keep_copilot_reuse() {
+        for slots in [1, 3] {
+            let mut helper = Checkpoints {
+                slots,
+                saved: Vec::new(),
+            };
+            let mut copilot_reused = Vec::new();
+            for ask in 0..4 {
+                // Copilot: anchor then its stable prefix, on the shared helper;
+                // its next ask finds its prefix the most recent checkpoint.
+                if ask > 0 {
+                    copilot_reused.push(helper.saved.first() == Some(&"copilot-prefix"));
+                }
+                helper.request("copilot-anchor");
+                helper.request("copilot-prefix");
+                // A live notes window between asks, on the same helper.
+                if live_notes_cache(false, 1200, 32_768).is_some() {
+                    helper.request("live-notes-prefix");
+                }
+            }
+            assert_eq!(copilot_reused, [true, true, true], "{slots} slots");
+        }
+        // On their own helper live notes do keep their prefix.
+        let cache = live_notes_cache(true, 1200, 32_768).expect("own helper caches");
+        assert_eq!(cache.prefix_chars, 1200);
+        assert!(cache.context_size <= LIVE_NOTES_CACHE_CONTEXT);
+    }
+
+    #[test]
+    fn a_settings_change_waits_for_the_recording_to_restart_live_notes() {
+        assert_eq!(live_notes_restart(true), LiveNotesRestart::AfterRecording);
+        assert_eq!(live_notes_restart(false), LiveNotesRestart::Now);
+    }
+
+    #[test]
+    fn model_paths_are_cached_per_data_folder() {
+        let model = models::get_available_models().remove(0);
+        let place = |dir: &Path| {
+            let models_dir = models::get_models_directory(dir);
+            std::fs::create_dir_all(&models_dir).unwrap();
+            let file = models_dir.join(&model.gguf_file);
+            std::fs::write(&file, b"gguf").unwrap();
+            file
+        };
+        let app = tempfile::tempdir().unwrap();
+        let sandbox = tempfile::tempdir().unwrap();
+        let app_model = place(app.path());
+        let sandbox_model = place(sandbox.path());
+        assert_eq!(
+            get_cached_model_path(sandbox.path(), &model.name).unwrap(),
+            sandbox_model
+        );
+        assert_eq!(
+            get_cached_model_path(app.path(), &model.name).unwrap(),
+            app_model,
+            "the sandbox's cached path is not the app's"
+        );
+        assert_eq!(
+            get_cached_model_path(sandbox.path(), &model.name).unwrap(),
+            sandbox_model
+        );
+        let empty = tempfile::tempdir().unwrap();
+        assert!(get_cached_model_path(empty.path(), &model.name).is_err());
+    }
+
     #[test]
     fn test_request_serialization() {
         let request = Request::Generate {
@@ -315,6 +1218,21 @@ mod tests {
             repeat_penalty: Some(1.05),
             penalty_last_n: Some(256),
             stop_tokens: Some(vec!["<end_of_turn>".to_string()]),
+            seed: Some(BUILTIN_SEED),
+            id: None,
+            stream: None,
+            cache_prompt: None,
+            cache_prefix_chars: None,
+            cache_anchor_chars: None,
+            cache_context_size: None,
+            n_threads: None,
+            flash_attn: None,
+            kv_cache_type: None,
+            grammar: None,
+            max_lines: None,
+            lora_path: None,
+            gate_token: None,
+            gate_threshold: None,
         };
 
         let json = serde_json::to_string(&request).unwrap();
@@ -326,6 +1244,80 @@ mod tests {
         assert!(json.contains("\"frequency_penalty\":0.0"));
         assert!(json.contains("\"repeat_penalty\":1.05"));
         assert!(json.contains("\"penalty_last_n\":256"));
+        assert!(json.contains("\"seed\":42"));
+    }
+
+    #[test]
+    fn generate_response_reports_truncation_from_finish_reason() {
+        let done = parse_generate_response(
+            r#"{"type":"response","text":"ok","error":null,"finish_reason":"stop","prompt_tokens":10}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            done,
+            BuiltinCompletion {
+                text: "ok".to_string(),
+                truncated: false,
+                prompt_tokens: Some(10),
+                gate_prob: None,
+            }
+        );
+        let cut = parse_generate_response(
+            r#"{"type":"response","text":"par","error":null,"finish_reason":"length"}"#,
+        )
+        .unwrap();
+        assert!(cut.truncated);
+        // Responses from an older helper carry no finish_reason.
+        let legacy =
+            parse_generate_response(r#"{"type":"response","text":"x","error":null}"#).unwrap();
+        assert!(!legacy.truncated);
+    }
+
+    #[test]
+    fn generate_response_overflow_error_keeps_marker() {
+        let error = parse_generate_response(
+            r#"{"type":"response","text":"","error":"Generation failed: context overflow: prompt has 9 tokens","error_kind":"context_overflow"}"#,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<BuiltinError>(),
+            Some(BuiltinError::ContextOverflow(_))
+        ));
+        assert!(error.to_string().contains(CONTEXT_OVERFLOW_MARKER));
+        // Only error_kind decides, never the message text.
+        let plain = parse_generate_response(
+            r#"{"type":"response","text":"","error":"exceeds the context window"}"#,
+        )
+        .unwrap_err();
+        assert!(plain.downcast_ref::<BuiltinError>().is_none());
+    }
+
+    #[test]
+    fn old_helper_rejecting_tokenize_is_typed_as_unsupported() {
+        let error = parse_token_count_response(
+            r#"{"type":"error","message":"Invalid request: unknown variant `tokenize`"}"#,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<BuiltinError>(),
+            Some(BuiltinError::UnsupportedRequest(_))
+        ));
+    }
+
+    #[test]
+    fn tokenize_request_and_count_response() {
+        let json = serde_json::to_string(&Request::Tokenize {
+            text: "hi".to_string(),
+            context_size: Some(4096),
+            model_path: None,
+        })
+        .unwrap();
+        assert!(json.contains("\"type\":\"tokenize\""));
+        assert_eq!(
+            parse_token_count_response(r#"{"type":"token_count","count":17}"#).unwrap(),
+            17
+        );
+        assert!(parse_token_count_response(r#"{"type":"error","message":"no"}"#).is_err());
     }
 
     #[test]
@@ -334,12 +1326,180 @@ mod tests {
         let response: Response = serde_json::from_str(json).unwrap();
 
         match response {
-            Response::Response { text, error } => {
+            Response::Response { text, error, .. } => {
                 assert_eq!(text, "generated text");
                 assert!(error.is_none());
             }
             _ => panic!("Wrong response type"),
         }
+    }
+
+    #[test]
+    fn eight_gb_machines_get_the_helpers_smaller_copilot_context() {
+        let gb = 1024 * 1024 * 1024;
+        assert_eq!(copilot_cache_context_for(8192, Some(8 * gb)), 4096);
+        assert_eq!(copilot_cache_context_for(8192, Some(16 * gb)), 8192);
+        assert_eq!(copilot_cache_context_for(8192, None), 8192);
+    }
+
+    #[test]
+    fn background_work_pauses_after_a_generation_only_while_recording() {
+        let now = std::time::Instant::now();
+        let just_now = now - Duration::from_secs(1);
+        assert_eq!(
+            background_pacing_delay(Some(just_now), now, true),
+            BACKGROUND_PACING - Duration::from_secs(1)
+        );
+        assert_eq!(
+            background_pacing_delay(Some(just_now), now, false),
+            Duration::ZERO
+        );
+        assert_eq!(background_pacing_delay(None, now, true), Duration::ZERO);
+        let long_ago = now - Duration::from_secs(60);
+        assert_eq!(
+            background_pacing_delay(Some(long_ago), now, true),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn adapter_options_reach_the_request_and_the_gate_probability_comes_back() {
+        let model = models::get_model_by_name(models::LIVE_NOTES_MODEL).unwrap();
+        let options = BuiltinGenerateOptions {
+            lora_path: Some(PathBuf::from("/m/minutes-notes-lora.gguf")),
+            gate: Some(Gate {
+                token: ".".into(),
+                threshold: 0.9,
+            }),
+            context_size: Some(20_480),
+            ..Default::default()
+        };
+        assert_eq!(options.context_size(&model), 20_480);
+        assert_eq!(
+            BuiltinGenerateOptions::default().context_size(&model),
+            model.context_size
+        );
+        let (lora_path, gate_token, gate_threshold) = options.adapter_fields();
+        assert_eq!(lora_path.as_deref(), Some("/m/minutes-notes-lora.gguf"));
+        assert_eq!(gate_token.as_deref(), Some("."));
+        assert_eq!(gate_threshold, Some(0.9));
+        assert_eq!(
+            BuiltinGenerateOptions::default().adapter_fields(),
+            (None, None, None)
+        );
+
+        let gated = parse_generate_response(
+            r#"{"type":"response","text":".","error":null,"finish_reason":"stop","gate_prob":0.97}"#,
+        )
+        .unwrap();
+        assert_eq!(gated.text, ".");
+        assert_eq!(gated.gate_prob, Some(0.97));
+        let plain =
+            parse_generate_response(r#"{"type":"response","text":"x","error":null}"#).unwrap();
+        assert_eq!(plain.gate_prob, None);
+    }
+
+    #[test]
+    fn a_preempted_background_reply_is_a_typed_error_not_partial_text() {
+        let error = parse_generate_response(
+            r#"{"type":"response","text":"half","error":null,"finish_reason":"cancelled","id":3}"#,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<SidecarError>(),
+            Some(SidecarError::Preempted)
+        ));
+    }
+
+    #[test]
+    fn summary_requests_do_not_send_the_copilot_fields() {
+        let json = serde_json::to_string(&Request::Generate {
+            prompt: "p".into(),
+            max_tokens: None,
+            context_size: None,
+            model_path: None,
+            temperature: None,
+            top_k: None,
+            top_p: None,
+            presence_penalty: None,
+            frequency_penalty: None,
+            repeat_penalty: None,
+            penalty_last_n: None,
+            stop_tokens: None,
+            seed: None,
+            id: Some(4),
+            stream: None,
+            cache_prompt: None,
+            cache_prefix_chars: None,
+            cache_anchor_chars: None,
+            cache_context_size: None,
+            n_threads: None,
+            flash_attn: None,
+            kv_cache_type: None,
+            grammar: None,
+            max_lines: None,
+            lora_path: None,
+            gate_token: None,
+            gate_threshold: None,
+        })
+        .unwrap();
+        assert!(json.contains("\"id\":4"));
+        for field in [
+            "stream",
+            "cache_prompt",
+            "cache_prefix_chars",
+            "cache_context_size",
+            "lora_path",
+            "gate_token",
+            "gate_threshold",
+        ] {
+            assert!(!json.contains(field), "{field} leaked into {json}");
+        }
+    }
+
+    #[test]
+    fn the_stable_prefix_covers_the_template_head_system_and_stable_user_text() {
+        let system = "You are Copilot.";
+        let stable = "Live summary:\n[01:00] point\n\nTranscript:\n[01:10] Others: hello\n";
+        let rest = "[01:40] You: hi\n\nTask: what next?";
+        for model in ["qwen3.5:4b", "gemma3:4b"] {
+            let (full, prefix) =
+                format_builtin_prompt_with_prefix(model, system, stable, rest).unwrap();
+            let expected =
+                format_builtin_prompt(model, system, &format!("{stable}{rest}")).unwrap();
+            assert_eq!(full, expected, "{model}: same prompt as the plain path");
+            assert!(
+                full[..prefix].ends_with(stable),
+                "{model}: {:?}",
+                &full[..prefix]
+            );
+            assert!(full[prefix..].starts_with(rest));
+            let anchor_at = stable.find("\nTranscript").unwrap();
+            let (same, prefix2, anchor) =
+                format_builtin_prompt_with_prefixes(model, system, stable, rest, anchor_at)
+                    .unwrap();
+            assert_eq!((same.as_str(), prefix2), (full.as_str(), prefix));
+            assert!(full[..anchor].ends_with("[01:00] point\n"), "{model}");
+            assert!(anchor < prefix);
+        }
+    }
+
+    #[test]
+    fn stream_replies_carry_reuse_stats_and_a_cancel_is_cancelled() {
+        let done = parse_stream_response(
+            r#"{"type":"response","text":"ok","error":null,"finish_reason":"stop","prompt_tokens":1200,"completion_tokens":40,"reused_tokens":1100,"tokens_per_second":14.5,"id":9}"#,
+        )
+        .unwrap();
+        assert_eq!(done.reused_tokens, Some(1100));
+        assert_eq!(done.completion_tokens, Some(40));
+        let stopped = parse_stream_response(
+            r#"{"type":"response","text":"","error":null,"finish_reason":"cancelled","id":9}"#,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            stopped.downcast_ref::<SidecarError>(),
+            Some(SidecarError::Cancelled)
+        ));
     }
 
     #[test]

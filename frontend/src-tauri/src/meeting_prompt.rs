@@ -222,6 +222,12 @@ fn settle_request_state(
 #[tauri::command]
 pub fn dismiss_meeting_prompt<R: Runtime>(app: AppHandle<R>) {
     dismiss();
+    cancel_pending_request(&app);
+}
+
+/// Drop a start request nobody has claimed yet, without marking the prompt
+/// dismissed for the rest of the call.
+pub fn cancel_pending_request<R: Runtime>(app: &AppHandle<R>) {
     let request_id = {
         let mut pending = PENDING_REQUEST
             .lock()
@@ -229,12 +235,15 @@ pub fn dismiss_meeting_prompt<R: Runtime>(app: AppHandle<R>) {
         cancel_unclaimed(&mut pending)
     };
     if let Some(request_id) = request_id {
-        clear_legacy_fallback(&app, &request_id);
+        clear_legacy_fallback(app, &request_id);
     }
 }
 
 /// Position and show the `meeting-prompt` window for a detected app.
-pub async fn maybe_show<R: Runtime>(app: &AppHandle<R>, app_name: &str) {
+pub async fn maybe_show<R: Runtime>(
+    app: &AppHandle<R>,
+    detected: &crate::meeting_detection::DetectedMeeting,
+) {
     if PROMPT_DISMISSED.load(Ordering::SeqCst) {
         return;
     }
@@ -267,7 +276,7 @@ pub async fn maybe_show<R: Runtime>(app: &AppHandle<R>, app_name: &str) {
     if let Err(error) = app.emit_to(
         "meeting-prompt",
         "meeting-prompt-show",
-        serde_json::json!({ "appName": app_name }),
+        serde_json::json!({ "appName": detected.display_name, "app": detected.app }),
     ) {
         log::warn!("Meeting prompt: failed to emit show event: {}", error);
     }

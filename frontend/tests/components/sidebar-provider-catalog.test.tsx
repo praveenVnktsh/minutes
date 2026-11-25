@@ -3,14 +3,12 @@ import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import type { ReactNode } from 'react';
 
 const originalCore = { ...await import('@tauri-apps/api/core') };
-const originalAnalytics = { ...await import('../../src/lib/analytics') };
 const originalNavigation = { ...await import('next/navigation') };
 const originalRecordingState = { ...await import('../../src/contexts/RecordingStateContext') };
 const originalPersistence = { ...await import('../../src/services/notePersistenceService') };
 
 afterAll(() => {
   mock.module('@tauri-apps/api/core', () => originalCore);
-  mock.module('../../src/lib/analytics', () => originalAnalytics);
   mock.module('next/navigation', () => originalNavigation);
   mock.module('../../src/contexts/RecordingStateContext', () => originalRecordingState);
   mock.module('../../src/services/notePersistenceService', () => originalPersistence);
@@ -25,9 +23,6 @@ mock.module('next/navigation', () => ({
 }));
 mock.module('../../src/contexts/RecordingStateContext', () => ({
   useRecordingState: () => ({ isRecording: false }),
-}));
-mock.module('../../src/lib/analytics', () => ({
-  default: { trackBackendConnection() {}, trackButtonClick() {} },
 }));
 let flush: () => Promise<void> = async () => {};
 mock.module('../../src/services/notePersistenceService', () => ({

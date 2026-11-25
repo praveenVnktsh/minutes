@@ -1,7 +1,7 @@
 'use client'
 
 import './globals.css'
-import { Source_Sans_3, Source_Serif_4 } from 'next/font/google'
+import localFont from 'next/font/local'
 import { useCallback, useEffect, useLayoutEffect, useState } from 'react'
 import { usePathname } from 'next/navigation'
 import { invoke } from '@tauri-apps/api/core'
@@ -10,7 +10,6 @@ import { AlertTriangle, LoaderCircle } from 'lucide-react'
 import SimpleSidebar from '@/components/SimpleSidebar'
 import { SidebarProvider } from '@/components/Sidebar/SidebarProvider'
 import MainContent from '@/components/MainContent'
-import AnalyticsProvider from '@/components/AnalyticsProvider'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { Button } from '@/components/ui/button'
 import { StatusFeedback } from '@/components/ui/status-feedback'
@@ -18,7 +17,7 @@ import { MeetingActivityProvider } from '@/contexts/MeetingActivityContext'
 import { RecordingStateProvider } from '@/contexts/RecordingStateContext'
 import { OllamaDownloadProvider } from '@/contexts/OllamaDownloadContext'
 import { TranscriptProvider } from '@/contexts/TranscriptContext'
-import { ConfigProvider, useConfig } from '@/contexts/ConfigContext'
+import { ConfigProvider } from '@/contexts/ConfigContext'
 import { OnboardingProvider } from '@/contexts/OnboardingContext'
 import { RecordingControllerProvider } from '@/contexts/RecordingControllerContext'
 import { ShellProvider, useShell } from '@/contexts/ShellContext'
@@ -37,19 +36,22 @@ import { SHARED_TOASTER_PROPS, ThemedToaster } from '@/components/ThemedToaster'
 import { CommandPalette } from '@/components/CommandPalette'
 import { isAudioExtension, getAudioFormatsDisplayList } from '@/constants/audioFormats'
 import { applyTheme, listenForThemeChanges, readTheme, syncNativeTheme, type AppTheme } from '@/lib/theme'
-import { settingsHref } from '@/components/settings/settingsSections'
 import { Toaster, toast } from 'sonner'
 import 'sonner/dist/styles.css'
 
-const sourceSans3 = Source_Sans_3({
-  subsets: ['latin'],
-  weight: ['400', '500', '600', '700'],
+// Self-hosted so the build never fetches from Google Fonts: next/font/google
+// crashes the whole build when Google answers a CI runner with a font URL it
+// cannot parse. Both files are the latin-subset variable fonts (wght 400-700),
+// licensed under the OFL (see ./fonts/OFL-*.txt).
+const sourceSans3 = localFont({
+  src: './fonts/source-sans-3-latin-variable.woff2',
+  weight: '400 700',
   variable: '--font-source-sans-3',
 })
 
-const sourceSerif4 = Source_Serif_4({
-  subsets: ['latin'],
-  weight: ['400', '500', '600', '700'],
+const sourceSerif4 = localFont({
+  src: './fonts/source-serif-4-latin-variable.woff2',
+  weight: '400 700',
   variable: '--font-source-serif-4',
 })
 
@@ -96,16 +98,6 @@ function BootSurface({ state, onRetry }: { state: StartupState; onRetry: () => v
   )
 }
 
-function ConditionalImportDialog({ open, onOpenChange, filePath }: {
-  open: boolean
-  onOpenChange: (open: boolean) => void
-  filePath: string | null
-}) {
-  const { betaFeatures } = useConfig()
-  if (!betaFeatures.importAndRetranscribe) return null
-  return <ImportAudioDialog open={open} onOpenChange={onOpenChange} preselectedFile={filePath} />
-}
-
 function ImportSurfaces({ open, onOpenChange, filePath, onFileDrop }: {
   open: boolean
   onOpenChange: (open: boolean) => void
@@ -113,8 +105,6 @@ function ImportSurfaces({ open, onOpenChange, filePath, onFileDrop }: {
   onFileDrop: (paths: string[]) => void
 }) {
   const [showDropOverlay, setShowDropOverlay] = useState(false)
-  const { betaFeatures } = useConfig()
-  const { navigate } = useShell()
 
   useEffect(() => {
     let disposed = false
@@ -128,31 +118,22 @@ function ImportSurfaces({ open, onOpenChange, filePath, onFileDrop }: {
         if (!disposed) console.warn('[Import] Desktop drop events are unavailable:', error)
       }
     }
-    void retain(listen('tauri://drag-enter', () => {
-      if (betaFeatures.importAndRetranscribe) setShowDropOverlay(true)
-    }))
+    void retain(listen('tauri://drag-enter', () => setShowDropOverlay(true)))
     void retain(listen('tauri://drag-leave', () => setShowDropOverlay(false)))
     void retain(listen<{ paths: string[] }>('tauri://drag-drop', ({ payload }) => {
       setShowDropOverlay(false)
-      if (!betaFeatures.importAndRetranscribe) {
-        toast.info('Audio import is a beta feature', {
-          description: 'Enable it in Beta settings before importing a recording.',
-          action: { label: 'Open settings', onClick: () => void navigate(settingsHref('beta')) },
-        })
-        return
-      }
       onFileDrop(payload.paths)
     }))
     return () => {
       disposed = true
       unlisteners.forEach((unlisten) => unlisten())
     }
-  }, [betaFeatures.importAndRetranscribe, navigate, onFileDrop])
+  }, [onFileDrop])
 
   return (
     <>
       <ImportDropOverlay visible={showDropOverlay} />
-      <ConditionalImportDialog open={open} onOpenChange={onOpenChange} filePath={filePath} />
+      <ImportAudioDialog open={open} onOpenChange={onOpenChange} preselectedFile={filePath} />
     </>
   )
 }
@@ -267,21 +248,19 @@ export function MainAppLayout({ children }: { children: React.ReactNode }) {
     <html lang="en" className="dark" suppressHydrationWarning>
       <body style={{ visibility: 'hidden' }} className={`${sourceSans3.variable} ${sourceSerif4.variable} bg-surface-0 font-sans text-ink antialiased`}>
         <ThemeBootstrap />
-        <AnalyticsProvider>
-          {startupState === 'setup-required' ? (
-            <OnboardingProvider>
-              <OnboardingFlow onComplete={() => {
-                setStartupState('checking')
-                window.location.reload()
-              }} />
-            </OnboardingProvider>
-          ) : startupState === 'ready' ? (
-            <ReadyProviderTree>{children}</ReadyProviderTree>
-          ) : (
-            <BootSurface state={startupState} onRetry={() => setStartupAttempt((attempt) => attempt + 1)} />
-          )}
-          {startupState !== 'ready' && <BootToaster />}
-        </AnalyticsProvider>
+        {startupState === 'setup-required' ? (
+          <OnboardingProvider>
+            <OnboardingFlow onComplete={() => {
+              setStartupState('checking')
+              window.location.reload()
+            }} />
+          </OnboardingProvider>
+        ) : startupState === 'ready' ? (
+          <ReadyProviderTree>{children}</ReadyProviderTree>
+        ) : (
+          <BootSurface state={startupState} onRetry={() => setStartupAttempt((attempt) => attempt + 1)} />
+        )}
+        {startupState !== 'ready' && <BootToaster />}
       </body>
     </html>
   )

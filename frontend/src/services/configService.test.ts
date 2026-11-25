@@ -39,6 +39,20 @@ describe('ConfigService.commitModelConfig', () => {
     expect(calls).toEqual([]);
   });
 
+  test('saves without a transcription model now that Whisper is gone', async () => {
+    const payloads: Array<Record<string, unknown> | undefined> = [];
+    const service = new ConfigService(
+      (async (_command: string, payload?: Record<string, unknown>) => {
+        payloads.push(payload);
+        return durable(payload as unknown as ModelConfig);
+      }) as Invoke,
+      (async () => {}) as Emit,
+    );
+
+    await expect(service.commitModelConfig({ ...baseConfig, whisperModel: '' })).resolves.toMatchObject({ model: 'gpt-4o' });
+    expect(payloads[0]?.whisperModel).toBe('');
+  });
+
   test('rejects a concurrent save while the active save is pending', async () => {
     let finishSave: (() => void) | undefined;
     const pendingSave = new Promise<void>((resolve) => {

@@ -186,6 +186,35 @@ impl SummaryProcessesRepository {
         Ok(update.rows_affected() == 1)
     }
 
+    /// Fails every summary process still marked pending, restoring the previous
+    /// summary from `result_backup` exactly as [`Self::update_process_failed`]
+    /// does. Only for startup, before any summary job can exist in this process:
+    /// a pending row then belongs to a job that died with the previous run.
+    pub async fn fail_all_pending(pool: &SqlitePool, error: &str) -> Result<u64, sqlx::Error> {
+        let now = Utc::now();
+
+        let update = sqlx::query(
+            r#"
+            UPDATE summary_processes
+            SET
+                status = 'failed',
+                error = ?,
+                updated_at = ?,
+                end_time = ?,
+                result = COALESCE(result_backup, result),
+                result_backup = NULL,
+                result_backup_timestamp = NULL
+            WHERE LOWER(status) = 'pending'
+            "#,
+        )
+        .bind(error)
+        .bind(now)
+        .bind(now)
+        .execute(pool)
+        .await?;
+        Ok(update.rows_affected())
+    }
+
     pub async fn update_process_cancelled(
         pool: &SqlitePool,
         meeting_id: &str,
@@ -333,6 +362,83 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(cancelled, ("cancelled".to_string(), previous.to_string()));
+    }
+
+    #[tokio::test]
+    async fn fail_all_pending_restores_backup_and_leaves_finished_rows() {
+        let pool = test_pool().await;
+        let started = Utc::now();
+        let previous = r#"{"markdown":"previous"}"#;
+        // A regeneration that died mid-run: the old summary sits in the backup.
+        seed_pending(&pool, "regen", started, Some(previous), Some(previous)).await;
+        // A first generation that died mid-run: nothing to restore.
+        seed_pending(&pool, "first", started, None, None).await;
+        seed_pending(&pool, "done", started, None, None).await;
+        assert!(SummaryProcessesRepository::update_process_completed(
+            &pool,
+            "done",
+            started,
+            json!({"markdown": "done"}),
+            1,
+            1.0,
+        )
+        .await
+        .unwrap());
+
+        let failed = SummaryProcessesRepository::fail_all_pending(&pool, "Interrupted")
+            .await
+            .unwrap();
+        assert_eq!(failed, 2);
+
+        // meeting_id, status, error, result, result_backup
+        type Row = (
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        );
+        let rows: Vec<Row> = sqlx::query_as(
+            "SELECT meeting_id, status, error, result, result_backup
+                 FROM summary_processes ORDER BY meeting_id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "done".to_string(),
+                    "completed".to_string(),
+                    None,
+                    Some(r#"{"markdown":"done"}"#.to_string()),
+                    None
+                ),
+                (
+                    "first".to_string(),
+                    "failed".to_string(),
+                    Some("Interrupted".to_string()),
+                    None,
+                    None
+                ),
+                (
+                    "regen".to_string(),
+                    "failed".to_string(),
+                    Some("Interrupted".to_string()),
+                    Some(previous.to_string()),
+                    None
+                ),
+            ]
+        );
+
+        // Nothing left to fail on a second launch.
+        assert_eq!(
+            SummaryProcessesRepository::fail_all_pending(&pool, "Interrupted")
+                .await
+                .unwrap(),
+            0
+        );
     }
 
     #[tokio::test]

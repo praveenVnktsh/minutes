@@ -1,16 +1,58 @@
 'use client';
 
-import { useCallback, useMemo, useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createThrottledFlush } from '@/lib/throttledFlush';
+import { useLiveSource } from '@/lib/liveSource';
 import { VirtualizedTranscriptView } from '@/components/VirtualizedTranscriptView';
 import { useTranscripts } from '@/contexts/TranscriptContext';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
 import { useConfig } from '@/contexts/ConfigContext';
 import { Switch } from '@/components/ui/switch';
+import { useCopilot } from '@/hooks/useCopilot';
+import { isQuestionLine, questionLineStarts } from '@/lib/copilot';
 import {
   LIVE_TRANSCRIPTION_STORAGE_KEY,
   isLiveTranscriptionEnabled,
 } from '@/lib/liveTranscription';
+import {
+  TRANSCRIPT_PARTIAL_EVENT,
+  applyPartial,
+  orderedPartials,
+  type LivePartials,
+  type TranscriptPartialEvent,
+} from '@/lib/liveTranscriptionModels';
+
+function sourceLabel(source: string): string {
+  return source === 'system' ? 'Others' : 'You';
+}
+
+// Partials arrive per decoded chunk on each source; render at most ~10/s.
+const PARTIAL_RENDER_INTERVAL_MS = 100;
+
+/** The streaming model's in-progress utterances, per source. Display only:
+ * finished text arrives as regular transcript segments. */
+function useLivePartials(active: boolean): LivePartials {
+  const source = useLiveSource();
+  const [partials, setPartials] = useState<LivePartials>({});
+  const latestRef = useRef<LivePartials>({});
+  useEffect(() => {
+    latestRef.current = {};
+    if (!active) {
+      setPartials({});
+      return undefined;
+    }
+    const flush = createThrottledFlush(() => setPartials(latestRef.current), PARTIAL_RENDER_INTERVAL_MS);
+    const unlisten = source.listen<TranscriptPartialEvent>(TRANSCRIPT_PARTIAL_EVENT, (event) => {
+      latestRef.current = applyPartial(latestRef.current, event.payload);
+      flush.schedule();
+    });
+    return () => {
+      flush.cancel();
+      void unlisten.then((fn) => fn());
+    };
+  }, [active, source]);
+  return partials;
+}
 
 /**
  * Live transcript for an in-progress recording, rendered inside the meeting
@@ -18,6 +60,7 @@ import {
  * live-transcription toggle so it can be flipped during an active meeting.
  */
 export function LiveTranscriptPanel() {
+  const source = useLiveSource();
   const { transcripts } = useTranscripts();
   const { isRecording, isPaused, isProcessing, isStopping } = useRecordingState();
   const { betaFeatures } = useConfig();
@@ -33,12 +76,25 @@ export function LiveTranscriptPanel() {
   const handleToggle = useCallback((enabled: boolean) => {
     setLiveEnabled(enabled);
     localStorage.setItem(LIVE_TRANSCRIPTION_STORAGE_KEY, String(enabled));
-    invoke('set_live_transcription_enabled', { enabled }).catch((error) =>
+    source.invoke('set_live_transcription_enabled', { enabled }).catch((error) =>
       console.error('Failed to toggle live transcription:', error),
     );
-  }, []);
+  }, [source]);
 
   const toggleAvailable = betaFeatures.liveTranscription;
+  const partials = orderedPartials(useLivePartials(isRecording || isStopping));
+  const partialLines = partials.length > 0 && (
+    <div aria-live="polite" className="mx-auto w-full max-w-[900px] space-y-1 px-8 pb-4">
+      {partials.map((partial) => (
+        <p key={partial.source} className="text-sm italic text-[var(--ink-muted)]">
+          <span className="mr-2 text-[11px] font-semibold not-italic uppercase tracking-[0.06em] text-[var(--ink-subtle)]">
+            {sourceLabel(partial.source)}
+          </span>
+          {partial.text}
+        </p>
+      ))}
+    </div>
+  );
 
   const segments = useMemo(
     () =>
@@ -54,12 +110,27 @@ export function LiveTranscriptPanel() {
     [transcripts]
   );
 
+  // Lines Copilot answered with a suggestion card get a "Question for you" tag.
+  const copilot = useCopilot();
+  // A key, so streamed tokens (new snapshots) don't re-render the transcript.
+  const startsKey = questionLineStarts(copilot).join(',');
+  const segmentTags = useMemo(() => {
+    const questionStarts = startsKey ? startsKey.split(',').map(Number) : [];
+    const tags = new Map<string, string>();
+    if (questionStarts.length === 0) return tags;
+    for (const t of transcripts) {
+      if (isQuestionLine(questionStarts, t.audio_start_time, t.speaker)) tags.set(t.id, 'Question for you');
+    }
+    return tags;
+  }, [startsKey, transcripts]);
+
   return (
     <div className="flex h-full min-w-0 flex-col bg-[var(--surface-0)] text-ink">
       <div className="mx-auto w-full max-w-[900px] px-8 pb-2 pt-4">
         <div className="flex items-center justify-between gap-3">
-          <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.12em] text-[#d74d3f]">
-            <span className="h-2 w-2 animate-pulse rounded-full bg-[#d74d3f]" /> Recording
+          <div className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-[0.08em] text-recording">
+            <span className={`h-1.5 w-1.5 rounded-full bg-recording ${isPaused ? '' : 'animate-pulse'}`} />
+            {isPaused ? 'Paused' : 'Live'}
           </div>
           {toggleAvailable && (
             <label
@@ -81,10 +152,15 @@ export function LiveTranscriptPanel() {
           </p>
         </div>
       ) : segments.length === 0 ? (
-        <div className="flex flex-1 items-center justify-center px-8 pb-16 text-center text-sm text-[var(--ink-subtle)]">
-          Listening… live transcript will appear here as people speak.
-        </div>
+        partialLines ? (
+          <div className="flex flex-1 flex-col justify-end">{partialLines}</div>
+        ) : (
+          <div className="flex flex-1 items-center justify-center px-8 pb-16 text-center text-sm text-[var(--ink-subtle)]">
+            Listening… live transcript will appear here as people speak.
+          </div>
+        )
       ) : (
+        <>
         <div className="mx-auto w-full max-w-[900px] flex-1 overflow-hidden pb-4">
           <VirtualizedTranscriptView
             segments={segments}
@@ -93,9 +169,11 @@ export function LiveTranscriptPanel() {
             isProcessing={isProcessing}
             isStopping={isStopping}
             enableStreaming={isRecording}
-            showConfidence
+            segmentTags={segmentTags}
           />
         </div>
+        {partialLines}
+        </>
       )}
     </div>
   );

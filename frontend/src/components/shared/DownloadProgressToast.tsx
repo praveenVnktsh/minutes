@@ -1,12 +1,17 @@
 'use client';
 
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { toast } from 'sonner';
 import { X, Download, Check, Loader2, ArrowBigDownDash } from 'lucide-react';
-import type { ParakeetDownloadProgressEvent } from '@/lib/parakeet';
 import { BUILTIN_AI_DOWNLOAD_PROGRESS_EVENT, type BuiltInAIDownloadProgressEvent } from '@/lib/builtin-ai';
 import { BYTES_PER_MIB } from '@/lib/download-display';
+import {
+  SPEECH_MODEL_DOWNLOAD_PROGRESS_EVENT,
+  speechModelsApi,
+  type SpeechModelDownloadProgressEvent,
+} from '@/lib/speechModels';
+import { badge, toneText } from '@/lib/theme-classes';
 
 interface DownloadProgress {
   modelName: string;
@@ -66,12 +71,12 @@ function DownloadToastContent({
     <div className="flex items-center gap-3 w-full max-w-sm bg-surface-raised rounded-lg shadow-lg border border-hairline p-3 relative">
 
       {/* Icon */}
-      <div className={`flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center ${isComplete ? 'bg-green-100' : hasError ? 'bg-red-100' : isCancelled ? 'bg-surface-2' : 'bg-surface-2'
+      <div className={`flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center ${isComplete ? badge.success : hasError ? badge.error : isCancelled ? 'bg-surface-2' : 'bg-surface-2'
         }`}>
         {isComplete ? (
-          <Check className="w-4 h-4 text-green-600" />
+          <Check className="w-4 h-4" />
         ) : hasError ? (
-          <X className="w-4 h-4 text-red-600" />
+          <X className="w-4 h-4" />
         ) : isCancelled ? (
           <X className="w-4 h-4 text-ink-muted" />
         ) : (
@@ -100,9 +105,9 @@ function DownloadToastContent({
         </div>
 
         {hasError ? (
-          <p className="text-xs text-red-600">{download.error || 'Download failed'}</p>
+          <p className={`text-xs ${toneText.error}`}>{download.error || 'Download failed'}</p>
         ) : isComplete ? (
-          <p className="text-xs text-green-600">Download complete</p>
+          <p className={`text-xs ${toneText.success}`}>Download complete</p>
         ) : isCancelled ? (
           <p className="text-xs text-ink-muted">Download cancelled</p>
         ) : (
@@ -235,76 +240,49 @@ export function useDownloadProgressToast() {
     });
   }, [downloads, dismissedModels, showDownloadToast]);
 
-  // Listen to Parakeet download events
+  // Speech model names, for the toast title. The event carries only the id.
+  const speechNamesRef = useRef<Record<string, string>>({});
   useEffect(() => {
-    const unlistenProgress = listen<ParakeetDownloadProgressEvent>(
-      'parakeet-model-download-progress',
-      (event) => {
-        const { modelName, progress, downloaded_mb, total_mb, speed_mbps, status } = event.payload;
-        const downloadData: DownloadProgress = {
-          modelName,
-          displayName: 'Transcription Model (Parakeet)',
-          progress,
-          downloadedMb: downloaded_mb ?? 0,
-          totalMb: total_mb ?? 670,
-          speedMbps: speed_mbps ?? 0,
-          status: status === 'cancelled'
-            ? 'cancelled'
-            : status === 'completed'
-              ? 'completed'
-              : 'downloading',
-        };
+    speechModelsApi
+      .status()
+      .then((status) => {
+        speechNamesRef.current = Object.fromEntries(status.models.map((model) => [model.id, model.displayName]));
+      })
+      .catch((error) => console.warn('Failed to read the speech model names:', error));
+  }, []);
 
-        updateDownload(modelName, downloadData);
-        if (downloadData.status === 'cancelled') {
-          cleanupDownload(modelName, 6000);
-        }
-      }
-    );
+  // Speech models whose transfer this session has seen move. A download request also reports
+  // models already on disk as completed, and models still queued as cancelled when the run is
+  // stopped; neither deserves a toast.
+  const speechStartedRef = useRef<Set<string>>(new Set());
 
-    const unlistenComplete = listen<{ modelName: string }>(
-      'parakeet-model-download-complete',
-      (event) => {
-        const { modelName } = event.payload;
-        const downloadData: DownloadProgress = {
-          modelName,
-          displayName: 'Transcription Model (Parakeet)',
-          progress: 100,
-          downloadedMb: 670,
-          totalMb: 670,
-          speedMbps: 0,
-          status: 'completed',
-        };
-        updateDownload(modelName, downloadData);
-        // Clean up after 4 seconds (completion toast duration is 3s + 1s buffer)
-        cleanupDownload(modelName, 4000);
-      }
-    );
+  // Listen to the speech model downloads (FluidAudio models: live, transcript, voice
+  // detection, speakers), which run during onboarding and in the background after it.
+  useEffect(() => {
+    const unlisten = listen<SpeechModelDownloadProgressEvent>(SPEECH_MODEL_DOWNLOAD_PROGRESS_EVENT, (event) => {
+      const { modelId, progress, downloadedMb, totalMb, speedMbps, status, error } = event.payload;
+      if (status === 'downloading') speechStartedRef.current.add(modelId);
+      else if (status !== 'error' && !speechStartedRef.current.has(modelId)) return;
+      if (status !== 'downloading') speechStartedRef.current.delete(modelId);
 
-    const unlistenError = listen<{ modelName: string; error: string }>(
-      'parakeet-model-download-error',
-      (event) => {
-        const { modelName, error } = event.payload;
-        const downloadData: DownloadProgress = {
-          modelName,
-          displayName: 'Transcription Model (Parakeet)',
-          progress: 0,
-          downloadedMb: 0,
-          totalMb: 670,
-          speedMbps: 0,
-          status: 'error',
-          error: categorizeError(error),
-        };
-        updateDownload(modelName, downloadData);
-        // Clean up after 11 seconds (error toast duration is 10s + 1s buffer)
-        cleanupDownload(modelName, 11000);
-      }
-    );
-
+      const downloadData: DownloadProgress = {
+        modelName: modelId,
+        displayName: speechNamesRef.current[modelId] ?? modelId,
+        progress: progress ?? 0,
+        downloadedMb: downloadedMb ?? 0,
+        totalMb: totalMb ?? 0,
+        speedMbps: speedMbps ?? 0,
+        unitLabel: 'MiB',
+        status,
+        error: status === 'error' ? categorizeError(error || 'Download failed') : undefined,
+      };
+      updateDownload(modelId, downloadData);
+      if (status === 'completed') cleanupDownload(modelId, 4000);
+      else if (status === 'error') cleanupDownload(modelId, 11000);
+      else if (status === 'cancelled') cleanupDownload(modelId, 6000);
+    });
     return () => {
-      unlistenProgress.then((fn) => fn());
-      unlistenComplete.then((fn) => fn());
-      unlistenError.then((fn) => fn());
+      unlisten.then((fn) => fn());
     };
   }, [updateDownload, cleanupDownload]);
 

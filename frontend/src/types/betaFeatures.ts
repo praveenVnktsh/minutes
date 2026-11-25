@@ -6,9 +6,8 @@
  * ## Adding a New Beta Feature
  * 1. Add property to BetaFeatures interface
  * 2. Add default value in DEFAULT_BETA_FEATURES
- * 3. Add analytics mapping in BETA_FEATURE_ANALYTICS_MAP
- * 4. Add UI strings in BETA_FEATURE_NAMES and BETA_FEATURE_DESCRIPTIONS
- * 5. Use in components: `betaFeatures.yourFeatureName`
+ * 3. Add UI strings in BETA_FEATURE_NAMES and BETA_FEATURE_DESCRIPTIONS
+ * 4. Use in components: `betaFeatures.yourFeatureName`
  *
  * ## Graduating a Feature to Stable
  * 1. Remove property from BetaFeatures interface
@@ -18,20 +17,23 @@
 
 export interface BetaFeatures {
   /**
-   * Import audio files and retranscribe existing meetings with different language settings
-   * @since v0.3.0
-   */
-  importAndRetranscribe: boolean;
-  /**
-   * Toggle live transcription on/off during recording to save CPU/GPU resources
+   * Show the switch that turns live transcription on/off during recording.
+   * No longer a beta feature: its switch is in Settings › Recording. It stays
+   * in this stored object so existing values keep working.
    * @since v0.3.0
    */
   liveTranscription: boolean;
+  /**
+   * Remove laptop-speaker echo from the microphone before live transcription,
+   * so the remote side is not transcribed a second time as "mic"
+   * @since v1.5
+   */
+  micEchoCancellation: boolean;
 }
 
 export const DEFAULT_BETA_FEATURES: BetaFeatures = {
-  importAndRetranscribe: true, // Default: enabled
   liveTranscription: true, // Deferred transcription mode is available by default
+  micEchoCancellation: false, // Opt-in until it has been proven on real calls
 };
 
 
@@ -39,16 +41,16 @@ export const DEFAULT_BETA_FEATURES: BetaFeatures = {
  * Human-readable feature names for UI display
  */
 export const BETA_FEATURE_NAMES: Record<keyof BetaFeatures, string> = {
-  importAndRetranscribe: 'Import Audio & Retranscribe',
-  liveTranscription: 'Live Transcription Toggle',
+  liveTranscription: 'Live transcription switch',
+  micEchoCancellation: 'Mic Echo Cancellation',
 };
 
 /**
  * Feature descriptions for UI tooltips/help text
  */
 export const BETA_FEATURE_DESCRIPTIONS: Record<keyof BetaFeatures, string> = {
-  importAndRetranscribe: 'Import audio files to transcribe or retranscribe existing meetings with different language settings.',
   liveTranscription: 'Show a toggle to enable/disable live transcription during recording. When off, audio is still recorded but transcription is skipped to save resources.',
+  micEchoCancellation: 'When the other side plays through your speakers, remove their voice from the microphone before transcribing, so it is not transcribed twice. Takes effect from the next recording.',
 };
 
 /**
@@ -56,6 +58,22 @@ export const BETA_FEATURE_DESCRIPTIONS: Record<keyof BetaFeatures, string> = {
  * This ensures only valid feature keys can be used
  */
 export type BetaFeatureKey = keyof BetaFeatures;
+
+/**
+ * Saved beta features merged over the defaults. Only known flags are kept,
+ * so a retired one (like "Write live notes into my notes" or "Import Audio &
+ * Retranscribe", now always on) is ignored and dropped the next time the
+ * features are saved.
+ */
+export function parseBetaFeatures(saved: unknown): BetaFeatures {
+  const features: BetaFeatures = { ...DEFAULT_BETA_FEATURES };
+  if (!saved || typeof saved !== 'object') return features;
+  for (const key of Object.keys(DEFAULT_BETA_FEATURES) as BetaFeatureKey[]) {
+    const value = (saved as Record<string, unknown>)[key];
+    if (typeof value === 'boolean') features[key] = value;
+  }
+  return features;
+}
 
 /**
  * Load beta features from localStorage
@@ -70,9 +88,7 @@ export function loadBetaFeatures(): BetaFeatures {
   try {
     const saved = localStorage.getItem('betaFeatures');
     if (saved) {
-      const parsed = JSON.parse(saved) as Partial<BetaFeatures>;
-      // Merge with defaults to handle missing keys (graceful degradation)
-      return { ...DEFAULT_BETA_FEATURES, ...parsed };
+      return parseBetaFeatures(JSON.parse(saved));
     }
   } catch (error) {
     console.error('[BetaFeatures] Failed to load from localStorage:', error);

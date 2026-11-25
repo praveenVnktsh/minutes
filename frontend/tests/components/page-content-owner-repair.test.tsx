@@ -5,9 +5,9 @@ import type { SummaryProcessResponse } from '../../src/types';
 const originalCore = { ...await import('@tauri-apps/api/core') };
 const originalConfig = { ...await import('../../src/contexts/ConfigContext') };
 const originalNavigation = { ...await import('next/navigation') };
-const originalAnalytics = { ...await import('../../src/lib/analytics') };
 const originalToast = { ...await import('sonner') };
 const originalRecordingState = { ...await import('../../src/contexts/RecordingStateContext') };
+const originalRecordingController = { ...await import('../../src/contexts/RecordingControllerContext') };
 const originalPreferences = { ...await import('../../src/lib/summary-language-preferences') };
 
 let nativeSummary: SummaryProcessResponse;
@@ -44,15 +44,13 @@ mock.module('../../src/contexts/ConfigContext', () => ({
 }));
 const push = mock(() => {});
 mock.module('next/navigation', () => ({ useRouter: () => ({ push }) }));
-const analytics = {
-  trackPageView() {}, trackButtonClick() {}, trackCustomPromptUsed: async () => {},
-  trackSummaryGenerationStarted: async () => {}, trackSummaryGenerationCompleted: async () => {},
-  trackBackendConnection() {},
-};
-mock.module('../../src/lib/analytics', () => ({ ...analytics, default: analytics }));
 mock.module('sonner', () => ({ toast: { info() {}, error() {}, success() {}, warning() {} } }));
 mock.module('../../src/contexts/RecordingStateContext', () => ({
   useRecordingState: () => ({ isRecording: false }),
+}));
+mock.module('../../src/contexts/RecordingControllerContext', () => ({
+  ...originalRecordingController,
+  useRecordingController: () => ({ command: null, activeMeetingId: null }),
 }));
 mock.module('../../src/lib/summary-language-preferences', () => ({
   readMeetingSummaryLanguage: async () => ({ language: 'en', storage: 'metadata' }),
@@ -62,48 +60,57 @@ mock.module('../../src/lib/summary-language-preferences', () => ({
 mock.module('../../src/lib/autoSummary', () => ({
   validateSummaryModel: async () => {}, loadSummaryNotesContext: async () => '',
 }));
+mock.module('../../src/components/MeetingDetails/useContinueRecording', () => ({
+  useContinueRecording: () => ({ available: false, pending: false, continueRecording: async () => {} }),
+}));
 mock.module('../../src/hooks/meeting-details/useTemplates', () => ({ useTemplates: () => ({
   availableTemplates: [], selectedTemplate: 'standard_meeting', handleTemplateSelection() {},
 }) }));
 mock.module('../../src/hooks/meeting-details/useCopyOperations', () => ({ useCopyOperations: () => ({
-  handleCopyTranscript: async () => {}, handleCopySummary: async () => {}, handleExportMarkdown: async () => {},
+  handleCopyTranscript: async () => {}, handleCopyNotes: async () => {}, handleExportMarkdown: async () => {},
 }) }));
 mock.module('../../src/hooks/meeting-details/useMeetingOperations', () => ({ useMeetingOperations: () => ({
   handleOpenMeetingFolder: async () => {},
 }) }));
 mock.module('framer-motion', () => ({ motion: { div: ({ children }: { children?: unknown }) => children } }));
+const originalDialog = { ...await import('../../src/components/ui/dialog') };
+// Radix renders dialog content in a portal, which the test renderer cannot.
+mock.module('../../src/components/ui/dialog', () => ({
+  Dialog: ({ open, children }: { open?: boolean; children?: unknown }) => (open ? children : null),
+  DialogContent: ({ children }: { children?: unknown }) => children,
+  DialogHeader: ({ children }: { children?: unknown }) => children,
+  DialogFooter: ({ children }: { children?: unknown }) => children,
+  DialogTitle: ({ children }: { children?: unknown }) => children,
+  DialogDescription: ({ children }: { children?: unknown }) => children,
+}));
 mock.module('../../src/components/ui/popover', () => ({
   Popover: ({ children }: { children?: unknown }) => children,
   PopoverContent: ({ children }: { children?: unknown }) => children,
   PopoverTrigger: ({ children }: { children?: unknown }) => children,
 }));
 
+
 let workspaceProps: any;
-let summaryProps: any;
-let generatorProps: any;
+let notesProps: any;
 mock.module('../../src/components/MeetingDetails/MeetingWorkspace', () => ({
   MeetingWorkspace: (props: any) => {
     workspaceProps = props;
-    return <>{props.summary}{props.toolbarActions}</>;
+    return <>{props.statusBanner}{props.notesNotice}{props.notes}{props.toolbarActions}</>;
   },
 }));
-mock.module('../../src/components/MeetingDetails/SummaryPanel', () => ({
-  SummaryPanel: (props: any) => {
-    summaryProps = props;
-    return <output>{props.summaryStatus}:{JSON.stringify(props.aiSummary)}</output>;
+mock.module('../../src/components/MeetingDetails/MeetingNotesEditor', () => ({
+  MeetingNotesEditor: (props: any) => {
+    notesProps = props;
+    return <output>{props.legacyNotes}</output>;
   },
 }));
 mock.module('../../src/components/MeetingDetails/TranscriptPanel', () => ({ TranscriptPanel: () => null }));
-mock.module('../../src/components/MeetingDetails/SummaryGeneratorButtonGroup', () => ({
-  SummaryGeneratorButtonGroup: (props: any) => { generatorProps = props; return null; },
-}));
-mock.module('../../src/components/MeetingDetails/SummaryUpdaterButtonGroup', () => ({ SummaryUpdaterButtonGroup: () => null }));
-mock.module('../../src/components/MeetingDetails/SummaryLanguagePill', () => ({ SummaryLanguagePill: () => null }));
 mock.module('../../src/components/MeetingDetails/MeetingAssistantPanel', () => ({ MeetingAssistantPanel: () => null }));
-mock.module('../../src/components/MeetingDetails/MeetingRawNotesEditor', () => ({ MeetingRawNotesEditor: () => null }));
+mock.module('../../src/components/MeetingDetails/LiveNotes', () => ({ LiveNotes: () => null, LiveNotesNotice: () => null }));
 mock.module('../../src/components/MeetingDetails/LiveTranscriptPanel', () => ({ LiveTranscriptPanel: () => null }));
 mock.module('../../src/components/MeetingDetails/FloatingRecordingControls', () => ({ FloatingRecordingControls: () => null }));
 mock.module('../../src/components/LiveNotesPad', () => ({ LiveNotesPad: () => null }));
+
 
 const { SidebarProvider, useSidebar } = await import('../../src/components/Sidebar/SidebarProvider');
 const { meetingActivityStore } = await import('../../src/contexts/MeetingActivityContext');
@@ -113,9 +120,10 @@ afterAll(() => {
   mock.module('@tauri-apps/api/core', () => originalCore);
   mock.module('../../src/contexts/ConfigContext', () => originalConfig);
   mock.module('next/navigation', () => originalNavigation);
-  mock.module('../../src/lib/analytics', () => originalAnalytics);
   mock.module('sonner', () => originalToast);
   mock.module('../../src/contexts/RecordingStateContext', () => originalRecordingState);
+  mock.module('../../src/contexts/RecordingControllerContext', () => originalRecordingController);
+  mock.module('../../src/components/ui/dialog', () => originalDialog);
   mock.module('../../src/lib/summary-language-preferences', () => originalPreferences);
 });
 
@@ -140,8 +148,6 @@ beforeEach(() => {
   renamePromise = null;
   invocations.length = 0;
   workspaceProps = null;
-  summaryProps = null;
-  generatorProps = null;
   eventTarget = new EventTarget();
   Object.defineProperty(globalThis, 'window', {
     configurable: true,
@@ -173,14 +179,35 @@ async function show(onRefetchTranscripts = mock(async () => {}), initialSummaryE
   return onRefetchTranscripts;
 }
 
+
+/** A button in the notes menu (or banner), by its text. */
+function button(label: string) {
+  return renderer!.root.findAll((node) => node.type === 'button'
+    && node.children.some((child) => typeof child === 'string' && child.includes(label)))[0];
+}
+function exactButton(label: string) {
+  return renderer!.root.findAll((node) => node.type === 'button'
+    && node.children.some((child) => typeof child === 'string' && child.trim() === label))[0];
+}
+const rendered = () => JSON.stringify(renderer!.toJSON());
+
 describe('PageContent owner repair composition', () => {
-  test('fresh route document wins over retained terminal activity and is the save authority', async () => {
+  test('the fresh route document is the old AI notes shown below the notes', async () => {
     meetingActivityStore.hydrateSummary(response('Retained generated A'));
     await show();
-    expect(summaryProps.aiSummary).toEqual({ markdown: 'Fresh saved B' });
-    await act(async () => summaryProps.onSaveSummary({ markdown: 'Fresh saved B plus edit' }));
-    expect(invocations.find(([command]) => command === 'api_save_meeting_summary')?.[1]?.summary)
-      .toEqual({ markdown: 'Fresh saved B plus edit' });
+    expect(notesProps.meetingId).toBe('meeting-a');
+    expect(notesProps.legacyNotes).toBe('Fresh saved B');
+  });
+
+  test('no Raw/Enhanced split: the workspace gets one notes document', async () => {
+    await show();
+    expect(workspaceProps.notes).toBeDefined();
+    expect(workspaceProps.summary).toBeUndefined();
+    expect(workspaceProps.notesMode).toBeUndefined();
+    expect(button('Copy notes')).toBeDefined();
+    expect(button('Export')).toBeDefined();
+    // With Show AI notes on, Copy and Export include them, so say nothing more.
+    expect(rendered()).not.toContain('without AI notes');
   });
 
   test('a persistence-complete event refreshes only the current meeting', async () => {
@@ -191,26 +218,29 @@ describe('PageContent owner repair composition', () => {
     expect(refetch).toHaveBeenCalledTimes(1);
   });
 
-  test('disables the options generation action while the initial summary read is unavailable', async () => {
+  test('offers a retry, and no regenerate, while the initial summary read is unavailable', async () => {
     await show(undefined, 'database busy');
-    expect(generatorProps.summaryReadUnavailable).toBe(true);
+    expect(rendered()).toContain('Could not load AI notes');
+    expect(button('Regenerate AI notes')).toBeUndefined();
+    expect(button('Write AI notes')).toBeUndefined();
   });
 
-  test('pre-start hydration cannot replace regeneration with completed or hide Stop', async () => {
+  test('pre-start hydration cannot replace a rewrite with completed or hide Stop', async () => {
     let resolveStart!: (value: { process_id: string }) => void;
     startPromise = new Promise((resolve) => { resolveStart = resolve; });
     await show();
+    // Regenerating asks first, and says what it keeps.
+    await act(async () => { button('Regenerate AI notes').props.onClick(); });
+    expect(rendered()).toContain('Lines you wrote or edited are kept');
     await act(async () => {
-      void summaryProps.onRegenerateSummary();
+      exactButton('Regenerate').props.onClick();
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
-    expect(summaryProps.summaryStatus).toBe('regenerating');
-    expect(workspaceProps.isGenerating).toBe(true);
+    expect(rendered()).toContain('Finishing notes');
 
-    let stop!: Promise<void>;
-    await act(async () => { stop = summaryProps.onStopGeneration(); });
+    await act(async () => { button('Stop AI notes').props.onClick(); });
     await act(async () => resolveStart({ process_id: '2026-09-19T11:00:00.000000000Z' }));
-    await act(async () => stop);
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
     expect(invocations.some(([command]) => command === 'api_cancel_summary')).toBe(true);
   });
 
@@ -231,8 +261,7 @@ describe('PageContent owner repair composition', () => {
       replaceExisting: true,
     });
     await act(async () => { await Promise.resolve(); });
-    expect(summaryProps.summaryStatus).toBe('regenerating');
-    expect(workspaceProps.isGenerating).toBe(true);
+    expect(rendered()).toContain('Finishing notes');
 
     nativeSummary = response('Externally generated C');
     nativeSummary.start = '2026-09-19T11:00:00.000000000Z';
@@ -241,8 +270,8 @@ describe('PageContent owner repair composition', () => {
       await starting;
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
-    expect(summaryProps.summaryStatus).toBe('completed');
-    expect(summaryProps.aiSummary).toEqual({ markdown: 'Externally generated C' });
+    expect(rendered()).not.toContain('Finishing notes');
+    expect(notesProps.legacyNotes).toBe('Externally generated C');
   });
 
   test('delayed title completion cannot restore an obsolete catalog or selection', async () => {

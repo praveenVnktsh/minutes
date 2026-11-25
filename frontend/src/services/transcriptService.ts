@@ -22,10 +22,6 @@ export interface TranscriptionErrorPayload {
   phase: 'startup' | 'active';
 }
 
-export interface ModelDownloadCompletePayload {
-  modelName: string;
-}
-
 export interface TranscriptHistorySegment {
   id: string;
   text: string;
@@ -76,15 +72,6 @@ export class TranscriptService {
   }
 
   /**
-   * Listen for transcription-complete event
-   * @param callback - Function to call when transcription processing is complete
-   * @returns Promise that resolves to unlisten function
-   */
-  async onTranscriptionComplete(callback: () => void): Promise<UnlistenFn> {
-    return listen('transcription-complete', callback);
-  }
-
-  /**
    * Listen for transcription-error event (structured errors)
    * @param callback - Function to call when transcription error occurs
    * @returns Promise that resolves to unlisten function
@@ -92,39 +79,6 @@ export class TranscriptService {
   async onTranscriptionError(callback: (error: TranscriptionErrorPayload) => void): Promise<UnlistenFn> {
     return listen<TranscriptionErrorPayload>('transcription-error', (event) => {
       callback(event.payload);
-    });
-  }
-
-  /**
-   * Listen for transcript-error event (legacy error format)
-   * @param callback - Function to call when transcript error occurs
-   * @returns Promise that resolves to unlisten function
-   */
-  async onTranscriptError(callback: (error: string) => void): Promise<UnlistenFn> {
-    return listen<string>('transcript-error', (event) => {
-      callback(event.payload);
-    });
-  }
-
-  /**
-   * Listen for Whisper model download complete event
-   * @param callback - Function to call when Whisper model download completes
-   * @returns Promise that resolves to unlisten function
-   */
-  async onModelDownloadComplete(callback: (modelName: string) => void): Promise<UnlistenFn> {
-    return listen<ModelDownloadCompletePayload>('model-download-complete', (event) => {
-      callback(event.payload.modelName);
-    });
-  }
-
-  /**
-   * Listen for Parakeet model download complete event
-   * @param callback - Function to call when Parakeet model download completes
-   * @returns Promise that resolves to unlisten function
-   */
-  async onParakeetModelDownloadComplete(callback: (modelName: string) => void): Promise<UnlistenFn> {
-    return listen<ModelDownloadCompletePayload>('parakeet-model-download-complete', (event) => {
-      callback(event.payload.modelName);
     });
   }
 }

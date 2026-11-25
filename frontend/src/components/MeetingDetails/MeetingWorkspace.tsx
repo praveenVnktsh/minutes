@@ -1,19 +1,11 @@
 'use client';
 
 import { ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import {
-  FileText,
-  ListTree,
-  Loader2,
-  MessageCircle,
-  RotateCw,
-  Sparkles,
-} from 'lucide-react';
+import { FileText, Loader2, MessageCircle, Sparkles } from 'lucide-react';
 import { useShell, SIDEBAR_WIDTH, SIDEBAR_COLLAPSED_WIDTH } from '@/contexts/ShellContext';
 import { ResizeSeparator } from '@/components/ui/resize-separator';
-import { SegmentedControl } from '@/components/ui/segmented-control';
-
-export type NotesMode = 'enhanced' | 'raw';
+import { Switch } from '@/components/ui/switch';
+import { useShowAiNotes } from '@/lib/aiNotes';
 
 const DOCK_RATIO_KEY = 'meetily:workspace-dock-ratio';
 const DOCK_WIDTH_KEY = 'meetily:workspace-dock-width';
@@ -22,6 +14,10 @@ const DEFAULT_DOCK_WIDTH = 520;
 /** Keep the notes column readable: never let the dock take so much that the
  *  notes fall below MIN_NOTES_WIDTH. */
 const MIN_NOTES_WIDTH = 520;
+
+/** Below this workspace width the notes and the dock no longer fit side by
+ *  side, so the dock becomes an overlay and panels open one at a time. */
+const OVERLAY_WORKSPACE_WIDTH = 760;
 
 function clampDockWidth(value: number, viewportWidth: number, sidebarWidth: number): number {
   const max = Math.max(360, viewportWidth - sidebarWidth - MIN_NOTES_WIDTH);
@@ -41,51 +37,51 @@ export function MeetingWorkspace({
   title,
   createdAt,
   statusBanner,
-  notesMode,
-  onNotesModeChange,
-  canShowEnhanced,
-  hasEnhancedContent = canShowEnhanced,
-  summary,
-  rawNotes,
+  notes,
+  notesNotice,
   transcript,
   assistant,
   showAssistant,
+  assistantLabel = 'Copilot',
   peopleCount,
   toolbarActions,
+  titleActions,
   onTitleChange,
-  onRegenerate,
-  onStopGeneration,
-  isGenerating = false,
-  notesDirty = false,
   titlePending = false,
   titleError,
+  onRegenerateTitle,
+  titleRegenerating = false,
+  initialAssistantOpen = false,
 }: {
   title: string;
   createdAt: string;
   statusBanner?: ReactNode;
-  notesMode: NotesMode;
-  onNotesModeChange: (mode: NotesMode) => void;
-  canShowEnhanced: boolean;
-  hasEnhancedContent?: boolean;
-  summary: ReactNode;
-  rawNotes: ReactNode;
+  /** The notes document: the user's lines and the AI's. */
+  notes: ReactNode;
+  /** A short line beside the AI notes switch (why no AI notes are coming). */
+  notesNotice?: ReactNode;
   transcript: ReactNode;
   assistant: ReactNode;
   showAssistant: boolean;
+  /** The dock pill's label. The assistant is "Copilot" during and after a meeting. */
+  assistantLabel?: string;
   peopleCount: number;
   toolbarActions?: ReactNode;
+  /** Actions beside the title (Continue recording). */
+  titleActions?: ReactNode;
   onTitleChange?: (title: string) => void | Promise<void>;
-  onRegenerate?: () => void;
-  onStopGeneration?: () => void;
-  isGenerating?: boolean;
-  notesDirty?: boolean;
   titlePending?: boolean;
   titleError?: string | null;
+  onRegenerateTitle?: () => void | Promise<void>;
+  titleRegenerating?: boolean;
+  /** Open the assistant panel on mount (the replay viewer shows Copilot). */
+  initialAssistantOpen?: boolean;
 }) {
-  const { compact, collapsed } = useShell();
+  const { collapsed } = useShell();
+  const [showAiNotes, setShowAiNotes] = useShowAiNotes();
   const sidebarWidth = collapsed ? SIDEBAR_COLLAPSED_WIDTH : SIDEBAR_WIDTH;
-  const [transcriptOpen, setTranscriptOpen] = useState(() => !compact);
-  const [chatOpen, setChatOpen] = useState(false);
+  const [transcriptOpen, setTranscriptOpen] = useState(true);
+  const [chatOpen, setChatOpen] = useState(initialAssistantOpen);
   const [ratio, setRatio] = useState(62);
   const [dockWidth, setDockWidth] = useState(DEFAULT_DOCK_WIDTH);
   const [titleDraft, setTitleDraft] = useState(title);
@@ -95,10 +91,38 @@ export function MeetingWorkspace({
   const [workspaceWidth, setWorkspaceWidth] = useState(0);
   const dockRef = useRef<HTMLDivElement>(null);
 
+  const titleInputRef = useRef<HTMLInputElement>(null);
+  const titleDraftRef = useRef(titleDraft);
+  titleDraftRef.current = titleDraft;
+  const titleOwnerRef = useRef(createdAt);
+
+  // A new title for the same meeting that didn't come from typing here (the
+  // model naming it after enhancing) types itself in. Switching meetings,
+  // your own edits, and reduced motion swap it instantly.
   useEffect(() => {
-    setTitleDraft(title);
     setLocalTitleError(null);
-  }, [title]);
+    const sameMeeting = titleOwnerRef.current === createdAt;
+    titleOwnerRef.current = createdAt;
+    const animate =
+      sameMeeting &&
+      title !== titleDraftRef.current &&
+      document.activeElement !== titleInputRef.current &&
+      !window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    if (!animate) {
+      setTitleDraft(title);
+      return;
+    }
+    let shown = 0;
+    const timer = window.setInterval(() => {
+      shown += 1;
+      setTitleDraft(title.slice(0, shown));
+      if (shown >= title.length) window.clearInterval(timer);
+    }, 38);
+    return () => {
+      window.clearInterval(timer);
+      setTitleDraft(title);
+    };
+  }, [title, createdAt]);
 
   const commitTitle = async () => {
     if (skipBlurCommitRef.current) {
@@ -226,25 +250,27 @@ export function MeetingWorkspace({
   }, [dockWidth, sidebarWidth]);
 
   const dateSubtitle = useMemo(() => formatDateSubtitle(createdAt), [createdAt]);
-  const narrow = compact || (workspaceWidth > 0 && workspaceWidth < 900);
+  // Only a genuinely tight workspace overlays the dock; a non-maximized
+  // (compact) window still keeps the transcript as a side rail.
+  const narrow = workspaceWidth > 0 && workspaceWidth < OVERLAY_WORKSPACE_WIDTH;
   const dockVisible = transcriptOpen || (chatOpen && showAssistant);
 
-  // Compact mode defaults to everything closed; the user opens a panel on demand.
-  // Entering compact closes both, leaving compact restores both.
-  const prevCompactRef = useRef(compact);
+  // The overlay layout defaults to everything closed; the user opens a panel on
+  // demand. Entering it closes both, leaving it restores the transcript.
+  const prevNarrowRef = useRef(narrow);
   useEffect(() => {
-    if (narrow && !prevCompactRef.current) {
+    if (narrow && !prevNarrowRef.current) {
       setTranscriptOpen(false);
       setChatOpen(false);
-    } else if (!narrow && prevCompactRef.current) {
+    } else if (!narrow && prevNarrowRef.current) {
       setTranscriptOpen(true);
       setChatOpen(false);
     }
-    prevCompactRef.current = narrow;
+    prevNarrowRef.current = narrow;
   }, [narrow]);
 
-  // In compact mode there is only room for one panel, so transcript and chat
-  // become mutually exclusive.
+  // In the overlay layout there is only room for one panel, so transcript and
+  // chat become mutually exclusive.
   useEffect(() => {
     if (narrow && transcriptOpen && chatOpen) setChatOpen(false);
   }, [narrow, transcriptOpen, chatOpen]);
@@ -271,26 +297,42 @@ export function MeetingWorkspace({
       {/* Header */}
       <div className="flex min-h-[76px] shrink-0 items-center justify-between gap-6 px-8 py-3">
         <div className="min-w-0 flex-1">
-          <input
-            value={titleDraft}
-            onChange={(event) => setTitleDraft(event.target.value)}
-            onBlur={() => void commitTitle()}
-            disabled={titlePending}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter') {
-                event.preventDefault();
-                (event.target as HTMLInputElement).blur();
-              } else if (event.key === 'Escape') {
-                skipBlurCommitRef.current = true;
-                setTitleDraft(title);
-                (event.target as HTMLInputElement).blur();
-              }
-            }}
-            spellCheck={false}
-            aria-label="Meeting title"
-            placeholder="Untitled meeting"
-            className="w-full truncate rounded bg-transparent font-serif text-[26px] font-semibold tracking-[-0.02em] text-ink outline-none placeholder:text-ink-subtle focus-visible:ring-2 focus-visible:ring-focus"
-          />
+          <div className="flex items-center gap-1">
+            <input
+              ref={titleInputRef}
+              value={titleDraft}
+              onChange={(event) => setTitleDraft(event.target.value)}
+              onBlur={() => void commitTitle()}
+              disabled={titlePending}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault();
+                  (event.target as HTMLInputElement).blur();
+                } else if (event.key === 'Escape') {
+                  skipBlurCommitRef.current = true;
+                  setTitleDraft(title);
+                  (event.target as HTMLInputElement).blur();
+                }
+              }}
+              spellCheck={false}
+              aria-label="Meeting title"
+              placeholder="Untitled meeting"
+              className="min-w-0 flex-1 truncate rounded bg-transparent font-serif text-[26px] font-semibold tracking-[-0.02em] text-ink outline-none placeholder:text-ink-subtle focus-visible:ring-2 focus-visible:ring-focus"
+            />
+            {onRegenerateTitle && (
+              <button
+                type="button"
+                onClick={() => void onRegenerateTitle()}
+                disabled={titleRegenerating || titlePending}
+                title="Regenerate title"
+                aria-label="Regenerate title"
+                className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-ink-muted hover:bg-surface-2 hover:text-ink focus-visible:ring-2 focus-visible:ring-focus disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-ink-muted"
+              >
+                {titleRegenerating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+              </button>
+            )}
+            {titleActions}
+          </div>
           {(dateSubtitle || peopleCount > 0) && (
             <p className="mt-0.5 text-xs text-ink-subtle">
               {[dateSubtitle, peopleCount > 0 ? `${peopleCount} ${peopleCount === 1 ? 'person' : 'people'}` : ''].filter(Boolean).join(' · ')}
@@ -313,11 +355,11 @@ export function MeetingWorkspace({
             type="button"
             onClick={toggleChat}
             disabled={!showAssistant}
-            title="Toggle chat"
+            title={`Toggle ${assistantLabel.toLowerCase()}`}
             aria-pressed={chatOpen && showAssistant}
             className={`flex h-8 items-center gap-1.5 rounded-full px-3 text-xs transition-colors ${chatOpen && showAssistant ? 'bg-surface-2 text-ink' : 'text-ink-subtle hover:bg-surface-2 hover:text-ink'} disabled:opacity-40`}
           >
-            <MessageCircle className="h-3.5 w-3.5" /> Chat
+            <MessageCircle className="h-3.5 w-3.5" /> {assistantLabel}
           </button>
         </div>
       </div>
@@ -326,43 +368,19 @@ export function MeetingWorkspace({
         {/* Center: notes document */}
         <section className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
           {/* Toolbar */}
-          <div className="flex shrink-0 flex-wrap items-center gap-1.5 px-8 pb-3">
-            {/* Enhanced / Raw segmented toggle */}
-            <div className="flex h-8 shrink-0 items-center rounded-full bg-surface-2 p-0.5">
-              <SegmentedControl
-                value={notesMode}
-                aria-label="Notes view"
-                className="h-8 rounded-full border-0 bg-transparent p-0"
-                options={[
-                  { value: 'raw', label: <span className="flex items-center gap-1.5"><ListTree className="h-3.5 w-3.5" /> Raw</span> },
-                  { value: 'enhanced', label: <span className="flex items-center gap-1.5"><Sparkles className="h-3.5 w-3.5" /> Enhanced</span> },
-                ]}
-                onValueChange={onNotesModeChange}
-              />
-              <div className="flex h-7 items-center rounded-full pr-1 text-ink-muted">
-                {hasEnhancedContent && (
-                  <button
-                    type="button"
-                    onClick={() => (isGenerating ? onStopGeneration?.() : onRegenerate?.())}
-                    title={isGenerating ? 'Stop generating' : notesDirty ? 'Your notes changed — re-enhance to include them' : 'Re-enhance notes'}
-                    aria-label={isGenerating ? 'Stop generating' : notesDirty ? 'Your notes changed — re-enhance' : 'Re-enhance notes'}
-                    className={`flex h-6 w-6 items-center justify-center rounded-full text-ink-muted hover:bg-surface-2 hover:text-ink ${notesDirty && !isGenerating ? 'animate-pulse text-amber-500 ring-2 ring-amber-400/70' : ''}`}
-                  >
-                    {isGenerating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RotateCw className="h-3.5 w-3.5" />}
-                  </button>
-                )}
-              </div>
-            </div>
-
+          <div className="flex h-8 shrink-0 items-center gap-3 px-8">
+            <label className="flex shrink-0 cursor-pointer items-center gap-2 text-xs text-ink-muted">
+              <Switch checked={showAiNotes} onCheckedChange={setShowAiNotes} aria-label="Show AI notes" />
+              Show AI notes
+            </label>
+            {notesNotice && <span className="min-w-0 truncate text-xs text-ink-subtle">{notesNotice}</span>}
             {toolbarActions && (
-              <div className="ml-1 flex shrink-0 items-center gap-1.5">{toolbarActions}</div>
+              <div className="ml-auto flex shrink-0 items-center gap-1.5">{toolbarActions}</div>
             )}
           </div>
 
           {/* Document */}
-          <div className="min-h-0 flex-1 overflow-hidden">
-            {notesMode === 'enhanced' && canShowEnhanced ? summary : rawNotes}
-          </div>
+          <div className="min-h-0 flex-1 overflow-hidden">{notes}</div>
         </section>
 
         {/* Drag handle between the notes column and the side dock */}
@@ -372,13 +390,13 @@ export function MeetingWorkspace({
             min={320}
             max={Math.max(320, workspaceWidth - MIN_NOTES_WIDTH)}
             onValueChange={setDockWidth}
-            label="Resize transcript and chat panel"
+            label="Resize transcript and Copilot panel"
             onPointerDown={onColumnDividerPointerDown}
             className="z-10 w-2 bg-transparent"
           />
         )}
 
-        {/* Transcript / chat dock: always a right-side rail; collapsed by default in compact */}
+        {/* Transcript / chat dock: always a right-side rail; overlay when the workspace is too tight */}
         <section
           aria-hidden={!dockVisible}
           className={`${dockVisible ? 'flex' : 'hidden'} min-h-0 min-w-0 shrink-0 flex-col overflow-hidden border-l border-hairline bg-surface-1 ${narrow ? 'absolute inset-x-0 bottom-0 top-[76px] z-20' : ''}`}

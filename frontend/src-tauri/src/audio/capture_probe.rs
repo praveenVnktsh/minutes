@@ -36,7 +36,6 @@ const ACTIVE_RMS_FLOOR: f32 = 0.01;
 
 /// Used when the macOS tap is running but no output device resolves behind it,
 /// so the frontend still has something to name in its sentence.
-#[cfg(target_os = "macos")]
 const SYSTEM_AUDIO_FALLBACK_NAME: &str = "System audio";
 
 /// Which channel a probe is capturing. The string form is what the
@@ -176,7 +175,6 @@ fn resolve_device(
 
 /// On macOS system audio comes off the CoreAudio tap, which is already an async
 /// stream of mono samples and needs no cpal device of its own.
-#[cfg(target_os = "macos")]
 async fn probe_system_audio<R: Runtime>(
     app: AppHandle<R>,
     _device_name: Option<String>,
@@ -261,20 +259,6 @@ async fn probe_system_audio<R: Runtime>(
         device_name,
         cancelled: stopped_early,
     })
-}
-
-/// Everywhere else system audio is an ordinary input stream over an output
-/// device: WASAPI loopback on Windows, a PulseAudio monitor source on Linux.
-/// `get_device_and_config` already knows which of those it is looking at.
-#[cfg(not(target_os = "macos"))]
-async fn probe_system_audio<R: Runtime>(
-    app: AppHandle<R>,
-    device_name: Option<String>,
-    duration: Duration,
-    cancelled: Arc<AtomicBool>,
-) -> Result<ProbeCapture, ProbeError> {
-    let device = resolve_device(device_name.as_deref(), DeviceType::Output)?;
-    probe_with_cpal(app, ProbeChannel::SystemAudio, device, duration, cancelled).await
 }
 
 /// Run the cpal capture on its own thread: `Stream` is not `Send` on every

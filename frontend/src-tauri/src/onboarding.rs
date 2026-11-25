@@ -1,11 +1,14 @@
 use anyhow::Result;
 use log::{error, info, warn};
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Runtime};
+use tauri::{AppHandle, Emitter, Runtime};
 use tauri_plugin_store::StoreExt;
 
 use crate::database::repositories::setting::SettingsRepository;
 use crate::state::AppState;
+
+/// Emitted when onboarding finishes, so startup work that waits for it runs.
+pub const ONBOARDING_COMPLETED_EVENT: &str = "onboarding-completed";
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct OnboardingStatus {
@@ -38,8 +41,11 @@ pub struct SetupCheckRecord {
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct ModelStatus {
+    /// Whether the speech models (the batch transcript models: Parakeet and the
+    /// voice detector) are downloaded. Named after the old Parakeet engine for
+    /// compatibility with saved statuses and the frontend.
     pub parakeet: String, // "downloaded" | "not_downloaded" | "downloading"
-    pub summary: String,  // Generic field for summary model (Qwen 3.5 or legacy Gemma variants)
+    pub summary: String, // Generic field for summary model (Qwen 3.5 or legacy Gemma variants)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected_summary_model: Option<String>,
 }
@@ -200,13 +206,6 @@ pub async fn save_onboarding_status_cmd<R: Runtime>(
 }
 
 #[tauri::command]
-pub async fn reset_onboarding_status_cmd<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
-    reset_onboarding_status(&app)
-        .await
-        .map_err(|e| format!("Failed to reset onboarding status: {}", e))
-}
-
-#[tauri::command]
 pub async fn complete_onboarding<R: Runtime>(
     app: AppHandle<R>,
     state: tauri::State<'_, AppState>,
@@ -218,30 +217,15 @@ pub async fn complete_onboarding<R: Runtime>(
     // Step 1: Save model configuration to SQLite database FIRST
     let pool = state.db_manager.pool();
 
-    // Onboarding always uses builtin-ai (local LLM)
+    // Onboarding always uses builtin-ai (local LLM). The Whisper model column
+    // is no longer read: speech models live in the speech-helper's store.
     if let Err(e) =
-        SettingsRepository::save_model_config(pool, "builtin-ai", &model, "large-v3", None).await
+        SettingsRepository::save_model_config(pool, "builtin-ai", &model, "", None).await
     {
         error!("Failed to save builtin-ai model config: {}", e);
         return Err(format!("Failed to save builtin-ai model config: {}", e));
     }
     info!("Saved builtin-ai model config: model={}", model);
-
-    // Save transcription model config (parakeet provider) - always parakeet
-    if let Err(e) = SettingsRepository::save_transcript_config(
-        pool,
-        "parakeet",
-        crate::config::DEFAULT_PARAKEET_MODEL,
-    )
-    .await
-    {
-        error!("Failed to save transcription model config: {}", e);
-        return Err(format!("Failed to save transcription model config: {}", e));
-    }
-    info!(
-        "Saved transcription model config: provider=parakeet, model={}",
-        crate::config::DEFAULT_PARAKEET_MODEL
-    );
 
     // Step 2: Only NOW mark onboarding as complete (after DB operations succeed)
     let mut status = load_onboarding_status(&app)
@@ -249,8 +233,13 @@ pub async fn complete_onboarding<R: Runtime>(
         .map_err(|e| format!("Failed to load onboarding status: {}", e))?;
 
     status.completed = true;
-    status.current_step = 4; // Max step (4 on macOS with permissions, 3 on other platforms)
-    status.model_status.parakeet = "downloaded".to_string();
+    status.current_step = 4; // Max step (the permissions step included)
+    status.model_status.parakeet = if crate::audio::speech::models::batch_ready(&app) {
+        "downloaded"
+    } else {
+        "not_downloaded"
+    }
+    .to_string();
     status.model_status.summary = "downloaded".to_string();
     status.model_status.selected_summary_model = Some(model.clone());
     // A user finishing setup without having run the check must not erase an earlier
@@ -265,6 +254,8 @@ pub async fn complete_onboarding<R: Runtime>(
         .map_err(|e| format!("Failed to save completed onboarding status: {}", e))?;
 
     info!("Onboarding completed successfully with model: {}", model);
+    // Start the speech-model setup now rather than next launch.
+    let _ = app.emit(ONBOARDING_COMPLETED_EVENT, ());
     Ok(())
 }
 

@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
-import { Archive, ArchiveRestore, CalendarDays, Mic, Pin, PinOff, Search, Upload, X } from 'lucide-react'
+import { Archive, ArchiveRestore, BadgeCheck, CalendarDays, Mic, Pin, PinOff, Search, Upload, X } from 'lucide-react'
 import { useSidebar, type CurrentMeeting } from '@/components/Sidebar/SidebarProvider'
 import { handleShellActionError, useShell } from '@/contexts/ShellContext'
 import { useDebugMode } from '@/hooks/useDebugMode'
@@ -24,23 +24,21 @@ export function MeetingsLibrary() {
     catalogError,
     searchStatus,
     searchError,
+    searchTranscripts,
     selectMeetings,
     selectSearchResults,
     refetchMeetings,
     setMeetingPinned,
     setMeetingArchived,
+    setMeetingDebug,
     meetingMutations,
   } = useSidebar()
   const {
     recordingActionLabel,
     runRecordingAction,
-    importActionLabel,
     runImportAction,
     openMeeting,
     isNavigating,
-    meetingSearchQuery: query,
-    setMeetingSearchQuery: setQuery,
-    isMeetingSearchPending,
     recordingActionDisabled,
     meetingSearchFocusRequest,
     consumeMeetingSearchFocus,
@@ -49,7 +47,14 @@ export function MeetingsLibrary() {
   const debugMode = useDebugMode()
   const [filter, setFilter] = useState<LibraryFilter>('all')
   const [actionError, setActionError] = useState<string | null>(null)
+  // The library owns its search: nothing else in the shell shares this query.
+  const [query, setQuery] = useState('')
   const searchRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    const timer = setTimeout(() => void searchTranscripts(query), 250)
+    return () => clearTimeout(timer)
+  }, [query, searchTranscripts])
 
   useEffect(() => {
     if (meetingSearchFocusRequest == null || !searchRef.current) return
@@ -67,7 +72,7 @@ export function MeetingsLibrary() {
     ? meetings.filter((meeting) => meeting.archived)
     : meetings
   const loading = catalogStatus === 'loading'
-  const searching = query.trim() && isMeetingSearchPending
+  const searching = query.trim() && searchStatus === 'searching'
 
   const runMutation = async (action: () => Promise<void>) => {
     setActionError(null)
@@ -94,6 +99,10 @@ export function MeetingsLibrary() {
     event.stopPropagation()
     void runMutation(() => setMeetingArchived(meeting.id, !meeting.archived))
   }
+  const keepAsRealMeeting = (event: MouseEvent, meeting: CurrentMeeting) => {
+    event.stopPropagation()
+    void runMutation(() => setMeetingDebug(meeting.id, false))
+  }
 
   return (
     <div className="h-screen overflow-y-auto bg-surface-0 px-5 pb-24 pt-12 sm:px-8 lg:px-12">
@@ -105,7 +114,7 @@ export function MeetingsLibrary() {
             <p className="mt-2 max-w-xl text-sm leading-6 text-ink-muted">Record a conversation, return to active work, or find notes from an earlier meeting.</p>
           </div>
           <div className="flex flex-wrap gap-2">
-            <Button variant="outline" onClick={() => void runShellAction(runImportAction)}><Upload />{importActionLabel}</Button>
+            <Button variant="outline" onClick={() => void runShellAction(runImportAction)}><Upload />Import recording</Button>
             <Button disabled={recordingActionDisabled} variant={recordingActionLabel === 'Stop recording' ? 'recording' : 'default'} onClick={() => void runRecordingAction()}>
               <Mic />{recordingActionLabel}
             </Button>
@@ -173,7 +182,7 @@ export function MeetingsLibrary() {
           <ul className="mt-6 grid gap-3 md:grid-cols-2 xl:grid-cols-3" aria-busy={isNavigating}>
             {visibleMeetings.map((meeting) => {
               const mutation = meetingMutations[meeting.id]
-              const pending = mutation?.pin?.status === 'pending' || mutation?.archive?.status === 'pending'
+              const pending = mutation?.pin?.status === 'pending' || mutation?.archive?.status === 'pending' || mutation?.debug?.status === 'pending'
               const activity = getMeetingActivities(meeting.id).find((item) => !['ready', 'cancelled'].includes(item.status))
               const active = meeting.id === activeMeetingId
               return (
@@ -182,12 +191,20 @@ export function MeetingsLibrary() {
                     <button type="button" className="w-full text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus" onClick={() => void runShellAction(() => openMeeting(meeting))}>
                       <div className="flex items-start justify-between gap-3">
                         <h2 className="line-clamp-2 text-base font-semibold leading-6 text-ink">{meeting.title || 'Untitled meeting'}</h2>
-                        {active && <span className="shrink-0 rounded-full bg-recording-subtle px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-recording">Live</span>}
+                        <div className="flex shrink-0 items-center gap-1.5">
+                          {active && <span className="rounded-full bg-recording-subtle px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-recording">Live</span>}
+                          {meeting.debug && <span className="rounded-full bg-warning-subtle px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-warning">Debug</span>}
+                        </div>
                       </div>
                       <p className="mt-3 text-xs text-ink-subtle">{formatDate(meeting.created_at)}</p>
                       {activity && <p className="mt-2 truncate text-xs font-medium text-info">{activity.message ?? activity.stage ?? activity.status}</p>}
                     </button>
                     <div className="mt-4 flex items-center justify-end gap-1 border-t border-hairline pt-3">
+                      {meeting.debug && (
+                        <button type="button" disabled={pending} onClick={(event) => keepAsRealMeeting(event, meeting)} aria-label={`Keep as real meeting ${meeting.title}`} title="Keep as real meeting" className="rounded-lg p-2 text-ink-subtle hover:bg-surface-2 hover:text-ink disabled:opacity-50">
+                          <BadgeCheck className="h-4 w-4" />
+                        </button>
+                      )}
                       <button type="button" disabled={pending} onClick={(event) => togglePin(event, meeting)} aria-label={meeting.pinned ? `Unpin ${meeting.title}` : `Pin ${meeting.title}`} className="rounded-lg p-2 text-ink-subtle hover:bg-surface-2 hover:text-ink disabled:opacity-50">
                         {meeting.pinned ? <PinOff className="h-4 w-4" /> : <Pin className="h-4 w-4" />}
                       </button>
@@ -195,8 +212,8 @@ export function MeetingsLibrary() {
                         {meeting.archived ? <ArchiveRestore className="h-4 w-4" /> : <Archive className="h-4 w-4" />}
                       </button>
                     </div>
-                    {(mutation?.pin?.status === 'error' || mutation?.archive?.status === 'error') && (
-                      <StatusFeedback tone="error" className="mt-2 text-xs">{mutation.pin?.error ?? mutation.archive?.error}</StatusFeedback>
+                    {(mutation?.pin?.status === 'error' || mutation?.archive?.status === 'error' || mutation?.debug?.status === 'error') && (
+                      <StatusFeedback tone="error" className="mt-2 text-xs">{mutation.pin?.error ?? mutation.archive?.error ?? mutation.debug?.error}</StatusFeedback>
                     )}
                   </article>
                 </li>

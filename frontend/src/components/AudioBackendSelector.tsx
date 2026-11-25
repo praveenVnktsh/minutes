@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { Info } from 'lucide-react';
+import { cn } from '@/lib/utils';
+import { panel, selection } from '@/lib/theme-classes';
 
 export interface BackendInfo {
   id: string;
@@ -122,7 +124,7 @@ export function AudioBackendSelector({
       </div>
 
       {error && (
-        <div className="p-2 text-xs text-red-700 bg-red-50 border border-red-200 rounded-md">
+        <div className={cn('p-2 text-xs rounded-md', panel.error)}>
           {error}
         </div>
       )}
@@ -138,7 +140,7 @@ export function AudioBackendSelector({
               key={backend.id}
               className={`flex items-start p-3 border rounded-lg transition-all ${
                 currentBackend === backend.id
-                  ? 'border-blue-500 bg-blue-50'
+                  ? selection.card.selected
                   : 'border-hairline hover:border-[var(--ink-subtle)] bg-surface-raised'
               } ${isDisabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
             >
@@ -149,7 +151,7 @@ export function AudioBackendSelector({
                 checked={currentBackend === backend.id}
                 onChange={() => handleBackendChange(backend.id)}
                 disabled={isDisabled}
-                className="mt-1 h-4 w-4 text-blue-600 focus:ring-blue-500 border-hairline"
+                className="mt-1 h-4 w-4 text-ink focus:ring-focus border-hairline"
               />
               <div className="ml-3 flex-1">
                 <div className="flex items-center justify-between">
@@ -157,7 +159,7 @@ export function AudioBackendSelector({
                     {backend.name}
                   </span>
                   {currentBackend === backend.id && (
-                    <span className="text-xs font-medium text-blue-600 bg-blue-100 px-2 py-0.5 rounded">
+                    <span className={cn('text-xs font-medium px-2 py-0.5 rounded', selection.pill)}>
                       Active
                     </span>
                   )}

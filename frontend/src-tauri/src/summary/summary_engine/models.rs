@@ -52,13 +52,17 @@ impl SamplingParams {
         }
     }
 
-    /// Summary-tuned Qwen 3.5 preset: non-greedy with mild repetition controls.
+    /// Summary-tuned Qwen 3.5 preset. Low temperature plus llama-helper's fixed
+    /// seed keeps summaries reproducible. A mild repeat penalty guards against the
+    /// loops small models fall into at low temperature; there is no presence
+    /// penalty, which would push the model away from names and terms a summary
+    /// has to repeat.
     pub fn qwen35_summary(stop_tokens: Vec<String>) -> Self {
         Self {
-            temperature: 0.5,
+            temperature: SUMMARY_TEMPERATURE,
             top_k: 20,
             top_p: 0.8,
-            presence_penalty: 0.3,
+            presence_penalty: 0.0,
             frequency_penalty: 0.0,
             repeat_penalty: 1.05,
             penalty_last_n: 256,
@@ -66,10 +70,11 @@ impl SamplingParams {
         }
     }
 
-    /// Gemma 3 instruct preset, matching the prior Gemma sampling behavior.
+    /// Gemma 3 instruct preset for summaries: Google's top_k/top_p with a low
+    /// temperature so the same transcript gives the same notes.
     pub fn gemma3_instruct(stop_tokens: Vec<String>) -> Self {
         Self {
-            temperature: 1.0,
+            temperature: SUMMARY_TEMPERATURE,
             top_k: 64,
             top_p: 0.95,
             presence_penalty: 0.0,
@@ -158,6 +163,10 @@ pub struct ModelDef {
 
     /// Short description for UI
     pub description: String,
+
+    /// SHA-256 of the GGUF at `download_url`, checked after every download.
+    #[serde(default)]
+    pub sha256: Option<String>,
 }
 
 /// Get all available built-in AI models
@@ -170,12 +179,13 @@ pub fn get_available_models() -> Vec<ModelDef> {
             display_name: "Qwen 3.5 2B (Balanced)".to_string(),
             gguf_file: "Qwen3.5-2B-Q4_K_M.gguf".to_string(),
             template: "qwen3.5_nonthinking".to_string(),
-            download_url: "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf".to_string(),
+            download_url: "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/802854bfd388ed92748de119df31327962811548/Qwen3.5-2B-Q4_K_M.gguf".to_string(),
             size_mb: 1221,
             context_size: 32768,
             layer_count: 24,
             sampling: SamplingParams::qwen35_summary(vec!["<|im_end|>".to_string()]),
             description: "Balanced Qwen 3.5 model for built-in summaries. Higher quality with modest local requirements.".to_string(),
+            sha256: Some("aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223".to_string()),
         },
         // Qwen 3.5 4B - High quality tier
         ModelDef {
@@ -183,12 +193,13 @@ pub fn get_available_models() -> Vec<ModelDef> {
             display_name: "Qwen 3.5 4B (High Quality)".to_string(),
             gguf_file: "Qwen3.5-4B-Q4_K_M.gguf".to_string(),
             template: "qwen3.5_nonthinking".to_string(),
-            download_url: "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf".to_string(),
+            download_url: "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/720bb031aae5488eae5d6a78768e6d826662b2ae/Qwen3.5-4B-Q4_K_M.gguf".to_string(),
             size_mb: 2614,
             context_size: 32768,
             layer_count: 32,
             sampling: SamplingParams::qwen35_summary(vec!["<|im_end|>".to_string()]),
             description: "High-quality Qwen 3.5 model for built-in summaries. Best local Qwen option in the current lineup.".to_string(),
+            sha256: Some("00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4".to_string()),
         },
         // Gemma 3 4B - Legacy alternative retained for users who prefer Gemma output.
         ModelDef {
@@ -196,12 +207,29 @@ pub fn get_available_models() -> Vec<ModelDef> {
             display_name: "Gemma 3 4B (Balanced)".to_string(),
             gguf_file: "gemma-3-4b-it-Q4_K_M.gguf".to_string(),
             template: "gemma3".to_string(),
-            download_url: "https://huggingface.co/bartowski/google_gemma-3-4b-it-GGUF/resolve/main/google_gemma-3-4b-it-Q4_K_M.gguf".to_string(),
+            download_url: "https://huggingface.co/bartowski/google_gemma-3-4b-it-GGUF/resolve/aacc4e309559a829f07b79687968a3a4b003b212/google_gemma-3-4b-it-Q4_K_M.gguf".to_string(),
             size_mb: 2374,
             context_size: 32768,
             layer_count: 35,
             sampling: SamplingParams::gemma3_instruct(vec!["<end_of_turn>".to_string()]),
             description: "Balanced model. Great quality/speed trade-off. Requires ~3.5GB RAM.".to_string(),
+            sha256: Some("4996030242583a40aa151ff93f49ed787ac8c25e4120c3ae4588b2e2a7d1ae94".to_string()),
+        },
+        // Gemma 4 E2B - the live notes model: the smallest that writes good
+        // notes while a meeting records (see
+        // docs/superpowers/specs/2026-10-17-live-notes-min-model.md).
+        ModelDef {
+            name: LIVE_NOTES_MODEL.to_string(),
+            display_name: "Gemma 4 E2B (Live notes)".to_string(),
+            gguf_file: "gemma-4-E2B-it-Q4_K_M.gguf".to_string(),
+            template: "gemma4".to_string(),
+            download_url: "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/0314792d7f1f7e229411f620751375812bb9faf2/gemma-4-E2B-it-Q4_K_M.gguf".to_string(),
+            size_mb: 2963,
+            context_size: 32768,
+            layer_count: 35,
+            sampling: SamplingParams::gemma3_instruct(vec!["<turn|>".to_string()]),
+            description: "Small, fast model for live notes while recording. Also works for summaries.".to_string(),
+            sha256: Some("740185b21d22ceb83a11c3aa62ad5842ef32c70f6096d756bbee85a1e4ec34b8".to_string()),
         },
         // Gemma 3 1B - Visible legacy tier retained for already-shipped users.
         ModelDef {
@@ -209,12 +237,13 @@ pub fn get_available_models() -> Vec<ModelDef> {
             display_name: "Gemma 3 1B (Fast)".to_string(),
             gguf_file: "gemma-3-1b-it-Q8_0.gguf".to_string(),
             template: "gemma3".to_string(),
-            download_url: "https://huggingface.co/bartowski/google_gemma-3-1b-it-GGUF/resolve/main/google_gemma-3-1b-it-Q8_0.gguf".to_string(),
+            download_url: "https://huggingface.co/bartowski/google_gemma-3-1b-it-GGUF/resolve/a1b37cf3926e12dd1d90d3ae20df53ff3c4ef25e/google_gemma-3-1b-it-Q8_0.gguf".to_string(),
             size_mb: 1019,
             context_size: 32768,
             layer_count: 26,
             sampling: SamplingParams::gemma3_instruct(vec!["<end_of_turn>".to_string()]),
             description: "Fastest model. Runs on any hardware with ~1GB RAM. Good for quick summaries.".to_string(),
+            sha256: Some("375e12a4a18929a641f9744b060d4a7cf4e279530750555828ec0c117870bc96".to_string()),
         },
     ]
 }
@@ -231,6 +260,9 @@ impl ModelDef {
 pub fn get_model_by_name(name: &str) -> Option<ModelDef> {
     get_available_models().into_iter().find(|m| m.name == name)
 }
+
+/// The built-in model live notes use while recording, when it is downloaded.
+pub const LIVE_NOTES_MODEL: &str = "gemma4:e2b";
 
 /// Get the largest, highest-quality built-in summary model.
 pub fn get_default_model() -> ModelDef {
@@ -257,13 +289,25 @@ pub fn get_models_directory(app_data_dir: &Path) -> PathBuf {
 // Prompt Templates (Model-Specific Formatting)
 // ============================================================================
 
-/// Gemma 3 chat template format
+/// Gemma 3 chat template format. Gemma has no system role: its official
+/// template prepends the system text to the first user turn, separated by a
+/// blank line. BOS comes from the tokenizer (the GGUF sets add_bos_token).
 pub const GEMMA3_TEMPLATE: &str = "\
 <start_of_turn>user
-{system_prompt}<end_of_turn>
-<start_of_turn>user
+{system_prompt}
+
 {user_prompt}<end_of_turn>
 <start_of_turn>model
+";
+
+/// Gemma 4 chat template (thinking off): Gemma 4 has a real system turn.
+/// BOS comes from the tokenizer (the GGUF sets add_bos_token).
+pub const GEMMA4_TEMPLATE: &str = "\
+<|turn>system
+{system_prompt}<turn|>
+<|turn>user
+{user_prompt}<turn|>
+<|turn>model
 ";
 
 /// Qwen 3.5 non-thinking chat template format.
@@ -287,6 +331,8 @@ fn escape_user_prompt_control_markers(user_prompt: &str) -> String {
         .replace("<|im_end|>", "< |im_end| >")
         .replace("<start_of_turn>", "< start_of_turn >")
         .replace("<end_of_turn>", "< end_of_turn >")
+        .replace("<|turn>", "< |turn >")
+        .replace("<turn|>", "< turn| >")
         .replace("<think>", "< think >")
         .replace("</think>", "< /think >")
 }
@@ -307,6 +353,7 @@ pub fn format_prompt(
 ) -> Result<String> {
     let template = match template_name {
         "gemma3" => GEMMA3_TEMPLATE,
+        "gemma4" => GEMMA4_TEMPLATE,
         "qwen3.5_nonthinking" => QWEN35_NONTHINKING_TEMPLATE,
         _ => return Err(anyhow!("Unknown template: {}", template_name)),
     };
@@ -327,6 +374,11 @@ pub fn format_prompt(
 /// Default max tokens for generation (increased for better summary quality)
 pub const DEFAULT_MAX_TOKENS: i32 = 4096;
 
+/// Sampling temperature for built-in summaries. Low enough to be near-greedy,
+/// high enough to escape the repetition loops pure greedy decoding hits on
+/// small models.
+pub const SUMMARY_TEMPERATURE: f32 = 0.2;
+
 /// Idle timeout for sidecar (seconds) - can be overridden via LLAMA_IDLE_TIMEOUT env var
 pub const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 300; // 5 minutes
 
@@ -336,6 +388,46 @@ pub const GENERATION_TIMEOUT_SECS: u64 = 900; // 15 minutes
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_model_pins_its_download_by_sha256() {
+        for model in get_available_models() {
+            let sha = model.sha256.as_deref().unwrap_or_default();
+            assert_eq!(sha.len(), 64, "{}", model.name);
+            assert!(sha.chars().all(|c| c.is_ascii_hexdigit()), "{}", model.name);
+            assert!(
+                model.download_url.starts_with("https://huggingface.co/"),
+                "{}",
+                model.name
+            );
+            // The hash belongs to one revision: a `resolve/main` URL breaks
+            // every download the day the repo re-uploads the file.
+            let revision = model
+                .download_url
+                .split("/resolve/")
+                .nth(1)
+                .and_then(|rest| rest.split('/').next())
+                .unwrap_or_default();
+            assert_eq!(revision.len(), 40, "{}: {}", model.name, model.download_url);
+            assert!(
+                revision
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+                "{}: {}",
+                model.name,
+                model.download_url
+            );
+        }
+    }
+
+    #[test]
+    fn the_live_notes_model_is_gemma4_e2b() {
+        let model = get_model_by_name(LIVE_NOTES_MODEL).expect("live notes model");
+        assert_eq!(model.template, "gemma4");
+        assert_eq!(model.gguf_file, "gemma-4-E2B-it-Q4_K_M.gguf");
+        assert_eq!(model.sampling.stop_tokens, vec!["<turn|>".to_string()]);
+        assert!(format_prompt(&model.template, "s", "u").is_ok());
+    }
 
     #[test]
     fn default_model_is_largest_qwen_model() {
@@ -356,7 +448,7 @@ mod tests {
         assert_eq!(qwen_2b.template, "qwen3.5_nonthinking");
         assert_eq!(
             qwen_2b.download_url,
-            "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf"
+            "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/802854bfd388ed92748de119df31327962811548/Qwen3.5-2B-Q4_K_M.gguf"
         );
         assert_eq!(qwen_2b.size_mb, 1221);
         assert_eq!(qwen_2b.context_size, 32768);
@@ -372,7 +464,7 @@ mod tests {
         assert_eq!(qwen_4b.template, "qwen3.5_nonthinking");
         assert_eq!(
             qwen_4b.download_url,
-            "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf"
+            "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/720bb031aae5488eae5d6a78768e6d826662b2ae/Qwen3.5-4B-Q4_K_M.gguf"
         );
         assert_eq!(qwen_4b.size_mb, 2614);
         assert_eq!(qwen_4b.context_size, 32768);
@@ -389,13 +481,13 @@ mod tests {
         assert_eq!(gemma_1b.gguf_file, "gemma-3-1b-it-Q8_0.gguf");
         assert_eq!(
             gemma_1b.download_url,
-            "https://huggingface.co/bartowski/google_gemma-3-1b-it-GGUF/resolve/main/google_gemma-3-1b-it-Q8_0.gguf"
+            "https://huggingface.co/bartowski/google_gemma-3-1b-it-GGUF/resolve/a1b37cf3926e12dd1d90d3ae20df53ff3c4ef25e/google_gemma-3-1b-it-Q8_0.gguf"
         );
         assert_eq!(
             gemma_1b.sampling,
             SamplingParams::gemma3_instruct(vec!["<end_of_turn>".to_string()])
         );
-        assert_eq!(gemma_1b.sampling.temperature, 1.0);
+        assert_eq!(gemma_1b.sampling.temperature, 0.2);
         assert_eq!(gemma_1b.sampling.top_k, 64);
         assert_eq!(gemma_1b.sampling.top_p, 0.95);
         assert_eq!(gemma_1b.sampling.presence_penalty, 0.0);
@@ -406,13 +498,13 @@ mod tests {
         let gemma_4b = get_model_by_name("gemma3:4b").expect("gemma 4b model should exist");
         assert_eq!(
             gemma_4b.download_url,
-            "https://huggingface.co/bartowski/google_gemma-3-4b-it-GGUF/resolve/main/google_gemma-3-4b-it-Q4_K_M.gguf"
+            "https://huggingface.co/bartowski/google_gemma-3-4b-it-GGUF/resolve/aacc4e309559a829f07b79687968a3a4b003b212/google_gemma-3-4b-it-Q4_K_M.gguf"
         );
         assert_eq!(
             gemma_4b.sampling,
             SamplingParams::gemma3_instruct(vec!["<end_of_turn>".to_string()])
         );
-        assert_eq!(gemma_4b.sampling.temperature, 1.0);
+        assert_eq!(gemma_4b.sampling.temperature, 0.2);
         assert_eq!(gemma_4b.sampling.top_k, 64);
         assert_eq!(gemma_4b.sampling.top_p, 0.95);
         assert_eq!(gemma_4b.sampling.presence_penalty, 0.0);
@@ -459,10 +551,50 @@ mod tests {
         )
         .unwrap();
 
-        assert!(formatted.contains("<start_of_turn>user\nsystem rules<end_of_turn>"));
         assert!(formatted.contains("literal < start_of_turn > and < end_of_turn >"));
-        assert_eq!(formatted.matches("<start_of_turn>").count(), 3);
-        assert_eq!(formatted.matches("<end_of_turn>").count(), 2);
+        assert_eq!(formatted.matches("<start_of_turn>").count(), 2);
+        assert_eq!(formatted.matches("<end_of_turn>").count(), 1);
+    }
+
+    #[test]
+    fn gemma3_template_merges_system_prompt_into_first_user_turn() {
+        let formatted = format_prompt("gemma3", "system rules", "summarize this").unwrap();
+        assert_eq!(
+            formatted,
+            "<start_of_turn>user\nsystem rules\n\nsummarize this<end_of_turn>\n<start_of_turn>model\n"
+        );
+        // BOS is added by the tokenizer, never written into the template text.
+        assert!(!formatted.contains("<bos>"));
+    }
+
+    #[test]
+    fn gemma4_template_has_a_system_turn_and_escapes_markers() {
+        let formatted = format_prompt("gemma4", "system rules", "say <turn|> hi").unwrap();
+        assert_eq!(
+            formatted,
+            "<|turn>system\nsystem rules<turn|>\n<|turn>user\nsay < turn| > hi<turn|>\n<|turn>model\n"
+        );
+        assert!(!formatted.contains("<bos>"));
+    }
+
+    #[test]
+    fn qwen_template_does_not_write_bos_text() {
+        let formatted = format_prompt("qwen3.5_nonthinking", "s", "u").unwrap();
+        assert!(formatted.starts_with("<|im_start|>system\n"));
+        assert!(!formatted.contains("<|endoftext|>"));
+    }
+
+    #[test]
+    fn summary_presets_are_low_temperature_without_presence_penalty() {
+        for model in get_available_models() {
+            assert_eq!(
+                model.sampling.temperature, SUMMARY_TEMPERATURE,
+                "{}",
+                model.name
+            );
+            assert_eq!(model.sampling.presence_penalty, 0.0, "{}", model.name);
+        }
+        const { assert!(SUMMARY_TEMPERATURE > 0.0 && SUMMARY_TEMPERATURE <= 0.3) };
     }
 
     #[test]

@@ -1,6 +1,6 @@
-import { afterAll, describe, expect, mock, test } from 'bun:test'
+import { afterAll, beforeEach, describe, expect, mock, test } from 'bun:test'
 import React from 'react'
-import { create } from 'react-test-renderer'
+import { act, create } from 'react-test-renderer'
 
 const originalActivity = { ...await import('@/contexts/MeetingActivityContext') }
 const originalController = { ...await import('@/contexts/RecordingControllerContext') }
@@ -13,6 +13,19 @@ const failedActivities = Array.from({ length: 4 }, (_, index) => ({
   title: `Retained failure ${index}`, stage: null, progress_percentage: null, message: null,
   error: 'failed', warning: null, controls_available: false, revision: index + 1,
 }))
+
+const pauseRecording = mock(async () => {})
+const resumeRecording = mock(async () => {})
+const dismissSummary = mock(() => {})
+let summaries: Array<Record<string, unknown>> = []
+let isRecording = false
+let isPaused = false
+let isCommandPending = true
+let controllerCommand: string | null = 'finalize'
+let activeMeetingId: string | null = null
+let pathname = '/settings'
+let currentMeeting: { id: string } | null = null
+
 mock.module('@/contexts/MeetingActivityContext', () => ({
   ...originalActivity,
   useMeetingActivity: () => ({
@@ -26,24 +39,41 @@ mock.module('@/contexts/MeetingActivityContext', () => ({
         { task_id: 'active-job', meeting_id: 'active-meeting', kind: 'import', status: 'transcribing', title: 'Active transcription', stage: 'transcribing', progress_percentage: 42, message: null, error: null, warning: null, controls_available: true, revision: 19 },
       ],
     },
-    summaries: [{
-      activityId: 'summary-meeting:process', revision: 4, meetingId: 'summary-meeting', processId: 'process', status: 'processing',
-      response: { status: 'processing', meetingName: 'Quarterly review', meeting_id: 'summary-meeting', start: 'process', end: null, data: null, error: null },
-      error: null, reconciliationError: null,
-    }],
-    retrySummary: async () => {}, cancelSummary: async () => true,
+    summaries,
+    retrySummary: async () => {}, cancelSummary: async () => true, dismissSummary,
     cancelTranscription: async () => true, pauseTranscription: async () => true, resumeTranscription: async () => true,
   }),
 }))
 mock.module('@/contexts/RecordingControllerContext', () => ({
   ...originalController,
-  useRecordingController: () => ({ command: 'finalize', activeMeetingId: null, isCommandPending: true, returnToRecording: async () => {}, stopRecording: async () => {} }),
+  useRecordingController: () => ({
+    command: controllerCommand, activeMeetingId, isCommandPending, returnToRecording: async () => {},
+    stopRecording: async () => {}, pauseRecording, resumeRecording,
+  }),
 }))
-mock.module('@/contexts/RecordingStateContext', () => ({ ...originalRecording, useRecordingState: () => ({ isRecording: false, isPaused: false, isProcessing: false, isSaving: true }) }))
-mock.module('@/components/Sidebar/SidebarProvider', () => ({ ...originalSidebar, useSidebar: () => ({ currentMeeting: null }) }))
-mock.module('next/navigation', () => ({ ...originalNavigation, usePathname: () => '/settings' }))
+mock.module('@/contexts/RecordingStateContext', () => ({ ...originalRecording, useRecordingState: () => ({ isRecording, isPaused, isProcessing: false, isSaving: !isRecording }) }))
+mock.module('@/components/Sidebar/SidebarProvider', () => ({ ...originalSidebar, useSidebar: () => ({ currentMeeting }) }))
+mock.module('next/navigation', () => ({ ...originalNavigation, usePathname: () => pathname }))
 
 const { ShellActivitySurface } = await import('./ShellActivitySurface')
+
+beforeEach(() => {
+  isRecording = false
+  isPaused = false
+  isCommandPending = true
+  controllerCommand = 'finalize'
+  activeMeetingId = null
+  pathname = '/settings'
+  currentMeeting = null
+  summaries = [{
+    activityId: 'summary-meeting:process', revision: 4, meetingId: 'summary-meeting', processId: 'process', status: 'processing',
+    response: { status: 'processing', meetingName: 'Quarterly review', meeting_id: 'summary-meeting', start: 'process', end: null, data: null, error: null },
+    error: null, reconciliationError: null,
+  }]
+  pauseRecording.mockClear()
+  resumeRecording.mockClear()
+  dismissSummary.mockClear()
+})
 
 afterAll(() => {
   mock.module('@/contexts/MeetingActivityContext', () => originalActivity)
@@ -63,6 +93,168 @@ describe('ShellActivitySurface', () => {
     expect(rendered).toContain('Quarterly review')
     expect(rendered).toContain('more activities')
     expect(rendered).not.toContain('Duplicate recording failure')
+    renderer.unmount()
+  })
+
+  test('pause button calls pauseRecording when recording is active and not paused', async () => {
+    isRecording = true
+    isPaused = false
+    isCommandPending = false
+    controllerCommand = null
+    const renderer = create(<ShellActivitySurface />)
+    const button = renderer.root.findByProps({ 'aria-label': 'Pause recording' })
+    await act(async () => button.props.onClick())
+    expect(pauseRecording).toHaveBeenCalledTimes(1)
+    expect(resumeRecording).not.toHaveBeenCalled()
+    renderer.unmount()
+  })
+
+  test('resume button calls resumeRecording when recording is paused', async () => {
+    isRecording = true
+    isPaused = true
+    isCommandPending = false
+    controllerCommand = null
+    const renderer = create(<ShellActivitySurface />)
+    const button = renderer.root.findByProps({ 'aria-label': 'Resume recording' })
+    await act(async () => button.props.onClick())
+    expect(resumeRecording).toHaveBeenCalledTimes(1)
+    expect(pauseRecording).not.toHaveBeenCalled()
+    renderer.unmount()
+  })
+
+  test('hides the recording card on the live workspace, which has its own controls', () => {
+    isRecording = true
+    isCommandPending = false
+    controllerCommand = null
+    activeMeetingId = 'live-meeting'
+    pathname = '/meeting-details'
+    currentMeeting = { id: 'live-meeting' }
+    const renderer = create(<ShellActivitySurface />)
+    expect(renderer.root.findAllByProps({ 'aria-label': 'Pause recording' })).toHaveLength(0)
+    expect(JSON.stringify(renderer.toJSON())).not.toContain('Recording in progress')
+    renderer.unmount()
+  })
+
+  test('keeps the recording card when viewing a different meeting', () => {
+    isRecording = true
+    isCommandPending = false
+    controllerCommand = null
+    activeMeetingId = 'live-meeting'
+    pathname = '/meeting-details'
+    currentMeeting = { id: 'other-meeting' }
+    const renderer = create(<ShellActivitySurface />)
+    expect(renderer.root.findAllByProps({ 'aria-label': 'Pause recording' })).not.toHaveLength(0)
+    renderer.unmount()
+  })
+
+  test('leaves the finishing card to the meeting page while you are on it', () => {
+    activeMeetingId = 'finishing-meeting'
+    pathname = '/meeting-details'
+    currentMeeting = { id: 'finishing-meeting' }
+    const onPage = create(<ShellActivitySurface />)
+    expect(JSON.stringify(onPage.toJSON())).not.toContain('Saving meeting')
+    onPage.unmount()
+
+    currentMeeting = { id: 'other-meeting' }
+    const elsewhere = create(<ShellActivitySurface />)
+    expect(JSON.stringify(elsewhere.toJSON())).toContain('Saving meeting')
+    elsewhere.unmount()
+  })
+
+  test('dismissing an activity card hides it and reveals the next queued card', async () => {
+    const renderer = create(<ShellActivitySurface />)
+    expect(JSON.stringify(renderer.toJSON())).toContain('Show 4 more activities')
+    const dismissButton = renderer.root.findByProps({ 'aria-label': 'Dismiss Preparing early import' })
+    await act(async () => dismissButton.props.onClick())
+    const rendered = JSON.stringify(renderer.toJSON())
+    expect(rendered).not.toContain('Preparing early import')
+    expect(rendered).toContain('Retained failure 3')
+    expect(rendered).toContain('Show 3 more activities')
+    renderer.unmount()
+  })
+
+  test('a dismissed card stays hidden across progress revisions and returns on a status change', async () => {
+    const processing = summaries[0]
+    const renderer = create(<ShellActivitySurface />)
+    const dismissButton = renderer.root.findByProps({ 'aria-label': 'Dismiss Quarterly review' })
+    await act(async () => dismissButton.props.onClick())
+    expect(JSON.stringify(renderer.toJSON())).not.toContain('Quarterly review')
+    summaries = [{ ...processing, revision: 5 }]
+    await act(async () => renderer.update(<ShellActivitySurface />))
+    expect(JSON.stringify(renderer.toJSON())).not.toContain('Quarterly review')
+    expect(JSON.stringify(renderer.toJSON())).toContain('Show 3 more activities')
+    expect(dismissSummary).not.toHaveBeenCalled()
+    summaries = [{ ...processing, revision: 6, status: 'failed', error: 'Summary failed' }]
+    await act(async () => renderer.update(<ShellActivitySurface />))
+    expect(JSON.stringify(renderer.toJSON())).toContain('Show 4 more activities')
+    renderer.unmount()
+  })
+
+  test('dismissing a failed summary hides it locally and calls dismissSummary', async () => {
+    summaries = [{
+      activityId: 'failed-summary:process-2', revision: 7, meetingId: 'failed-meeting', processId: 'process-2', status: 'failed',
+      response: null, error: 'boom', reconciliationError: null,
+    }]
+    const renderer = create(<ShellActivitySurface />)
+    const showMoreButton = renderer.root.findByProps({ className: 'w-full rounded-lg bg-surface-raised px-3 py-2 text-xs font-semibold text-ink-muted shadow' })
+    await act(async () => showMoreButton.props.onClick())
+    const dismissButton = renderer.root.findByProps({ 'aria-label': 'Dismiss AI notes' })
+    await act(async () => dismissButton.props.onClick())
+    expect(dismissSummary).toHaveBeenCalledWith('failed-meeting', 'process-2')
+    expect(JSON.stringify(renderer.toJSON())).not.toContain('"AI notes"')
+    renderer.unmount()
+  })
+
+  test('minimizing hides every card and shows a restore pill with the total count; the pill restores them', async () => {
+    const renderer = create(<ShellActivitySurface />)
+    const minimizeButton = renderer.root.findByProps({ 'aria-label': 'Minimize activity' })
+    await act(async () => minimizeButton.props.onClick())
+    let rendered = JSON.stringify(renderer.toJSON())
+    expect(rendered).not.toContain('Saving meeting')
+    expect(rendered).not.toContain('Active transcription')
+    expect(rendered).not.toContain('Quarterly review')
+    expect(rendered).not.toContain('more activities')
+    expect(renderer.root.findAllByProps({ 'aria-label': 'Minimize activity' })).toHaveLength(0)
+    const pill = renderer.root.findByProps({ 'aria-label': 'Show activity' })
+    expect(rendered).toContain('8 activities')
+    await act(async () => pill.props.onClick())
+    rendered = JSON.stringify(renderer.toJSON())
+    expect(rendered).toContain('Saving meeting')
+    expect(rendered).toContain('Active transcription')
+    expect(rendered).toContain('Quarterly review')
+    expect(renderer.root.findAllByProps({ 'aria-label': 'Show activity' })).toHaveLength(0)
+    renderer.unmount()
+  })
+
+  test('minimizing while recording hides the pause/stop controls but keeps the restore pill visible', async () => {
+    isRecording = true
+    isPaused = false
+    isCommandPending = false
+    controllerCommand = null
+    const renderer = create(<ShellActivitySurface />)
+    const minimizeButton = renderer.root.findByProps({ 'aria-label': 'Minimize activity' })
+    await act(async () => minimizeButton.props.onClick())
+    expect(renderer.root.findAllByProps({ 'aria-label': 'Pause recording' })).toHaveLength(0)
+    const pill = renderer.root.findByProps({ 'aria-label': 'Show activity' })
+    expect(pill).toBeTruthy()
+    expect(JSON.stringify(renderer.toJSON())).toContain('8 activities')
+    renderer.unmount()
+  })
+
+  test('minimized state persists across an update as new work arrives, and the pill count updates', async () => {
+    const renderer = create(<ShellActivitySurface />)
+    const minimizeButton = renderer.root.findByProps({ 'aria-label': 'Minimize activity' })
+    await act(async () => minimizeButton.props.onClick())
+    expect(JSON.stringify(renderer.toJSON())).toContain('8 activities')
+    summaries = [...summaries, {
+      activityId: 'summary-2:process-2', revision: 1, meetingId: 'summary-meeting-2', processId: 'process-2', status: 'queued',
+      response: null, error: null, reconciliationError: null,
+    }]
+    await act(async () => renderer.update(<ShellActivitySurface />))
+    const rendered = JSON.stringify(renderer.toJSON())
+    expect(rendered).not.toContain('Quarterly review')
+    expect(rendered).not.toContain('Saving meeting')
+    expect(rendered).toContain('9 activities')
     renderer.unmount()
   })
 })

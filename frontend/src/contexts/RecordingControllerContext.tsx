@@ -27,12 +27,14 @@ import {
 } from '@/lib/liveTranscription';
 import { LIVE_NOTES_FALLBACK_FOLDER_KEY, LIVE_NOTES_FALLBACK_KEY } from '@/lib/liveNotes';
 import {
-  getProviderCommands,
-  hasDownloadingModel,
-  type ModelWithStatus,
-} from '@/lib/transcription-model-readiness';
+  recordingWithoutLiveTextMessage,
+  speechModelsApi,
+  speechReadiness,
+  type SpeechReadiness,
+} from '@/lib/speechModels';
 import { markDeferredMeetingForAutoSummary } from '@/lib/autoSummary';
-import Analytics from '@/lib/analytics';
+import { finalPassNotice, finalPassTookOver, finalPassWaitsForModels } from '@/lib/liveTranscriptionModels';
+import { toast } from 'sonner';
 import { showRecordingNotification } from '@/lib/recordingNotification';
 import {
   applyPinnedSummaryLanguageToMeeting,
@@ -143,10 +145,6 @@ interface LifecycleOperation {
 
 class LifecycleBusyError extends Error {}
 
-interface TranscriptConfig {
-  provider?: string;
-}
-
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -176,6 +174,47 @@ export function shouldDiscardShortMeeting(check: ShortMeetingCheck): boolean {
     && Math.max(check.recordingSeconds, check.transcriptSeconds) < check.minimumSeconds
     && !check.hasNotes
     && !check.hasTranscript;
+}
+
+export interface StampResumeTargetOptions {
+  resumeMeetingId: string | null;
+  /** sessionStorage 'indexeddb_current_meeting_id', read before the native start call. */
+  previousRecoveryId: string | null;
+  /** Reads sessionStorage 'indexeddb_current_meeting_id' now. */
+  readRecoveryId: () => string | null;
+  stamp: (recoveryId: string, resumeOfMeetingId: string) => Promise<boolean>;
+  wait: (ms: number) => Promise<void>;
+  attempts?: number;
+  intervalMs?: number;
+}
+
+/**
+ * Stamps the IndexedDB recovery entry created for a resumed session with the
+ * saved meeting id it resumes, so recovering it later appends into that
+ * meeting instead of wiping or duplicating it. TranscriptContext creates the
+ * recovery entry asynchronously after start returns, and sessionStorage may
+ * still hold a stale id from a previous session until it does, so this polls
+ * for a genuinely new id before stamping. Never throws.
+ */
+export async function stampResumeTarget(options: StampResumeTargetOptions): Promise<string | null> {
+  const { resumeMeetingId, previousRecoveryId, readRecoveryId, stamp, wait } = options;
+  if (!resumeMeetingId) return null;
+  const attempts = options.attempts ?? 40;
+  const intervalMs = options.intervalMs ?? 250;
+  try {
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      const id = readRecoveryId();
+      if (id && id !== previousRecoveryId) {
+        if (await stamp(id, resumeMeetingId)) return id;
+      }
+      await wait(intervalMs);
+    }
+  } catch (error) {
+    console.warn('Could not stamp the resume target on the recovery entry:', error);
+    return null;
+  }
+  console.warn('Gave up stamping the resume target on the recovery entry: no recovery entry appeared.');
+  return null;
 }
 
 function meetingTitleNow(): string {
@@ -294,6 +333,9 @@ async function readCompletedTranscripts(sessionId: string): Promise<Transcript[]
 
 const RecordingControllerContext = createContext<RecordingControllerValue | null>(null);
 
+/** Supplies a controller to a subtree that must never drive the recorder (the replay viewer). */
+export const RecordingControllerValueProvider = RecordingControllerContext.Provider;
+
 export function useRecordingController(): RecordingControllerValue {
   const context = useContext(RecordingControllerContext);
   if (!context) {
@@ -314,7 +356,7 @@ export function RecordingControllerProvider({
   feedbackManagedGlobally?: boolean;
 }) {
   const router = useRouter();
-  const { selectedDevices, betaFeatures, selectedLanguage, transcriptModelConfig } = useConfig();
+  const { selectedDevices, betaFeatures } = useConfig();
   const { recording, activeMeetingId: authoritativeMeetingId, snapshot, rehydrate } = useMeetingActivity();
   const recordingState = useRecordingState();
   const {
@@ -426,45 +468,34 @@ export function RecordingControllerProvider({
     setFeedback({ kind, title, message: messageOf(error), settingsSection });
   }, []);
 
-  const checkModelReady = useCallback(async (): Promise<'ready' | 'downloading' | 'missing'> => {
-    const config = await invoke<TranscriptConfig | null>('api_get_transcript_config').catch(() => null);
-    const commands = getProviderCommands(config?.provider || 'parakeet');
-    if (!commands) return 'missing';
-    try {
-      await invoke(commands.initialize);
-      if (await invoke<boolean>(commands.hasAvailableModels)) return 'ready';
-      const models = await invoke<ModelWithStatus[]>(commands.getAvailableModels).catch(() => []);
-      return hasDownloadingModel(models) ? 'downloading' : 'missing';
-    } catch {
-      return 'missing';
-    }
+  // Whether the meeting can be transcribed: live, or afterwards by the
+  // transcript models. Either one is enough to record.
+  const checkModelReady = useCallback(async (): Promise<SpeechReadiness> => {
+    return speechReadiness(await speechModelsApi.status().catch(() => null));
   }, []);
 
-  const persistStartedSession = useCallback(async (session: SessionRecord) => {
+  const persistStartedSession = useCallback(async (session: SessionRecord): Promise<void> => {
+    let meetingId: string;
     try {
-      session.folderPath = await recordingFolderPath();
+      session.folderPath ??= await recordingFolderPath();
       session.recoveryMeetingId ??= sessionStorage.getItem('indexeddb_current_meeting_id');
       sessionsRef.current.set(session.sessionId, session);
       persistSessions(sessionsRef.current);
-      let meetingId = session.resumed ? session.meetingId : null;
-      if (!meetingId) {
+      let existingMeetingId = session.meetingId;
+      if (!existingMeetingId) {
         const created = await storageService.createMeeting(
           session.title,
           session.folderPath,
           cachedDebugMode(),
         );
         if (!created.meeting_id) throw new Error('The meeting row was not created.');
-        meetingId = created.meeting_id;
+        existingMeetingId = created.meeting_id;
       }
+      meetingId = existingMeetingId;
       session.meetingId = meetingId;
       sessionsRef.current.set(session.sessionId, session);
       sessionStorage.setItem(ACTIVE_MEETING_KEY, meetingId);
       persistSessions(sessionsRef.current);
-      await meetingActivityService.bindActiveRecordingMeeting(session.sessionId, meetingId);
-      setCurrentMeeting({ id: meetingId, title: session.title });
-      await refetchMeetings();
-      await flushNotes();
-      router.push(`/meeting-details?id=${encodeURIComponent(meetingId)}`);
     } catch (error) {
       reportError(
         'persistence',
@@ -472,13 +503,40 @@ export function RecordingControllerProvider({
           ? 'Recording resumed, but its meeting could not be prepared'
           : 'Recording started, but its meeting could not be prepared',
         `${messageOf(error)} Recording is still active and can be stopped safely.`,
+        undefined,
+        () => persistStartedSession(session),
       );
+      return;
     }
+
+    // The meeting exists, so open it. Nothing after this point may keep the
+    // user away from the meeting they are recording: a failed bind is
+    // re-attempted on rehydrate, and unsaved notes stay in their local draft.
+    try {
+      await meetingActivityService.bindActiveRecordingMeeting(session.sessionId, meetingId);
+    } catch (error) {
+      console.warn('Could not bind the recording to its meeting yet:', error);
+    }
+    setCurrentMeeting({ id: meetingId, title: session.title });
+    try {
+      await flushNotes();
+    } catch (error) {
+      console.warn('Could not save notes before opening the new meeting:', error);
+    }
+    router.push(`/meeting-details?id=${encodeURIComponent(meetingId)}`);
+    await refetchMeetings().catch((error) => {
+      console.warn('Could not refresh the meetings list:', error);
+    });
   }, [refetchMeetings, reportError, router, setCurrentMeeting]);
 
   const performStart = useCallback(async (options: StartRecordingOptions = {}) => {
     if (recording && ['starting', 'recording', 'paused', 'saving'].includes(recording.status)) {
-      if (recording.meeting_id) await flushNotes().then(() => router.push(`/meeting-details?id=${encodeURIComponent(recording.meeting_id!)}`));
+      if (recording.meeting_id) {
+        await flushNotes().catch((error) => {
+          console.warn('Could not save notes before returning to the recording:', error);
+        });
+        router.push(`/meeting-details?id=${encodeURIComponent(recording.meeting_id)}`);
+      }
       return;
     }
 
@@ -500,14 +558,14 @@ export function RecordingControllerProvider({
     try {
       await invoke('set_live_transcription_enabled', { enabled: liveTranscription });
       if (liveTranscription) {
+        // A missing model never stops a recording: the backend records
+        // without live text and queues the final pass, which runs on its own
+        // once the speech models finish downloading.
         const readiness = await checkModelReady();
         if (readiness !== 'ready') {
-          const error = readiness === 'downloading'
-            ? 'The transcription model is still downloading. Wait for it to finish, then try again.'
-            : 'Download a transcription model before starting live transcription.';
-          reportError('setup', 'Transcription setup required', error, 'transcription');
-          await rejectRequest(error);
-          return;
+          toast.warning('Recording without live text', {
+            description: recordingWithoutLiveTextMessage(readiness),
+          });
         }
       }
 
@@ -517,6 +575,7 @@ export function RecordingControllerProvider({
         : meetingTitleNow();
       setMeetingTitle(title);
       recordingState.setStatus(RecordingStatus.STARTING, 'Initializing recording...');
+      const previousRecoveryId = sessionStorage.getItem('indexeddb_current_meeting_id');
       nativeStartInvoked = true;
       const result = await recordingService.startRecordingWithDevices(
         selectedDevices?.micDevice ?? null,
@@ -537,12 +596,19 @@ export function RecordingControllerProvider({
       latestSessionIdRef.current = result.session_id;
       sessionsRef.current.set(result.session_id, session);
       persistSessions(sessionsRef.current);
+      if (resumeMeetingId) {
+        // Fire-and-forget: the recovery entry may not exist yet, and stamping
+        // must never block or fail the start of a recording.
+        void stampResumeTarget({
+          resumeMeetingId,
+          previousRecoveryId,
+          readRecoveryId: () => sessionStorage.getItem('indexeddb_current_meeting_id'),
+          stamp: (recoveryId, resumeOfMeetingId) => indexedDBService.setResumeOfMeetingId(recoveryId, resumeOfMeetingId),
+          wait: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+        });
+      }
       clearTranscripts();
       setIsMeetingActive(true);
-      Analytics.trackButtonClick(
-        resumeMeetingId ? 'resume_meeting' : 'start_recording',
-        options.source ?? 'recording_controller',
-      );
       await showRecordingNotification().catch((error) => {
         console.warn('Could not show the recording notification:', error);
       });
@@ -596,11 +662,40 @@ export function RecordingControllerProvider({
   }, []);
 
   const startRecording = useCallback((options: StartRecordingOptions = {}): Promise<void> => {
-    if ([...finalizationsRef.current.values()].some((state) => !state.completed)) {
-      return Promise.reject(new LifecycleBusyError('Finish saving the previous meeting before starting another.'));
+    const refuse = (message: string) => {
+      const error = new LifecycleBusyError(message);
+      reportError(
+        'capture',
+        options.resumeMeetingId ? 'Recording could not resume' : 'Recording could not start',
+        error,
+        'recording',
+      );
+      return Promise.reject(error);
+    };
+    const unfinished = [...finalizationsRef.current.entries()].filter(([, state]) => !state.completed);
+    if (unfinished.some(([, state]) => state.promise)) {
+      return refuse('Finish saving the previous meeting before starting another.');
     }
-    return runLifecycle('start', null, () => performStart(options));
-  }, [performStart, runLifecycle]);
+    const active = lifecycleOperationRef.current;
+    if (active && active.kind !== 'start') {
+      return refuse(active.kind === 'finalize'
+        ? 'Finish saving the previous meeting before starting another.'
+        : `Wait for ${active.kind} to finish before starting another meeting.`);
+    }
+    if (unfinished.length === 0) return runLifecycle('start', null, () => performStart(options));
+    // A previous meeting whose saving failed gets one more try, but it never
+    // blocks a new recording: its files and retry stay available either way.
+    return runLifecycle('start', null, async () => {
+      for (const [sessionId] of unfinished) {
+        if (!sessionsRef.current.has(sessionId)) {
+          finalizationsRef.current.delete(sessionId);
+          continue;
+        }
+        await finalizeHandlerRef.current(sessionId, true).catch(() => {});
+      }
+      await performStart(options);
+    });
+  }, [performStart, reportError, runLifecycle]);
   startHandlerRef.current = startRecording;
 
   const resumeMeeting = useCallback((meetingId: string): Promise<void> => (
@@ -767,16 +862,61 @@ export function RecordingControllerProvider({
           return;
         }
 
-        if (!finalization.postProcessingStarted && deferred) {
-          if (!session.folderPath) throw new Error('The recording has no audio folder for deferred transcription.');
-          await invoke('start_retranscription_command', {
+        // The final pass re-transcribes the whole recording with the final
+        // model, replaces the live transcript and rediarizes; its completion
+        // (final-transcript-pass-complete / the task turning ready) drives the
+        // summary. Deferred mode forces it, since it is the only transcription.
+        // Transcription is English-only, so no language is passed.
+        const startFinalPass = async (force: boolean): Promise<unknown> => {
+          if (!session.folderPath) return null;
+          const result = await invoke('start_final_transcript_pass', {
             meetingId: savedMeetingId,
             meetingFolderPath: session.folderPath,
-            language: selectedLanguage === 'auto' || selectedLanguage === 'auto-translate' ? null : selectedLanguage,
-            model: transcriptModelConfig.model || null,
-            provider: transcriptModelConfig.provider || null,
+            language: null,
+            force,
+          }).catch((error) => {
+            console.warn('Final transcript pass could not be queued:', error);
+            return null;
           });
+          const notice = finalPassNotice(result);
+          if (notice) toast.info('Final transcript', { description: notice });
+          return result;
+        };
+        let finalPassQueued = false;
+        if (!finalization.postProcessingStarted && deferred) {
+          if (!session.folderPath) throw new Error('The recording has no audio folder for deferred transcription.');
+          const started = await startFinalPass(true);
+          // A pass waiting for the speech models runs once they download;
+          // retranscribing now would only fail for the same missing model.
+          if (!finalPassTookOver(started) && !finalPassWaitsForModels(started)) {
+            await invoke('start_retranscription_command', {
+              meetingId: savedMeetingId,
+              meetingFolderPath: session.folderPath,
+              language: null,
+              model: null,
+              provider: null,
+            });
+          }
           markDeferredMeetingForAutoSummary(savedMeetingId);
+          finalization.postProcessingStarted = true;
+          checkpointFinalization(session, finalization, sessionsRef.current);
+        } else if (!finalization.postProcessingStarted && finalPassTookOver(await startFinalPass(false))) {
+          finalPassQueued = true;
+          // Enhanced notes built from the live notes do not wait for the
+          // final transcript: finish them now. The final pass does not
+          // rewrite them; Re-enhance uses its transcript. Only meetings
+          // without them wait for the final pass to summarize (otherwise
+          // the summary job would run a second time when it lands).
+          const fromLiveNotes = await invoke<boolean>('has_live_enhanced_notes', {
+            meetingId: savedMeetingId,
+          }).catch(() => false);
+          if (fromLiveNotes) {
+            window.dispatchEvent(new CustomEvent('meetily:meeting-ready-for-summary', {
+              detail: { meetingId: savedMeetingId },
+            }));
+          } else {
+            markDeferredMeetingForAutoSummary(savedMeetingId);
+          }
           finalization.postProcessingStarted = true;
           checkpointFinalization(session, finalization, sessionsRef.current);
         } else if (!finalization.postProcessingStarted) {
@@ -827,27 +967,11 @@ export function RecordingControllerProvider({
           recordingState.setStatus(RecordingStatus.IDLE);
         }
         window.dispatchEvent(new CustomEvent('meetily:recording-finalized', {
-          detail: { meetingId: savedMeetingId, transcribing: deferred },
+          detail: { meetingId: savedMeetingId, transcribing: deferred || finalPassQueued },
         }));
         finalization.completed = true;
         sessionsRef.current.delete(sessionId);
         persistSessions(sessionsRef.current);
-        const durationSeconds = Math.max(session.recordingSeconds ?? transcriptSeconds, transcriptSeconds);
-        const wordCount = freshTranscripts.reduce(
-          (count, transcript) => count + transcript.text.split(/\s+/).filter(Boolean).length,
-          0,
-        );
-        void (async () => {
-          const meetingsToday = await Analytics.getMeetingsCountToday();
-          await Analytics.trackMeetingCompleted(savedMeetingId, {
-            duration_seconds: durationSeconds,
-            transcript_segments: freshTranscripts.length,
-            transcript_word_count: wordCount,
-            words_per_minute: durationSeconds > 0 ? wordCount / (durationSeconds / 60) : 0,
-            meetings_today: meetingsToday,
-          });
-          await Analytics.updateMeetingCount();
-        })().catch((error) => console.warn('Could not record meeting completion analytics:', error));
       } catch (error) {
         recordingState.setStatus(RecordingStatus.ERROR, messageOf(error));
         reportError(
@@ -872,11 +996,8 @@ export function RecordingControllerProvider({
     recordingState,
     refetchMeetings,
     reportError,
-    selectedLanguage,
     setCurrentMeeting,
     setIsMeetingActive,
-    transcriptModelConfig.model,
-    transcriptModelConfig.provider,
     runLifecycle,
   ]);
   finalizeHandlerRef.current = finalizeRecording;
@@ -1017,19 +1138,23 @@ export function RecordingControllerProvider({
   ), [performResume, recording?.session_id, runLifecycle]);
 
   const returnToRecording = useCallback(async () => {
-    const meetingId = authoritativeMeetingId;
+    // Until the native session is bound, the meeting this controller created
+    // for it is still the right place to go.
+    const latestSessionId = recording?.session_id ?? latestSessionIdRef.current;
+    const meetingId = authoritativeMeetingId
+      ?? (latestSessionId ? sessionsRef.current.get(latestSessionId)?.meetingId : null)
+      ?? null;
     if (!meetingId) {
       reportError('persistence', 'Recording workspace unavailable', 'The recording is active, but its meeting row has not been created yet.');
       return;
     }
     try {
       await flushNotes();
-      router.push(`/meeting-details?id=${encodeURIComponent(meetingId)}`);
     } catch (error) {
-      reportError('persistence', 'Notes could not be saved before navigation', error);
-      throw error;
+      console.warn('Could not save notes before returning to the recording:', error);
     }
-  }, [authoritativeMeetingId, reportError, router]);
+    router.push(`/meeting-details?id=${encodeURIComponent(meetingId)}`);
+  }, [authoritativeMeetingId, recording?.session_id, reportError, router]);
 
   requestHandlerRef.current = (request) => {
     if (handledRequestsRef.current.has(request.request_id)) return;
@@ -1063,7 +1188,6 @@ export function RecordingControllerProvider({
     let unlistenStopped: UnlistenFn | undefined;
     let unlistenTrayStop: UnlistenFn | undefined;
     let unlistenTranscriptionError: UnlistenFn | undefined;
-    let unlistenChunkWarning: UnlistenFn | undefined;
 
     const retain = async (registration: Promise<UnlistenFn>, assign: (unlisten: UnlistenFn) => void) => {
       try {
@@ -1134,12 +1258,6 @@ export function RecordingControllerProvider({
       }),
       (unlisten) => { unlistenTranscriptionError = unlisten; },
     );
-    void retain(
-      recordingService.onChunkDropWarning((warning) => {
-        setFeedback({ kind: 'warning', title: 'Some audio could not be processed', message: warning });
-      }),
-      (unlisten) => { unlistenChunkWarning = unlisten; },
-    );
 
     return () => {
       disposed = true;
@@ -1147,7 +1265,6 @@ export function RecordingControllerProvider({
       unlistenStopped?.();
       unlistenTrayStop?.();
       unlistenTranscriptionError?.();
-      unlistenChunkWarning?.();
     };
   }, [rehydrate, reportError, runLifecycle]);
 

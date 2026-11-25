@@ -5,7 +5,6 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
-import { usePlatform } from '@/hooks/usePlatform';
 
 /**
  * The floating "meeting detected" prompt is shown from Rust (so it works while
@@ -13,7 +12,6 @@ import { usePlatform } from '@/hooks/usePlatform';
  * hides the prompt when it is no longer relevant.
  */
 export function MeetingDetectedPrompt({ enabled = true }: { enabled?: boolean }) {
-  const platform = usePlatform();
   const { isRecording } = useRecordingState();
 
   const hidePrompt = useCallback(async () => {
@@ -36,7 +34,7 @@ export function MeetingDetectedPrompt({ enabled = true }: { enabled?: boolean })
   }, [hidePrompt]);
 
   useEffect(() => {
-    if (!enabled || platform !== 'macos') return;
+    if (!enabled) return;
 
     let disposed = false;
     const unlisteners: UnlistenFn[] = [];
@@ -69,7 +67,7 @@ export function MeetingDetectedPrompt({ enabled = true }: { enabled?: boolean })
       unlisteners.forEach((unlisten) => unlisten());
       void hidePrompt();
     };
-  }, [enabled, hidePrompt, platform]);
+  }, [enabled, hidePrompt]);
 
   return null;
 }

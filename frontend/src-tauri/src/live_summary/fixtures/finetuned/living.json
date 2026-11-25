@@ -1,0 +1,736 @@
+{
+ "structure": [
+  {
+   "event": {
+    "type": "user_add",
+    "id": "u1",
+    "ms": 5000,
+    "t": "00:05",
+    "text": "before any topic"
+   },
+   "changed": false,
+   "maxid": 0,
+   "notes": []
+  },
+  {
+   "topic": "Remote control design",
+   "maxid": 0,
+   "notes": []
+  },
+  {
+   "event": {
+    "type": "user_add",
+    "id": "u1",
+    "ms": 6000,
+    "t": "00:06",
+    "text": "price 25 eur?"
+   },
+   "changed": true,
+   "maxid": 0,
+   "notes": [
+    "u1 [you] price 25 eur?"
+   ]
+  },
+  {
+   "output": "+p 00:10|Remote must be original, trendy and user-friendly\n>1 p 00:12|Three design stages: functional, conceptual, detailed\n>1 p 00:14|Each stage ends with a meeting",
+   "results": [
+    {
+     "op": {
+      "op": "add",
+      "id": 1,
+      "start": "00:10",
+      "end": "00:10",
+      "kind": "point",
+      "owner": null,
+      "text": "Remote must be original, trendy and user-friendly"
+     },
+     "reasons": []
+    },
+    {
+     "op": {
+      "op": "child",
+      "parent": 1,
+      "id": 2,
+      "start": "00:12",
+      "end": "00:12",
+      "kind": "point",
+      "owner": null,
+      "text": "Three design stages: functional, conceptual, detailed"
+     },
+     "reasons": []
+    },
+    {
+     "op": {
+      "op": "child",
+      "parent": 1,
+      "id": 3,
+      "start": "00:14",
+      "end": "00:14",
+      "kind": "point",
+      "owner": null,
+      "text": "Each stage ends with a meeting"
+     },
+     "reasons": []
+    }
+   ],
+   "maxid": 3,
+   "notes": [
+    "u1 [you] price 25 eur?",
+    "1 [ai] Remote must be original, trendy and user-friendly",
+    "  2 [ai] Three design stages: functional, conceptual, detailed",
+    "  3 [ai] Each stage ends with a meeting"
+   ]
+  },
+  {
+   "output": ">1 p 00:20|Fourth detail pushes past the child limit\n>2 p 00:22|Child of a child becomes its own note\n>u1 p 00:25|Selling price target is 25 euros per unit",
+   "results": [
+    {
+     "op": {
+      "op": "child",
+      "parent": 1,
+      "id": 4,
+      "start": "00:20",
+      "end": "00:20",
+      "kind": "point",
+      "owner": null,
+      "text": "Fourth detail pushes past the child limit"
+     },
+     "reasons": []
+    },
+    {
+     "op": {
+      "op": "child",
+      "parent": 2,
+      "id": 5,
+      "start": "00:22",
+      "end": "00:22",
+      "kind": "point",
+      "owner": null,
+      "text": "Child of a child becomes its own note"
+     },
+     "repaired_from": [
+      "nested_child:2_is_a_child"
+     ],
+     "reasons": []
+    },
+    {
+     "op": {
+      "op": "child",
+      "parent": "u1",
+      "id": 6,
+      "start": "00:25",
+      "end": "00:25",
+      "kind": "point",
+      "owner": null,
+      "text": "Selling price target is 25 euros per unit"
+     },
+     "reasons": []
+    }
+   ],
+   "maxid": 6,
+   "notes": [
+    "u1 [you] price 25 eur?",
+    "  6 [ai] Selling price target is 25 euros per unit",
+    "1 [ai] Remote must be original, trendy and user-friendly",
+    "  2 [ai] Three design stages: functional, conceptual, detailed",
+    "  3 [ai] Each stage ends with a meeting",
+    "  4 [ai] Fourth detail pushes past the child limit",
+    "5 [ai] Child of a child becomes its own note"
+   ]
+  },
+  {
+   "output": ">u9 p 00:30|Parent unknown gets repaired to a new note\n>1 a 00:31 Craig|Craig sends the drawings by Friday\n>1 p 00:32|Andrew to prepare the market research",
+   "results": [
+    {
+     "op": {
+      "op": "child",
+      "parent": "u9",
+      "id": 7,
+      "start": "00:30",
+      "end": "00:30",
+      "kind": "point",
+      "owner": null,
+      "text": "Parent unknown gets repaired to a new note"
+     },
+     "repaired_from": [
+      "parent_unknown:u9"
+     ],
+     "reasons": []
+    },
+    {
+     "op": {
+      "op": "child",
+      "parent": 1,
+      "id": 8,
+      "start": "00:31",
+      "end": "00:31",
+      "kind": "action",
+      "owner": "Craig",
+      "text": "Craig sends the drawings by Friday"
+     },
+     "reasons": [
+      "too_many_children:1_has_3_start_a_new_note_or_merge",
+      "action_must_be_top_level"
+     ]
+    },
+    {
+     "op": {
+      "op": "child",
+      "parent": 1,
+      "id": 9,
+      "start": "00:32",
+      "end": "00:32",
+      "kind": "point",
+      "owner": null,
+      "text": "Andrew to prepare the market research"
+     },
+     "reasons": [
+      "too_many_children:1_has_3_start_a_new_note_or_merge",
+      "assignment_as_child_use_action_op"
+     ]
+    }
+   ],
+   "maxid": 7,
+   "notes": [
+    "u1 [you] price 25 eur?",
+    "  6 [ai] Selling price target is 25 euros per unit",
+    "1 [ai] Remote must be original, trendy and user-friendly",
+    "  2 [ai] Three design stages: functional, conceptual, detailed",
+    "  3 [ai] Each stage ends with a meeting",
+    "  4 [ai] Fourth detail pushes past the child limit",
+    "5 [ai] Child of a child becomes its own note",
+    "7 [ai] Parent unknown gets repaired to a new note"
+   ]
+  },
+  {
+   "output": "~1|Remote: original, trendy, user-friendly; three stages\n~u1|cannot edit the user's note\n~99|unknown target\n-3",
+   "results": [
+    {
+     "op": {
+      "op": "edit",
+      "id": 1,
+      "text": "Remote: original, trendy, user-friendly; three stages"
+     },
+     "reasons": []
+    },
+    {
+     "op": {
+      "op": "edit",
+      "id": "u1",
+      "text": "cannot edit the user's note"
+     },
+     "reasons": [
+      "edit_of_user_note:u1_notes_marked_you_are_read_only"
+     ]
+    },
+    {
+     "op": {
+      "op": "edit",
+      "id": 99,
+      "text": "unknown target"
+     },
+     "reasons": [
+      "target_unknown:99"
+     ]
+    },
+    {
+     "op": {
+      "op": "drop",
+      "id": 3
+     },
+     "reasons": []
+    }
+   ],
+   "maxid": 7,
+   "notes": [
+    "u1 [you] price 25 eur?",
+    "  6 [ai] Selling price target is 25 euros per unit",
+    "1 [ai] Remote: original, trendy, user-friendly; three stages",
+    "  2 [ai] Three design stages: functional, conceptual, detailed",
+    "  4 [ai] Fourth detail pushes past the child limit",
+    "5 [ai] Child of a child becomes its own note",
+    "7 [ai] Parent unknown gets repaired to a new note"
+   ]
+  },
+  {
+   "output": "~1|Remote: original, trendy, user-friendly; three stages",
+   "results": [
+    {
+     "op": {
+      "op": "edit",
+      "id": 1,
+      "text": "Remote: original, trendy, user-friendly; three stages"
+     },
+     "reasons": [
+      "edit_changes_nothing"
+     ]
+    }
+   ],
+   "maxid": 7,
+   "notes": [
+    "u1 [you] price 25 eur?",
+    "  6 [ai] Selling price target is 25 euros per unit",
+    "1 [ai] Remote: original, trendy, user-friendly; three stages",
+    "  2 [ai] Three design stages: functional, conceptual, detailed",
+    "  4 [ai] Fourth detail pushes past the child limit",
+    "5 [ai] Child of a child becomes its own note",
+    "7 [ai] Parent unknown gets repaired to a new note"
+   ]
+  },
+  {
+   "output": "~1 k=a o=Craig|Craig writes the functional spec\n~1 k=p|Remote: original and trendy",
+   "results": [
+    {
+     "op": {
+      "op": "edit",
+      "id": 1,
+      "text": "Craig writes the functional spec",
+      "kind": "action",
+      "owner": "Craig"
+     },
+     "reasons": []
+    },
+    {
+     "op": {
+      "op": "edit",
+      "id": 1,
+      "text": "Remote: original and trendy",
+      "kind": "point"
+     },
+     "reasons": []
+    }
+   ],
+   "maxid": 7,
+   "notes": [
+    "u1 [you] price 25 eur?",
+    "  6 [ai] Selling price target is 25 euros per unit",
+    "1 [ai] Remote: original and trendy",
+    "  2 [ai] Three design stages: functional, conceptual, detailed",
+    "  4 [ai] Fourth detail pushes past the child limit",
+    "5 [ai] Child of a child becomes its own note",
+    "7 [ai] Parent unknown gets repaired to a new note"
+   ]
+  },
+  {
+   "event": {
+    "type": "user_edit",
+    "id": 4,
+    "ms": 40000,
+    "t": "00:40",
+    "text": "fourth detail, my words"
+   },
+   "changed": true,
+   "maxid": 7,
+   "notes": [
+    "u1 [you] price 25 eur?",
+    "  6 [ai] Selling price target is 25 euros per unit",
+    "1 [ai] Remote: original and trendy",
+    "  2 [ai] Three design stages: functional, conceptual, detailed",
+    "  4 [you] (you edited an ai note: now theirs) fourth detail, my words",
+    "5 [ai] Child of a child becomes its own note",
+    "7 [ai] Parent unknown gets repaired to a new note"
+   ]
+  },
+  {
+   "output": "~4|the AI cannot take it back\n-4",
+   "results": [
+    {
+     "op": {
+      "op": "edit",
+      "id": 4,
+      "text": "the AI cannot take it back"
+     },
+     "reasons": [
+      "edit_of_user_note:4_notes_marked_you_are_read_only"
+     ]
+    },
+    {
+     "op": {
+      "op": "drop",
+      "id": 4
+     },
+     "reasons": [
+      "drop_of_user_note:4_notes_marked_you_are_read_only"
+     ]
+    }
+   ],
+   "maxid": 7,
+   "notes": [
+    "u1 [you] price 25 eur?",
+    "  6 [ai] Selling price target is 25 euros per unit",
+    "1 [ai] Remote: original and trendy",
+    "  2 [ai] Three design stages: functional, conceptual, detailed",
+    "  4 [you] (you edited an ai note: now theirs) fourth detail, my words",
+    "5 [ai] Child of a child becomes its own note",
+    "7 [ai] Parent unknown gets repaired to a new note"
+   ]
+  },
+  {
+   "event": {
+    "type": "user_delete",
+    "id": 1,
+    "ms": 41000,
+    "t": "00:41"
+   },
+   "changed": true,
+   "maxid": 7,
+   "notes": [
+    "u1 [you] price 25 eur?",
+    "  6 [ai] Selling price target is 25 euros per unit",
+    "5 [ai] Child of a child becomes its own note",
+    "7 [ai] Parent unknown gets repaired to a new note"
+   ]
+  },
+  {
+   "output": ">1 p 00:45|Parent dropped: rejected, not repaired\n+p 00:46|Remote needs a lighter battery compartment",
+   "results": [
+    {
+     "op": {
+      "op": "child",
+      "parent": 1,
+      "id": 8,
+      "start": "00:45",
+      "end": "00:45",
+      "kind": "point",
+      "owner": null,
+      "text": "Parent dropped: rejected, not repaired"
+     },
+     "reasons": [
+      "parent_dropped:1"
+     ]
+    },
+    {
+     "op": {
+      "op": "add",
+      "id": 9,
+      "start": "00:46",
+      "end": "00:46",
+      "kind": "point",
+      "owner": null,
+      "text": "Remote needs a lighter battery compartment"
+     },
+     "reasons": []
+    }
+   ],
+   "maxid": 9,
+   "notes": [
+    "u1 [you] price 25 eur?",
+    "  6 [ai] Selling price target is 25 euros per unit",
+    "5 [ai] Child of a child becomes its own note",
+    "7 [ai] Parent unknown gets repaired to a new note",
+    "9 [ai] Remote needs a lighter battery compartment"
+   ]
+  },
+  {
+   "topic": "Budget",
+   "maxid": 9,
+   "notes": []
+  },
+  {
+   "output": ">5 p 01:50|Parent in a closed topic becomes a note\n~5|closed topic edit\n-5",
+   "results": [
+    {
+     "op": {
+      "op": "child",
+      "parent": 5,
+      "id": 10,
+      "start": "01:50",
+      "end": "01:50",
+      "kind": "point",
+      "owner": null,
+      "text": "Parent in a closed topic becomes a note"
+     },
+     "repaired_from": [
+      "parent_in_closed_topic:5"
+     ],
+     "reasons": []
+    },
+    {
+     "op": {
+      "op": "edit",
+      "id": 5,
+      "text": "closed topic edit"
+     },
+     "reasons": [
+      "target_in_closed_topic:5"
+     ]
+    },
+    {
+     "op": {
+      "op": "drop",
+      "id": 5
+     },
+     "reasons": [
+      "target_in_closed_topic:5"
+     ]
+    }
+   ],
+   "maxid": 10,
+   "notes": [
+    "10 [ai] Parent in a closed topic becomes a note"
+   ]
+  },
+  {
+   "event": {
+    "type": "user_delete",
+    "id": 5,
+    "ms": 120000,
+    "t": "02:00"
+   },
+   "changed": false,
+   "maxid": 10,
+   "notes": [
+    "10 [ai] Parent in a closed topic becomes a note"
+   ]
+  },
+  {
+   "event": {
+    "type": "user_add",
+    "id": "u2",
+    "ms": 121000,
+    "t": "02:01",
+    "text": "budget"
+   },
+   "changed": true,
+   "maxid": 10,
+   "notes": [
+    "10 [ai] Parent in a closed topic becomes a note",
+    "u2 [you] budget"
+   ]
+  }
+ ],
+ "duplicates": [
+  {
+   "topic": "Pricing",
+   "maxid": 0,
+   "notes": []
+  },
+  {
+   "event": {
+    "type": "user_add",
+    "id": "u1",
+    "ms": 6000,
+    "t": "00:06",
+    "text": "price 25 eur, mid range"
+   },
+   "changed": true,
+   "maxid": 0,
+   "notes": [
+    "u1 [you] price 25 eur, mid range"
+   ]
+  },
+  {
+   "output": "+p 00:10|Price 25 euros, mid-range market",
+   "results": [
+    {
+     "op": {
+      "op": "add",
+      "id": 1,
+      "start": "00:10",
+      "end": "00:10",
+      "kind": "point",
+      "owner": null,
+      "text": "Price 25 euros, mid-range market"
+     },
+     "duplicate": [
+      "duplicates_user_note:u1"
+     ]
+    }
+   ],
+   "maxid": 0,
+   "notes": [
+    "u1 [you] price 25 eur, mid range"
+   ]
+  },
+  {
+   "output": "+p 00:12|Target buyers are 25 to 35 years old\n+p 00:14|Target buyers aged 25 to 35 years",
+   "results": [
+    {
+     "op": {
+      "op": "add",
+      "id": 1,
+      "start": "00:12",
+      "end": "00:12",
+      "kind": "point",
+      "owner": null,
+      "text": "Target buyers are 25 to 35 years old"
+     },
+     "reasons": []
+    },
+    {
+     "op": {
+      "op": "add",
+      "id": 2,
+      "start": "00:14",
+      "end": "00:14",
+      "kind": "point",
+      "owner": null,
+      "text": "Target buyers aged 25 to 35 years"
+     },
+     "duplicate": [
+      "near_duplicate_add_of:1_edit_it_instead"
+     ]
+    }
+   ],
+   "maxid": 1,
+   "notes": [
+    "u1 [you] price 25 eur, mid range",
+    "1 [ai] Target buyers are 25 to 35 years old"
+   ]
+  },
+  {
+   "output": "+p 00:16|Production cost limit set at 12.50 euros\n+p 00:18|Production cost limit 12.50 euros per unit",
+   "results": [
+    {
+     "op": {
+      "op": "add",
+      "id": 2,
+      "start": "00:16",
+      "end": "00:16",
+      "kind": "point",
+      "owner": null,
+      "text": "Production cost limit set at 12.50 euros"
+     },
+     "reasons": []
+    },
+    {
+     "op": {
+      "op": "add",
+      "id": 3,
+      "start": "00:18",
+      "end": "00:18",
+      "kind": "point",
+      "owner": null,
+      "text": "Production cost limit 12.50 euros per unit"
+     },
+     "duplicate": [
+      "near_duplicate_add_of:2_edit_it_instead"
+     ]
+    }
+   ],
+   "maxid": 2,
+   "notes": [
+    "u1 [you] price 25 eur, mid range",
+    "1 [ai] Target buyers are 25 to 35 years old",
+    "2 [ai] Production cost limit set at 12.50 euros"
+   ]
+  },
+  {
+   "output": "+p 00:20|Production cost limit set at 14 euros instead",
+   "results": [
+    {
+     "op": {
+      "op": "add",
+      "id": 3,
+      "start": "00:20",
+      "end": "00:20",
+      "kind": "point",
+      "owner": null,
+      "text": "Production cost limit set at 14 euros instead"
+     },
+     "duplicate": [
+      "near_duplicate_add_of:2_edit_it_instead"
+     ]
+    }
+   ],
+   "maxid": 2,
+   "notes": [
+    "u1 [you] price 25 eur, mid range",
+    "1 [ai] Target buyers are 25 to 35 years old",
+    "2 [ai] Production cost limit set at 12.50 euros"
+   ]
+  },
+  {
+   "output": ">u1 p 00:22|Price is 25 euros in the mid-range market",
+   "results": [
+    {
+     "op": {
+      "op": "child",
+      "parent": "u1",
+      "id": 3,
+      "start": "00:22",
+      "end": "00:22",
+      "kind": "point",
+      "owner": null,
+      "text": "Price is 25 euros in the mid-range market"
+     },
+     "reasons": []
+    }
+   ],
+   "maxid": 3,
+   "notes": [
+    "u1 [you] price 25 eur, mid range",
+    "  3 [ai] Price is 25 euros in the mid-range market",
+    "1 [ai] Target buyers are 25 to 35 years old",
+    "2 [ai] Production cost limit set at 12.50 euros"
+   ]
+  },
+  {
+   "output": "~2|Buyers 25-35; price 25 euros mid range",
+   "results": [
+    {
+     "op": {
+      "op": "edit",
+      "id": 2,
+      "text": "Buyers 25-35; price 25 euros mid range"
+     },
+     "duplicate": [
+      "duplicates_user_note:u1"
+     ]
+    }
+   ],
+   "maxid": 3,
+   "notes": [
+    "u1 [you] price 25 eur, mid range",
+    "  3 [ai] Price is 25 euros in the mid-range market",
+    "1 [ai] Target buyers are 25 to 35 years old",
+    "2 [ai] Production cost limit set at 12.50 euros"
+   ]
+  },
+  {
+   "output": "~2|Target buyers are 25 to 35, mostly urban",
+   "results": [
+    {
+     "op": {
+      "op": "edit",
+      "id": 2,
+      "text": "Target buyers are 25 to 35, mostly urban"
+     },
+     "reasons": []
+    }
+   ],
+   "maxid": 3,
+   "notes": [
+    "u1 [you] price 25 eur, mid range",
+    "  3 [ai] Price is 25 euros in the mid-range market",
+    "1 [ai] Target buyers are 25 to 35 years old",
+    "2 [ai] Target buyers are 25 to 35, mostly urban"
+   ]
+  },
+  {
+   "output": "+p 00:30|Marketing budget covers two TV adverts",
+   "results": [
+    {
+     "op": {
+      "op": "add",
+      "id": 4,
+      "start": "00:30",
+      "end": "00:30",
+      "kind": "point",
+      "owner": null,
+      "text": "Marketing budget covers two TV adverts"
+     },
+     "reasons": []
+    }
+   ],
+   "maxid": 4,
+   "notes": [
+    "u1 [you] price 25 eur, mid range",
+    "  3 [ai] Price is 25 euros in the mid-range market",
+    "1 [ai] Target buyers are 25 to 35 years old",
+    "2 [ai] Target buyers are 25 to 35, mostly urban",
+    "4 [ai] Marketing budget covers two TV adverts"
+   ]
+  }
+ ]
+}

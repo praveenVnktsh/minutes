@@ -1,0 +1,446 @@
+use super::*;
+
+#[test]
+fn context_budget_accepts_prompt_that_fits_with_output() {
+    assert!(check_context_budget(1000, 3000, 4096).is_ok());
+    assert!(check_context_budget(1096, 3000, 4096).is_ok());
+}
+
+#[test]
+fn context_budget_rejects_prompt_plus_output_over_window() {
+    let error = check_context_budget(1097, 3000, 4096).unwrap_err();
+    assert!(matches!(
+        error,
+        GenerateError::ContextOverflow {
+            prompt_tokens: 1097,
+            max_tokens: 3000,
+            context_size: 4096
+        }
+    ));
+    assert!(error.to_string().contains("context overflow"));
+}
+
+#[test]
+fn context_budget_rejects_empty_prompt_as_other_error() {
+    assert!(matches!(
+        check_context_budget(0, 10, 4096),
+        Err(GenerateError::Other(_))
+    ));
+}
+
+#[test]
+fn overflow_response_carries_machine_readable_kind() {
+    let response = Response::from_generation(
+        Err(GenerateError::ContextOverflow {
+            prompt_tokens: 5000,
+            max_tokens: 4096,
+            context_size: 8192,
+        }),
+        None,
+    );
+    let json = serde_json::to_value(&response).unwrap();
+    assert_eq!(json["type"], "response");
+    assert_eq!(json["error_kind"], "context_overflow");
+    assert!(json["error"].as_str().unwrap().contains("context overflow"));
+    assert!(json.get("id").is_none());
+}
+
+fn output(finish_reason: FinishReason) -> GenerationOutput {
+    GenerationOutput {
+        text: "partial".to_string(),
+        finish_reason,
+        prompt_tokens: 12,
+        completion_tokens: 34,
+        reused_tokens: None,
+        first_token_ms: Some(80),
+        tokens_per_second: 25.0,
+        gate_prob: None,
+    }
+}
+
+#[test]
+fn success_response_reports_finish_reason_and_token_counts() {
+    let response = Response::from_generation(Ok(output(FinishReason::Length)), None);
+    let json = serde_json::to_value(&response).unwrap();
+    assert_eq!(json["finish_reason"], "length");
+    assert_eq!(json["prompt_tokens"], 12);
+    assert_eq!(json["completion_tokens"], 34);
+    assert!(json["error"].is_null());
+    assert!(json.get("error_kind").is_none());
+    assert!(
+        json.get("id").is_none(),
+        "old callers see no new fields they did not ask for"
+    );
+    assert!(json.get("reused_tokens").is_none());
+    assert!(json.get("gate_prob").is_none());
+}
+
+#[test]
+fn a_cancelled_request_still_gets_its_one_final_reply_with_its_id() {
+    let mut cancelled = output(FinishReason::Cancelled);
+    cancelled.reused_tokens = Some(900);
+    let json = serde_json::to_value(Response::from_generation(Ok(cancelled), Some(7))).unwrap();
+    assert_eq!(json["type"], "response");
+    assert_eq!(json["finish_reason"], "cancelled");
+    assert_eq!(json["id"], 7);
+    assert_eq!(json["reused_tokens"], 900);
+    assert_eq!(json["first_token_ms"], 80);
+}
+
+#[test]
+fn token_lines_carry_the_request_id() {
+    let json = serde_json::to_string(&Response::Token {
+        id: Some(3),
+        text: "Hi".into(),
+    })
+    .unwrap();
+    assert_eq!(json, r#"{"type":"token","id":3,"text":"Hi"}"#);
+}
+
+#[test]
+fn streaming_and_cache_fields_are_optional_and_parsed() {
+    let plain: Request = serde_json::from_str(r#"{"type":"generate","prompt":"p"}"#).unwrap();
+    let Request::Generate {
+        id,
+        stream,
+        cache_prompt,
+        cache_prefix_chars,
+        cache_context_size,
+        ..
+    } = plain
+    else {
+        panic!("expected generate request");
+    };
+    assert_eq!(
+        (
+            id,
+            stream,
+            cache_prompt,
+            cache_prefix_chars,
+            cache_context_size
+        ),
+        (None, None, None, None, None)
+    );
+
+    let cached: Request = serde_json::from_str(
+        r#"{"type":"generate","prompt":"p","id":9,"stream":true,"cache_prompt":true,"cache_prefix_chars":120,"cache_context_size":8192}"#,
+    )
+    .unwrap();
+    let Request::Generate {
+        id,
+        stream,
+        cache_prompt,
+        cache_prefix_chars,
+        cache_context_size,
+        ..
+    } = cached
+    else {
+        panic!("expected generate request");
+    };
+    assert_eq!(
+        (
+            id,
+            stream,
+            cache_prompt,
+            cache_prefix_chars,
+            cache_context_size
+        ),
+        (Some(9), Some(true), Some(true), Some(120), Some(8192))
+    );
+}
+
+#[test]
+fn cancel_requests_parse() {
+    let request: Request = serde_json::from_str(r#"{"type":"cancel","id":4}"#).unwrap();
+    assert!(matches!(request, Request::Cancel { id: 4 }));
+}
+
+#[test]
+fn prefix_boundary_never_splits_a_character() {
+    assert_eq!(floor_char_boundary("héllo", 2), 1);
+    assert_eq!(floor_char_boundary("héllo", 3), 3);
+    assert_eq!(floor_char_boundary("abc", 99), 3);
+}
+
+#[test]
+fn generate_request_seed_is_optional_and_parsed() {
+    let without: Request = serde_json::from_str(r#"{"type":"generate","prompt":"p"}"#).unwrap();
+    let Request::Generate { seed, .. } = without else {
+        panic!("expected generate request");
+    };
+    assert_eq!(seed, None);
+
+    let with: Request =
+        serde_json::from_str(r#"{"type":"generate","prompt":"p","seed":7}"#).unwrap();
+    let Request::Generate { seed, .. } = with else {
+        panic!("expected generate request");
+    };
+    assert_eq!(seed, Some(7));
+    assert_eq!(DEFAULT_SEED, 42);
+}
+
+#[test]
+fn tokenize_request_and_token_count_response_round_trip() {
+    let request: Request =
+        serde_json::from_str(r#"{"type":"tokenize","text":"hello","context_size":4096}"#).unwrap();
+    assert!(matches!(
+        request,
+        Request::Tokenize { ref text, context_size: Some(4096), model_path: None } if text == "hello"
+    ));
+    let json = serde_json::to_string(&Response::TokenCount { count: 3 }).unwrap();
+    assert_eq!(json, r#"{"type":"token_count","count":3}"#);
+}
+
+#[test]
+fn generate_request_defaults_penalties_when_omitted() {
+    let json =
+        r#"{"type":"generate","prompt":"summarize","temperature":0.5,"top_k":20,"top_p":0.8}"#;
+    let request: Request = serde_json::from_str(json).unwrap();
+    let Request::Generate {
+        temperature,
+        top_k,
+        top_p,
+        presence_penalty,
+        frequency_penalty,
+        repeat_penalty,
+        penalty_last_n,
+        ..
+    } = request
+    else {
+        panic!("expected generate request");
+    };
+
+    let sampling = SamplingConfig::from_request(
+        temperature,
+        top_k,
+        top_p,
+        presence_penalty,
+        frequency_penalty,
+        repeat_penalty,
+        penalty_last_n,
+    );
+
+    assert_eq!(sampling.presence_penalty, 0.0);
+    assert_eq!(sampling.frequency_penalty, 0.0);
+    assert_eq!(sampling.repeat_penalty, 1.0);
+    assert_eq!(sampling.penalty_last_n, 0);
+    assert!(!sampling.uses_penalties());
+}
+
+#[test]
+fn generate_request_deserializes_qwen_penalties() {
+    let json = r#"{"type":"generate","prompt":"summarize","temperature":0.5,"top_k":20,"top_p":0.8,"presence_penalty":0.3,"frequency_penalty":0.0,"repeat_penalty":1.05,"penalty_last_n":256}"#;
+    let request: Request = serde_json::from_str(json).unwrap();
+    let Request::Generate {
+        temperature,
+        top_k,
+        top_p,
+        presence_penalty,
+        frequency_penalty,
+        repeat_penalty,
+        penalty_last_n,
+        ..
+    } = request
+    else {
+        panic!("expected generate request");
+    };
+
+    let sampling = SamplingConfig::from_request(
+        temperature,
+        top_k,
+        top_p,
+        presence_penalty,
+        frequency_penalty,
+        repeat_penalty,
+        penalty_last_n,
+    );
+
+    assert_eq!(sampling.temperature, 0.5);
+    assert_eq!(sampling.top_k, 20);
+    assert_eq!(sampling.top_p, 0.8);
+    assert_eq!(sampling.presence_penalty, 0.3);
+    assert_eq!(sampling.frequency_penalty, 0.0);
+    assert_eq!(sampling.repeat_penalty, 1.05);
+    assert_eq!(sampling.penalty_last_n, 256);
+    assert!(sampling.uses_penalties());
+}
+
+#[test]
+fn thread_count_can_be_lowered_per_request() {
+    let request: Request =
+        serde_json::from_str(r#"{"type":"generate","prompt":"p","n_threads":2}"#).unwrap();
+    let Request::Generate { n_threads, .. } = request else {
+        panic!("expected generate request");
+    };
+    assert_eq!(n_threads, Some(2));
+}
+
+#[test]
+fn small_machines_keep_one_checkpoint_and_a_smaller_cached_context() {
+    assert_eq!(cache_limits(Some(8 * 1024 * 1024 * 1024)), (1, Some(4096)));
+    assert_eq!(
+        cache_limits(Some(16 * 1024 * 1024 * 1024)),
+        (MAX_CHECKPOINTS, None)
+    );
+    assert_eq!(cache_limits(None), (MAX_CHECKPOINTS, None));
+}
+
+#[test]
+fn context_options_and_grammar_parse_from_a_request() {
+    let request: Request = serde_json::from_str(
+        r#"{"type":"generate","prompt":"p","flash_attn":true,"kv_cache_type":"q8_0","n_ubatch":1024,"grammar":"root ::= \"none\""}"#,
+    )
+    .unwrap();
+    let Request::Generate {
+        flash_attn,
+        kv_cache_type,
+        n_ubatch,
+        grammar,
+        ..
+    } = request
+    else {
+        panic!("expected generate request");
+    };
+    assert_eq!(flash_attn, Some(true));
+    assert_eq!(
+        kv_cache_type.as_deref().and_then(KvType::parse),
+        Some(KvType::Q8_0)
+    );
+    assert_eq!(n_ubatch, Some(1024));
+    assert_eq!(grammar.as_deref(), Some("root ::= \"none\""));
+    // Older apps send none of them: llama.cpp's defaults.
+    let request: Request = serde_json::from_str(r#"{"type":"generate","prompt":"p"}"#).unwrap();
+    let Request::Generate {
+        flash_attn,
+        kv_cache_type,
+        grammar,
+        ..
+    } = request
+    else {
+        panic!("expected generate request");
+    };
+    assert_eq!((flash_attn, kv_cache_type, grammar), (None, None, None));
+}
+
+#[test]
+fn the_line_limit_counts_complete_lines_with_text() {
+    assert_eq!(complete_lines(""), 0);
+    assert_eq!(complete_lines("topic: same"), 0);
+    assert_eq!(complete_lines("topic: same\n"), 1);
+    assert_eq!(complete_lines("topic: same\n\n04:12|point|-|Budget"), 1);
+    assert_eq!(complete_lines("topic: same\n\n04:12|point|-|Budget\n"), 2);
+    let request: Request =
+        serde_json::from_str(r#"{"type":"generate","prompt":"p","max_lines":4}"#).unwrap();
+    let Request::Generate { max_lines, .. } = request else {
+        panic!("expected generate request");
+    };
+    assert_eq!(max_lines, Some(4));
+}
+
+#[test]
+fn kv_cache_types_parse_and_unknown_ones_are_ignored() {
+    assert_eq!(KvType::parse("F16"), Some(KvType::F16));
+    assert_eq!(KvType::parse(" q4_0 "), Some(KvType::Q4_0));
+    assert_eq!(KvType::parse("q5_1"), None);
+    // Different options never share a cached context.
+    let base = ContextOptions::default();
+    let quantized = ContextOptions {
+        kv_cache_type: Some(KvType::Q8_0),
+        ..base
+    };
+    assert_ne!(base, quantized);
+}
+
+#[test]
+fn metal_offloads_every_layer_only_within_the_memory_budget() {
+    const GB16: f32 = 16.0 * 0.6;
+    const GB8: f32 = 8.0 * 0.6;
+    // Qwen 3.5 4B (2.55 GB) and Gemma 4 E2B (2.9 GB) on 16 GB: all on Metal.
+    assert_eq!(
+        gpu::metal_gpu_layers(2.55, GB16, 32_768, 33),
+        gpu::ALL_LAYERS
+    );
+    assert_eq!(
+        gpu::metal_gpu_layers(2.9, GB16, 32_768, 33),
+        gpu::ALL_LAYERS
+    );
+    // Qwen 3.5 2B (1.2 GB) still fits on 8 GB.
+    assert_eq!(gpu::metal_gpu_layers(1.2, GB8, 32_768, 28), gpu::ALL_LAYERS);
+    // The 4B on 8 GB is over the budget: the sizing logic's partial offload.
+    let layers = gpu::metal_gpu_layers(2.55, GB8, 32_768, 33);
+    assert!(layers < 33, "{layers}");
+    assert_eq!(layers, gpu::layers_that_fit(2.55, 33, GB8, 32_768));
+    // An unreadable file never gets every layer.
+    assert_eq!(gpu::metal_gpu_layers(0.0, GB16, 32_768, 33), 0);
+}
+
+#[test]
+fn lora_and_gate_fields_parse_and_old_requests_have_none() {
+    let request: Request = serde_json::from_str(
+        r#"{"type":"generate","prompt":"p","lora_path":"/m/notes-lora.gguf","gate_token":".","gate_threshold":0.9}"#,
+    )
+    .unwrap();
+    let Request::Generate {
+        lora_path,
+        gate_token,
+        gate_threshold,
+        ..
+    } = request
+    else {
+        panic!("expected generate request");
+    };
+    assert_eq!(lora_path.as_deref(), Some("/m/notes-lora.gguf"));
+    assert_eq!(
+        Gate::from_request(gate_token, gate_threshold),
+        Some(Gate {
+            token: ".".to_string(),
+            threshold: 0.9
+        })
+    );
+    let request: Request = serde_json::from_str(r#"{"type":"generate","prompt":"p"}"#).unwrap();
+    let Request::Generate {
+        lora_path,
+        gate_token,
+        gate_threshold,
+        ..
+    } = request
+    else {
+        panic!("expected generate request");
+    };
+    assert_eq!(lora_path, None);
+    assert_eq!(Gate::from_request(gate_token, gate_threshold), None);
+}
+
+#[test]
+fn a_gate_needs_a_token_and_without_a_threshold_only_bans_it() {
+    assert_eq!(Gate::from_request(Some(String::new()), Some(0.9)), None);
+    assert_eq!(Gate::from_request(None, Some(0.9)), None);
+    let ban_only = Gate::from_request(Some(".".into()), None).unwrap();
+    assert!(1.0 < ban_only.threshold);
+    let nan = Gate::from_request(Some(".".into()), Some(f32::NAN)).unwrap();
+    assert!(1.0 < nan.threshold);
+}
+
+#[test]
+fn gate_probability_is_the_softmax_over_the_whole_vocabulary() {
+    let logits = [0.0_f32, 0.0, 0.0, 0.0];
+    assert!((token_probability(&logits, 2) - 0.25).abs() < 1e-6);
+    // Large logits do not overflow.
+    let logits = [1000.0_f32, 1000.0 + 2.0_f32.ln()];
+    assert!((token_probability(&logits, 1) - 2.0 / 3.0).abs() < 1e-5);
+    // Masked (-inf) logits count for nothing; out-of-range is zero.
+    let logits = [f32::NEG_INFINITY, 1.0, 1.0];
+    assert!((token_probability(&logits, 1) - 0.5).abs() < 1e-6);
+    assert_eq!(token_probability(&logits, 0), 0.0);
+    assert_eq!(token_probability(&logits, 9), 0.0);
+}
+
+#[test]
+fn a_gated_response_reports_its_probability() {
+    let mut gated = output(FinishReason::Stop);
+    gated.text = ".".to_string();
+    gated.gate_prob = Some(0.97);
+    let json = serde_json::to_value(Response::from_generation(Ok(gated), Some(3))).unwrap();
+    assert_eq!(json["text"], ".");
+    assert!((json["gate_prob"].as_f64().unwrap() - 0.97).abs() < 1e-6);
+}

@@ -2,12 +2,7 @@
 
 import { Pause, Play } from 'lucide-react';
 import { useRef, useState, type PointerEvent } from 'react';
-
-export function formatClock(seconds: number): string {
-  if (!Number.isFinite(seconds) || seconds < 0) return '00:00';
-  const total = Math.floor(seconds);
-  return `${Math.floor(total / 60).toString().padStart(2, '0')}:${(total % 60).toString().padStart(2, '0')}`;
-}
+import { formatClock } from '@/lib/format';
 
 export function timeFromClientX(
   clientX: number,

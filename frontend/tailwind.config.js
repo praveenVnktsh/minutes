@@ -5,6 +5,8 @@ module.exports = {
     './src/pages/**/*.{js,ts,jsx,tsx,mdx}',
     './src/components/**/*.{js,ts,jsx,tsx,mdx}',
     './src/app/**/*.{js,ts,jsx,tsx,mdx}',
+    // Class recipes shared across the app (theme-classes.ts) live here.
+    './src/lib/**/*.{js,ts,jsx,tsx}',
   ],
   theme: {
   	extend: {
@@ -58,7 +60,8 @@ module.exports = {
 			},
 			recording: {
 				DEFAULT: 'rgb(var(--recording-rgb) / <alpha-value>)',
-				subtle: 'rgb(var(--recording-subtle-rgb) / <alpha-value>)'
+				subtle: 'rgb(var(--recording-subtle-rgb) / <alpha-value>)',
+				foreground: 'var(--recording-foreground)'
 			},
 			paused: {
 				DEFAULT: 'rgb(var(--paused-rgb) / <alpha-value>)',
@@ -110,6 +113,12 @@ module.exports = {
   			sm: 'calc(var(--radius) - 4px)'
   		},
   		keyframes: {
+  			shimmer: {
+  				to: { backgroundPosition: '-200% 0' }
+  			},
+  			'rise-in': {
+  				from: { opacity: '0', transform: 'translateY(8px)' }
+  			},
   			'accordion-down': {
   				from: {
   					height: '0'
@@ -129,7 +138,9 @@ module.exports = {
   		},
   		animation: {
   			'accordion-down': 'accordion-down 0.2s ease-out',
-  			'accordion-up': 'accordion-up 0.2s ease-out'
+  			'accordion-up': 'accordion-up 0.2s ease-out',
+  			shimmer: 'shimmer 1.4s linear infinite',
+  			'rise-in': 'rise-in 0.45s ease-out both'
   		}
   	}
   },

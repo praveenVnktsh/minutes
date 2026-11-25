@@ -1,11 +1,10 @@
 'use client';
 
 import React, { createContext, useContext, useState, useEffect, useCallback, useMemo, ReactNode, useRef } from 'react';
-import type { TranscriptModelProps } from '@/components/TranscriptSettings';
 import type { SelectedDevices } from '@/components/DeviceSelection';
 import { ConfigSaveInProgressError, LatestRequestGuard, configService } from '@/services/configService';
 import { invoke } from '@tauri-apps/api/core';
-import Analytics from '@/lib/analytics';
+import { appDataDir, join } from '@tauri-apps/api/path';
 import { BetaFeatures, BetaFeatureKey, loadBetaFeatures, saveBetaFeatures } from '@/types/betaFeatures';
 import { DEFAULT_MODEL_CONFIG, mergeProviderKeyHydration, ModelConfig, ProviderApiKeys } from '@/types/modelConfig';
 
@@ -52,21 +51,12 @@ interface ConfigContextType {
   isModelConfigSaving: boolean;
   modelConfigSaveError: Error | null;
 
-  // Transcript model configuration
-  transcriptModelConfig: TranscriptModelProps;
-  setTranscriptModelConfig: (config: TranscriptModelProps | ((prev: TranscriptModelProps) => TranscriptModelProps)) => void;
-
   // Device configuration
   selectedDevices: SelectedDevices;
   setSelectedDevices: (devices: SelectedDevices) => void;
 
-  // Language preference
-  selectedLanguage: string;
-  setSelectedLanguage: (lang: string) => void;
 
   // UI preferences
-  showConfidenceIndicator: boolean;
-  toggleConfidenceIndicator: (checked: boolean) => void;
 
   // Beta features
   betaFeatures: BetaFeatures;
@@ -95,6 +85,9 @@ interface ConfigContextType {
 
 const ConfigContext = createContext<ConfigContextType | undefined>(undefined);
 
+/** Overrides the configuration for a subtree (the replay viewer). */
+export const ConfigValueProvider = ConfigContext.Provider;
+
 function isProviderWithApiKey(provider: string): provider is keyof ProviderApiKeys {
   return ['claude', 'groq', 'openai', 'openrouter'].includes(provider);
 }
@@ -122,14 +115,6 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     setModelConfigState(next);
   }, []);
 
-
-  // Transcript model configuration state
-  const [transcriptModelConfig, setTranscriptModelConfig] = useState<TranscriptModelProps>({
-    provider: 'parakeet',
-    model: 'parakeet-tdt-0.6b-v3-int8',
-    apiKey: null
-  });
-
   // Provider-specific API keys (loaded once at startup)
   // Note: Gemini omitted for now - add when UI support is added
   const [providerApiKeys, setProviderApiKeys] = useState<ProviderApiKeys>({
@@ -147,24 +132,6 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
   const [selectedDevices, setSelectedDevices] = useState<SelectedDevices>({
     micDevice: null,
     systemDevice: null
-  });
-
-  // Language preference state
-  const [selectedLanguage, setSelectedLanguage] = useState<string>(() => {
-    if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('primaryLanguage');
-      return saved || 'auto';
-    }
-    return 'auto';
-  });
-
-  // UI preferences state
-  const [showConfidenceIndicator, setShowConfidenceIndicator] = useState<boolean>(() => {
-    if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('showConfidenceIndicator');
-      return saved !== null ? saved === 'true' : true;
-    }
-    return true;
   });
 
   // Summary configs
@@ -204,37 +171,13 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     loadModels();
   }, [modelConfig.ollamaEndpoint]);
 
-  // Load transcript configuration on mount
+  // Mirror the mic echo cancellation beta flag into Rust on mount and on every
+  // toggle, so recordings started from any entry point (shortcut, tray, meeting
+  // detection) pick it up. Rust reads it when each recording starts.
   useEffect(() => {
-    const loadTranscriptConfig = async () => {
-      try {
-        const config = await configService.getTranscriptConfig();
-        if (config) {
-          setTranscriptModelConfig({
-            provider: config.provider || 'parakeet',
-            model: config.model || 'parakeet-tdt-0.6b-v3-int8',
-            apiKey: config.apiKey || null
-          });
-        }
-      } catch (error) {
-        console.error('[ConfigContext] Failed to load transcript config:', error);
-      }
-    };
-    loadTranscriptConfig();
-  }, []);
-
-  // Sync language preference to Rust on mount (fixes startup desync bug)
-  useEffect(() => {
-    if (selectedLanguage) {
-      invoke('set_language_preference', { language: selectedLanguage })
-        .then(() => {
-          console.log('[ConfigContext] Synced language preference to Rust on startup:', selectedLanguage);
-        })
-        .catch(err => {
-          console.error('[ConfigContext] Failed to sync language preference to Rust on startup:', err);
-        });
-    }
-  }, []); 
+    invoke('set_mic_echo_cancellation_enabled', { enabled: betaFeatures.micEchoCancellation })
+      .catch(err => console.error('[ConfigContext] Failed to sync mic echo cancellation flag:', err));
+  }, [betaFeatures.micEchoCancellation]);
 
   const cacheProviderModel = useCallback((config: ModelConfig) => {
     if (typeof window === 'undefined' || !config.model) return;
@@ -395,16 +338,6 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     'custom-openai': [],
   };
 
-  // Toggle confidence indicator with localStorage persistence
-  const toggleConfidenceIndicator = useCallback((checked: boolean) => {
-    setShowConfidenceIndicator(checked);
-    if (typeof window !== 'undefined') {
-      localStorage.setItem('showConfidenceIndicator', checked.toString());
-    }
-    // Trigger a custom event to notify other components
-    window.dispatchEvent(new CustomEvent('confidenceIndicatorChanged', { detail: checked }));
-  }, []);
-
   const toggleIsAutoSummary = useCallback((checked: boolean) => {
     setisAutoSummary(checked);
     if (typeof window !== 'undefined') {
@@ -412,18 +345,11 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
-  // Toggle beta feature with localStorage persistence and analytics
+  // Toggle beta feature with localStorage persistence
   const toggleBetaFeature = useCallback((featureKey: BetaFeatureKey, enabled: boolean) => {
     setBetaFeatures(prev => {
       const updated = { ...prev, [featureKey]: enabled };
       saveBetaFeatures(updated);
-
-      // Track analytics with specific feature
-      Analytics.track('beta_feature_toggled', {
-        feature: featureKey,
-        enabled: enabled.toString(),
-      }).catch(err => console.error('Failed to track beta feature toggle:', err));
-
       return updated;
     });
   }, []);
@@ -464,7 +390,8 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
       // Load storage locations
       const [dbDir, modelsDir, recordingsDir] = await Promise.all([
         invoke<string>('get_database_directory'),
-        invoke<string>('whisper_get_models_directory'),
+        // The speech models' folder (speech::models::dir on the Rust side).
+        appDataDir().then((dir) => join(dir, 'models', 'fluidaudio')),
         invoke<string>('get_default_recordings_folder_path')
       ]);
 
@@ -495,18 +422,6 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  // Wrapper for setSelectedLanguage that persists to localStorage and syncs to Rust
-  const handleSetSelectedLanguage = useCallback((lang: string) => {
-    setSelectedLanguage(lang);
-    if (typeof window !== 'undefined') {
-      localStorage.setItem('primaryLanguage', lang);
-    }
-    // Sync with Rust in-memory state for live recording
-    invoke('set_language_preference', { language: lang }).catch(err =>
-      console.error('Failed to sync language preference to Rust:', err)
-    );
-  }, []);
-
   const value: ConfigContextType = useMemo(() => ({
     modelConfig,
     setModelConfig,
@@ -518,14 +433,8 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     toggleIsAutoSummary,
     providerApiKeys,
     updateProviderApiKey,
-    transcriptModelConfig,
-    setTranscriptModelConfig,
     selectedDevices,
     setSelectedDevices,
-    selectedLanguage,
-    setSelectedLanguage: handleSetSelectedLanguage,
-    showConfidenceIndicator,
-    toggleConfidenceIndicator,
     betaFeatures,
     toggleBetaFeature,
     models,
@@ -547,12 +456,7 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     toggleIsAutoSummary,
     providerApiKeys,
     updateProviderApiKey,
-    transcriptModelConfig,
     selectedDevices,
-    selectedLanguage,
-    handleSetSelectedLanguage,
-    showConfidenceIndicator,
-    toggleConfidenceIndicator,
     betaFeatures,
     toggleBetaFeature,
     models,

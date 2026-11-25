@@ -4,11 +4,12 @@ import { useState, useEffect, Suspense } from "react";
 import { MeetingSummary, SummaryProcessResponse, Transcript } from "@/types";
 import PageContent from "./page-content";
 import { useRouter, useSearchParams } from "next/navigation";
-import Analytics from "@/lib/analytics";
 import { invoke } from "@tauri-apps/api/core";
 import { LoaderIcon } from "lucide-react";
 import { usePaginatedTranscripts } from "@/hooks/usePaginatedTranscripts";
 import { parseSummaryContent } from "@/lib/summary-content";
+import { Button } from "@/components/ui/button";
+import { toneText } from "@/lib/theme-classes";
 
 interface MeetingDetailsResponse {
   id: string;
@@ -44,6 +45,7 @@ function MeetingDetailsContent() {
     loadedCount,
     loadMore,
     refetch,
+    refresh,
     error: transcriptError,
   } = usePaginatedTranscripts({ meetingId: meetingId || '' });
 
@@ -97,7 +99,6 @@ function MeetingDetailsContent() {
       console.warn('No valid meeting ID in URL - meetingId:', meetingId);
       setError("No meeting selected");
       setIsLoading(false);
-      Analytics.trackPageView('meeting_details');
       return;
     }
 
@@ -139,13 +140,12 @@ function MeetingDetailsContent() {
     return (
       <div className="flex items-center justify-center h-screen">
         <div className="text-center">
-          <p className="text-red-500 mb-4">{error}</p>
-          <button
+          <p className={`${toneText.error} mb-4`}>{error}</p>
+          <Button
             onClick={() => router.push('/')}
-            className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
           >
             Go Back
-          </button>
+          </Button>
         </div>
       </div>
     );
@@ -169,6 +169,7 @@ function MeetingDetailsContent() {
       await refetchMeetings();
     }}
     onRefetchTranscripts={refetch}
+    onRefreshTranscripts={refresh}
     // Pagination props for efficient transcript loading
     segments={segments}
     hasMore={hasMore}

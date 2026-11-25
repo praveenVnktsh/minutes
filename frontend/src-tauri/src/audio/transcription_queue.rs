@@ -1,5 +1,5 @@
 // Transcription task queue - processes import/retranscribe jobs sequentially
-// Prevents Whisper/Parakeet engine contention by ensuring only one task runs at a time
+// Runs one task at a time, so jobs never contend for the batch speech-helper
 
 use log::{error, info, warn};
 use once_cell::sync::Lazy;
@@ -41,10 +41,17 @@ pub struct TranscriptionTask {
     // Retranscribe-specific fields
     pub meeting_id: Option<String>,
     pub meeting_folder_path: Option<String>,
-    // Shared fields
+    // Shared fields. Kept so tasks queued by older versions still deserialize,
+    // and passed through, but not used to pick an engine: every task is
+    // transcribed in English with Parakeet in the speech-helper.
     pub language: Option<String>,
     pub model: Option<String>,
     pub provider: Option<String>,
+    /// The automatic final pass after a recording: on failure or cancellation
+    /// the live transcript is kept, diarized and marked ready instead of the
+    /// task failing, so the meeting still gets speakers and a summary.
+    #[serde(default)]
+    pub final_pass: bool,
 }
 
 /// Progress event emitted by the queue
@@ -443,6 +450,15 @@ impl TranscriptionQueue {
         self.active_task.lock().await.is_some()
     }
 
+    /// The id of the task being processed, if any.
+    pub async fn active_task_id(&self) -> Option<String> {
+        self.active_task
+            .lock()
+            .await
+            .as_ref()
+            .map(|task| task.task_id.clone())
+    }
+
     /// Start the queue worker loop
     pub fn start_worker<R: Runtime>(self: Arc<Self>, app: AppHandle<R>) {
         let queue = self.clone();
@@ -605,6 +621,9 @@ async fn process_import_task<R: Runtime>(app: &AppHandle<R>, task: &Transcriptio
     cancel_watcher.abort();
     app.unlisten(progress_bridge);
     disable_controls(&task.task_id);
+    // Stop the batch speech-helper (~1.5 GB) before anything waits on the
+    // outcome; the next queued task starts it again.
+    super::common::unload_engine_after_batch().await;
 
     match result {
         Ok(import_result) => {
@@ -713,7 +732,17 @@ async fn process_retranscribe_task<R: Runtime>(app: &AppHandle<R>, task: &Transc
     use super::retranscription::RETRANSCRIPTION_CANCELLED;
     RETRANSCRIPTION_CANCELLED.store(false, Ordering::SeqCst);
     if is_task_cancelled(&task.task_id) {
-        emit_cancelled(app, task, "Retranscription cancelled");
+        if task.final_pass {
+            super::final_pass::keep_live_transcript(
+                app,
+                task,
+                &meeting_id,
+                "the final pass was cancelled",
+            )
+            .await;
+        } else {
+            emit_cancelled(app, task, "Retranscription cancelled");
+        }
         return;
     }
 
@@ -794,6 +823,9 @@ async fn process_retranscribe_task<R: Runtime>(app: &AppHandle<R>, task: &Transc
     cancel_watcher.abort();
     app.unlisten(progress_bridge);
     disable_controls(&task.task_id);
+    // Stop the batch speech-helper (~1.5 GB) before anything waits on the
+    // outcome; the next queued task starts it again.
+    super::common::unload_engine_after_batch().await;
 
     match result {
         Ok(retranscription_result) => {
@@ -856,6 +888,30 @@ async fn process_retranscribe_task<R: Runtime>(app: &AppHandle<R>, task: &Transc
                     "warning": retranscription_result.warning
                 }),
             );
+
+            if task.final_pass {
+                super::final_pass::emit_complete(
+                    app,
+                    super::final_pass::FinalPassComplete {
+                        meeting_id: retranscription_result.meeting_id.clone(),
+                        task_id: task.task_id.clone(),
+                        outcome: "replaced",
+                        provider: task.provider.clone(),
+                        model: task.model.clone(),
+                        warning: retranscription_result.warning.clone(),
+                    },
+                );
+            }
+        }
+        Err(e) if task.final_pass => {
+            let error_msg = e.to_string();
+            let reason = if error_msg.contains("cancelled") {
+                "the final pass was cancelled".to_string()
+            } else {
+                warn!("Final pass {} failed: {}", task.task_id, error_msg);
+                format!("the final pass failed ({error_msg})")
+            };
+            super::final_pass::keep_live_transcript(app, task, &meeting_id, &reason).await;
         }
         Err(e) => {
             let error_msg = e.to_string();
@@ -964,12 +1020,6 @@ pub fn init_queue_worker<R: Runtime>(app: &AppHandle<R>) {
 // Tauri commands
 // ============================================================================
 
-/// Get the current queue status
-#[tauri::command]
-pub async fn get_transcription_queue_status() -> QueueStatus {
-    get_queue().get_status().await
-}
-
 /// Cancel a transcription task by ID
 #[tauri::command]
 pub async fn cancel_transcription_task<R: Runtime>(
@@ -978,6 +1028,23 @@ pub async fn cancel_transcription_task<R: Runtime>(
 ) -> Result<bool, String> {
     let queue = get_queue();
     let cancellation = queue.cancel_task(&task_id).await;
+    // A final pass cancelled before it started keeps the live transcript, which
+    // still needs its speakers and summary.
+    if let Some((task, true)) = cancellation.as_ref().filter(|(task, _)| task.final_pass) {
+        if let Some(meeting_id) = task.meeting_id.clone() {
+            let (app, task) = (app.clone(), task.clone());
+            tauri::async_runtime::spawn(async move {
+                super::final_pass::keep_live_transcript(
+                    &app,
+                    &task,
+                    &meeting_id,
+                    "the final pass was cancelled",
+                )
+                .await;
+            });
+            return Ok(true);
+        }
+    }
     if let Some((task, true)) = cancellation.as_ref() {
         crate::meeting_activity::update_task(
             &app,
@@ -1050,12 +1117,6 @@ pub async fn resume_transcription_task<R: Runtime>(
     Ok(true)
 }
 
-/// Check if the queue has an active task (used to determine if live transcription should be disabled)
-#[tauri::command]
-pub async fn is_transcription_queue_active() -> bool {
-    get_queue().has_active_task().await
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1072,6 +1133,7 @@ mod tests {
             language: None,
             model: None,
             provider: None,
+            final_pass: false,
         }
     }
 

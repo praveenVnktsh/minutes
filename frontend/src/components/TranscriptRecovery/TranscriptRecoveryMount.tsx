@@ -1,14 +1,14 @@
 'use client';
 
-import { useRouter } from 'next/navigation';
 import { toast } from 'sonner';
 import { useSidebar } from '@/components/Sidebar/SidebarProvider';
+import { useShell } from '@/contexts/ShellContext';
 import { useRecordingController } from '@/contexts/RecordingControllerContext';
 import { TranscriptRecovery } from './TranscriptRecovery';
 
 /** Route-independent recovery surface for the application shell. */
 export function TranscriptRecoveryMount() {
-  const router = useRouter();
+  const { navigate } = useShell();
   const { refetchMeetings } = useSidebar();
   const controller = useRecordingController();
   const { recovery } = controller;
@@ -20,7 +20,8 @@ export function TranscriptRecoveryMount() {
       toast.success('Meeting recovered', {
         description: result.transcriptCount > 0 ? 'Transcript recovery completed.' : 'Audio recovery completed.',
       });
-      router.push(`/meeting-details?id=${encodeURIComponent(result.meetingId)}`);
+      // Saves open notes first; a failure shows the shell's navigation feedback.
+      await navigate(`/meeting-details?id=${encodeURIComponent(result.meetingId)}`).catch(() => {});
     }
     return result;
   };

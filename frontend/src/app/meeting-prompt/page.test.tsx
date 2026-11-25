@@ -1,4 +1,4 @@
-import { afterAll, beforeEach, describe, expect, mock, test } from 'bun:test'
+import { afterAll, beforeEach, describe, expect, jest, mock, test } from 'bun:test'
 import React from 'react'
 import { act, create } from 'react-test-renderer'
 import type { RecordingRequestResult } from '@/types/meetingActivity'
@@ -136,5 +136,78 @@ describe('meeting prompt acknowledgement', () => {
     expect(invoke).not.toHaveBeenCalledWith('start_recording_from_prompt')
     expect(JSON.stringify(renderer!.toJSON())).toContain('Start')
     await act(async () => renderer!.unmount())
+  })
+})
+
+type TextNode = { children: Array<TextNode | string> }
+const textOf = (node: TextNode | string): string =>
+  typeof node === 'string' ? node : node.children.map(textOf).join('')
+
+describe('meeting prompt ignore and snooze actions', () => {
+  const show = async () => {
+    let renderer: ReturnType<typeof create>
+    await act(async () => { renderer = create(<MeetingPromptPage />) })
+    await act(async () => {
+      handlers.get('meeting-prompt-show')?.({ payload: { appName: 'Zoom', app: { name: 'zoom.us', bundle_id: 'us.zoom.xos' } } })
+    })
+    const more = renderer!.root.findByProps({ 'aria-label': 'More options' })
+    await act(async () => more.props.onClick())
+    return renderer!
+  }
+  const buttonWithText = (renderer: ReturnType<typeof create>, label: string) =>
+    renderer.root.findAllByType('button').find((button) => textOf(button).includes(label))!
+
+  test("don't ask adds the shown app (by identity) and offers undo", async () => {
+    const renderer = await show()
+    await act(async () => { await buttonWithText(renderer, 'ask for').props.onClick() })
+    expect(invoke).toHaveBeenCalledWith('ignore_meeting_app', { target: { name: 'zoom.us', bundle_id: 'us.zoom.xos' }, source: 'prompt' })
+    expect(JSON.stringify(renderer.toJSON())).toContain('again')
+
+    await act(async () => { await buttonWithText(renderer, 'Undo').props.onClick() })
+    expect(invoke).toHaveBeenCalledWith('unignore_meeting_app', { target: { name: 'zoom.us', bundle_id: 'us.zoom.xos' }, source: 'prompt' })
+    expect(hide).not.toHaveBeenCalled()
+    expect(JSON.stringify(renderer.toJSON())).toContain('Meeting detected')
+    await act(async () => renderer.unmount())
+  })
+
+  test('closing after the undo window only hides; it never marks the prompt dismissed', async () => {
+    jest.useFakeTimers()
+    try {
+      const renderer = await show()
+      await act(async () => { await buttonWithText(renderer, 'ask for').props.onClick() })
+      await act(async () => { jest.advanceTimersByTime(5000) })
+      await act(async () => { await Promise.resolve() })
+      expect(hide).toHaveBeenCalledTimes(1)
+      // dismiss_meeting_prompt would silence the next real meeting until the mic went idle.
+      expect(invoke).not.toHaveBeenCalledWith('dismiss_meeting_prompt')
+      await act(async () => renderer.unmount())
+    } finally {
+      jest.useRealTimers()
+    }
+  })
+
+  test('the menu is announced, and Escape closes it back to the prompt', async () => {
+    let renderer: ReturnType<typeof create>
+    await act(async () => { renderer = create(<MeetingPromptPage />) })
+    const more = renderer!.root.findByProps({ 'aria-label': 'More options' })
+    expect(more.props['aria-haspopup']).toBe('menu')
+    expect(more.props['aria-expanded']).toBe(false)
+    await act(async () => more.props.onClick())
+    expect(renderer!.root.findByProps({ role: 'menu' }).findAllByProps({ role: 'menuitem' })).toHaveLength(2)
+
+    await act(async () => { window.dispatchEvent(Object.assign(new Event('keydown'), { key: 'Escape' })) })
+    expect(invoke).not.toHaveBeenCalledWith('dismiss_meeting_prompt')
+    expect(hide).not.toHaveBeenCalled()
+    expect(renderer!.root.findAllByProps({ role: 'menu' })).toHaveLength(0)
+    expect(JSON.stringify(renderer!.toJSON())).toContain('Meeting detected')
+    await act(async () => renderer!.unmount())
+  })
+
+  test('snooze stops detection for an hour and hides the prompt', async () => {
+    const renderer = await show()
+    await act(async () => { await buttonWithText(renderer, 'Snooze').props.onClick() })
+    expect(invoke).toHaveBeenCalledWith('snooze_meeting_detection', { minutes: 60 })
+    expect(hide).toHaveBeenCalledTimes(1)
+    await act(async () => renderer.unmount())
   })
 })

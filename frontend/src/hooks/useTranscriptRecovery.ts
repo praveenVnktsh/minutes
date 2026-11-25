@@ -73,6 +73,21 @@ function boundMeetingId(folderPath?: string): string | null {
   }
 }
 
+/**
+ * Whether a saved meeting still exists. Only a missing row counts as gone; any
+ * other failure to read it is rethrown rather than treated as a deletion.
+ */
+async function meetingExists(meetingId: string): Promise<boolean> {
+  try {
+    await storageService.getMeeting(meetingId);
+    return true;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.startsWith('Meeting not found')) return false;
+    throw error;
+  }
+}
+
 export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
   const [recoverableMeetings, setRecoverableMeetings] = useState<MeetingMetadata[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -178,13 +193,31 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
         throw new Error('No transcripts or audio found for this meeting');
       }
 
+      // A resumed session appends into the meeting it resumed, so recovery
+      // neither replaces that meeting's transcript nor creates a second
+      // meeting. Appending is not idempotent: once it has happened, a retry
+      // (after a failed audio merge, say) must not append the segments again.
+      // The IndexedDB flag survives a restart; the recovery row id covers a
+      // retry in this session when writing that flag failed.
+      const resumeOfMeetingId = metadata.resumeOfMeetingId;
+      const alreadyAppended = Boolean(resumeOfMeetingId) && (
+        metadata.resumeAppended || recoveryRowIds()[meetingId] === resumeOfMeetingId
+      );
+      // Whether the meeting it resumed was deleted is decided before the audio
+      // merge: the folder still holds that meeting's audio, which must not be
+      // carried into the meeting this recovery creates instead.
+      const resumeTargetGone = !!resumeOfMeetingId && !alreadyAppended
+        && !(await meetingExists(resumeOfMeetingId));
+
       // 4. Attempt audio recovery if folder path exists
       let audioRecoveryStatus: AudioRecoveryStatus | null = null;
       if (folderPath) {
         try {
           audioRecoveryStatus = await invoke<AudioRecoveryStatus>(
             'recover_audio_from_checkpoints',
-            { meetingFolder: folderPath, sampleRate: 48000 }
+            resumeTargetGone
+              ? { meetingFolder: folderPath, sampleRate: 48000, discardPriorAudio: true }
+              : { meetingFolder: folderPath, sampleRate: 48000 }
           );
         } catch (error) {
           console.error('Audio recovery failed:', error);
@@ -228,16 +261,52 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
       }));
 
       // 6. Save to backend database using existing save utilities
-      const saveResponse = await storageService.saveMeeting(
-        metadata.title,
-        formattedTranscripts,
-        folderPath ?? null,
-        false,
-        recoveryRowIds()[meetingId] ?? boundMeetingId(folderPath),
-      );
-
-      const savedMeetingId = saveResponse.meeting_id;
-      persistRecoveryRowId(meetingId, savedMeetingId);
+      let savedMeetingId: string;
+      if (resumeOfMeetingId) {
+        if (alreadyAppended) {
+          savedMeetingId = resumeOfMeetingId;
+          if (!metadata.resumeAppended) {
+            await indexedDBService.markResumeAppendedStrict(meetingId);
+          }
+        } else if (resumeTargetGone) {
+          // The meeting it resumed was deleted, so there is nothing to append
+          // into: recover the session as a meeting of its own. The bound session
+          // may still point at the deleted meeting, so only a row this recovery
+          // created is reused. The entry is not flagged as appended, so a retry
+          // finds the target still gone and saves into that same row again.
+          const saveResponse = await storageService.saveMeeting(
+            metadata.title,
+            formattedTranscripts,
+            folderPath ?? null,
+            false,
+            recoveryRowIds()[meetingId] ?? null,
+          );
+          savedMeetingId = saveResponse.meeting_id;
+          persistRecoveryRowId(meetingId, savedMeetingId);
+        } else {
+          const saveResponse = await storageService.saveMeeting(
+            metadata.title,
+            formattedTranscripts,
+            folderPath ?? null,
+            false,
+            resumeOfMeetingId,
+            true,
+          );
+          savedMeetingId = saveResponse.meeting_id;
+          persistRecoveryRowId(meetingId, savedMeetingId);
+          await indexedDBService.markResumeAppendedStrict(meetingId);
+        }
+      } else {
+        const saveResponse = await storageService.saveMeeting(
+          metadata.title,
+          formattedTranscripts,
+          folderPath ?? null,
+          false,
+          recoveryRowIds()[meetingId] ?? boundMeetingId(folderPath),
+        );
+        savedMeetingId = saveResponse.meeting_id;
+        persistRecoveryRowId(meetingId, savedMeetingId);
+      }
 
       if (folderPath) {
         try {
@@ -251,8 +320,8 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
         await applyPinnedSummaryLanguageToMeeting(savedMeetingId);
       } catch (error) {
         console.warn('Failed to apply pinned summary language to recovered meeting:', error);
-        toast.warning('Could not apply default summary language', {
-          description: 'The recovered meeting was saved, but the default summary language was not applied.',
+        toast.warning('Could not apply the default AI notes language', {
+          description: 'The recovered meeting was saved, but the default AI notes language was not applied.',
         });
       }
 

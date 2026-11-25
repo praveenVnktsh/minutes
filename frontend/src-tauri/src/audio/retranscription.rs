@@ -1,19 +1,19 @@
-// Retranscription module - allows re-processing stored audio with different settings
+// Retranscription module - re-processes a meeting's stored audio with the
+// batch speech-helper (Silero VAD + Parakeet TDT v2), then diarizes it
 
-use super::common::{create_transcript_segments, split_segment_at_silence, write_transcripts_json};
+use super::common::{
+    create_transcript_segments, split_segment_at_silence, write_transcripts_json, FINAL_MODEL,
+    FINAL_PROVIDER,
+};
 use super::constants::AUDIO_EXTENSIONS;
 use crate::audio::decoder::decode_audio_file;
-use crate::audio::vad::get_speech_chunks_with_progress;
-use crate::config::{DEFAULT_PARAKEET_MODEL, DEFAULT_WHISPER_MODEL};
-use crate::parakeet_engine::ParakeetEngine;
+use crate::audio::speech::batch::{self as speech_batch, SpeechSegment};
 use crate::state::AppState;
-use crate::whisper_engine::WhisperEngine;
 use anyhow::{anyhow, Result};
-use log::{debug, error, info, warn};
+use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 /// Global flag to track if retranscription is in progress
@@ -44,13 +44,6 @@ impl Drop for RetranscriptionGuard {
         RETRANSCRIPTION_IN_PROGRESS.store(false, Ordering::SeqCst);
     }
 }
-
-/// VAD redemption time in milliseconds - bridges natural pauses in speech
-/// Batch processing needs longer redemption (2000ms) than the live pipeline
-/// (500ms) because the entire file is processed at once by VAD with no
-/// latency requirement, and short redemption fragments speech at every
-/// natural sentence/topic pause (500ms-2s)
-const VAD_REDEMPTION_TIME_MS: u32 = 2000;
 
 /// Progress update emitted during retranscription
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,7 +81,9 @@ pub fn cancel_retranscription() {
     RETRANSCRIPTION_CANCELLED.store(true, Ordering::SeqCst);
 }
 
-/// Start retranscription of a meeting's audio
+/// Start retranscription of a meeting's audio. `language`, `model` and
+/// `provider` are accepted for compatibility and ignored: meetings are
+/// transcribed in English with Parakeet TDT v2 in the speech-helper.
 pub async fn start_retranscription<R: Runtime>(
     app: AppHandle<R>,
     meeting_id: String,
@@ -103,7 +98,6 @@ pub async fn start_retranscription<R: Runtime>(
     // Reset cancellation flag
     RETRANSCRIPTION_CANCELLED.store(false, Ordering::SeqCst);
 
-    let use_parakeet = provider.as_deref() == Some("parakeet");
     let result = run_retranscription(
         app.clone(),
         meeting_id.clone(),
@@ -115,7 +109,7 @@ pub async fn start_retranscription<R: Runtime>(
     .await;
 
     // Unload the engine after the batch job (success, failure, or cancellation)
-    super::common::unload_engine_after_batch(use_parakeet).await;
+    super::common::unload_engine_after_batch().await;
 
     // Guard will automatically clear flag on drop
     // No need for manual: RETRANSCRIPTION_IN_PROGRESS.store(false, Ordering::SeqCst);
@@ -197,13 +191,12 @@ async fn run_retranscription<R: Runtime>(
     let folder_path = PathBuf::from(&meeting_folder_path);
     let audio_path = find_audio_file(&folder_path)?;
 
-    // Determine which provider to use (default to whisper)
-    let use_parakeet = provider.as_deref() == Some("parakeet");
-
     info!(
-        "Starting retranscription for meeting {} with language {:?}, model {:?}, provider {:?}",
+        "Starting retranscription for meeting {} (requested language {:?}, model {:?}, provider {:?} are ignored: English, Parakeet)",
         meeting_id, language, model, provider
     );
+
+    super::common::ensure_batch_ready(&app)?;
 
     // Emit progress: decoding
     emit_progress(&app, &meeting_id, "decoding", 5, "Decoding audio file...");
@@ -215,7 +208,7 @@ async fn run_retranscription<R: Runtime>(
 
     // Decode the audio file (CPU-intensive, run in blocking task)
     let path_for_decode = audio_path.clone();
-    let decoded = tokio::task::spawn_blocking(move || decode_audio_file(&path_for_decode))
+    let decoded = crate::quiet_work::spawn_quietly(move || decode_audio_file(&path_for_decode))
         .await
         .map_err(|e| anyhow!("Decode task panicked: {}", e))??;
     let duration_seconds = decoded.duration_seconds;
@@ -239,7 +232,7 @@ async fn run_retranscription<R: Runtime>(
     }
 
     // Convert to 16kHz mono format (CPU-intensive, run in blocking task)
-    let audio_samples = tokio::task::spawn_blocking(move || decoded.to_whisper_format())
+    let audio_samples = crate::quiet_work::spawn_quietly(move || decoded.to_whisper_format())
         .await
         .map_err(|e| anyhow!("Resample task panicked: {}", e))?;
     info!(
@@ -254,44 +247,33 @@ async fn run_retranscription<R: Runtime>(
         return Err(anyhow!("Retranscription cancelled"));
     }
 
-    // Use VAD to find natural speech boundaries (same approach as live transcription)
-    // IMPORTANT: Run VAD in a blocking task to avoid blocking the async runtime
-    // For large files (35+ minutes), VAD processing can take several minutes
+    // Use VAD (Silero in the speech-helper) to find natural speech boundaries
     let app_for_vad = app.clone();
     let meeting_id_for_vad = meeting_id.clone();
+    let vad_progress: Box<dyn Fn(f32) + Send + Sync> = Box::new(move |fraction: f32| {
+        // Map VAD progress (0-1) to overall progress (20-25)
+        let percent = (fraction.clamp(0.0, 1.0) * 100.0) as u32;
+        let overall_progress = 20 + (percent as f32 * 0.05) as u32;
+        emit_progress(
+            &app_for_vad,
+            &meeting_id_for_vad,
+            "vad",
+            overall_progress,
+            &format!("Detecting speech segments... {}%", percent),
+        );
+    });
 
-    let speech_segments = tokio::task::spawn_blocking(move || {
-        get_speech_chunks_with_progress(
-            &audio_samples,
-            VAD_REDEMPTION_TIME_MS,
-            |vad_progress, segments_found| {
-                // Map VAD progress (0-100) to overall progress (20-25)
-                let overall_progress = 20 + (vad_progress as f32 * 0.05) as u32;
-                emit_progress(
-                    &app_for_vad,
-                    &meeting_id_for_vad,
-                    "vad",
-                    overall_progress,
-                    &format!(
-                        "Detecting speech segments... {}% ({} found)",
-                        vad_progress, segments_found
-                    ),
-                );
+    let speech_segments = speech_batch::speech_segments(&audio_samples, Some(vad_progress))
+        .await
+        .map_err(|e| anyhow!("VAD processing failed: {}", e))?;
+    drop(audio_samples);
 
-                // Return false to cancel if cancellation requested
-                !RETRANSCRIPTION_CANCELLED.load(Ordering::SeqCst)
-            },
-        )
-    })
-    .await
-    .map_err(|e| anyhow!("VAD task panicked: {}", e))?
-    .map_err(|e| anyhow!("VAD processing failed: {}", e))?;
+    if RETRANSCRIPTION_CANCELLED.load(Ordering::SeqCst) {
+        return Err(anyhow!("Retranscription cancelled"));
+    }
 
     let total_segments = speech_segments.len();
-    info!(
-        "VAD detected {} speech segments (redemption_time={}ms)",
-        total_segments, VAD_REDEMPTION_TIME_MS
-    );
+    info!("VAD detected {} speech segments", total_segments);
 
     // Diagnostic: log segment duration distribution
     if !speech_segments.is_empty() {
@@ -342,25 +324,13 @@ async fn run_retranscription<R: Runtime>(
         "Loading transcription engine...",
     );
 
-    // Initialize the appropriate engine once (not per-segment)
-    let whisper_engine = if !use_parakeet {
-        Some(get_or_init_whisper(&app, model.as_deref()).await?)
-    } else {
-        None
-    };
-    let parakeet_engine = if use_parakeet {
-        Some(get_or_init_parakeet(&app, model.as_deref()).await?)
-    } else {
-        None
-    };
-
     // Split very long segments at silence boundaries for better transcription quality.
     // Hard cuts at arbitrary sample positions lose words at boundaries. Instead, scan
     // for the lowest-energy window near the target split point and cut there.
     const MAX_SEGMENT_SAMPLES: usize = 25 * 16000; // 25 seconds at 16kHz
 
-    let mut processable_segments: Vec<crate::audio::vad::SpeechSegment> = Vec::new();
-    for segment in &speech_segments {
+    let mut processable_segments: Vec<SpeechSegment> = Vec::new();
+    for segment in speech_segments {
         if segment.samples.len() > MAX_SEGMENT_SAMPLES {
             debug!(
                 "Splitting large segment ({:.0}ms, {} samples) at silence boundaries",
@@ -368,11 +338,11 @@ async fn run_retranscription<R: Runtime>(
                 segment.samples.len()
             );
 
-            let sub_segments = split_segment_at_silence(segment, MAX_SEGMENT_SAMPLES);
+            let sub_segments = split_segment_at_silence(&segment, MAX_SEGMENT_SAMPLES);
             debug!("Split into {} sub-segments", sub_segments.len());
             processable_segments.extend(sub_segments);
         } else {
-            processable_segments.push(segment.clone());
+            processable_segments.push(segment);
         }
     }
 
@@ -385,8 +355,9 @@ async fn run_retranscription<R: Runtime>(
     // Process each speech segment with progress updates
     let mut all_transcripts: Vec<(String, f64, f64)> = Vec::new(); // (text, start_ms, end_ms)
     let mut total_confidence = 0.0f32;
+    let mut confidence_count = 0usize;
 
-    for (i, segment) in processable_segments.iter().enumerate() {
+    for (i, segment) in processable_segments.into_iter().enumerate() {
         // Check for cancellation before each segment
         if RETRANSCRIPTION_CANCELLED.load(Ordering::SeqCst) {
             return Err(anyhow!("Retranscription cancelled"));
@@ -399,6 +370,7 @@ async fn run_retranscription<R: Runtime>(
 
         // Calculate progress (25% to 80% range for transcription)
         let progress = 25 + ((i as f32 / processable_count as f32) * 55.0) as u32;
+
         let segment_duration_sec = (segment.end_timestamp_ms - segment.start_timestamp_ms) / 1000.0;
         emit_progress(
             &app,
@@ -424,27 +396,17 @@ async fn run_retranscription<R: Runtime>(
         }
 
         // Transcribe this segment
-        let (text, conf) = if use_parakeet {
-            let engine = parakeet_engine.as_ref().unwrap();
-            let text = engine
-                .transcribe_audio(segment.samples.clone())
-                .await
-                .map_err(|e| anyhow!("Parakeet transcription failed on segment {}: {}", i, e))?;
-            (text, 0.9f32)
-        } else {
-            let engine = whisper_engine.as_ref().unwrap();
-            let (text, conf, _) = engine
-                .transcribe_audio_with_confidence(segment.samples.clone(), language.clone())
-                .await
-                .map_err(|e| anyhow!("Whisper transcription failed on segment {}: {}", i, e))?;
-            (text, conf)
-        };
+        let (start_ms, end_ms) = (segment.start_timestamp_ms, segment.end_timestamp_ms);
+        let transcript = speech_batch::transcribe(segment.samples)
+            .await
+            .map_err(|e| anyhow!("Transcription failed on segment {}: {}", i, e))?;
+        let (text, conf) = (transcript.text, transcript.confidence);
 
         // Skip empty transcripts
         let trimmed = text.trim();
         if !trimmed.is_empty() {
             debug!(
-                "Segment {}/{}: {:.1}s, conf={:.2}, text='{}'",
+                "Segment {}/{}: {:.1}s, conf={:?}, text='{}'",
                 i + 1,
                 processable_count,
                 segment_duration_sec,
@@ -459,8 +421,11 @@ async fn run_retranscription<R: Runtime>(
                     trimmed
                 }
             );
-            all_transcripts.push((text, segment.start_timestamp_ms, segment.end_timestamp_ms));
-            total_confidence += conf;
+            all_transcripts.push((text, start_ms, end_ms));
+            if let Some(conf) = conf {
+                total_confidence += conf;
+                confidence_count += 1;
+            }
         } else {
             debug!(
                 "Segment {}/{}: {:.1}s — empty transcription",
@@ -472,8 +437,8 @@ async fn run_retranscription<R: Runtime>(
     }
 
     let transcribed_count = all_transcripts.len();
-    let avg_confidence = if transcribed_count > 0 {
-        total_confidence / transcribed_count as f32
+    let avg_confidence = if confidence_count > 0 {
+        total_confidence / confidence_count as f32
     } else {
         0.0
     };
@@ -533,6 +498,16 @@ async fn run_retranscription<R: Runtime>(
         .map_err(|e| anyhow!("Failed to insert transcript: {}", e))?;
     }
 
+    // The new rows have no speakers yet; if the app quits before diarization
+    // finishes, the startup resume picks this meeting up.
+    super::diarization::mark_pending_in_tx(&mut tx, &meeting_id)
+        .await
+        .map_err(|e| anyhow!("Failed to mark diarization pending: {}", e))?;
+    // The transcript is replaced: an interrupted final pass for it is done.
+    super::final_pass::clear_in_tx(&mut tx, &meeting_id)
+        .await
+        .map_err(|e| anyhow!("Failed to clear the pending final pass: {}", e))?;
+
     tx.commit()
         .await
         .map_err(|e| anyhow!("Failed to commit transaction: {}", e))?;
@@ -542,6 +517,8 @@ async fn run_retranscription<R: Runtime>(
         segments.len(),
         meeting_id
     );
+    // Let an open meeting show the new transcript now rather than after diarization.
+    super::common::emit_transcripts_updated(&app, &meeting_id);
 
     // Write updated transcripts.json and metadata.json to the meeting folder
     emit_progress(
@@ -567,6 +544,19 @@ async fn run_retranscription<R: Runtime>(
         write_retranscription_metadata(&folder_path, &meeting_id, duration_seconds, &audio_filename)
     {
         warn!("Failed to update metadata.json: {}", e);
+    }
+
+    // Record which model produced this transcript, for the model provenance
+    // note. Must run after write_retranscription_metadata() above so that
+    // rewrite doesn't clobber the key.
+    let transcription_model = super::model_provenance::TranscriptionModel {
+        provider: FINAL_PROVIDER.to_string(),
+        model: FINAL_MODEL.to_string(),
+    };
+    if let Err(e) =
+        super::model_provenance::record_transcription_model(&folder_path, &transcription_model)
+    {
+        warn!("Failed to record transcription model provenance: {}", e);
     }
 
     // Persistence and diarization are one non-cancellable tail once committed.
@@ -599,7 +589,8 @@ async fn run_retranscription<R: Runtime>(
         meeting_id,
         segments_count: segments.len(),
         duration_seconds,
-        language,
+        // Parakeet TDT v2 transcribes English only, whatever was requested.
+        language: Some("en".to_string()),
         warning,
     })
 }
@@ -643,235 +634,6 @@ fn emit_progress<R: Runtime>(
             message: message.to_string(),
         },
     );
-}
-
-/// Get or initialize the Whisper engine, auto-loading the model if needed
-/// If `requested_model` is provided, ensures that specific model is loaded
-async fn get_or_init_whisper<R: Runtime>(
-    app: &AppHandle<R>,
-    requested_model: Option<&str>,
-) -> Result<Arc<WhisperEngine>> {
-    use crate::whisper_engine::commands::WHISPER_ENGINE;
-
-    let engine = {
-        let guard = WHISPER_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
-        guard.as_ref().cloned()
-    };
-
-    match engine {
-        Some(e) => {
-            // Determine which model to use
-            let target_model = match requested_model {
-                Some(model) => model.to_string(),
-                None => get_configured_whisper_model(app).await?,
-            };
-
-            // Check if the correct model is already loaded
-            let current_model = e.get_current_model().await;
-            let needs_load = match &current_model {
-                Some(loaded) => loaded != &target_model,
-                None => true,
-            };
-
-            if needs_load {
-                info!(
-                    "Loading Whisper model '{}' (current: {:?})",
-                    target_model, current_model
-                );
-
-                // Discover available models first (populates the internal cache)
-                info!("Discovering available Whisper models...");
-                if let Err(discover_err) = e.discover_models().await {
-                    warn!(
-                        "Error during model discovery (continuing anyway): {}",
-                        discover_err
-                    );
-                }
-
-                match e.load_model(&target_model).await {
-                    Ok(_) => {
-                        info!("Whisper model '{}' loaded successfully", target_model);
-                        Ok(e)
-                    }
-                    Err(load_err) => {
-                        error!(
-                            "Failed to load Whisper model '{}': {}",
-                            target_model, load_err
-                        );
-                        Err(anyhow!(
-                            "Failed to load Whisper model '{}': {}",
-                            target_model,
-                            load_err
-                        ))
-                    }
-                }
-            } else {
-                info!("Whisper model '{}' already loaded", target_model);
-                Ok(e)
-            }
-        }
-        None => Err(anyhow!("Whisper engine not initialized")),
-    }
-}
-
-/// Get the configured Whisper model name from the database
-async fn get_configured_whisper_model<R: Runtime>(app: &AppHandle<R>) -> Result<String> {
-    debug!("Getting configured Whisper model from database...");
-
-    let app_state = app.try_state::<AppState>().ok_or_else(|| {
-        error!("App state not available");
-        anyhow!("App state not available")
-    })?;
-
-    debug!("Querying transcript_settings table...");
-
-    // Query the transcript settings from the database - get both provider and model
-    let result: Option<(String, String)> =
-        sqlx::query_as("SELECT provider, model FROM transcript_settings WHERE id = '1'")
-            .fetch_optional(app_state.db_manager.pool())
-            .await
-            .map_err(|e| {
-                error!("Failed to query transcript config: {}", e);
-                anyhow!("Failed to query transcript config: {}", e)
-            })?;
-
-    match result {
-        Some((provider, model)) => {
-            info!(
-                "Found transcript config: provider={}, model={}",
-                provider, model
-            );
-
-            // Check if provider is Whisper-based
-            if provider == "localWhisper" || provider == "whisper" {
-                Ok(model)
-            } else {
-                error!(
-                    "Retranscription requires Whisper provider, but configured provider is: {}",
-                    provider
-                );
-                Err(anyhow!("Retranscription requires Whisper. Current provider '{}' does not support retranscription with language selection.", provider))
-            }
-        }
-        None => {
-            // Default to configured Whisper model if no config exists
-            warn!(
-                "No transcript config found, using default model '{}'",
-                DEFAULT_WHISPER_MODEL
-            );
-            Ok(DEFAULT_WHISPER_MODEL.to_string())
-        }
-    }
-}
-
-/// Get or initialize the Parakeet engine, auto-loading the model if needed
-async fn get_or_init_parakeet<R: Runtime>(
-    app: &AppHandle<R>,
-    requested_model: Option<&str>,
-) -> Result<Arc<ParakeetEngine>> {
-    use crate::parakeet_engine::commands::PARAKEET_ENGINE;
-
-    let engine = {
-        let guard = PARAKEET_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
-        guard.as_ref().cloned()
-    };
-
-    match engine {
-        Some(e) => {
-            // Determine which model to use
-            let target_model = match requested_model {
-                Some(model) => model.to_string(),
-                None => get_configured_parakeet_model(app).await?,
-            };
-
-            // Check if the correct model is already loaded
-            let current_model = e.get_current_model().await;
-            let needs_load = match &current_model {
-                Some(loaded) => loaded != &target_model,
-                None => true,
-            };
-
-            if needs_load {
-                info!(
-                    "Loading Parakeet model '{}' (current: {:?})",
-                    target_model, current_model
-                );
-
-                // Discover available models first
-                info!("Discovering available Parakeet models...");
-                if let Err(discover_err) = e.discover_models().await {
-                    warn!(
-                        "Error during Parakeet model discovery (continuing anyway): {}",
-                        discover_err
-                    );
-                }
-
-                match e.load_model(&target_model).await {
-                    Ok(_) => {
-                        info!("Parakeet model '{}' loaded successfully", target_model);
-                        Ok(e)
-                    }
-                    Err(load_err) => {
-                        error!(
-                            "Failed to load Parakeet model '{}': {}",
-                            target_model, load_err
-                        );
-                        Err(anyhow!(
-                            "Failed to load Parakeet model '{}': {}",
-                            target_model,
-                            load_err
-                        ))
-                    }
-                }
-            } else {
-                info!("Parakeet model '{}' already loaded", target_model);
-                Ok(e)
-            }
-        }
-        None => Err(anyhow!("Parakeet engine not initialized")),
-    }
-}
-
-/// Get the configured Parakeet model name from the database
-async fn get_configured_parakeet_model<R: Runtime>(app: &AppHandle<R>) -> Result<String> {
-    debug!("Getting configured Parakeet model from database...");
-
-    let app_state = app.try_state::<AppState>().ok_or_else(|| {
-        error!("App state not available");
-        anyhow!("App state not available")
-    })?;
-
-    // Query the transcript settings from the database
-    let result: Option<(String, String)> =
-        sqlx::query_as("SELECT provider, model FROM transcript_settings WHERE id = '1'")
-            .fetch_optional(app_state.db_manager.pool())
-            .await
-            .map_err(|e| {
-                error!("Failed to query transcript config: {}", e);
-                anyhow!("Failed to query transcript config: {}", e)
-            })?;
-
-    match result {
-        Some((provider, model)) => {
-            info!(
-                "Found transcript config: provider={}, model={}",
-                provider, model
-            );
-
-            if provider == "parakeet" {
-                Ok(model)
-            } else {
-                // Default to configured Parakeet model
-                warn!("Configured provider is not Parakeet, using default model");
-                Ok(DEFAULT_PARAKEET_MODEL.to_string())
-            }
-        }
-        None => {
-            // Default to configured Parakeet model if no config exists
-            warn!("No transcript config found, using default Parakeet model");
-            Ok(DEFAULT_PARAKEET_MODEL.to_string())
-        }
-    }
 }
 
 /// Write or update metadata.json for retranscription (preserves existing fields, adds retranscribed_at)
@@ -961,6 +723,7 @@ pub async fn start_retranscription_command<R: Runtime>(
         language,
         model,
         provider,
+        final_pass: false,
     };
 
     let task_id = get_queue().enqueue(&app, task).await;
@@ -971,18 +734,6 @@ pub async fn start_retranscription_command<R: Runtime>(
         meeting_id,
         message: format!("Retranscription queued (task: {})", task_id),
     })
-}
-
-#[tauri::command]
-pub async fn cancel_retranscription_command() -> Result<(), String> {
-    // Legacy cancel still works for direct retranscriptions
-    cancel_retranscription();
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn is_retranscription_in_progress_command() -> bool {
-    is_retranscription_in_progress()
 }
 
 #[cfg(test)]
@@ -1077,12 +828,6 @@ mod tests {
 
         // Reset for other tests
         RETRANSCRIPTION_CANCELLED.store(false, Ordering::SeqCst);
-    }
-
-    #[test]
-    fn test_vad_redemption_time_constant() {
-        // Batch processing uses 2000ms to bridge natural pauses in full-file VAD
-        assert_eq!(VAD_REDEMPTION_TIME_MS, 2000);
     }
 
     #[test]

@@ -1,13 +1,12 @@
-#[cfg(target_os = "macos")]
 use std::time::{Duration, Instant};
 
-#[cfg(target_os = "macos")]
 use cidre::{core_audio as ca, os};
 
 /// Event types for system audio detection
 #[derive(Debug, Clone)]
 pub enum SystemAudioEvent {
-    SystemAudioStarted(Vec<String>), // List of apps using system audio
+    /// Apps capturing the microphone (name plus bundle id when known).
+    SystemAudioStarted(Vec<crate::meeting_detection::AudioApp>),
     SystemAudioStopped,
 }
 
@@ -71,12 +70,10 @@ impl Drop for BackgroundTask {
 }
 
 /// Detects system audio usage on macOS
-#[cfg(target_os = "macos")]
 pub struct MacOSSystemAudioDetector {
     background: BackgroundTask,
 }
 
-#[cfg(target_os = "macos")]
 impl Default for MacOSSystemAudioDetector {
     fn default() -> Self {
         Self {
@@ -85,21 +82,18 @@ impl Default for MacOSSystemAudioDetector {
     }
 }
 
-#[cfg(target_os = "macos")]
 const DEVICE_IS_RUNNING_SOMEWHERE: ca::PropAddr = ca::PropAddr {
     selector: ca::PropSelector::DEVICE_IS_RUNNING_SOMEWHERE,
     scope: ca::PropScope::GLOBAL,
     element: ca::PropElement::MAIN,
 };
 
-#[cfg(target_os = "macos")]
 struct DetectorState {
     last_state: bool,
     last_change: Instant,
     debounce_duration: Duration,
 }
 
-#[cfg(target_os = "macos")]
 impl DetectorState {
     fn new() -> Self {
         Self {
@@ -125,7 +119,6 @@ impl DetectorState {
     }
 }
 
-#[cfg(target_os = "macos")]
 impl MacOSSystemAudioDetector {
     pub fn start(&mut self, callback: SystemAudioCallback) {
         self.background.start(|running, mut stop_rx| {
@@ -372,22 +365,30 @@ impl MacOSSystemAudioDetector {
     }
 }
 
-#[cfg(target_os = "macos")]
 /// Apps currently capturing the microphone. Mic capture is the signal that the
 /// user is actually in a call, unlike output audio (music, video, etc.).
-fn list_microphone_using_apps() -> Vec<String> {
+fn list_microphone_using_apps() -> Vec<crate::meeting_detection::AudioApp> {
+    use crate::meeting_detection::AudioApp;
+
     match ca::System::processes() {
         Ok(processes) => {
-            let mut apps = Vec::new();
+            let mut apps: Vec<AudioApp> = Vec::new();
             for process in processes {
                 if process.is_running_input().unwrap_or(false) {
                     if let Ok(pid) = process.pid() {
+                        // Browsers and Electron/WebKit apps capture the mic from a
+                        // helper process that isn't a running app itself, so name
+                        // the app responsible for it (Chrome helper → Google Chrome).
+                        let pid = responsible_pid(pid);
                         if let Some(running_app) = cidre::ns::RunningApp::with_pid(pid) {
                             let name = running_app
                                 .localized_name()
                                 .map(|s| s.to_string())
                                 .unwrap_or_else(|| format!("Process {}", pid));
-                            apps.push(name);
+                            let bundle_id = running_app.bundle_id().map(|id| id.to_string());
+                            if !apps.iter().any(|app| app.name == name) {
+                                apps.push(AudioApp { name, bundle_id });
+                            }
                         }
                     }
                 }
@@ -396,7 +397,7 @@ fn list_microphone_using_apps() -> Vec<String> {
             // Browsers hide which tab is open, so probe for a Meet URL among the
             // browsers that are actually capturing the mic.
             if browser_capturing_mic_has_google_meet(&apps) {
-                apps.push("Google Meet".to_string());
+                apps.push(AudioApp::named("Google Meet"));
             }
             apps
         }
@@ -404,19 +405,30 @@ fn list_microphone_using_apps() -> Vec<String> {
     }
 }
 
-#[cfg(target_os = "macos")]
-fn browser_capturing_mic_has_google_meet(capturing: &[String]) -> bool {
+extern "C" {
+    // libquarantine (part of libSystem): the pid macOS holds responsible for
+    // `pid`, e.g. the browser that owns a helper or WebKit GPU process.
+    fn responsibility_get_pid_responsible_for_pid(pid: i32) -> i32;
+}
+
+fn responsible_pid(pid: i32) -> i32 {
+    match unsafe { responsibility_get_pid_responsible_for_pid(pid) } {
+        responsible if responsible > 0 => responsible,
+        _ => pid,
+    }
+}
+
+fn browser_capturing_mic_has_google_meet(capturing: &[crate::meeting_detection::AudioApp]) -> bool {
     const BROWSERS: [&str; 3] = ["Google Chrome", "Microsoft Edge", "Safari"];
 
     BROWSERS.iter().any(|application_name| {
         capturing
             .iter()
-            .any(|app| app.eq_ignore_ascii_case(application_name))
+            .any(|app| app.name.eq_ignore_ascii_case(application_name))
             && browser_has_google_meet_tab(application_name)
     })
 }
 
-#[cfg(target_os = "macos")]
 fn browser_has_google_meet_tab(application_name: &str) -> bool {
     let script = format!(
         "tell application \"{}\" to get URL of every tab of every window",
@@ -454,7 +466,6 @@ fn browser_has_google_meet_tab(application_name: &str) -> bool {
     }
 }
 
-#[cfg(target_os = "macos")]
 fn google_meet_url_is_open(browser_urls: &str) -> bool {
     browser_urls.split(',').any(|url| {
         let Some(path) = url.trim().strip_prefix("https://meet.google.com/") else {
@@ -467,26 +478,6 @@ fn google_meet_url_is_open(browser_urls: &str) -> bool {
                 part.len() == *length && part.chars().all(|c| c.is_ascii_alphabetic())
             })
     })
-}
-
-// Stub implementation for non-macOS platforms
-#[cfg(not(target_os = "macos"))]
-pub struct MacOSSystemAudioDetector;
-
-#[cfg(not(target_os = "macos"))]
-impl Default for MacOSSystemAudioDetector {
-    fn default() -> Self {
-        Self
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-impl MacOSSystemAudioDetector {
-    pub fn start(&mut self, _callback: SystemAudioCallback) {
-        tracing::warn!("System audio detection is only supported on macOS");
-    }
-
-    pub fn stop(&mut self) {}
 }
 
 /// Public interface for system audio detection
@@ -513,7 +504,6 @@ impl SystemAudioDetector {
 mod tests {
     use super::*;
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn recognizes_google_meet_call_urls_only() {
         assert!(google_meet_url_is_open(
@@ -525,6 +515,26 @@ mod tests {
         assert!(!google_meet_url_is_open("https://meet.google.com/"));
         assert!(!google_meet_url_is_open("https://meet.google.com/landing"));
         assert!(!google_meet_url_is_open("https://youtube.com/watch?v=123"));
+    }
+
+    #[test]
+    fn helper_processes_resolve_to_their_owning_app() {
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("5")
+            .spawn()
+            .expect("spawn child");
+        let child_pid = child.id() as i32;
+
+        // A spawned child shares its parent's responsible app, the same way a
+        // browser's audio helper resolves to the browser.
+        assert_eq!(
+            responsible_pid(child_pid),
+            responsible_pid(std::process::id() as i32)
+        );
+        assert_ne!(responsible_pid(child_pid), child_pid);
+
+        let _ = child.kill();
+        let _ = child.wait();
     }
 
     #[tokio::test]

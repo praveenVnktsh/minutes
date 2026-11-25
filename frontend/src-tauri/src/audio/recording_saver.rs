@@ -40,6 +40,8 @@ pub struct MeetingMetadata {
     pub transcript_file: String,
     pub sample_rate: u32,
     pub status: String, // "recording", "completed", "error"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcription_model: Option<crate::audio::model_provenance::TranscriptionModel>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,6 +74,9 @@ pub struct RecordingSaver {
     prior_segments: Vec<TranscriptSegment>,
     // Added to every new segment's sequence_id so it cannot collide with prior ones.
     sequence_offset: u64,
+    // Set via `set_transcription_model`. Applied to `metadata` immediately if it
+    // already exists, and otherwise to metadata created or reopened afterwards.
+    pending_transcription_model: Option<crate::audio::model_provenance::TranscriptionModel>,
 }
 
 impl RecordingSaver {
@@ -86,6 +91,7 @@ impl RecordingSaver {
             resume_target: None,
             prior_segments: Vec::new(),
             sequence_offset: 0,
+            pending_transcription_model: None,
         }
     }
 
@@ -111,6 +117,30 @@ impl RecordingSaver {
                 let metadata_clone = metadata.clone();
                 if let Err(e) = self.write_metadata(folder, &metadata_clone) {
                     warn!("Failed to update metadata with device info: {}", e);
+                }
+            }
+        }
+    }
+
+    /// Set the transcription model that produced (or is producing) this session's transcript.
+    ///
+    /// Callable before or after `start_accumulation`: if metadata already exists it is
+    /// updated and rewritten to disk immediately; otherwise the model is remembered and
+    /// applied when the meeting folder is created or reopened.
+    pub fn set_transcription_model(
+        &mut self,
+        model: crate::audio::model_provenance::TranscriptionModel,
+    ) {
+        self.pending_transcription_model = Some(model.clone());
+
+        if let Some(ref mut metadata) = self.metadata {
+            metadata.transcription_model = Some(model);
+
+            // Write updated metadata to disk if folder exists
+            if let Some(folder) = &self.meeting_folder {
+                let metadata_clone = metadata.clone();
+                if let Err(e) = self.write_metadata(folder, &metadata_clone) {
+                    warn!("Failed to update metadata with transcription model: {}", e);
                 }
             }
         }
@@ -330,6 +360,7 @@ impl RecordingSaver {
             transcript_file: "transcripts.json".to_string(),
             sample_rate: 48000,
             status: "recording".to_string(),
+            transcription_model: self.pending_transcription_model.clone(),
         };
 
         // Write initial metadata.json
@@ -383,6 +414,7 @@ impl RecordingSaver {
             &meeting_folder,
             self.meeting_name.as_deref(),
             create_checkpoints,
+            self.pending_transcription_model.as_ref(),
         );
         self.write_metadata(&meeting_folder, &metadata)?;
 
@@ -687,11 +719,14 @@ fn next_sequence_offset(prior: &[TranscriptSegment]) -> u64 {
 }
 
 /// Metadata for a resumed meeting: the existing metadata.json marked as recording
-/// again, or fresh metadata when there is none to reuse.
+/// again, or fresh metadata when there is none to reuse. `transcription_model`,
+/// when set, overrides whatever the existing (or fresh) metadata held; otherwise
+/// a resumed meeting keeps its existing value.
 fn resumed_metadata(
     folder: &Path,
     meeting_name: Option<&str>,
     saves_audio: bool,
+    transcription_model: Option<&crate::audio::model_provenance::TranscriptionModel>,
 ) -> MeetingMetadata {
     let path = folder.join("metadata.json");
     let existing = std::fs::read_to_string(&path)
@@ -727,6 +762,7 @@ fn resumed_metadata(
                 transcript_file: "transcripts.json".to_string(),
                 sample_rate: 48000,
                 status: "recording".to_string(),
+                transcription_model: None,
             }
         }
     };
@@ -735,6 +771,9 @@ fn resumed_metadata(
     metadata.completed_at = None;
     if saves_audio {
         metadata.audio_file = "audio.mp4".to_string();
+    }
+    if let Some(model) = transcription_model {
+        metadata.transcription_model = Some(model.clone());
     }
     metadata
 }
@@ -748,9 +787,10 @@ impl Default for RecordingSaver {
 #[cfg(test)]
 mod tests {
     use super::{
-        load_prior_segments, next_sequence_offset, resumed_metadata, RecordingSaver, ResumeTarget,
-        TranscriptSegment,
+        load_prior_segments, next_sequence_offset, resumed_metadata, MeetingMetadata,
+        RecordingSaver, ResumeTarget, TranscriptSegment,
     };
+    use crate::audio::model_provenance::TranscriptionModel;
     use std::path::PathBuf;
 
     fn segment(sequence_id: u64, text: &str, start: f64) -> TranscriptSegment {
@@ -934,10 +974,11 @@ mod tests {
         std::fs::write(folder.join("metadata.json"), "{ not json").unwrap();
         assert!(load_prior_segments(&folder).is_empty());
 
-        let metadata = resumed_metadata(&folder, Some("Standup"), true);
+        let metadata = resumed_metadata(&folder, Some("Standup"), true, None);
         assert_eq!(metadata.meeting_name.as_deref(), Some("Standup"));
         assert_eq!(metadata.audio_file, "audio.mp4");
         assert_eq!(metadata.status, "recording");
+        assert!(metadata.transcription_model.is_none());
 
         std::fs::remove_dir_all(&folder).ok();
     }
@@ -965,5 +1006,122 @@ mod tests {
         assert_eq!(completed[0].speaker.as_deref(), Some("microphone"));
         assert_eq!(completed[0].audio_start_time, 7.0);
         assert_eq!(completed[0].audio_end_time, 8.5);
+    }
+
+    #[test]
+    fn metadata_without_transcription_model_still_deserializes() {
+        let json = r#"{
+            "version": "1.0",
+            "meeting_id": "meeting-1",
+            "meeting_name": "Standup",
+            "created_at": "2026-09-22T09:00:00Z",
+            "completed_at": null,
+            "duration_seconds": null,
+            "devices": { "microphone": null, "system_audio": null },
+            "audio_file": "audio.mp4",
+            "transcript_file": "transcripts.json",
+            "sample_rate": 48000,
+            "status": "recording"
+        }"#;
+
+        let metadata: MeetingMetadata = serde_json::from_str(json).unwrap();
+        assert!(metadata.transcription_model.is_none());
+    }
+
+    #[test]
+    fn metadata_transcription_model_round_trips_and_is_omitted_when_absent() {
+        let model = TranscriptionModel {
+            provider: "whisper".to_string(),
+            model: "large-v3-turbo".to_string(),
+        };
+        let metadata = MeetingMetadata {
+            version: "1.0".to_string(),
+            meeting_id: Some("meeting-1".to_string()),
+            meeting_name: Some("Standup".to_string()),
+            created_at: "2026-09-22T09:00:00Z".to_string(),
+            completed_at: None,
+            duration_seconds: None,
+            devices: super::DeviceInfo {
+                microphone: None,
+                system_audio: None,
+            },
+            audio_file: "audio.mp4".to_string(),
+            transcript_file: "transcripts.json".to_string(),
+            sample_rate: 48000,
+            status: "recording".to_string(),
+            transcription_model: Some(model.clone()),
+        };
+
+        let json = serde_json::to_value(&metadata).unwrap();
+        assert_eq!(
+            json["transcription_model"],
+            serde_json::json!({"provider": "whisper", "model": "large-v3-turbo"})
+        );
+        let round_tripped: MeetingMetadata = serde_json::from_value(json).unwrap();
+        assert_eq!(round_tripped.transcription_model, Some(model));
+
+        // Absent entirely (not `null`) when there is none to write.
+        let mut without_model = metadata;
+        without_model.transcription_model = None;
+        let json = serde_json::to_value(&without_model).unwrap();
+        assert!(json.get("transcription_model").is_none());
+    }
+
+    #[test]
+    fn set_transcription_model_updates_existing_metadata_and_writes_to_disk() {
+        let folder = temp_meeting_folder("set-model-after-start");
+        let mut saver = resuming_saver(&folder);
+
+        saver.set_transcription_model(TranscriptionModel {
+            provider: "parakeet".to_string(),
+            model: "tdt-1.1b".to_string(),
+        });
+
+        assert_eq!(
+            saver.metadata.as_ref().unwrap().transcription_model,
+            Some(TranscriptionModel {
+                provider: "parakeet".to_string(),
+                model: "tdt-1.1b".to_string(),
+            })
+        );
+        let on_disk: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(folder.join("metadata.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            on_disk["transcription_model"],
+            serde_json::json!({"provider": "parakeet", "model": "tdt-1.1b"})
+        );
+
+        std::fs::remove_dir_all(&folder).ok();
+    }
+
+    #[test]
+    fn set_transcription_model_before_start_is_applied_once_metadata_is_created() {
+        let folder = temp_meeting_folder("set-model-before-start");
+        let mut saver = RecordingSaver::new();
+        saver.set_transcription_model(TranscriptionModel {
+            provider: "whisper".to_string(),
+            model: "base".to_string(),
+        });
+        // No metadata yet: nothing to update, but the model is remembered.
+        assert!(saver.metadata.is_none());
+
+        let target = ResumeTarget {
+            meeting_folder: folder.clone(),
+            audio_offset_seconds: 0.0,
+        };
+        saver.set_meeting_name(Some("Standup".to_string()));
+        saver.set_resume_target(Some(target.clone()));
+        saver.reopen_meeting_folder(&target, false).unwrap();
+
+        assert_eq!(
+            saver.metadata.as_ref().unwrap().transcription_model,
+            Some(TranscriptionModel {
+                provider: "whisper".to_string(),
+                model: "base".to_string(),
+            })
+        );
+
+        std::fs::remove_dir_all(&folder).ok();
     }
 }

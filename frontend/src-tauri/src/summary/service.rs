@@ -1,13 +1,19 @@
+use crate::database::models::{Setting, Transcript};
 use crate::database::repositories::{
-    meeting::MeetingsRepository, setting::SettingsRepository, summary::SummaryProcessesRepository,
+    meeting::{MeetingsRepository, TitleSource, TitleUpdate},
+    setting::SettingsRepository,
+    summary::SummaryProcessesRepository,
 };
 use crate::ollama::metadata::ModelMetadataCache;
+use crate::summary::budget::ContextBudget;
 use crate::summary::language_detection::detect_summary_language;
-use crate::summary::llm_client::LLMProvider;
+use crate::summary::llm_client::{generate_summary, GenerationOptions, LLMProvider};
 use crate::summary::metadata::read_detected_summary_language_from_metadata;
 use crate::summary::processor::{
-    clean_llm_markdown_detailed, extract_meeting_name_from_markdown, generate_meeting_summary,
-    language_name_from_code, require_visible_markdown,
+    build_title_user_prompt, clean_llm_markdown_detailed, extract_meeting_name_from_markdown,
+    generate_meeting_summary, is_prompt_echo_title, language_name_from_code,
+    require_visible_markdown, resolve_summary_system_prompt, sanitize_generated_title,
+    title_system_prompt, ProviderBackend,
 };
 use crate::summary::templates::{self, Template};
 use chrono::{DateTime, Utc};
@@ -20,6 +26,93 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
+
+/// Cache-key threshold recorded for hosted models, which run single-pass.
+const HOSTED_TOKEN_THRESHOLD: usize = 100_000;
+
+/// When an app call to an Ollama model happens. Ollama reloads the model
+/// whenever `num_ctx` changes, and sizes its KV cache to it, so every call
+/// in one phase sends the same value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OllamaPhase {
+    /// While a recording runs: the live summary timeline, meeting chat and
+    /// the live copilot. Kept small so the KV cache stays affordable next to
+    /// live transcription (16k on an 8B model is ~2 GB, too much for an
+    /// 8 GB Mac).
+    Recording,
+    /// After the meeting: the summary, titles and chat. One model reload
+    /// when the meeting ends is the price of the larger context.
+    AfterMeeting,
+}
+
+/// `num_ctx` for every Ollama call made while recording.
+pub(crate) const OLLAMA_RECORDING_NUM_CTX: usize = 8_192;
+/// Context assumed for a model whose real context is unknown: its metadata
+/// could not be read, or only gave a family default or the 4000 fallback.
+const OLLAMA_UNKNOWN_CONTEXT: usize = 8_192;
+/// Smallest `num_ctx` a title call gets: its prompt carries up to 12k
+/// characters of transcript.
+const OLLAMA_MIN_TITLE_NUM_CTX: usize = 8_192;
+
+/// The context window to run an Ollama model with in `phase`, given the
+/// model's own context (None when unknown).
+/// - Recording: 8192, or the model's context when it is known and smaller.
+/// - After the meeting: the model's context capped for memory
+///   (`ContextBudget::for_ollama`), 8192 when unknown.
+pub(crate) fn ollama_context_for(phase: OllamaPhase, model_context: Option<usize>) -> usize {
+    match phase {
+        OllamaPhase::Recording => model_context.map_or(OLLAMA_RECORDING_NUM_CTX, |known| {
+            known.min(OLLAMA_RECORDING_NUM_CTX)
+        }),
+        OllamaPhase::AfterMeeting => {
+            ContextBudget::for_ollama(model_context.unwrap_or(OLLAMA_UNKNOWN_CONTEXT)).n_ctx
+        }
+    }
+}
+
+/// The model's own context from Ollama's metadata (cached), or None when it
+/// cannot be read or is only a guess.
+async fn ollama_model_context(model_name: &str, endpoint: Option<&str>) -> Option<usize> {
+    match METADATA_CACHE.get_or_fetch(model_name, endpoint).await {
+        Ok(metadata) if metadata.context_known => Some(metadata.context_size),
+        Ok(metadata) => {
+            info!(
+                "Ollama context for {} is a guess ({} tokens); treating it as unknown",
+                model_name, metadata.context_size
+            );
+            None
+        }
+        Err(e) => {
+            warn!("Failed to fetch context for {}: {}", model_name, e);
+            None
+        }
+    }
+}
+
+/// The phase a call made now belongs to.
+pub(crate) async fn ollama_phase_now() -> OllamaPhase {
+    if crate::audio::recording_commands::is_recording().await {
+        OllamaPhase::Recording
+    } else {
+        OllamaPhase::AfterMeeting
+    }
+}
+
+/// `num_ctx` for an Ollama call in `phase` (see [`ollama_context_for`]);
+/// None for other providers. Every Ollama call goes through this, so calls
+/// in one phase never make Ollama reload the model.
+pub(crate) async fn ollama_num_ctx_for(
+    provider: &LLMProvider,
+    model_name: &str,
+    endpoint: Option<&str>,
+    phase: OllamaPhase,
+) -> Option<u32> {
+    if *provider != LLMProvider::Ollama {
+        return None;
+    }
+    let context = ollama_context_for(phase, ollama_model_context(model_name, endpoint).await);
+    Some(u32::try_from(context).unwrap_or(u32::MAX))
+}
 
 static METADATA_CACHE: LazyLock<ModelMetadataCache> =
     LazyLock::new(|| ModelMetadataCache::new(Duration::from_secs(300)));
@@ -65,6 +158,8 @@ struct SummaryCacheSource {
     custom_prompt_fingerprint: String,
     template_id: String,
     template_fingerprint: String,
+    #[serde(default)]
+    notes_prompt_fingerprint: String,
     token_threshold: usize,
     model_provider: String,
     model_name: String,
@@ -100,6 +195,7 @@ fn build_summary_cache_source(
     custom_prompt: &str,
     template_id: &str,
     template_fingerprint: &str,
+    notes_prompt_fingerprint: &str,
     token_threshold: usize,
     model_provider: &str,
     model_name: &str,
@@ -114,6 +210,7 @@ fn build_summary_cache_source(
         custom_prompt_fingerprint: stable_text_fingerprint(custom_prompt),
         template_id: template_id.to_string(),
         template_fingerprint: template_fingerprint.to_string(),
+        notes_prompt_fingerprint: notes_prompt_fingerprint.to_string(),
         token_threshold,
         model_provider: model_provider.to_string(),
         model_name: model_name.to_string(),
@@ -170,6 +267,24 @@ fn build_summary_result_json(
     }))
 }
 
+/// Tells the notes editor a meeting's tidy pass result is stored.
+pub const TIDY_NOTES_READY_EVENT: &str = "tidy-notes-ready";
+/// The result field holding the tidy pass's wrap-up.
+pub const TIDY_WRAP_UP_FIELD: &str = "tidy_wrap_up";
+
+/// The stored result with the tidy pass's wrap-up, when it wrote the notes.
+fn with_tidy_wrap_up(
+    mut result: serde_json::Value,
+    wrap_up: Option<&crate::summary::tidy::TidyWrapUp>,
+) -> serde_json::Value {
+    if let (Some(wrap_up), Some(object)) = (wrap_up, result.as_object_mut()) {
+        if let Ok(value) = serde_json::to_value(wrap_up) {
+            object.insert(TIDY_WRAP_UP_FIELD.to_string(), value);
+        }
+    }
+    result
+}
+
 /// Parses a `summary_processes.result` JSON blob and extracts a cached English
 /// summary only when it was produced from exactly the same source inputs and
 /// the user is switching to a different non-English target language.
@@ -209,6 +324,117 @@ fn extract_cached_english_markdown(
     }
 }
 
+/// Everything an LLM call needs beyond the prompts, resolved from saved settings.
+pub(crate) struct LlmConfig {
+    pub(crate) provider: LLMProvider,
+    pub(crate) model_name: String,
+    pub(crate) api_key: String,
+    pub(crate) ollama_endpoint: Option<String>,
+    pub(crate) custom_openai_endpoint: Option<String>,
+    pub(crate) max_tokens: Option<u32>,
+    pub(crate) temperature: Option<f32>,
+    pub(crate) top_p: Option<f32>,
+}
+
+/// Resolves the API key, Ollama endpoint and CustomOpenAI settings for a provider/model pair.
+/// `settings` is the already-loaded settings row, when the caller has one, so Ollama's
+/// endpoint lookup does not read it again.
+pub(crate) async fn load_llm_config(
+    pool: &SqlitePool,
+    model_provider: &str,
+    model_name: &str,
+    settings: Option<&Setting>,
+) -> Result<LlmConfig, String> {
+    let provider = LLMProvider::from_str(model_provider)?;
+    let mut config = LlmConfig {
+        provider: provider.clone(),
+        model_name: model_name.to_string(),
+        api_key: String::new(),
+        ollama_endpoint: None,
+        custom_openai_endpoint: None,
+        max_tokens: None,
+        temperature: None,
+        top_p: None,
+    };
+
+    match provider {
+        LLMProvider::BuiltInAI => {}
+        LLMProvider::Ollama => {
+            config.ollama_endpoint = match settings {
+                Some(settings) => settings.ollama_endpoint.clone(),
+                None => match SettingsRepository::get_model_config(pool).await {
+                    Ok(settings) => settings.and_then(|settings| settings.ollama_endpoint),
+                    Err(e) => {
+                        info!("Failed to retrieve Ollama endpoint: {}, using default", e);
+                        None
+                    }
+                },
+            };
+        }
+        LLMProvider::CustomOpenAI => {
+            let custom = match SettingsRepository::get_custom_openai_config(pool).await {
+                Ok(Some(custom)) => custom,
+                Ok(None) => {
+                    return Err(
+                        "Custom OpenAI provider selected but no configuration found".to_string()
+                    );
+                }
+                Err(e) => {
+                    return Err(format!("Failed to retrieve custom OpenAI config: {}", e));
+                }
+            };
+            info!("✓ Using custom OpenAI endpoint: {}", custom.endpoint);
+            config.api_key = custom.api_key.unwrap_or_default();
+            config.custom_openai_endpoint = Some(custom.endpoint);
+            config.max_tokens = custom.max_tokens.map(|t| t as u32);
+            config.temperature = custom.temperature;
+            config.top_p = custom.top_p;
+        }
+        _ => {
+            config.api_key = match SettingsRepository::get_api_key(pool, model_provider).await {
+                Ok(Some(key)) if !key.is_empty() => key,
+                Ok(None) | Ok(Some(_)) => {
+                    return Err(format!("API key not found for {}", model_provider));
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "Failed to retrieve API key for {}: {}",
+                        model_provider, e
+                    ));
+                }
+            };
+        }
+    }
+
+    Ok(config)
+}
+
+/// Joins stored transcript segments into the plain text the title prompt reads,
+/// labelling each line with its speaker the way the summary transcript does.
+fn title_transcript_text(segments: &[Transcript]) -> String {
+    segments
+        .iter()
+        .filter_map(|segment| {
+            let text = segment.transcript.trim();
+            if text.is_empty() {
+                return None;
+            }
+            Some(match segment.speaker.as_deref().map(str::trim) {
+                Some("mic") => format!("[You] {text}"),
+                Some("system") => format!("[Others] {text}"),
+                Some(speaker) if !speaker.is_empty() => format!("[{speaker}] {text}"),
+                _ => text.to_string(),
+            })
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The error a summary gets when the job running it is gone: the app quit or
+/// crashed mid-run, so nothing will ever finish the pending row.
+pub const INTERRUPTED_SUMMARY_ERROR: &str =
+    "Interrupted: the app was closed while this summary was running. Generate it again.";
+
 /// Summary service - handles all summary generation logic
 pub struct SummaryService;
 
@@ -233,6 +459,16 @@ impl SummaryService {
         }
         info!("Registered cancellation token for meeting: {}", meeting_id);
         token
+    }
+
+    /// True while this process runs the generation identified by `started_at`.
+    /// A pending row without one was orphaned by a quit, crash or lost write.
+    pub(crate) fn has_active_job(meeting_id: &str, started_at: DateTime<Utc>) -> bool {
+        CANCELLATION_REGISTRY
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(meeting_id)
+            .is_some_and(|entry| entry.started_at == started_at)
     }
 
     /// Cancels only the active generation identified by `started_at`.
@@ -329,7 +565,7 @@ impl SummaryService {
     /// the main thread. It updates the database with progress and results.
     ///
     /// # Arguments
-    /// * `_app` - Tauri app handle (for future use)
+    /// * `app` - Tauri app handle (used for app data dir and the saved notes-prompt override)
     /// * `pool` - SQLx connection pool
     /// * `meeting_id` - Unique identifier for the meeting
     /// * `text` - Full transcript text
@@ -340,7 +576,7 @@ impl SummaryService {
     // This task boundary carries the persisted command inputs into detached processing.
     #[allow(clippy::too_many_arguments)]
     pub async fn process_transcript_background<R: tauri::Runtime>(
-        _app: AppHandle<R>,
+        app: AppHandle<R>,
         pool: SqlitePool,
         meeting_id: String,
         started_at: DateTime<Utc>,
@@ -351,6 +587,7 @@ impl SummaryService {
         custom_prompt: String,
         template_id: String,
         summary_language: Option<String>,
+        regenerate: bool,
     ) {
         let start_time = Instant::now();
         info!(
@@ -358,145 +595,65 @@ impl SummaryService {
             meeting_id
         );
 
-        // Parse provider
-        let provider = match LLMProvider::from_str(&model_provider) {
-            Ok(p) => p,
+        let LlmConfig {
+            provider,
+            model_name,
+            api_key: final_api_key,
+            ollama_endpoint,
+            custom_openai_endpoint,
+            max_tokens: custom_openai_max_tokens,
+            temperature: custom_openai_temperature,
+            top_p: custom_openai_top_p,
+        } = match load_llm_config(&pool, &model_provider, &model_name, None).await {
+            Ok(config) => config,
             Err(e) => {
                 Self::fail_and_cleanup(&pool, &meeting_id, started_at, &e).await;
                 return;
             }
         };
 
-        // Validate and setup api_key, Flexible for Ollama, BuiltInAI, and CustomOpenAI
-        let api_key = if provider == LLMProvider::Ollama
-            || provider == LLMProvider::BuiltInAI
-            || provider == LLMProvider::CustomOpenAI
-        {
-            // These providers don't require API keys from the standard database column
-            String::new()
-        } else {
-            match SettingsRepository::get_api_key(&pool, &model_provider).await {
-                Ok(Some(key)) if !key.is_empty() => key,
-                Ok(None) | Ok(Some(_)) => {
-                    let err_msg = format!("API key not found for {}", model_provider);
-                    Self::fail_and_cleanup(&pool, &meeting_id, started_at, &err_msg).await;
-                    return;
+        // Local models get a context budget: the window the model runs with.
+        // Ollama is sent the same value as num_ctx; hosted models take the
+        // whole transcript in one pass.
+        let context_budget = if provider == LLMProvider::Ollama {
+            let model_context = ollama_model_context(&model_name, ollama_endpoint.as_deref()).await;
+            let budget =
+                ContextBudget::new(ollama_context_for(OllamaPhase::AfterMeeting, model_context));
+            info!(
+                "✓ Ollama context for {}: model max {:?} tokens, running with num_ctx {}",
+                model_name, model_context, budget.n_ctx
+            );
+            Some(budget)
+        } else if provider == LLMProvider::BuiltInAI {
+            use crate::summary::summary_engine::models;
+            match models::get_model_by_name(&model_name) {
+                Some(model_def) => {
+                    info!(
+                        "✓ Using BuiltInAI context size: {} tokens",
+                        model_def.context_size
+                    );
+                    Some(ContextBudget::new(model_def.context_size as usize))
                 }
-                Err(e) => {
-                    let err_msg =
-                        format!("Failed to retrieve API key for {}: {}", model_provider, e);
-                    Self::fail_and_cleanup(&pool, &meeting_id, started_at, &err_msg).await;
-                    return;
-                }
-            }
-        };
-
-        // Get Ollama endpoint if provider is Ollama
-        let ollama_endpoint = if provider == LLMProvider::Ollama {
-            match SettingsRepository::get_model_config(&pool).await {
-                Ok(Some(config)) => config.ollama_endpoint,
-                Ok(None) => None,
-                Err(e) => {
-                    info!("Failed to retrieve Ollama endpoint: {}, using default", e);
-                    None
+                None => {
+                    warn!("Unknown model: {}, using a 2048-token budget", model_name);
+                    Some(ContextBudget::new(2048))
                 }
             }
         } else {
             None
         };
-
-        // Get CustomOpenAI config if provider is CustomOpenAI
-        let (
-            custom_openai_endpoint,
-            custom_openai_api_key,
-            custom_openai_max_tokens,
-            custom_openai_temperature,
-            custom_openai_top_p,
-        ) = if provider == LLMProvider::CustomOpenAI {
-            match SettingsRepository::get_custom_openai_config(&pool).await {
-                Ok(Some(config)) => {
-                    info!("✓ Using custom OpenAI endpoint: {}", config.endpoint);
-                    (
-                        Some(config.endpoint),
-                        config.api_key,
-                        config.max_tokens.map(|t| t as u32),
-                        config.temperature,
-                        config.top_p,
-                    )
-                }
-                Ok(None) => {
-                    let err_msg = "Custom OpenAI provider selected but no configuration found";
-                    Self::fail_and_cleanup(&pool, &meeting_id, started_at, err_msg).await;
-                    return;
-                }
-                Err(e) => {
-                    let err_msg = format!("Failed to retrieve custom OpenAI config: {}", e);
-                    Self::fail_and_cleanup(&pool, &meeting_id, started_at, &err_msg).await;
-                    return;
-                }
-            }
-        } else {
-            (None, None, None, None, None)
-        };
-
-        // For CustomOpenAI, use its API key (if any) instead of the empty string
-        let final_api_key = if provider == LLMProvider::CustomOpenAI {
-            custom_openai_api_key.unwrap_or_default()
-        } else {
-            api_key
-        };
-
-        // Dynamically fetch context size based on provider and model
-        let token_threshold = if provider == LLMProvider::Ollama {
-            match METADATA_CACHE
-                .get_or_fetch(&model_name, ollama_endpoint.as_deref())
-                .await
-            {
-                Ok(metadata) => {
-                    // Reserve 300 tokens for prompt overhead
-                    let optimal = metadata.context_size.saturating_sub(300);
-                    info!(
-                        "✓ Using dynamic context for {}: {} tokens (chunk size: {})",
-                        model_name, metadata.context_size, optimal
-                    );
-                    optimal
-                }
-                Err(e) => {
-                    warn!(
-                        "Failed to fetch context for {}: {}. Using default 4000",
-                        model_name, e
-                    );
-                    4000 // Fallback to safe default
-                }
-            }
-        } else if provider == LLMProvider::BuiltInAI {
-            // Get model's context size from registry
-            use crate::summary::summary_engine::models;
-            let model = models::get_model_by_name(&model_name)
-                .ok_or_else(|| format!("Unknown model: {}", model_name));
-
-            match model {
-                Ok(model_def) => {
-                    // Reserve 300 tokens for prompt overhead
-                    let optimal = model_def.context_size.saturating_sub(300) as usize;
-                    info!(
-                        "✓ Using BuiltInAI context size: {} tokens (chunk size: {})",
-                        model_def.context_size, optimal
-                    );
-                    optimal
-                }
-                Err(e) => {
-                    warn!("{}, using default 2048", e);
-                    1748 // 2048 - 300 for overhead
-                }
-            }
-        } else {
-            // Cloud providers (OpenAI, Claude, Groq, CustomOpenAI) handle large contexts automatically
-            100000 // Effectively unlimited for single-pass processing
-        };
+        // Recorded in the cache key; hosted models keep the legacy value.
+        let token_threshold = context_budget.map_or(HOSTED_TOKEN_THRESHOLD, |budget| budget.n_ctx);
 
         // Get app data directory for BuiltInAI provider
-        let app_data_dir = _app.path().app_data_dir().ok();
+        let app_data_dir = app.path().app_data_dir().ok();
+
+        use crate::summary::prompt_settings::{load_prompt, PromptKind};
+        let effective_notes_prompt = resolve_summary_system_prompt(
+            load_prompt(&app, PromptKind::Notes).as_deref(),
+            load_prompt(&app, PromptKind::TranscriptOnly).as_deref(),
+            &custom_prompt,
+        );
 
         if let Some(code) = &summary_language {
             info!("📝 Summary language preference: {}", code);
@@ -520,11 +677,14 @@ impl SummaryService {
         };
         let template_fingerprint = template_cache_fingerprint(&template);
 
+        let notes_prompt_fingerprint = stable_text_fingerprint(&effective_notes_prompt.text);
+
         let cache_source = build_summary_cache_source(
             &text,
             &custom_prompt,
             &template_id,
             &template_fingerprint,
+            &notes_prompt_fingerprint,
             token_threshold,
             &model_provider,
             &model_name,
@@ -562,29 +722,82 @@ impl SummaryService {
             }),
         };
 
-        let client = reqwest::Client::new();
-        let result = generate_meeting_summary(
-            &client,
-            &provider,
-            &model_name,
-            &final_api_key,
+        // Meetings with live notes: the sections written during the meeting,
+        // the last topic and the title on the live notes model. No pass over
+        // the whole transcript.
+        let from_live_notes = crate::summary::live_enhanced::notes_from_live_notes(
+            &app,
+            &pool,
+            &meeting_id,
             &text,
             &custom_prompt,
-            &template_id,
-            &template,
-            token_threshold,
-            ollama_endpoint.as_deref(),
-            custom_openai_endpoint.as_deref(),
-            custom_openai_max_tokens,
-            custom_openai_temperature,
-            custom_openai_top_p,
-            app_data_dir.as_ref(),
-            Some(&cancellation_token),
-            summary_language.as_deref(),
-            detected_summary_language.as_deref(),
-            cached_english.as_deref(),
+            summary_language
+                .as_deref()
+                .or(detected_summary_language.as_deref()),
+            regenerate,
+            &cancellation_token,
         )
         .await;
+        let from_live_notes = match from_live_notes {
+            Ok(notes) => notes,
+            Err(_) if cancellation_token.is_cancelled() => None,
+            Err(error) => {
+                warn!(
+                    "Enhanced notes from live notes failed ({error}); using the whole transcript"
+                );
+                None
+            }
+        };
+
+        let client = reqwest::Client::new();
+        let backend = ProviderBackend {
+            client: &client,
+            provider: &provider,
+            model_name: &model_name,
+            api_key: &final_api_key,
+            ollama_endpoint: ollama_endpoint.as_deref(),
+            custom_openai_endpoint: custom_openai_endpoint.as_deref(),
+            app_data_dir: app_data_dir.as_ref(),
+            cancellation_token: Some(&cancellation_token),
+        };
+        // The notes document's wrap-up from the tidy pass, stored with the
+        // summary for the notes editor (`completeAiNotes`).
+        let tidy_wrap_up = from_live_notes
+            .as_ref()
+            .and_then(|notes| notes.tidy.clone());
+        let result = match from_live_notes {
+            Some(notes) => Ok(crate::summary::processor::GeneratedMeetingSummary {
+                final_markdown: notes.markdown.clone(),
+                english_markdown: notes.markdown,
+                successful_chunk_count: notes.calls as i64,
+                reasoning_stripped: false,
+                normalization_fallback: false,
+            }),
+            None if cancellation_token.is_cancelled() => {
+                Err("Summary generation was cancelled".to_string())
+            }
+            None => {
+                generate_meeting_summary(
+                    &backend,
+                    &model_name,
+                    &text,
+                    &custom_prompt,
+                    &effective_notes_prompt,
+                    context_budget,
+                    &GenerationOptions {
+                        max_tokens: custom_openai_max_tokens,
+                        temperature: custom_openai_temperature,
+                        top_p: custom_openai_top_p,
+                        num_ctx: None,
+                        ..Default::default()
+                    },
+                    summary_language.as_deref(),
+                    detected_summary_language.as_deref(),
+                    cached_english.as_deref(),
+                )
+                .await
+            }
+        };
 
         let duration = start_time.elapsed().as_secs_f64();
 
@@ -602,7 +815,7 @@ impl SummaryService {
                     generated.reasoning_stripped,
                     generated.normalization_fallback,
                 ) {
-                    Ok(result) => result,
+                    Ok(result) => with_tidy_wrap_up(result, tidy_wrap_up.as_ref()),
                     Err(error) => {
                         Self::update_process_failed(&pool, &meeting_id, started_at, &error).await;
                         Self::cleanup_cancellation_token(&meeting_id, started_at);
@@ -625,17 +838,42 @@ impl SummaryService {
                             extract_meeting_name_from_markdown(&generated.final_markdown)
                                 .filter(|name| !name.is_empty())
                         {
-                            if let Err(error) =
-                                MeetingsRepository::update_meeting_name(&pool, &meeting_id, &name)
-                                    .await
-                            {
-                                error!(
-                                    "Failed to update meeting name for {}: {}",
-                                    meeting_id, error
+                            // Old notes-prompt overrides still carry the example title,
+                            // which small models copy verbatim instead of naming the meeting.
+                            if is_prompt_echo_title(&name, &text) {
+                                warn!(
+                                    "Keeping meeting name for {}: generated title '{}' echoes the prompt example",
+                                    meeting_id, name
                                 );
+                            } else {
+                                match MeetingsRepository::update_meeting_name(
+                                    &pool,
+                                    &meeting_id,
+                                    &name,
+                                    TitleSource::Generated,
+                                )
+                                .await
+                                {
+                                    Ok(TitleUpdate::Kept) => info!(
+                                        "Keeping the user's title for {}: not renaming it to '{}'",
+                                        meeting_id, name
+                                    ),
+                                    Ok(_) => {}
+                                    Err(error) => error!(
+                                        "Failed to update meeting name for {}: {}",
+                                        meeting_id, error
+                                    ),
+                                }
                             }
                         }
                         info!("Summary saved successfully for meeting_id: {}", meeting_id);
+                        if tidy_wrap_up.is_some() {
+                            use tauri::Emitter;
+                            let _ = app.emit(
+                                TIDY_NOTES_READY_EVENT,
+                                serde_json::json!({ "meetingId": meeting_id }),
+                            );
+                        }
                     }
                     Ok(false) => warn!(
                         "Skipped stale summary completion for meeting_id: {}",
@@ -674,6 +912,114 @@ impl SummaryService {
             }
         }
         Self::cleanup_cancellation_token(&meeting_id, started_at);
+    }
+
+    /// Asks the configured summary model for a fresh meeting title from the stored
+    /// transcript and the user's notes, saves it, and returns it.
+    pub async fn regenerate_meeting_title<R: tauri::Runtime>(
+        app: &AppHandle<R>,
+        pool: &SqlitePool,
+        meeting_id: &str,
+    ) -> Result<String, String> {
+        let model_config = SettingsRepository::get_model_config(pool)
+            .await
+            .map_err(|e| format!("Failed to load summary model settings: {}", e))?
+            .filter(|config| !config.provider.trim().is_empty() && !config.model.trim().is_empty())
+            .ok_or_else(|| "No summary model configured".to_string())?;
+        let config = load_llm_config(
+            pool,
+            &model_config.provider,
+            &model_config.model,
+            Some(&model_config),
+        )
+        .await?;
+
+        let (segments, _) =
+            MeetingsRepository::get_meeting_transcripts_paginated(pool, meeting_id, i64::MAX, 0)
+                .await
+                .map_err(|e| format!("Failed to load transcript for {}: {}", meeting_id, e))?;
+        let transcript = title_transcript_text(&segments);
+        if transcript.trim().is_empty() {
+            return Err("This meeting has no transcript to generate a title from".to_string());
+        }
+
+        let notes = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT notes_markdown FROM meeting_notes WHERE meeting_id = ?",
+        )
+        .bind(meeting_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| format!("Failed to load notes for {}: {}", meeting_id, e))?
+        .flatten();
+
+        info!(
+            "Regenerating title for meeting_id {} with {}/{}",
+            meeting_id, model_config.provider, config.model_name
+        );
+        let app_data_dir = app.path().app_data_dir().ok();
+        let client = reqwest::Client::new();
+        let title_user_prompt = build_title_user_prompt(&transcript, notes.as_deref());
+        let title_max_tokens = crate::summary::processor::fit_builtin_output(
+            &config.provider,
+            &config.model_name,
+            app_data_dir.as_ref(),
+            title_system_prompt(),
+            &title_user_prompt,
+            config.max_tokens,
+        )
+        .await;
+        let completion = generate_summary(
+            &client,
+            &config.provider,
+            &config.model_name,
+            &config.api_key,
+            title_system_prompt(),
+            &title_user_prompt,
+            config.ollama_endpoint.as_deref(),
+            config.custom_openai_endpoint.as_deref(),
+            &GenerationOptions {
+                max_tokens: title_max_tokens,
+                temperature: config.temperature,
+                top_p: config.top_p,
+                // The title prompt carries up to 12k characters of transcript,
+                // so it never runs below 8192, whatever the metadata says.
+                num_ctx: ollama_num_ctx_for(
+                    &config.provider,
+                    &config.model_name,
+                    config.ollama_endpoint.as_deref(),
+                    ollama_phase_now().await,
+                )
+                .await
+                .map(|num_ctx| num_ctx.max(OLLAMA_MIN_TITLE_NUM_CTX as u32)),
+                ..Default::default()
+            },
+            app_data_dir.as_ref(),
+            None,
+        )
+        .await?;
+
+        let title = sanitize_generated_title(&completion.content)
+            .ok_or_else(|| "The model did not return a usable title".to_string())?;
+
+        // The user asked for this title, so it is saved even over their own
+        // rename, and later automatic passes keep it.
+        match MeetingsRepository::update_meeting_name(
+            pool,
+            meeting_id,
+            &title,
+            TitleSource::Requested,
+        )
+        .await
+        {
+            Ok(TitleUpdate::Saved) => {
+                info!("Regenerated title for meeting_id {}: {}", meeting_id, title);
+                Ok(title)
+            }
+            Ok(TitleUpdate::Kept | TitleUpdate::NotFound) => {
+                Err(format!("Meeting not found: {}", meeting_id))
+            }
+            Err(e) => Err(format!("Failed to save meeting title: {}", e)),
+        }
     }
 
     /// Updates the summary process status to failed with error message
@@ -735,6 +1081,64 @@ mod tests {
         ));
         assert!(second.is_cancelled());
         SummaryService::cleanup_cancellation_token(&meeting_id, second_started_at);
+    }
+
+    fn segment(text: &str, speaker: Option<&str>) -> Transcript {
+        Transcript {
+            id: uuid::Uuid::new_v4().to_string(),
+            meeting_id: "meeting-1".to_string(),
+            transcript: text.to_string(),
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+            speaker: speaker.map(str::to_string),
+            summary: None,
+            action_items: None,
+            key_points: None,
+            audio_start_time: None,
+            audio_end_time: None,
+            duration: None,
+        }
+    }
+
+    #[test]
+    fn title_transcript_text_labels_speakers_in_order_and_skips_blank_segments() {
+        let segments = [
+            segment("  Kick off the hiring review. ", Some("mic")),
+            segment("   ", Some("system")),
+            segment("Two offers are out.", Some("system")),
+            segment("I own the budget.", Some("Priya")),
+            segment("Unattributed line", None),
+            segment("Blank speaker", Some("  ")),
+        ];
+        assert_eq!(
+            title_transcript_text(&segments),
+            "[You] Kick off the hiring review.\n[Others] Two offers are out.\n[Priya] I own the budget.\nUnattributed line\nBlank speaker"
+        );
+    }
+
+    #[test]
+    fn title_transcript_text_is_empty_without_spoken_text() {
+        assert_eq!(title_transcript_text(&[]), "");
+        assert_eq!(title_transcript_text(&[segment(" \n ", Some("mic"))]), "");
+    }
+
+    #[tokio::test]
+    async fn llm_config_resolves_keyless_providers_and_rejects_unknown_ones() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let config = load_llm_config(&pool, "builtin-ai", "gemma3:1b", None)
+            .await
+            .unwrap_or_else(|e| panic!("builtin-ai should need no settings: {e}"));
+        assert_eq!(config.provider, LLMProvider::BuiltInAI);
+        assert_eq!(config.model_name, "gemma3:1b");
+        assert!(config.api_key.is_empty());
+        assert!(config.ollama_endpoint.is_none());
+        assert!(config.custom_openai_endpoint.is_none());
+
+        assert_eq!(
+            load_llm_config(&pool, "not-a-provider", "x", None)
+                .await
+                .err(),
+            Some("Unsupported LLM provider: not-a-provider".to_string())
+        );
     }
 
     #[test]
@@ -823,13 +1227,19 @@ mod tests {
         );
     }
 
+    fn sample_notes_prompt_fingerprint() -> String {
+        stable_text_fingerprint("standard notes prompt")
+    }
+
     fn sample_cache_source() -> SummaryCacheSource {
         let template_fingerprint = stable_text_fingerprint("standard template prompt");
+        let notes_prompt_fingerprint = sample_notes_prompt_fingerprint();
         build_summary_cache_source(
             "transcript body",
             "custom prompt",
             "standard_meeting",
             &template_fingerprint,
+            &notes_prompt_fingerprint,
             3700,
             "ollama",
             "gemma3:1b",
@@ -921,6 +1331,7 @@ mod tests {
     fn test_changed_summary_inputs_reject_cache() {
         let source = sample_cache_source();
         let template_fingerprint = source.template_fingerprint.clone();
+        let notes_prompt_fingerprint = source.notes_prompt_fingerprint.clone();
         let raw = build_summary_result_json(
             "# Reunion\n## Points\nBonjour",
             "# Meeting\n## Points\nHello",
@@ -938,6 +1349,7 @@ mod tests {
                 "custom prompt",
                 "standard_meeting",
                 &template_fingerprint,
+                &notes_prompt_fingerprint,
                 3700,
                 "ollama",
                 "gemma3:1b",
@@ -952,6 +1364,7 @@ mod tests {
                 "changed prompt",
                 "standard_meeting",
                 &template_fingerprint,
+                &notes_prompt_fingerprint,
                 3700,
                 "ollama",
                 "gemma3:1b",
@@ -966,6 +1379,7 @@ mod tests {
                 "custom prompt",
                 "daily_standup",
                 &template_fingerprint,
+                &notes_prompt_fingerprint,
                 3700,
                 "ollama",
                 "gemma3:1b",
@@ -980,6 +1394,7 @@ mod tests {
                 "custom prompt",
                 "standard_meeting",
                 &template_fingerprint,
+                &notes_prompt_fingerprint,
                 3700,
                 "openai",
                 "gemma3:1b",
@@ -994,6 +1409,7 @@ mod tests {
                 "custom prompt",
                 "standard_meeting",
                 &template_fingerprint,
+                &notes_prompt_fingerprint,
                 3700,
                 "ollama",
                 "qwen2.5:3b",
@@ -1008,6 +1424,7 @@ mod tests {
                 "custom prompt",
                 "standard_meeting",
                 &template_fingerprint,
+                &notes_prompt_fingerprint,
                 3700,
                 "ollama",
                 "gemma3:1b",
@@ -1022,6 +1439,7 @@ mod tests {
                 "custom prompt",
                 "standard_meeting",
                 &template_fingerprint,
+                &notes_prompt_fingerprint,
                 3700,
                 "ollama",
                 "gemma3:1b",
@@ -1067,6 +1485,57 @@ mod tests {
     }
 
     #[test]
+    fn test_changed_notes_prompt_rejects_cache() {
+        let source = sample_cache_source();
+        let raw = build_summary_result_json(
+            "# Reunion\n## Points\nBonjour",
+            "# Meeting\n## Points\nHello",
+            source.clone(),
+            Some("fr"),
+            false,
+            false,
+        )
+        .unwrap()
+        .to_string();
+
+        let changed_notes_prompt = SummaryCacheSource {
+            notes_prompt_fingerprint: stable_text_fingerprint("changed notes prompt"),
+            ..source
+        };
+
+        assert_eq!(
+            extract_cached_english_markdown(&raw, &changed_notes_prompt, Some("de")).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn ollama_context_is_small_while_recording_and_never_trusts_a_guess() {
+        // While recording: 8192, or a known smaller model context.
+        assert_eq!(
+            ollama_context_for(OllamaPhase::Recording, Some(131_072)),
+            8_192
+        );
+        assert_eq!(ollama_context_for(OllamaPhase::Recording, None), 8_192);
+        assert_eq!(
+            ollama_context_for(OllamaPhase::Recording, Some(4_096)),
+            4_096
+        );
+        // After the meeting: the model's context capped at 16k, and an
+        // unknown context (the 4000/2048 guesses) is 8192, not the guess.
+        assert_eq!(
+            ollama_context_for(OllamaPhase::AfterMeeting, Some(131_072)),
+            16_384
+        );
+        assert_eq!(ollama_context_for(OllamaPhase::AfterMeeting, None), 8_192);
+        assert_eq!(
+            ollama_context_for(OllamaPhase::AfterMeeting, Some(8_192)),
+            8_192
+        );
+        assert!(OLLAMA_MIN_TITLE_NUM_CTX >= 8_192);
+    }
+
+    #[test]
     fn test_changed_token_threshold_rejects_cache() {
         let source = sample_cache_source();
         let raw = build_summary_result_json(
@@ -1107,6 +1576,41 @@ mod tests {
         assert_eq!(
             result["english_cache"]["markdown"],
             "# English Title\n## Decisions\nDone"
+        );
+    }
+
+    #[test]
+    fn result_json_carries_the_tidy_wrap_up_only_when_the_tidy_pass_wrote_the_notes() {
+        let result = || {
+            build_summary_result_json(
+                "# Title\n## Summary\nDone",
+                "# Title\n## Summary\nDone",
+                sample_cache_source(),
+                None,
+                false,
+                false,
+            )
+            .unwrap()
+        };
+        assert!(with_tidy_wrap_up(result(), None)
+            .get(TIDY_WRAP_UP_FIELD)
+            .is_none());
+        let wrap_up = crate::summary::tidy::TidyWrapUp {
+            summary: "Done".into(),
+            decisions: vec!["Ship it".into()],
+            action_items: vec!["Priya — Send the deck".into()],
+            open_questions: Vec::new(),
+        };
+        let stored = with_tidy_wrap_up(result(), Some(&wrap_up));
+        assert_eq!(stored["markdown"], "## Summary\nDone");
+        assert_eq!(
+            stored[TIDY_WRAP_UP_FIELD],
+            serde_json::json!({
+                "summary": "Done",
+                "decisions": ["Ship it"],
+                "action_items": ["Priya — Send the deck"],
+                "open_questions": [],
+            })
         );
     }
 

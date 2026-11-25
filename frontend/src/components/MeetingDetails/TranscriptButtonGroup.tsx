@@ -1,24 +1,23 @@
 "use client";
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, type ReactNode } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { Button } from '@/components/ui/button';
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuSub,
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { Copy, FolderOpen, Link2, Loader2, Mic, MoreHorizontal, RefreshCw, UserRoundCog, Users } from 'lucide-react';
+import { Copy, FolderOpen, Link2, Loader2, Mic, MoreHorizontal, RefreshCw, Search, UserRoundCog, Users } from 'lucide-react';
 import { toast } from 'sonner';
-import Analytics from '@/lib/analytics';
+import { copyMeetingLink } from '@/lib/clipboard';
 import { RetranscribeDialog } from './RetranscribeDialog';
-import { useConfig } from '@/contexts/ConfigContext';
-import { useOptionalRecordingController } from '@/contexts/RecordingControllerContext';
-import { useRecordingState } from '@/contexts/RecordingStateContext';
+import { useContinueRecording } from './useContinueRecording';
 
 
 interface TranscriptButtonGroupProps {
@@ -31,9 +30,20 @@ interface TranscriptButtonGroupProps {
   onOpenSpeakerManager?: () => void;
   locked?: boolean;
   isEnhancing?: boolean;
+  /** Whether the transcript search box is open, and how to toggle it. */
+  searchOpen?: boolean;
+  onToggleSearch?: () => void;
+  /** Shown at the start of the row (the model provenance info icon). */
+  leading?: ReactNode;
 }
 
+const pill = 'h-8 rounded-full bg-[var(--surface-2)] px-3 text-[var(--ink-muted)] hover:bg-[var(--surface-2)]';
 
+/**
+ * The transcript header: Search and Speakers as buttons (plus Re-transcribe
+ * while there is no transcript yet, when it is the thing to do), and
+ * everything else in the ⋯ menu.
+ */
 export function TranscriptButtonGroup({
   transcriptCount,
   onCopyTranscript,
@@ -44,31 +54,28 @@ export function TranscriptButtonGroup({
   onOpenSpeakerManager,
   locked = false,
   isEnhancing = false,
+  searchOpen = false,
+  onToggleSearch,
+  leading,
 }: TranscriptButtonGroupProps) {
-  const { betaFeatures } = useConfig();
-  const recordingController = useOptionalRecordingController();
-  const { isRecording, isStopping, isProcessing, isSaving, isStartingRecording } = useRecordingState();
+  const continueRecording = useContinueRecording(meetingId, locked);
   const [showRetranscribeDialog, setShowRetranscribeDialog] = useState(false);
   const [isIdentifyingSpeakers, setIsIdentifyingSpeakers] = useState(false);
-  // "Copy meeting link" only needs meetingId, so it alone keeps the menu non-empty.
-  const hasMoreActions = !locked && Boolean(meetingId);
-  // No recording in progress anywhere in the app (this meeting or any other) — a resume would
-  // otherwise collide with the recording that's already running.
-  const isRecordingIdle = !isRecording && !isStopping && !isProcessing && !isSaving && !isStartingRecording;
-  const canResumeMeeting = Boolean(meetingId) && !locked && Boolean(recordingController) && isRecordingIdle;
-
-  const handleResumeMeeting = useCallback(async () => {
-    if (!meetingId || !recordingController) return;
-    Analytics.trackButtonClick('resume_meeting', 'transcript_panel');
+  const canRetranscribe = Boolean(meetingId && meetingFolderPath) && !locked;
+  // Re-transcribing is the primary action only while there is nothing to read.
+  const retranscribeIsPrimary = canRetranscribe && (transcriptCount === 0 || isEnhancing);
+  const canManageSpeakers = Boolean(meetingId) && transcriptCount > 0 && Boolean(onOpenSpeakerManager) && !locked;
+  const handleCopyMeetingLink = useCallback(async () => {
+    if (!meetingId) return;
     try {
-      await recordingController.resumeMeeting(meetingId);
+      await copyMeetingLink(meetingId);
+      toast.success('Meeting link copied');
     } catch (error) {
-      // The controller already surfaces user-facing feedback for a failed resume
-      // (its feedback banner), so we only log here to avoid double-reporting.
-      console.warn('Resume meeting failed:', error);
+      toast.error('Could not copy meeting link', {
+        description: error instanceof Error ? error.message : String(error),
+      });
     }
-  }, [meetingId, recordingController]);
-
+  }, [meetingId]);
   const handleIdentifySpeakers = useCallback(async (numSpeakers: number | null) => {
     if (!meetingId || isIdentifyingSpeakers) return;
     setIsIdentifyingSpeakers(true);
@@ -109,45 +116,29 @@ export function TranscriptButtonGroup({
 
   return (
     <div className="flex w-full items-center justify-end gap-2">
+      {leading && <div className="mr-auto flex items-center">{leading}</div>}
       <div className="flex items-center gap-1.5">
-        <Button
-          variant="ghost"
-          size="sm"
-          className="h-8 rounded-full bg-[var(--surface-2)] px-3 text-[var(--ink-muted)] hover:bg-[var(--surface-2)]"
-          onClick={() => {
-            Analytics.trackButtonClick('copy_transcript', 'meeting_details');
-            onCopyTranscript();
-          }}
-          disabled={transcriptCount === 0}
-          title={transcriptCount === 0 ? 'No transcript available' : 'Copy Transcript'}
-        >
-          <Copy />
-          <span className="hidden @[22rem]:inline">Copy</span>
-        </Button>
-
-        <Button
-          size="sm"
-          variant="ghost"
-          className="h-8 rounded-full bg-[var(--surface-2)] px-3 text-[var(--ink-muted)] hover:bg-[var(--surface-2)]"
-          onClick={() => {
-            Analytics.trackButtonClick('open_recording_folder', 'meeting_details');
-            onOpenMeetingFolder();
-          }}
-          title="Open Recording Folder"
-        >
-          <FolderOpen className="@[22rem]:mr-2" size={18} />
-          <span className="hidden @[22rem]:inline">Recording</span>
-        </Button>
-
-        {meetingId && transcriptCount > 0 && onOpenSpeakerManager && !locked && (
+        {onToggleSearch && (
           <Button
             size="sm"
             variant="ghost"
-            className="h-8 rounded-full bg-[var(--surface-2)] px-3 text-[var(--ink-muted)] hover:bg-[var(--surface-2)]"
-            onClick={() => {
-              Analytics.trackButtonClick('manage_speakers', 'meeting_details');
-              onOpenSpeakerManager();
-            }}
+            className={`${pill} ${searchOpen ? 'text-ink' : ''}`}
+            onClick={onToggleSearch}
+            disabled={transcriptCount === 0}
+            aria-pressed={searchOpen}
+            title="Search transcript"
+          >
+            <Search className="@[22rem]:mr-2" size={18} />
+            <span className="hidden @[22rem]:inline">Search</span>
+          </Button>
+        )}
+
+        {canManageSpeakers && (
+          <Button
+            size="sm"
+            variant="ghost"
+            className={pill}
+            onClick={() => onOpenSpeakerManager?.()}
             title="Manage speaker names"
           >
             <UserRoundCog className="@[22rem]:mr-2" size={18} />
@@ -155,45 +146,55 @@ export function TranscriptButtonGroup({
           </Button>
         )}
 
-        {canResumeMeeting && (
+        {retranscribeIsPrimary && (
           <Button
             size="sm"
             variant="ghost"
-            className="h-8 rounded-full bg-[var(--surface-2)] px-3 text-[var(--ink-muted)] hover:bg-[var(--surface-2)]"
-            onClick={() => void handleResumeMeeting()}
-            disabled={recordingController?.isCommandPending || isEnhancing}
-            title="Resume meeting"
-          >
-            <Mic className="@[22rem]:mr-2" size={18} />
-            <span className="hidden @[22rem]:inline">Resume</span>
-          </Button>
-        )}
-
-        {betaFeatures.importAndRetranscribe && meetingId && meetingFolderPath && !locked && (
-          <Button
-            size="sm"
-            variant="ghost"
-            className="h-8 w-8 rounded-full bg-[var(--surface-2)] p-0 text-[var(--ink-muted)] hover:bg-[var(--surface-2)]"
-            onClick={() => {
-              Analytics.trackButtonClick('enhance_transcript', 'meeting_details');
-              setShowRetranscribeDialog(true);
-            }}
+            className={pill}
+            onClick={() => setShowRetranscribeDialog(true)}
             disabled={isEnhancing}
-            title={isEnhancing ? 'Enhancing transcript…' : 'Enhance transcript'}
-            aria-label={isEnhancing ? 'Enhancing transcript…' : 'Enhance transcript'}
+            title={isEnhancing ? 'Re-transcribing…' : 'Re-transcribe'}
           >
-            {isEnhancing ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw size={18} />}
+            {isEnhancing ? <Loader2 className="h-4 w-4 animate-spin @[22rem]:mr-2" /> : <RefreshCw className="@[22rem]:mr-2" size={18} />}
+            <span className="hidden @[22rem]:inline">{isEnhancing ? 'Re-transcribing…' : 'Re-transcribe'}</span>
           </Button>
         )}
 
-        {hasMoreActions && <DropdownMenu>
+        <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button size="sm" variant="ghost" className="h-8 rounded-full bg-[var(--surface-2)] px-2.5 text-[var(--ink-muted)] hover:bg-[var(--surface-2)]" title="More transcript actions" aria-label="More transcript actions">
               <MoreHorizontal size={18} />
             </Button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="w-52">
-            {meetingId && meetingFolderPath && transcriptCount > 0 && (
+          <DropdownMenuContent align="end" className="w-56">
+            <DropdownMenuItem disabled={transcriptCount === 0} onClick={() => onCopyTranscript()}>
+              <Copy className="mr-2 h-4 w-4" /> Copy transcript
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => void onOpenMeetingFolder()}>
+              <FolderOpen className="mr-2 h-4 w-4" /> Open recording folder
+            </DropdownMenuItem>
+            {meetingId && (
+              <DropdownMenuItem onClick={() => void handleCopyMeetingLink()}>
+                <Link2 className="mr-2 h-4 w-4" /> Copy meeting link
+              </DropdownMenuItem>
+            )}
+            {(continueRecording.available || canRetranscribe) && (
+              <DropdownMenuSeparator />
+            )}
+            {continueRecording.available && (
+              <DropdownMenuItem
+                disabled={continueRecording.pending || isEnhancing}
+                onClick={() => void continueRecording.continueRecording()}
+              >
+                <Mic className="mr-2 h-4 w-4" /> Continue recording
+              </DropdownMenuItem>
+            )}
+            {canRetranscribe && !retranscribeIsPrimary && (
+              <DropdownMenuItem disabled={isEnhancing} onClick={() => setShowRetranscribeDialog(true)}>
+                <RefreshCw className="mr-2 h-4 w-4" /> Re-transcribe
+              </DropdownMenuItem>
+            )}
+            {canRetranscribe && transcriptCount > 0 && (
               <DropdownMenuSub>
                 <DropdownMenuSubTrigger disabled={isIdentifyingSpeakers}>
                   <Users className={`mr-2 h-4 w-4 ${isIdentifyingSpeakers ? 'animate-pulse' : ''}`} />
@@ -211,26 +212,11 @@ export function TranscriptButtonGroup({
                 </DropdownMenuSubContent>
               </DropdownMenuSub>
             )}
-            {meetingId && transcriptCount > 0 && onOpenSpeakerManager && (
-              <DropdownMenuItem onClick={onOpenSpeakerManager}>
-                <UserRoundCog className="mr-2 h-4 w-4" /> Manage speaker names
-              </DropdownMenuItem>
-            )}
-            {meetingId && (
-              <DropdownMenuItem
-                onClick={() => {
-                  void navigator.clipboard.writeText(`minutes://meeting/${meetingId}`);
-                  toast.success('Meeting link copied');
-                }}
-              >
-                <Link2 className="mr-2 h-4 w-4" /> Copy meeting link
-              </DropdownMenuItem>
-            )}
           </DropdownMenuContent>
-        </DropdownMenu>}
+        </DropdownMenu>
       </div>
 
-      {betaFeatures.importAndRetranscribe && meetingId && meetingFolderPath && (
+      {meetingId && meetingFolderPath && (
         <RetranscribeDialog
           open={showRetranscribeDialog}
           onOpenChange={setShowRetranscribeDialog}

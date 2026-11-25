@@ -1,0 +1,5 @@
+---
+triple:          'arm64-apple-darwin'
+binary-path:     '/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/nemotron-helper'
+relocations:     []
+...

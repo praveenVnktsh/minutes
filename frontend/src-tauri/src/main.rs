@@ -1,13 +1,8 @@
-#![cfg_attr(
-    all(not(debug_assertions), target_os = "windows"),
-    windows_subsystem = "windows"
-)]
-
 fn main() {
-    std::env::set_var("RUST_LOG", "info");
-    env_logger::init();
+    // First, so a panic anywhere after this (including inside the macOS launch
+    // callback, which aborts) leaves a report in the app's log directory.
+    app_lib::app_logging::init();
 
-    // Async logger will be initialized lazily when first needed (after Tauri runtime starts)
-    log::info!("Starting application...");
+    log::info!("Starting application v{}...", env!("CARGO_PKG_VERSION"));
     app_lib::run();
 }

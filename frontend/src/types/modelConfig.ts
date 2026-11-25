@@ -10,6 +10,7 @@ export type ModelProvider =
 export interface ModelConfig {
   provider: ModelProvider;
   model: string;
+  /** Unused since Whisper was removed; the save command still takes it. */
   whisperModel: string;
   apiKey?: string | null;
   ollamaEndpoint?: string | null;
@@ -56,6 +57,6 @@ export function mergeProviderKeyHydration(
 export const DEFAULT_MODEL_CONFIG: ModelConfig = {
   provider: 'builtin-ai',
   model: 'qwen3.5:4b',
-  whisperModel: 'large-v3',
+  whisperModel: '',
   ollamaEndpoint: null,
 };

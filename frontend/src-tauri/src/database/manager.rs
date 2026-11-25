@@ -43,10 +43,9 @@ impl DatabaseManager {
     // (Newly created .sqlite with the copied content from .db)
     pub async fn new_from_app_handle(app_handle: &tauri::AppHandle) -> Result<Self> {
         // Resolve the app's data directory
-        let app_data_dir = app_handle
-            .path()
-            .app_data_dir()
-            .expect("failed to get app data dir");
+        let app_data_dir = app_handle.path().app_data_dir().map_err(|e| {
+            sqlx::Error::Configuration(format!("failed to get app data dir: {e}").into())
+        })?;
         if !app_data_dir.exists() {
             fs::create_dir_all(&app_data_dir).map_err(sqlx::Error::Io)?;
         }
@@ -122,42 +121,13 @@ impl DatabaseManager {
 
     /// Check if this is the first launch (sqlite database doesn't exist yet)
     pub async fn is_first_launch(app_handle: &tauri::AppHandle) -> Result<bool> {
-        let app_data_dir = app_handle
-            .path()
-            .app_data_dir()
-            .expect("failed to get app data dir");
+        let app_data_dir = app_handle.path().app_data_dir().map_err(|e| {
+            sqlx::Error::Configuration(format!("failed to get app data dir: {e}").into())
+        })?;
 
         let tauri_db_path = app_data_dir.join("meeting_minutes.sqlite");
 
         Ok(!tauri_db_path.exists())
-    }
-
-    /// Import a legacy database from the specified path and initialize
-    pub async fn import_legacy_database(
-        app_handle: &tauri::AppHandle,
-        legacy_db_path: &str,
-    ) -> Result<Self> {
-        let app_data_dir = app_handle
-            .path()
-            .app_data_dir()
-            .expect("failed to get app data dir");
-
-        if !app_data_dir.exists() {
-            fs::create_dir_all(&app_data_dir).map_err(sqlx::Error::Io)?;
-        }
-
-        // Copy legacy database to app data directory as meeting_minutes.db
-        let target_legacy_path = app_data_dir.join("meeting_minutes.db");
-        log::info!(
-            "Copying legacy database from {} to {}",
-            legacy_db_path,
-            target_legacy_path.display()
-        );
-
-        fs::copy(legacy_db_path, &target_legacy_path).map_err(sqlx::Error::Io)?;
-
-        // Now use the standard initialization which will detect and migrate the legacy db
-        Self::new_from_app_handle(app_handle).await
     }
 
     pub fn pool(&self) -> &SqlitePool {

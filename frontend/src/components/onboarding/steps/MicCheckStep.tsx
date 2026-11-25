@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useState } from 'react';
 import { toast } from 'sonner';
 import { OnboardingContainer } from '../OnboardingContainer';
 import { useOnboarding } from '@/contexts/OnboardingContext';
@@ -18,23 +18,9 @@ import { Loader2 } from 'lucide-react';
 export function MicCheckStep() {
   const { goToStep, completeOnboarding } = useOnboarding();
 
-  const [isMac, setIsMac] = useState(false);
   const [result, setResult] = useState<SetupCheckResult | null>(null);
   const [record, setRecord] = useState<SetupCheckRecord | null>(null);
   const [finishing, setFinishing] = useState(false);
-
-  useEffect(() => {
-    const checkPlatform = async () => {
-      try {
-        const { platform } = await import('@tauri-apps/plugin-os');
-        setIsMac(platform() === 'macos');
-      } catch {
-        setIsMac(navigator.userAgent.includes('Mac'));
-      }
-    };
-
-    checkPlatform();
-  }, []);
 
   const finish = async (setupCheck: SetupCheckRecord | null) => {
     setFinishing(true);
@@ -62,8 +48,8 @@ export function MicCheckStep() {
     <OnboardingContainer
       title="Hear it back"
       description="Minutes will prove the transcription model loads, that it can hear you, and what it can hear from the meeting side — then read your own words back to you."
-      step={isMac ? 5 : 4}
-      totalSteps={isMac ? 5 : 4}
+      step={5}
+      totalSteps={5}
     >
       <div className="flex flex-col items-center space-y-6">
         <div className="w-full max-w-lg space-y-4">

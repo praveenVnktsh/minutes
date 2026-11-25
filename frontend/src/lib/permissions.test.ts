@@ -1,12 +1,10 @@
 import { afterAll, describe, expect, mock, test } from 'bun:test';
 
-// Restore the real modules afterwards so a mocked `invoke` or `platform` cannot
-// leak into a later file.
+// Restore the real module afterwards so a mocked `invoke` cannot leak into a
+// later file.
 const originalCore = { ...(await import('@tauri-apps/api/core')) };
-const originalOs = { ...(await import('@tauri-apps/plugin-os')) };
 afterAll(() => {
   mock.module('@tauri-apps/api/core', () => originalCore);
-  mock.module('@tauri-apps/plugin-os', () => originalOs);
 });
 
 let invokeResult: () => Promise<unknown> = async () => undefined;
@@ -19,24 +17,17 @@ mock.module('@tauri-apps/api/core', () => ({
   },
 }));
 
-// openPermissionSettings is macOS-only, so the tests that exercise it need the
-// platform to say so.
-let platformName = 'macos';
-mock.module('@tauri-apps/plugin-os', () => ({ platform: () => platformName }));
-
 // The permissions module must load after the Tauri mocks are registered.
 const {
   PERMISSION_PANES,
   checkMicrophonePermission,
   checkSystemAudioPermission,
-  isMacOS,
   openPermissionSettings,
   verdictToStatus,
 } = await import('./permissions');
 
 describe('openPermissionSettings', () => {
   test('invokes open_system_settings with the microphone pane', async () => {
-    platformName = 'macos';
     invokeCalls.length = 0;
     invokeResult = async () => undefined;
 
@@ -48,7 +39,6 @@ describe('openPermissionSettings', () => {
   });
 
   test('invokes open_system_settings with the system audio pane', async () => {
-    platformName = 'macos';
     invokeCalls.length = 0;
     invokeResult = async () => undefined;
 
@@ -64,7 +54,6 @@ describe('openPermissionSettings', () => {
   // failed on the Rust side. Asserting the exact payload shape for every pane
   // is what would have caught that divergence.
   test('always sends a preferencePane argument object, for every pane', async () => {
-    platformName = 'macos';
     invokeCalls.length = 0;
     invokeResult = async () => undefined;
 
@@ -78,7 +67,6 @@ describe('openPermissionSettings', () => {
   });
 
   test('resolves false rather than throwing when the invoke rejects', async () => {
-    platformName = 'macos';
     invokeResult = async () => {
       throw new Error('open_system_settings is not registered');
     };
@@ -86,19 +74,10 @@ describe('openPermissionSettings', () => {
     expect(await openPermissionSettings(PERMISSION_PANES.microphone)).toBe(false);
   });
 
-  test('does nothing off macOS, where there is no pane to open', async () => {
-    platformName = 'windows';
-    invokeCalls.length = 0;
-    invokeResult = async () => undefined;
-
-    expect(await openPermissionSettings(PERMISSION_PANES.systemAudio)).toBe(false);
-    expect(invokeCalls).toEqual([]);
-  });
 });
 
 describe('checkMicrophonePermission', () => {
   test('returns the report the backend gave', async () => {
-    platformName = 'macos';
     invokeCalls.length = 0;
     invokeResult = async () => ({ verdict: 'authorized', detail: null });
 
@@ -145,15 +124,5 @@ describe('verdictToStatus', () => {
     expect(verdictToStatus('authorized')).toBe('authorized');
     expect(verdictToStatus('denied')).toBe('denied');
     expect(verdictToStatus('undetermined')).toBe('undetermined');
-  });
-});
-
-describe('isMacOS', () => {
-  test('reads the platform from @tauri-apps/plugin-os', async () => {
-    platformName = 'macos';
-    expect(await isMacOS()).toBe(true);
-
-    platformName = 'windows';
-    expect(await isMacOS()).toBe(false);
   });
 });

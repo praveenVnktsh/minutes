@@ -1,8 +1,6 @@
 use log::{debug as log_debug, error as log_error, info as log_info, warn as log_warn};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use tauri::{AppHandle, Runtime};
-use tauri_plugin_store::StoreExt;
 
 use crate::{
     database::{
@@ -16,9 +14,6 @@ use crate::{
     state::AppState,
     summary::CustomOpenAIConfig,
 };
-
-// Hardcoded server URL
-const APP_SERVER_URL: &str = "http://localhost:5167";
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ApiResponse<T> {
@@ -55,24 +50,12 @@ pub struct TranscriptSearchResult {
     pub timestamp: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ProfileRequest {
-    pub email: String,
-    pub license_key: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SaveProfileRequest {
+/// One transcript row of a meeting that matches an in-meeting search, in
+/// transcript order (the order the transcript panel pages rows in).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MeetingTranscriptMatch {
     pub id: String,
-    pub email: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct UpdateProfileRequest {
-    pub email: String,
-    pub license_key: String,
-    pub company: String,
-    pub position: String,
+    pub audio_start_time: Option<f64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -246,132 +229,6 @@ pub struct TranscriptSegment {
     pub duration: Option<f64>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Profile {
-    pub id: String,
-    pub name: Option<String>,
-    pub email: String,
-    pub license_key: String,
-    pub company: Option<String>,
-    pub position: Option<String>,
-    pub created_at: String,
-    pub updated_at: String,
-    pub is_licensed: bool,
-}
-
-// Helper function to get auth token from store (optional)
-#[allow(dead_code)]
-async fn get_auth_token<R: Runtime>(app: &AppHandle<R>) -> Option<String> {
-    let store = match app.store("store.json") {
-        Ok(store) => store,
-        Err(_) => return None,
-    };
-
-    match store.get("authToken") {
-        Some(token) => {
-            if let Some(token_str) = token.as_str() {
-                let truncated = token_str.chars().take(20).collect::<String>();
-                log_info!("Found auth token: {}", truncated);
-                Some(token_str.to_string())
-            } else {
-                log_warn!("Auth token is not a string");
-                None
-            }
-        }
-        None => {
-            log_warn!("No auth token found in store");
-            None
-        }
-    }
-}
-
-// Helper function to get server address - now hardcoded
-async fn get_server_address<R: Runtime>(_app: &AppHandle<R>) -> Result<String, String> {
-    log_info!("Using hardcoded server URL: {}", APP_SERVER_URL);
-    Ok(APP_SERVER_URL.to_string())
-}
-
-// Generic API call function with optional authentication
-async fn make_api_request<R: Runtime, T: for<'de> Deserialize<'de>>(
-    app: &AppHandle<R>,
-    endpoint: &str,
-    method: &str,
-    body: Option<&str>,
-    additional_headers: Option<HashMap<String, String>>,
-    auth_token: Option<String>, // Pass auth token from frontend
-) -> Result<T, String> {
-    let client = reqwest::Client::new();
-    let server_url = get_server_address(app).await?;
-
-    let url = format!("{}{}", server_url, endpoint);
-    log_info!("Making {} request to: {}", method, url);
-
-    let mut request = match method.to_uppercase().as_str() {
-        "GET" => client.get(&url),
-        "POST" => client.post(&url),
-        "PUT" => client.put(&url),
-        "DELETE" => client.delete(&url),
-        _ => return Err(format!("Unsupported HTTP method: {}", method)),
-    };
-
-    // Add authorization header if auth token is provided
-    if let Some(token) = auth_token {
-        log_info!("Adding authorization header");
-        request = request.header("Authorization", format!("Bearer {}", token));
-    } else {
-        log_warn!("No auth token provided, making unauthenticated request");
-    }
-
-    request = request.header("Content-Type", "application/json");
-
-    // Add additional headers if provided
-    if let Some(headers) = additional_headers {
-        for (key, value) in headers {
-            request = request.header(&key, &value);
-        }
-    }
-
-    // Add body if provided
-    if let Some(body_str) = body {
-        request = request.body(body_str.to_string());
-    }
-
-    let response = request.send().await.map_err(|e| {
-        let error_msg = format!("Request failed: {}", e);
-        log_error!("{}", error_msg);
-        error_msg
-    })?;
-
-    let status = response.status();
-    log_info!("Response status: {}", status);
-
-    if !status.is_success() {
-        let error_text = response
-            .text()
-            .await
-            .unwrap_or_else(|_| "Unknown error".to_string());
-        let error_msg = format!("HTTP {}: {}", status, error_text);
-        log_error!("{}", error_msg);
-        return Err(error_msg);
-    }
-
-    let response_text = response.text().await.map_err(|e| {
-        let error_msg = format!("Failed to read response: {}", e);
-        log_error!("{}", error_msg);
-        error_msg
-    })?;
-
-    // Safely truncate response for logging, respecting UTF-8 character boundaries
-    let truncated = response_text.chars().take(200).collect::<String>();
-    log_info!("Response body: {}", truncated);
-
-    serde_json::from_str(&response_text).map_err(|e| {
-        let error_msg = format!("Failed to parse JSON: {}", e);
-        log_error!("{}", error_msg);
-        error_msg
-    })
-}
-
 // API Commands for Tauri
 
 #[tauri::command]
@@ -432,6 +289,18 @@ pub async fn api_set_meeting_archived<R: Runtime>(
     archived: bool,
 ) -> Result<bool, String> {
     MeetingsRepository::set_meeting_archived(state.db_manager.pool(), &meeting_id, archived)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn api_set_meeting_debug<R: Runtime>(
+    _app: AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+    meeting_id: String,
+    debug: bool,
+) -> Result<bool, String> {
+    MeetingsRepository::set_meeting_debug(state.db_manager.pool(), &meeting_id, debug)
         .await
         .map_err(|e| e.to_string())
 }
@@ -538,32 +407,6 @@ pub async fn api_get_meeting_audio_path<R: Runtime>(
     }
 }
 
-/// Read the current custom transcription vocabulary.
-#[tauri::command]
-pub async fn api_get_transcription_vocabulary<R: Runtime>(
-    _app: AppHandle<R>,
-) -> Result<String, String> {
-    Ok(crate::whisper_engine::whisper_engine::transcription_vocabulary())
-}
-
-/// Persist and activate a custom transcription vocabulary.
-#[tauri::command]
-pub async fn api_set_transcription_vocabulary<R: Runtime>(
-    app: AppHandle<R>,
-    vocabulary: String,
-) -> Result<(), String> {
-    crate::whisper_engine::whisper_engine::set_transcription_vocabulary(vocabulary.clone());
-
-    let store = app.store("store.json").map_err(|e| e.to_string())?;
-    store.set(
-        "transcriptionVocabulary",
-        serde_json::Value::String(vocabulary),
-    );
-    store.save().map_err(|e| e.to_string())?;
-
-    Ok(())
-}
-
 #[tauri::command]
 pub async fn api_search_transcripts<R: Runtime>(
     _app: AppHandle<R>,
@@ -594,85 +437,26 @@ pub async fn api_search_transcripts<R: Runtime>(
     }
 }
 
+/// Searches one meeting's whole transcript (not only the rows the panel has
+/// loaded) and returns the matching rows' ids and start times, in order.
 #[tauri::command]
-pub async fn api_get_profile<R: Runtime>(
-    app: AppHandle<R>,
-    email: String,
-    license_key: String,
-    auth_token: Option<String>,
-) -> Result<Profile, String> {
-    log_info!(
-        "api_get_profile called for email: {}, auth_token: {}",
-        email,
-        auth_token.is_some()
-    );
-
-    let profile_request = ProfileRequest { email, license_key };
-    let body = serde_json::to_string(&profile_request).map_err(|e| e.to_string())?;
-
-    make_api_request::<R, Profile>(&app, "/get-profile", "POST", Some(&body), None, auth_token)
+pub async fn api_search_meeting_transcript<R: Runtime>(
+    _app: AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+    meeting_id: String,
+    query: String,
+) -> Result<Vec<MeetingTranscriptMatch>, String> {
+    let pool = state.db_manager.pool();
+    TranscriptsRepository::search_meeting_transcript(pool, &meeting_id, &query)
         .await
-}
-
-#[tauri::command]
-pub async fn api_save_profile<R: Runtime>(
-    app: AppHandle<R>,
-    id: String,
-    email: String,
-    auth_token: Option<String>,
-) -> Result<serde_json::Value, String> {
-    log_info!(
-        "api_save_profile called for email: {}, auth_token: {}",
-        email,
-        auth_token.is_some()
-    );
-
-    let save_request = SaveProfileRequest { id, email };
-    let body = serde_json::to_string(&save_request).map_err(|e| e.to_string())?;
-
-    make_api_request::<R, serde_json::Value>(
-        &app,
-        "/save-profile",
-        "POST",
-        Some(&body),
-        None,
-        auth_token,
-    )
-    .await
-}
-
-#[tauri::command]
-pub async fn api_update_profile<R: Runtime>(
-    app: AppHandle<R>,
-    email: String,
-    license_key: String,
-    company: String,
-    position: String,
-    auth_token: Option<String>,
-) -> Result<serde_json::Value, String> {
-    log_info!(
-        "api_update_profile called for email: {}, auth_token: {}",
-        email,
-        auth_token.is_some()
-    );
-
-    let update_request = UpdateProfileRequest {
-        email,
-        license_key,
-        company,
-        position,
-    };
-    let body = serde_json::to_string(&update_request).map_err(|e| e.to_string())?;
-
-    make_api_request::<R, serde_json::Value>(
-        &app,
-        "/update-profile",
-        "POST",
-        Some(&body),
-        None,
-        auth_token,
-    )
-    .await
+        .map_err(|e| {
+            log_error!(
+                "Error searching the transcript of meeting {}: {}",
+                meeting_id,
+                e
+            );
+            format!("Failed to search the transcript: {}", e)
+        })
 }
 
 #[tauri::command]
@@ -778,10 +562,12 @@ pub async fn api_save_model_config<R: Runtime>(
         error.to_string()
     })?;
 
-    // Trigger graceful shutdown of built-in AI sidecar if it's running
-    // This ensures that if the user switched models/providers, the old one is cleaned up
-    // The shutdown happens in the background, so it won't block the UI
-    if let Err(e) = crate::summary::summary_engine::client::shutdown_sidecar_gracefully().await {
+    // Restart the built-in AI helpers so a switched model or provider takes
+    // effect. Graceful and in the background; the live notes helper waits for
+    // a live recording to stop.
+    if let Err(e) =
+        crate::summary::summary_engine::client::restart_sidecars_for_settings_change().await
+    {
         log_warn!("Failed to initiate graceful sidecar shutdown: {}", e);
     }
 
@@ -892,7 +678,7 @@ pub async fn api_get_transcript_config<R: Runtime>(
             log_info!("No transcript config found, returning default.");
             Ok(Some(TranscriptConfig {
                 provider: "parakeet".to_string(),
-                model: crate::config::DEFAULT_PARAKEET_MODEL.to_string(),
+                model: crate::audio::common::FINAL_MODEL.to_string(),
                 api_key: None,
             }))
         }
@@ -998,43 +784,6 @@ pub async fn api_delete_api_key<R: Runtime>(
 }
 
 #[tauri::command]
-pub async fn api_delete_meeting<R: Runtime>(
-    _app: AppHandle<R>,
-    state: tauri::State<'_, AppState>,
-    meeting_id: String,
-    auth_token: Option<String>,
-) -> Result<serde_json::Value, String> {
-    log_info!(
-        "api_delete_meeting called for meeting_id(native): {}, auth_token: {}",
-        meeting_id,
-        auth_token.is_some()
-    );
-
-    let pool = state.db_manager.pool();
-
-    match MeetingsRepository::delete_meeting(pool, &meeting_id).await {
-        Ok(true) => {
-            log_info!("Successfully deleted meeting {}", meeting_id);
-            Ok(serde_json::json!({
-                "status": "success",
-                "message": "Meeting deleted successfully"
-            }))
-        }
-        Ok(false) => {
-            log_warn!("Meeting not found or already deleted: {}", meeting_id);
-            Err(format!(
-                "Meeting not found or could not be deleted: {}",
-                meeting_id
-            ))
-        }
-        Err(e) => {
-            log_error!("Error deleting meeting {}: {}", meeting_id, e);
-            Err(format!("Failed to delete meeting: {}", e))
-        }
-    }
-}
-
-#[tauri::command]
 pub async fn api_get_meeting<R: Runtime>(
     _app: AppHandle<R>,
     meeting_id: String,
@@ -1054,7 +803,10 @@ pub async fn api_get_meeting<R: Runtime>(
             log_info!("Successfully retrieved meeting {}", meeting_id);
             Ok(meeting)
         }
-        Ok(None) => {
+        // The repository reports a missing row as RowNotFound, not Ok(None).
+        // Both mean the meeting is gone, and callers such as transcript
+        // recovery rely on this message to tell a deletion from a read failure.
+        Ok(None) | Err(sqlx::Error::RowNotFound) => {
             log_warn!("Meeting not found: {}", meeting_id);
             Err(format!("Meeting not found: {}", meeting_id))
         }
@@ -1364,30 +1116,10 @@ pub async fn open_meeting_folder<R: Runtime>(
                     return Err(format!("Recording folder not found: {}", folder_path));
                 }
 
-                // Open folder based on OS
-                #[cfg(target_os = "macos")]
-                {
-                    std::process::Command::new("open")
-                        .arg(&folder_path)
-                        .spawn()
-                        .map_err(|e| format!("Failed to open folder: {}", e))?;
-                }
-
-                #[cfg(target_os = "windows")]
-                {
-                    std::process::Command::new("explorer")
-                        .arg(&folder_path)
-                        .spawn()
-                        .map_err(|e| format!("Failed to open folder: {}", e))?;
-                }
-
-                #[cfg(target_os = "linux")]
-                {
-                    std::process::Command::new("xdg-open")
-                        .arg(&folder_path)
-                        .spawn()
-                        .map_err(|e| format!("Failed to open folder: {}", e))?;
-                }
+                std::process::Command::new("open")
+                    .arg(&folder_path)
+                    .spawn()
+                    .map_err(|e| format!("Failed to open folder: {}", e))?;
 
                 log_info!("Successfully opened folder: {}", folder_path);
                 Ok(())
@@ -1403,83 +1135,11 @@ pub async fn open_meeting_folder<R: Runtime>(
     }
 }
 
-// Simple test command to check backend connectivity
-#[tauri::command]
-pub async fn test_backend_connection<R: Runtime>(
-    app: AppHandle<R>,
-    auth_token: Option<String>,
-) -> Result<String, String> {
-    log_debug!("Testing backend connection...");
-
-    let client = reqwest::Client::new();
-    let server_url = get_server_address(&app).await?;
-
-    log_debug!("Testing connection to: {}", server_url);
-
-    let mut request = client.get(format!("{}/docs", server_url));
-
-    if let Some(token) = auth_token {
-        request = request.header("Authorization", format!("Bearer {}", token));
-    }
-
-    match request.send().await {
-        Ok(response) => {
-            let status = response.status();
-            log_debug!("Backend responded with status: {}", status);
-            Ok(format!("Backend is reachable. Status: {}", status))
-        }
-        Err(e) => {
-            let error_msg = format!("Failed to connect to backend: {}", e);
-            log_debug!("{}", error_msg);
-            Err(error_msg)
-        }
-    }
-}
-
-#[tauri::command]
-pub async fn debug_backend_connection<R: Runtime>(app: AppHandle<R>) -> Result<String, String> {
-    log_debug!("=== DEBUG: Testing backend connection ===");
-
-    // Test 1: Check server address from store
-    let server_url = match get_server_address(&app).await {
-        Ok(url) => {
-            log_debug!("✓ Server URL from store: {}", url);
-            url
-        }
-        Err(e) => {
-            log_error!("✗ Failed to get server URL: {}", e);
-            return Err(format!("Failed to get server URL: {}", e));
-        }
-    };
-
-    // Test 2: Make a simple HTTP request to the backend
-    let client = reqwest::Client::new();
-    let test_url = format!("{}/docs", server_url); // Try the docs endpoint which should be public
-
-    log_debug!("Testing connection to: {}", test_url);
-
-    match client.get(&test_url).send().await {
-        Ok(response) => {
-            let status = response.status();
-            log_debug!("✓ Backend responded with status: {}", status);
-            Ok(format!(
-                "Backend connection successful! Status: {}, URL: {}",
-                status, server_url
-            ))
-        }
-        Err(e) => {
-            log_error!("✗ Backend connection failed: {}", e);
-            Err(format!("Backend connection failed: {}", e))
-        }
-    }
-}
-
 /// Schemes `open_external_url` is willing to hand to the user's browser.
 ///
 /// Anything else — a local path, a `file:` handler, a shell string — is
 /// refused, so a crafted argument cannot ask the OS to run something. Quotes
-/// and control characters are rejected too, because the Windows path below
-/// quotes the URL into a `cmd.exe` command line.
+/// and control characters are rejected too.
 fn is_browser_url_allowed(url: &str) -> bool {
     if url.trim() != url || url.is_empty() {
         return false;
@@ -1491,23 +1151,6 @@ fn is_browser_url_allowed(url: &str) -> bool {
 
     let lower = url.to_ascii_lowercase();
     lower.starts_with("http://") || lower.starts_with("https://")
-}
-
-#[cfg(windows)]
-fn open_url_on_windows(url: &str) -> std::io::Result<std::process::Output> {
-    use std::os::windows::process::CommandExt;
-    use std::process::Command;
-
-    // `cmd.exe` parses this command line itself, so Rust's argument quoting is
-    // not enough: an unquoted `&` in a query string would split the command and
-    // `start` would take the URL as a window title. `raw_arg` writes the quotes
-    // through verbatim, and the empty quoted argument is `start`'s title.
-    Command::new("cmd")
-        .raw_arg("/C")
-        .raw_arg("start")
-        .raw_arg("\"\"")
-        .raw_arg(format!("\"{}\"", url))
-        .output()
 }
 
 /// Where the feedback preflight asks whether a repository accepts issues.
@@ -1604,23 +1247,7 @@ pub async fn open_external_url(url: String) -> Result<(), String> {
         return Err(format!("Refusing to open unsupported URL: {}", url));
     }
 
-    let result = if cfg!(target_os = "windows") {
-        #[cfg(windows)]
-        {
-            open_url_on_windows(&url)
-        }
-        #[cfg(not(windows))]
-        {
-            unreachable!()
-        }
-    } else if cfg!(target_os = "macos") {
-        Command::new("open").arg(&url).output()
-    } else {
-        // Linux and other Unix-like systems
-        Command::new("xdg-open").arg(&url).output()
-    };
-
-    match result {
+    match Command::new("open").arg(&url).output() {
         Ok(_) => Ok(()),
         Err(e) => Err(format!("Failed to open URL: {}", e)),
     }

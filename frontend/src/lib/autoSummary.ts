@@ -7,6 +7,7 @@ import {
   readMeetingSummaryLanguage,
 } from '@/lib/summary-language-preferences';
 import { fetchCompleteTranscripts, originalNotesMarkdown } from '@/lib/meetingExport';
+import { formatSummaryTranscript } from '@/lib/summaryTranscript';
 import {
   flushNotes,
   loadNotes,
@@ -123,12 +124,12 @@ export async function generateAutomaticSummary(meetingId: string, modelConfig: M
   const result = await meetingActivityStore.prepareAndStartSummary(meetingId, async () => {
     const transcripts = await fetchAllTranscripts(meetingId);
     const transcriptTexts = transcripts.map(({ text }) => text.trim()).filter(Boolean);
-    if (transcriptTexts.length === 0) throw new Error('No transcripts available for summary.');
+    if (transcriptTexts.length === 0) throw new Error('No transcript available for AI notes.');
     const notesContext = await loadSummaryNotesContext(meetingId);
     await validateSummaryModel(modelConfig);
     const summaryLanguage = await resolveSummaryLanguage(meetingId, transcriptTexts);
     return {
-      text: transcriptTexts.join('\n'),
+      text: formatSummaryTranscript(transcripts),
       model: modelConfig.provider,
       modelName: modelConfig.model,
       meetingId,

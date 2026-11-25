@@ -3,15 +3,40 @@
 import { Transcript, TranscriptSegmentData } from '@/types';
 import { VirtualizedTranscriptView } from '@/components/VirtualizedTranscriptView';
 import { TranscriptButtonGroup } from './TranscriptButtonGroup';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { toast } from 'sonner';
 import { ChevronDown, ChevronUp, Loader2, Search, X } from 'lucide-react';
 import { useAudioPlayer } from '@/hooks/useAudioPlayer';
 import { useTranscriptionProgress } from '@/hooks/useTranscriptionProgress';
+import { useDiarizationStatus } from '@/hooks/useDiarizationStatus';
 import { useMeetingActivity } from '@/contexts/MeetingActivityContext';
 import { SpeakerCorrectionDialog, SpeakerIdentity } from './SpeakerCorrectionDialog';
 import { AudioScrubber } from './AudioScrubber';
+import { toneText } from '@/lib/theme-classes';
+import { FINAL_PASS_COMPLETE_EVENT, type FinalPassComplete } from '@/lib/liveTranscriptionModels';
+import { SpeakerStatusNotice } from './SpeakerStatusNotice';
+import { ModelProvenanceNote } from './ModelProvenanceNote';
+import { resolveMatchTarget, searchMeetingTranscript, transcriptMatchIds, type TranscriptMatch } from '@/lib/transcriptSearch';
+
+/**
+ * The one status line under the transcript header: a playback error first,
+ * then the lock while AI notes are written, then the speaker status.
+ */
+export function TranscriptStatusLine({
+  playerError,
+  locked,
+  speakerNotice,
+}: {
+  playerError?: string | null;
+  locked: boolean;
+  speakerNotice: ReactNode;
+}) {
+  if (playerError) return <p role="alert" className={`mt-1 text-[11px] ${toneText.error}`}>{playerError}</p>;
+  if (locked) return <p className="mt-2 text-[11px] text-[var(--ink-subtle)]">Transcript is locked while the AI notes are written.</p>;
+  return <>{speakerNotice}</>;
+}
 
 export function findSegmentIdAtTime(
   segments: Array<{ id: string; timestamp: number; endTime?: number }>,
@@ -66,6 +91,8 @@ interface TranscriptPanelProps {
   totalCount?: number;
   loadedCount?: number;
   onLoadMore?: () => void;
+  /** Loads every remaining row (used to reach a search match not loaded yet). */
+  onLoadAll?: () => Promise<void>;
 
   // Retranscription props
   meetingId?: string;
@@ -88,6 +115,7 @@ export function TranscriptPanel({
   totalCount,
   loadedCount,
   onLoadMore,
+  onLoadAll,
   meetingId,
   meetingFolderPath,
   onRefetchTranscripts,
@@ -95,6 +123,7 @@ export function TranscriptPanel({
   const [showSpeakerDialog, setShowSpeakerDialog] = useState(false);
   const [speakerOptions, setSpeakerOptions] = useState<SpeakerIdentity[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
+  const [searchOpen, setSearchOpen] = useState(false);
   const [audioPath, setAudioPath] = useState<string | null>(null);
   const [scrubTime, setScrubTime] = useState<number | null>(null);
   // The position last asked for, remembered so the clicked line lights up
@@ -110,9 +139,27 @@ export function TranscriptPanel({
   const transcriptionProgress = useTranscriptionProgress(meetingId);
   const { cancelTranscription } = useMeetingActivity();
 
-  // Segments are about to be replaced by the running pass, so edits made now
-  // would be thrown away.
-  const editsLocked = locked || transcriptionProgress !== null;
+  // A running pass does not lock the transcript: speaker corrections are kept
+  // by time, so they carry over to the rows the pass saves.
+  const editsLocked = locked;
+  // Once a pass reaches its speaker stage the new transcript is saved, so it
+  // stays readable with a status line instead of sitting under the overlay.
+  const isDiarizingPass = transcriptionProgress?.isDiarization ?? false;
+
+  const { status: diarizationStatus } = useDiarizationStatus(meetingId);
+  const [isStartingDiarization, setIsStartingDiarization] = useState(false);
+  const handleRetryDiarization = useCallback(async () => {
+    if (!meetingId || isStartingDiarization) return;
+    setIsStartingDiarization(true);
+    try {
+      // Status and transcript refreshes arrive as events while this runs.
+      await invoke('run_speaker_diarization', { meetingId, numSpeakers: null });
+    } catch (error) {
+      toast.error(`Speaker identification failed: ${String(error)}`);
+    } finally {
+      setIsStartingDiarization(false);
+    }
+  }, [isStartingDiarization, meetingId]);
 
   useEffect(() => {
     setSpeakerNames(
@@ -261,42 +308,106 @@ export function TranscriptPanel({
 
   const normalizedQuery = searchQuery.trim().toLowerCase();
 
-  const matchIndices = useMemo(() => {
-    if (!normalizedQuery) return [] as number[];
-    const indices: number[] = [];
-    convertedSegments.forEach((segment, index) => {
-      if (segment.text.toLowerCase().includes(normalizedQuery)) indices.push(index);
-    });
-    return indices;
-  }, [convertedSegments, normalizedQuery]);
+  // The whole transcript is searched in the database, so a match in a row
+  // that is not loaded yet still counts and can be jumped to.
+  const [remoteMatches, setRemoteMatches] = useState<TranscriptMatch[] | null>(null);
+  const searchedRowCount = usePagination ? (totalCount ?? convertedSegments.length) : convertedSegments.length;
+  useEffect(() => {
+    setRemoteMatches(null);
+    if (!meetingId || !normalizedQuery) return undefined;
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      searchMeetingTranscript(meetingId, normalizedQuery)
+        .then((matches) => {
+          if (!cancelled) setRemoteMatches(matches);
+        })
+        .catch((error) => {
+          // The rows on screen are still searched.
+          if (!cancelled) console.warn('Could not search the whole transcript:', error);
+        });
+    }, 200);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [meetingId, normalizedQuery, searchedRowCount]);
 
-  const matchIds = useMemo(
-    () => new Set(matchIndices.map((index) => convertedSegments[index].id)),
-    [matchIndices, convertedSegments],
+  const matchIdList = useMemo(
+    () => transcriptMatchIds(convertedSegments, normalizedQuery, remoteMatches),
+    [convertedSegments, normalizedQuery, remoteMatches],
   );
+  const matchIds = useMemo(() => new Set(matchIdList), [matchIdList]);
 
   const [activeMatch, setActiveMatch] = useState(0);
   useEffect(() => {
     setActiveMatch(0);
   }, [normalizedQuery]);
 
-  const activeMatchIndex = matchIndices.length
-    ? Math.min(activeMatch, matchIndices.length - 1)
+  const activeMatchIndex = matchIdList.length
+    ? Math.min(activeMatch, matchIdList.length - 1)
     : -1;
-  const activeMatchId = activeMatchIndex >= 0
-    ? convertedSegments[matchIndices[activeMatchIndex]]?.id
-    : undefined;
+  const activeMatchId = activeMatchIndex >= 0 ? matchIdList[activeMatchIndex] : undefined;
+
+  // A match beyond the loaded rows: load the rest, then jump once it is there.
+  const [pendingJumpId, setPendingJumpId] = useState<string | null>(null);
+  const jumpTo = useCallback((id: string, index: number) => {
+    window.dispatchEvent(new CustomEvent('meetily:jump-to-transcript', { detail: { id, index } }));
+  }, []);
+  useEffect(() => {
+    if (!pendingJumpId) return;
+    const target = resolveMatchTarget(convertedSegments, pendingJumpId, false);
+    if (target.kind !== 'jump') return;
+    setPendingJumpId(null);
+    // Let the view render the new rows before scrolling to one.
+    requestAnimationFrame(() => jumpTo(pendingJumpId, target.index));
+  }, [convertedSegments, jumpTo, pendingJumpId]);
 
   const goToMatch = useCallback((delta: number) => {
-    if (matchIndices.length === 0) return;
-    const next = (activeMatch + delta + matchIndices.length) % matchIndices.length;
+    if (matchIdList.length === 0) return;
+    const next = (activeMatch + delta + matchIdList.length) % matchIdList.length;
     setActiveMatch(next);
-    const index = matchIndices[next];
-    const id = convertedSegments[index]?.id;
-    if (id) {
-      window.dispatchEvent(new CustomEvent('meetily:jump-to-transcript', { detail: { id, index } }));
+    const id = matchIdList[next];
+    const canLoadMore = Boolean(hasMore && (onLoadAll || onLoadMore));
+    const target = resolveMatchTarget(convertedSegments, id, canLoadMore);
+    if (target.kind === 'jump') {
+      jumpTo(id, target.index);
+    } else if (target.kind === 'load') {
+      setPendingJumpId(id);
+      if (onLoadAll) void onLoadAll();
+      else onLoadMore?.();
     }
-  }, [activeMatch, matchIndices, convertedSegments]);
+  }, [activeMatch, convertedSegments, hasMore, jumpTo, matchIdList, onLoadAll, onLoadMore]);
+
+  // Keep paging toward a pending match when only page-by-page loading exists.
+  useEffect(() => {
+    if (!pendingJumpId || onLoadAll || !hasMore || isLoadingMore) return;
+    if (resolveMatchTarget(convertedSegments, pendingJumpId, true).kind === 'load') onLoadMore?.();
+  }, [convertedSegments, hasMore, isLoadingMore, onLoadAll, onLoadMore, pendingJumpId]);
+
+  // Say when the background pass has swapped in its transcript, or kept the
+  // current one.
+  useEffect(() => {
+    if (!meetingId) return undefined;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listen<FinalPassComplete>(FINAL_PASS_COMPLETE_EVENT, ({ payload }) => {
+      if (payload.meeting_id !== meetingId) return;
+      if (payload.outcome === 'replaced') {
+        toast.success('Transcript improved', {
+          description: payload.model ? `Re-transcribed with ${payload.model}.` : undefined,
+        });
+      } else {
+        toast.info('Kept the live transcript', { description: payload.warning ?? undefined });
+      }
+    }).then((fn) => {
+      if (disposed) fn();
+      else unlisten = fn;
+    }).catch((error) => console.warn('Could not listen for final transcript passes:', error));
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [meetingId]);
 
   // No optimistic state: the activity snapshot removes the surface once the
   // cancellation actually lands.
@@ -309,8 +420,9 @@ export function TranscriptPanel({
     }
   }, [cancelTranscription, transcriptionProgress]);
 
-  // One copy of the progress markup, shown either in place of an empty
-  // transcript or laid over an existing one.
+  // The full progress surface, shown only in place of an empty transcript (a
+  // first transcription). A pass over an existing one runs in the background
+  // and the meeting header's banner is its only progress surface.
   const progressSurface = transcriptionProgress ? (
     <div
       role="status"
@@ -378,14 +490,28 @@ export function TranscriptPanel({
           onOpenSpeakerManager={() => setShowSpeakerDialog(true)}
           locked={locked}
           isEnhancing={transcriptionProgress?.kind === 'retranscription'}
+          searchOpen={searchOpen}
+          onToggleSearch={() => {
+            if (searchOpen) setSearchQuery('');
+            setSearchOpen(!searchOpen);
+          }}
+          leading={meetingId ? <ModelProvenanceNote meetingId={meetingId} /> : undefined}
         />
-        <div className="mt-3 flex items-center gap-2">
+        {searchOpen && <div className="mt-3 flex items-center gap-2">
           <div className="relative min-w-0 flex-1">
             <Search className="absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--ink-subtle)]" />
             <input
               value={searchQuery}
               onChange={(event) => setSearchQuery(event.target.value)}
+              autoFocus
+              aria-label="Search transcript"
               onKeyDown={(event) => {
+                if (event.key === 'Escape') {
+                  event.preventDefault();
+                  setSearchQuery('');
+                  setSearchOpen(false);
+                  return;
+                }
                 if (event.key === 'Enter') {
                   event.preventDefault();
                   goToMatch(event.shiftKey ? -1 : 1);
@@ -408,12 +534,12 @@ export function TranscriptPanel({
           {normalizedQuery && (
             <div className="flex shrink-0 items-center gap-1">
               <span className="text-[11px] tabular-nums text-[var(--ink-subtle)]">
-                {matchIndices.length === 0 ? 'No matches' : `${activeMatchIndex + 1}/${matchIndices.length}`}
+                {matchIdList.length === 0 ? 'No matches' : `${activeMatchIndex + 1}/${matchIdList.length}`}
               </span>
               <button
                 type="button"
                 onClick={() => goToMatch(-1)}
-                disabled={matchIndices.length === 0}
+                disabled={matchIdList.length === 0}
                 title="Previous match"
                 aria-label="Previous match"
                 className="rounded p-1 text-[var(--ink-subtle)] hover:bg-[var(--surface-2)] hover:text-ink disabled:opacity-40"
@@ -423,7 +549,7 @@ export function TranscriptPanel({
               <button
                 type="button"
                 onClick={() => goToMatch(1)}
-                disabled={matchIndices.length === 0}
+                disabled={matchIdList.length === 0}
                 title="Next match"
                 aria-label="Next match"
                 className="rounded p-1 text-[var(--ink-subtle)] hover:bg-[var(--surface-2)] hover:text-ink disabled:opacity-40"
@@ -432,7 +558,7 @@ export function TranscriptPanel({
               </button>
             </div>
           )}
-        </div>
+        </div>}
         {audioPath && (
           <AudioScrubber
             currentTime={playbackTime}
@@ -443,12 +569,22 @@ export function TranscriptPanel({
             onScrubCommit={handleScrubCommit}
           />
         )}
-        {player.error && (
-          <p className="mt-1 text-[11px] text-red-500">{player.error}</p>
-        )}
-        {locked && convertedSegments.length > 0 && (
-          <p className="mt-2 text-[11px] text-[var(--ink-subtle)]">Transcript is locked while the summary is being generated.</p>
-        )}
+        <TranscriptStatusLine
+          playerError={player.error}
+          locked={locked && convertedSegments.length > 0}
+          speakerNotice={meetingId && meetingFolderPath && convertedSegments.length > 0 && !isRecording ? (
+            <SpeakerStatusNotice
+              status={diarizationStatus}
+              progress={isDiarizingPass && transcriptionProgress ? {
+                percent: transcriptionProgress.percent,
+                indeterminate: transcriptionProgress.indeterminate,
+                label: transcriptionProgress.stageLabel,
+              } : null}
+              isStarting={isStartingDiarization}
+              onRetry={() => void handleRetryDiarization()}
+            />
+          ) : null}
+        />
       </div>
 
       {/* Transcript content - use virtualized view for better performance */}
@@ -465,46 +601,41 @@ export function TranscriptPanel({
               </>
             )}
           </div>
-        ) : normalizedQuery && matchIndices.length === 0 ? (
-          <div className="flex flex-1 items-center justify-center px-8 pb-16 text-center text-sm text-[var(--ink-subtle)]">
-            No transcript matches “{searchQuery.trim()}”.
-          </div>
         ) : (
-          <div className="mx-auto w-full max-w-[900px] flex-1 overflow-hidden pb-4">
-            <VirtualizedTranscriptView
-              segments={convertedSegments}
-              matchIds={matchIds}
-              activeMatchId={activeMatchId}
-              highlightQuery={normalizedQuery}
-              isRecording={isRecording}
-              isPaused={false}
-              isProcessing={false}
-              isStopping={false}
-              enableStreaming={false}
-              showConfidence={true}
-              disableAutoScroll={disableAutoScroll}
-              hasMore={hasMore}
-              isLoadingMore={isLoadingMore}
-              totalCount={totalCount}
-              loadedCount={loadedCount}
-              onLoadMore={onLoadMore}
-              speakerOptions={speakerOptions}
-              onSpeakerChange={meetingId && !editsLocked ? handleSpeakerReassignment : undefined}
-              onRenameSpeaker={meetingId && !editsLocked ? handleRenameSpeaker : undefined}
-              onSeek={audioPath ? handleSeek : undefined}
-              activeSegmentId={activeSegmentId}
-            />
+          <div className="mx-auto flex w-full max-w-[900px] flex-1 flex-col overflow-hidden pb-4">
+            {/* A note, not a replacement: the rows (and their load-more) stay. */}
+            {normalizedQuery && matchIdList.length === 0 && (
+              <p role="status" className="px-8 pb-2 text-center text-sm text-[var(--ink-subtle)]">
+                No transcript matches “{searchQuery.trim()}”.
+              </p>
+            )}
+            <div className="min-h-0 flex-1 overflow-hidden">
+              <VirtualizedTranscriptView
+                segments={convertedSegments}
+                matchIds={matchIds}
+                activeMatchId={activeMatchId}
+                highlightQuery={normalizedQuery}
+                isRecording={isRecording}
+                isPaused={false}
+                isProcessing={false}
+                isStopping={false}
+                enableStreaming={false}
+                disableAutoScroll={disableAutoScroll}
+                hasMore={hasMore}
+                isLoadingMore={isLoadingMore}
+                totalCount={totalCount}
+                loadedCount={loadedCount}
+                onLoadMore={onLoadMore}
+                speakerOptions={speakerOptions}
+                onSpeakerChange={meetingId && !editsLocked ? handleSpeakerReassignment : undefined}
+                onRenameSpeaker={meetingId && !editsLocked ? handleRenameSpeaker : undefined}
+                onSeek={audioPath ? handleSeek : undefined}
+                activeSegmentId={activeSegmentId}
+              />
+            </div>
           </div>
         )}
 
-        {/* A pass over an existing transcript keeps it visible but inert. */}
-        {progressSurface && convertedSegments.length > 0 && (
-          <div className="absolute inset-0 z-20 flex flex-col items-center justify-center pb-16">
-            {/* Separate scrim layer so the progress text itself stays opaque. */}
-            <div aria-hidden="true" className="absolute inset-0 bg-[var(--surface-0)] opacity-[0.85]" />
-            <div className="relative">{progressSurface}</div>
-          </div>
-        )}
       </div>
 
       {meetingId && (

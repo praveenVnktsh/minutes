@@ -2,7 +2,6 @@
 
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
-import Analytics from '@/lib/analytics';
 import { invoke } from '@tauri-apps/api/core';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
 import { flushNotes } from '@/services/notePersistenceService';
@@ -38,7 +37,7 @@ export type TranscriptSearchResult = MeetingSearchResult;
 
 export type CatalogStatus = 'loading' | 'refreshing' | 'ready' | 'error';
 export type SearchStatus = 'idle' | 'searching' | 'success' | 'error';
-export type MeetingMutationKind = 'rename' | 'pin' | 'archive';
+export type MeetingMutationKind = 'rename' | 'pin' | 'archive' | 'debug';
 
 export interface MeetingMutationStatus {
   status: 'pending' | 'error';
@@ -50,7 +49,7 @@ export type MeetingMutationStates = Record<
   Partial<Record<MeetingMutationKind, MeetingMutationStatus>>
 >;
 
-type MutableMeetingField = 'title' | 'pinned' | 'archived';
+type MutableMeetingField = 'title' | 'pinned' | 'archived' | 'debug';
 
 interface SummarySubscription {
   processId: string;
@@ -94,11 +93,8 @@ interface SidebarContextType {
   renameMeeting: (meetingId: string, title: string) => Promise<void>;
   setMeetingPinned: (meetingId: string, pinned: boolean) => Promise<void>;
   setMeetingArchived: (meetingId: string, archived: boolean) => Promise<void>;
+  setMeetingDebug: (meetingId: string, debug: boolean) => Promise<void>;
   meetingMutations: MeetingMutationStates;
-  setServerAddress: (address: string) => void;
-  serverAddress: string;
-  transcriptServerAddress: string;
-  setTranscriptServerAddress: (address: string) => void;
   // Compatibility API: c6 will migrate summary polling to the activity owner.
   startSummaryPolling: (
     meetingId: string,
@@ -134,8 +130,6 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
   const [searchError, setSearchError] = useState<string | null>(null);
   const [meetingMutations, setMeetingMutations] = useState<MeetingMutationStates>({});
   const [navigationError, setNavigationError] = useState<string | null>(null);
-  const [serverAddress, setServerAddress] = useState('');
-  const [transcriptServerAddress, setTranscriptServerAddress] = useState('');
   const summarySubscriptionsRef = React.useRef(new Map<string, SummarySubscription>());
   const meetingsRef = React.useRef<CurrentMeeting[]>([]);
   const catalogRequestRef = React.useRef(0);
@@ -167,6 +161,7 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
         ['title', 'rename'],
         ['pinned', 'pin'],
         ['archived', 'archive'],
+        ['debug', 'debug'],
       ] as const) {
         const queue = mutationQueuesRef.current.get(`${meeting.id}:${kind}`);
         if (!queue) continue;
@@ -216,28 +211,18 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
       replaceMeetings(response, mutationSuccessAtStart);
       catalogLoadedRef.current = true;
       setCatalogStatus('ready');
-      Analytics.trackBackendConnection(true);
     } catch (error) {
       if (requestId !== catalogRequestRef.current) return;
       const message = errorMessage(error);
       console.error('Error fetching meetings:', error);
       setCatalogError(message);
       setCatalogStatus('error');
-      Analytics.trackBackendConnection(false, message);
     }
   }, [replaceMeetings]);
 
   useEffect(() => {
     void fetchMeetings();
   }, [fetchMeetings]);
-
-  useEffect(() => {
-    const fetchSettings = async () => {
-      setServerAddress('http://localhost:5167');
-      setTranscriptServerAddress('http://127.0.0.1:8178/stream');
-    };
-    fetchSettings();
-  }, []);
 
   const sidebarItems: SidebarItem[] = React.useMemo(() => [
     {
@@ -308,9 +293,6 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
         router.push('/');
       });
     }
-
-    // Track recording initiation from sidebar
-    Analytics.trackButtonClick('start_recording', 'sidebar');
     // The actual recording start/stop is handled in the Home component
   };
 
@@ -434,6 +416,10 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
     mutateMeeting(meetingId, 'archived', archived, 'archive', 'api_set_meeting_archived', { meetingId, archived })
   ), [mutateMeeting]);
 
+  const setMeetingDebug = React.useCallback((meetingId: string, debug: boolean) => (
+    mutateMeeting(meetingId, 'debug', debug, 'debug', 'api_set_meeting_debug', { meetingId, debug })
+  ), [mutateMeeting]);
+
   const selectCatalogMeetings = React.useCallback(
     (visibility?: MeetingVisibility) => selectMeetings(meetings, visibility),
     [meetings],
@@ -498,11 +484,8 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
       renameMeeting,
       setMeetingPinned,
       setMeetingArchived,
+      setMeetingDebug,
       meetingMutations,
-      setServerAddress,
-      serverAddress,
-      transcriptServerAddress,
-      setTranscriptServerAddress,
       startSummaryPolling,
       stopSummaryPolling,
       refetchMeetings: fetchMeetings,

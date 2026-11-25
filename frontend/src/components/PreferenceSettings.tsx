@@ -5,21 +5,18 @@ import { Switch } from "./ui/switch"
 import { FolderOpen, Keyboard, X } from "lucide-react"
 import { invoke } from "@tauri-apps/api/core"
 import { toast } from "sonner"
-import Analytics from "@/lib/analytics"
 import { useConfig, NotificationSettings } from "@/contexts/ConfigContext"
-import { usePlatform } from "@/hooks/usePlatform"
 import { UpdateSettings } from "./UpdateSettings"
 import { SaveFeedback, type SaveFeedbackState } from "./ui/status-feedback"
+import { ParticipantReminderSetting } from "./ParticipantReminderSetting"
 
 const OS_MODIFIER_KEYS = /^(Meta|Control|Alt|Shift)/
 
 /** Build a global-hotkey string (e.g. "CmdOrCtrl+Shift+KeyR") from a key event. */
-function eventToShortcut(event: KeyboardEvent, isMac: boolean): string | null {
-  const primary = isMac ? event.metaKey : event.ctrlKey;
-  const secondary = isMac ? event.ctrlKey : event.metaKey;
+function eventToShortcut(event: KeyboardEvent): string | null {
   const mods: string[] = [];
-  if (primary) mods.push("CmdOrCtrl");
-  else if (secondary) mods.push(isMac ? "Control" : "Super");
+  if (event.metaKey) mods.push("CmdOrCtrl");
+  else if (event.ctrlKey) mods.push("Control");
   if (event.altKey) mods.push("Alt");
   if (event.shiftKey) mods.push("Shift");
 
@@ -31,19 +28,18 @@ function eventToShortcut(event: KeyboardEvent, isMac: boolean): string | null {
 }
 
 /** Render a stored shortcut as a friendly label. */
-function displayShortcut(value: string, isMac: boolean): string {
+function displayShortcut(value: string): string {
   if (!value) return "Not set";
   return value
     .split("+")
     .map((part) => {
-      if (part === "CmdOrCtrl") return isMac ? "⌘" : "Ctrl";
-      if (part === "Super") return isMac ? "⌘" : "Win";
+      if (part === "CmdOrCtrl" || part === "Super") return "⌘";
       if (part === "Control") return "Ctrl";
-      if (part === "Alt") return isMac ? "⌥" : "Alt";
-      if (part === "Shift") return isMac ? "⇧" : "Shift";
+      if (part === "Alt") return "⌥";
+      if (part === "Shift") return "⇧";
       return part.replace(/^Key/, "").replace(/^Digit/, "");
     })
-    .join(isMac ? "" : "+");
+    .join("");
 }
 
 export function PreferenceSettings() {
@@ -58,19 +54,16 @@ export function PreferenceSettings() {
   const [notificationsEnabled, setNotificationsEnabled] = useState<boolean | null>(null);
   const [isInitialLoad, setIsInitialLoad] = useState(true);
   const [previousNotificationsEnabled, setPreviousNotificationsEnabled] = useState<boolean | null>(null);
-  const hasTrackedViewRef = useRef(false);
-  const platform = usePlatform();
-  const isMac = platform === 'macos';
-  const [shortcuts, setShortcuts] = useState<{ recording: string; window: string } | null>(null);
-  const [recordingKey, setRecordingKey] = useState<'recording' | 'window' | null>(null);
+  const [shortcuts, setShortcuts] = useState<{ recording: string; window: string; pause: string } | null>(null);
+  const [recordingKey, setRecordingKey] = useState<'recording' | 'window' | 'pause' | null>(null);
   const [shortcutSaveState, setShortcutSaveState] = useState<SaveFeedbackState | null>(null);
   const [notificationSaveState, setNotificationSaveState] = useState<SaveFeedbackState | null>(null);
   const [folderError, setFolderError] = useState('');
   const shortcutSavingRef = useRef(false);
 
   const saveShortcuts = useCallback(async (
-    previous: { recording: string; window: string },
-    next: { recording: string; window: string },
+    previous: { recording: string; window: string; pause: string },
+    next: { recording: string; window: string; pause: string },
     successMessage: string,
   ) => {
     if (shortcutSavingRef.current) return;
@@ -78,7 +71,7 @@ export function PreferenceSettings() {
     setShortcuts(next);
     setShortcutSaveState('saving');
     try {
-      await invoke('set_global_shortcuts', { recording: next.recording, window: next.window });
+      await invoke('set_global_shortcuts', { recording: next.recording, window: next.window, pause: next.pause });
       setShortcutSaveState('saved');
       toast.success(successMessage);
     } catch {
@@ -90,8 +83,8 @@ export function PreferenceSettings() {
   }, []);
 
   useEffect(() => {
-    invoke<{ recording: string; window: string }>('get_global_shortcuts')
-      .then(setShortcuts)
+    invoke<{ recording: string; window: string; pause?: string }>('get_global_shortcuts')
+      .then((loaded) => setShortcuts({ ...loaded, pause: loaded.pause ?? '' }))
       .catch((error) => console.warn('Could not load shortcuts:', error));
   }, []);
 
@@ -104,7 +97,7 @@ export function PreferenceSettings() {
         setRecordingKey(null);
         return;
       }
-      const value = eventToShortcut(event, isMac);
+      const value = eventToShortcut(event);
       if (!value || shortcutSavingRef.current) return;
       const previous = shortcuts;
       const next = { ...previous, [recordingKey]: value };
@@ -113,9 +106,9 @@ export function PreferenceSettings() {
     };
     window.addEventListener('keydown', onKeyDown, true);
     return () => window.removeEventListener('keydown', onKeyDown, true);
-  }, [recordingKey, shortcuts, isMac, saveShortcuts]);
+  }, [recordingKey, shortcuts, saveShortcuts]);
 
-  const clearShortcut = (which: 'recording' | 'window') => {
+  const clearShortcut = (which: 'recording' | 'window' | 'pause') => {
     if (!shortcuts) return;
     void saveShortcuts(shortcuts, { ...shortcuts, [which]: '' }, 'Shortcut disabled');
   };
@@ -123,32 +116,7 @@ export function PreferenceSettings() {
   // Lazy load preferences on mount (only loads if not already cached)
   useEffect(() => {
     loadPreferences();
-    // Reset tracking ref on mount (every tab visit)
-    hasTrackedViewRef.current = false;
   }, [loadPreferences]);
-
-  // Track preferences viewed analytics on every tab visit (once per mount)
-  useEffect(() => {
-    if (hasTrackedViewRef.current) return;
-
-    const trackPreferencesViewed = async () => {
-      // Wait for notification settings to be available (either from cache or after loading)
-      if (notificationSettings) {
-        await Analytics.track('preferences_viewed', {
-          notifications_enabled: notificationSettings.notification_preferences.show_recording_started ? 'true' : 'false'
-        });
-        hasTrackedViewRef.current = true;
-      } else if (!isLoadingPreferences) {
-        // If not loading and no settings available, track with default value
-        await Analytics.track('preferences_viewed', {
-          notifications_enabled: 'false'
-        });
-        hasTrackedViewRef.current = true;
-      }
-    };
-
-    trackPreferencesViewed();
-  }, [notificationSettings, isLoadingPreferences]);
 
   // Update notificationsEnabled when notificationSettings are loaded from global state
   useEffect(() => {
@@ -189,35 +157,19 @@ export function PreferenceSettings() {
       await updateNotificationSettings(updatedSettings);
       setPreviousNotificationsEnabled(enabled);
       setNotificationSaveState('saved');
-      await Analytics.track('notification_settings_changed', { notifications_enabled: enabled.toString() });
     } catch {
       setNotificationsEnabled(previous);
       setNotificationSaveState('error');
     }
   };
 
-  const handleOpenFolder = async (folderType: 'database' | 'models' | 'recordings') => {
+  const handleOpenRecordingsFolder = async () => {
     setFolderError('');
     try {
-      switch (folderType) {
-        case 'database':
-          await invoke('open_database_folder');
-          break;
-        case 'models':
-          await invoke('open_models_folder');
-          break;
-        case 'recordings':
-          await invoke('open_recordings_folder');
-          break;
-      }
-
-      // Track storage folder access
-      await Analytics.track('storage_folder_opened', {
-        folder_type: folderType
-      });
+      await invoke('open_recordings_folder');
     } catch (error) {
-      console.error(`Failed to open ${folderType} folder:`, error);
-      setFolderError(`Could not open the ${folderType} folder: ${String(error)}`);
+      console.error('Failed to open recordings folder:', error);
+      setFolderError(`Could not open the recordings folder: ${String(error)}`);
     }
   };
 
@@ -241,7 +193,7 @@ export function PreferenceSettings() {
         <div className="flex items-center justify-between">
           <div>
             <h3 className="text-lg font-semibold text-ink mb-2">Notifications</h3>
-            <p className="text-sm text-ink-muted">Enable or disable notifications of start and end of meeting</p>
+            <p className="text-sm text-ink-muted">Show a macOS notification when a recording starts and stops</p>
           </div>
           <Switch
             aria-label="Show operating system notifications when recording starts and stops"
@@ -257,6 +209,9 @@ export function PreferenceSettings() {
             labels={{ saving: 'Saving recording notifications', saved: 'Recording notifications saved', error: 'Could not save recording notifications; previous setting restored' }}
           />
         )}
+        <div className="mt-4 border-t border-hairline pt-4">
+          <ParticipantReminderSetting />
+        </div>
       </div>
 
       {/* Keyboard Shortcuts Section */}
@@ -274,6 +229,7 @@ export function PreferenceSettings() {
             [
               { key: 'recording', label: 'Start or stop recording' },
               { key: 'window', label: 'Show or hide Minutes' },
+              { key: 'pause', label: 'Pause / resume recording' },
             ] as const
           ).map(({ key, label }) => (
             <li key={key} className="flex items-center justify-between gap-4">
@@ -286,11 +242,11 @@ export function PreferenceSettings() {
                   aria-label={`Change shortcut for ${label}`}
                   className={`rounded border px-2 py-1 text-xs font-medium ${
                     recordingKey === key
-                      ? 'border-blue-400 text-blue-500'
+                      ? 'border-focus text-ink'
                       : 'border-hairline bg-surface-2 text-ink-muted hover:text-ink'
                   }`}
                 >
-                  {recordingKey === key ? 'Press keys…' : displayShortcut(shortcuts?.[key] ?? '', isMac)}
+                  {recordingKey === key ? 'Press keys…' : displayShortcut(shortcuts?.[key] ?? '')}
                 </button>
                 {shortcuts?.[key] && (
                   <button
@@ -310,7 +266,7 @@ export function PreferenceSettings() {
           <li className="flex items-center justify-between gap-4">
             <span className="text-sm text-ink">Open command palette</span>
             <kbd className="rounded border border-hairline bg-surface-2 px-2 py-1 text-xs font-medium text-ink-muted">
-              ⌘ / Ctrl + K
+              ⌘K
             </kbd>
           </li>
         </ul>
@@ -331,36 +287,6 @@ export function PreferenceSettings() {
         </p>
 
         <div className="space-y-4">
-          {/* Database Location */}
-          {/* <div className="p-4 border rounded-lg bg-surface-2">
-            <div className="font-medium mb-2">Database</div>
-            <div className="text-sm text-ink-muted mb-3 break-all font-mono text-xs">
-              {storageLocations?.database || 'Loading...'}
-            </div>
-            <button
-              onClick={() => handleOpenFolder('database')}
-              className="flex items-center gap-2 px-3 py-2 text-sm border border-hairline rounded-md hover:bg-surface-2 transition-colors"
-            >
-              <FolderOpen className="w-4 h-4" />
-              Open Folder
-            </button>
-          </div> */}
-
-          {/* Models Location */}
-          {/* <div className="p-4 border rounded-lg bg-surface-2">
-            <div className="font-medium mb-2">Whisper Models</div>
-            <div className="text-sm text-ink-muted mb-3 break-all font-mono text-xs">
-              {storageLocations?.models || 'Loading...'}
-            </div>
-            <button
-              onClick={() => handleOpenFolder('models')}
-              className="flex items-center gap-2 px-3 py-2 text-sm border border-hairline rounded-md hover:bg-surface-2 transition-colors"
-            >
-              <FolderOpen className="w-4 h-4" />
-              Open Folder
-            </button>
-          </div> */}
-
           {/* Recordings Location */}
           <div className="p-4 border rounded-lg bg-surface-2">
             <div className="font-medium mb-2">Meeting Recordings</div>
@@ -368,11 +294,11 @@ export function PreferenceSettings() {
               {storageLocations?.recordings || 'Loading...'}
             </div>
             <button
-              onClick={() => handleOpenFolder('recordings')}
+              onClick={() => void handleOpenRecordingsFolder()}
               className="flex items-center gap-2 px-3 py-2 text-sm border border-hairline rounded-md hover:bg-surface-2 transition-colors"
             >
               <FolderOpen className="w-4 h-4" />
-              Open Folder
+              Open recordings folder
             </button>
           </div>
         </div>

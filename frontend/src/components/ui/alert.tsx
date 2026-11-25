@@ -2,6 +2,7 @@ import * as React from "react"
 import { cva, type VariantProps } from "class-variance-authority"
 
 import { cn } from "@/lib/utils"
+import { panel } from "@/lib/theme-classes"
 
 const alertVariants = cva(
   "relative w-full rounded-lg border px-4 py-3 text-sm [&>svg+div]:translate-y-[-3px] [&>svg]:absolute [&>svg]:left-4 [&>svg]:top-4 [&>svg]:text-foreground [&>svg~*]:pl-7",
@@ -9,11 +10,10 @@ const alertVariants = cva(
     variants: {
       variant: {
         default: "bg-surface-raised text-ink",
-        info: "border-info bg-info-subtle text-info [&>svg]:text-info",
-        success: "border-success bg-success-subtle text-success [&>svg]:text-success",
-        warning: "border-warning bg-warning-subtle text-warning [&>svg]:text-warning",
-        destructive:
-          "border-error bg-error-subtle text-error [&>svg]:text-error",
+        info: cn(panel.info, "[&>svg]:text-info"),
+        success: cn(panel.success, "[&>svg]:text-success"),
+        warning: cn(panel.warning, "[&>svg]:text-warning"),
+        destructive: cn(panel.error, "[&>svg]:text-error"),
       },
     },
     defaultVariants: {

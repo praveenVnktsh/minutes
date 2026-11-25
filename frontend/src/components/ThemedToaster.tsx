@@ -27,7 +27,7 @@ export const THEMED_TOAST_VARIABLES = {
 } as const;
 
 export const SHARED_TOASTER_PROPS: Omit<ToasterProps, 'theme'> = {
-  position: 'bottom-center',
+  position: 'top-right',
   richColors: true,
   closeButton: true,
   className: 'minutes-toaster',

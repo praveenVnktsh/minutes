@@ -12,8 +12,4 @@ pub use system::SystemNotificationHandler;
 pub use types::{Notification, NotificationPriority, NotificationTimeout, NotificationType};
 
 // Export commands for Tauri
-pub use commands::{
-    get_notification_settings, get_system_dnd_status, is_dnd_active,
-    request_notification_permission, set_notification_settings, show_notification,
-    show_test_notification,
-};
+pub use commands::{get_notification_settings, set_notification_settings};

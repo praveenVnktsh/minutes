@@ -29,15 +29,22 @@ pub struct CustomOpenAIConfig {
     pub top_p: Option<f32>,
 }
 
+pub(crate) mod budget;
 pub mod commands;
+#[cfg(test)]
+mod enhanced_eval;
 pub(crate) mod language_detection;
+pub(crate) mod live_enhanced;
+pub(crate) mod live_outline;
 pub mod llm_client;
 pub(crate) mod metadata;
 pub mod processor;
+pub mod prompt_settings;
 pub mod service;
 pub mod summary_engine;
 pub mod template_commands;
 pub mod templates;
+pub(crate) mod tidy;
 
 // Re-export Tauri commands (with their generated __cmd__ variants)
 pub use commands::{
@@ -61,10 +68,15 @@ pub use commands::{
 
 // Re-export template commands
 pub use template_commands::{
-    __cmd__api_get_template_details, __cmd__api_list_templates, __cmd__api_validate_template,
-    __tauri_command_name_api_get_template_details, __tauri_command_name_api_list_templates,
-    __tauri_command_name_api_validate_template, api_get_template_details, api_list_templates,
-    api_validate_template,
+    __cmd__api_list_templates, __tauri_command_name_api_list_templates, api_list_templates,
+};
+
+// Re-export summary prompt settings commands
+pub use prompt_settings::{
+    __cmd__api_get_summary_prompt, __cmd__api_reset_summary_prompt, __cmd__api_save_summary_prompt,
+    __tauri_command_name_api_get_summary_prompt, __tauri_command_name_api_reset_summary_prompt,
+    __tauri_command_name_api_save_summary_prompt, api_get_summary_prompt, api_reset_summary_prompt,
+    api_save_summary_prompt,
 };
 
 // Re-export commonly used items

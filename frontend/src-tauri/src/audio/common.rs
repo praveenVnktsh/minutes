@@ -1,12 +1,16 @@
 use crate::api::TranscriptSegment;
-use anyhow::Result;
+use crate::audio::speech::batch::SpeechSegment;
+use anyhow::{anyhow, Result};
 use log::{debug, info};
 use once_cell::sync::Lazy;
 use std::path::Path;
 use std::sync::Arc;
+use tauri::{AppHandle, Emitter, Runtime};
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 use uuid::Uuid;
 
+/// Serializes recording start and stop, so a recording that is starting and
+/// one that is stopping never interleave their engine setup and teardown.
 static ENGINE_LIFECYCLE_LOCK: Lazy<Arc<AsyncMutex<()>>> =
     Lazy::new(|| Arc::new(AsyncMutex::new(())));
 
@@ -14,36 +18,45 @@ pub(crate) async fn acquire_engine_lifecycle_lock() -> OwnedMutexGuard<()> {
     ENGINE_LIFECYCLE_LOCK.clone().lock_owned().await
 }
 
-/// Unload the transcription engine after a batch job (import or retranscription).
-/// Skips unloading if a live recording is currently in progress, since recording
-/// uses the same global engine instances.
-pub(crate) async fn unload_engine_after_batch(use_parakeet: bool) {
-    let _engine_lifecycle_guard = acquire_engine_lifecycle_lock().await;
+/// Provenance of transcripts produced by the batch speech-helper (Parakeet TDT
+/// v2 on Core ML). Also what final-pass tasks carry in their `provider` and
+/// `model` fields, which are kept for queued tasks saved by older versions.
+pub(crate) const FINAL_PROVIDER: &str = "parakeet";
+pub(crate) const FINAL_MODEL: &str = "parakeet-tdt-0.6b-v2-coreml";
 
-    if crate::audio::recording_commands::is_recording().await {
-        log::info!("Skipping model unload after batch: recording in progress");
+/// Error for a batch job (import, retranscription or the final pass) started
+/// before the transcript models are on disk.
+pub(crate) const BATCH_MODEL_MISSING: &str =
+    "The transcript model is not downloaded. Download it in Settings → Transcription.";
+
+/// Fail a batch job early when the speech-helper's batch models (Parakeet and
+/// the VAD) are not downloaded.
+pub(crate) fn ensure_batch_ready<R: Runtime>(app: &AppHandle<R>) -> Result<()> {
+    if crate::audio::speech::models::batch_ready(app) {
+        Ok(())
+    } else {
+        Err(anyhow!(BATCH_MODEL_MISSING))
+    }
+}
+
+/// Stop the batch speech-helper after a batch job (import, retranscription or
+/// the final pass) to free its memory (~1.5 GB); the next job starts it again.
+/// Live text runs in its own helper process, so a recording never shares it.
+pub(crate) async fn unload_engine_after_batch() {
+    crate::audio::speech::batch::unload().await;
+}
+
+/// Stop the batch speech-helper after work outside a queued job (a manual or
+/// resumed diarization, the mic check), unless a queued task other than
+/// `own_task` is using it; nothing else would stop it afterwards.
+pub(crate) async fn release_batch_helper(own_task: Option<&str>) {
+    let active = crate::audio::transcription_queue::get_queue()
+        .active_task_id()
+        .await;
+    if active.is_some_and(|active| Some(active.as_str()) != own_task) {
         return;
     }
-
-    if use_parakeet {
-        use crate::parakeet_engine::commands::PARAKEET_ENGINE;
-        let engine = {
-            let guard = PARAKEET_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
-            guard.as_ref().cloned()
-        };
-        if let Some(e) = engine {
-            e.unload_model().await;
-        }
-    } else {
-        use crate::whisper_engine::commands::WHISPER_ENGINE;
-        let engine = {
-            let guard = WHISPER_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
-            guard.as_ref().cloned()
-        };
-        if let Some(e) = engine {
-            e.unload_model().await;
-        }
-    }
+    crate::audio::speech::batch::unload().await;
 }
 
 /// Create transcript segments from transcription results.
@@ -69,6 +82,16 @@ pub(crate) fn create_transcript_segments(
             }
         })
         .collect()
+}
+
+/// Tell the frontend a meeting's transcript rows changed in the database (a
+/// transcription pass was saved, or speaker labels were applied) so an open
+/// meeting can reload them without waiting for the rest of its task.
+pub(crate) fn emit_transcripts_updated<R: Runtime>(app: &AppHandle<R>, meeting_id: &str) {
+    let _ = app.emit(
+        "transcripts-updated",
+        serde_json::json!({ "meeting_id": meeting_id }),
+    );
 }
 
 /// Write transcripts.json to a meeting folder (atomic write with temp file)
@@ -111,10 +134,7 @@ pub(crate) fn write_transcripts_json(folder: &Path, segments: &[TranscriptSegmen
 /// Scans for 100ms windows with minimal RMS energy within +/-3 seconds of each target
 /// split point. If no clear silence is found, falls back to a 1-second overlap split
 /// to avoid cutting words at boundaries.
-pub(crate) fn split_segment_at_silence(
-    segment: &crate::audio::vad::SpeechSegment,
-    max_samples: usize,
-) -> Vec<crate::audio::vad::SpeechSegment> {
+pub fn split_segment_at_silence(segment: &SpeechSegment, max_samples: usize) -> Vec<SpeechSegment> {
     const SAMPLE_RATE: usize = 16000;
     // 100ms window for energy measurement (1600 samples at 16kHz)
     const ENERGY_WINDOW: usize = SAMPLE_RATE / 10;
@@ -127,7 +147,11 @@ pub(crate) fn split_segment_at_silence(
 
     let total = segment.samples.len();
     if total <= max_samples {
-        return vec![segment.clone()];
+        return vec![SpeechSegment {
+            samples: segment.samples.clone(),
+            start_timestamp_ms: segment.start_timestamp_ms,
+            end_timestamp_ms: segment.end_timestamp_ms,
+        }];
     }
 
     let ms_per_sample =
@@ -142,11 +166,10 @@ pub(crate) fn split_segment_at_silence(
             let chunk_samples = segment.samples[pos..].to_vec();
             let chunk_start_ms = segment.start_timestamp_ms + (pos as f64 * ms_per_sample);
             let chunk_end_ms = segment.end_timestamp_ms;
-            result.push(crate::audio::vad::SpeechSegment {
+            result.push(SpeechSegment {
                 samples: chunk_samples,
                 start_timestamp_ms: chunk_start_ms,
                 end_timestamp_ms: chunk_end_ms,
-                confidence: segment.confidence,
             });
             break;
         }
@@ -200,11 +223,10 @@ pub(crate) fn split_segment_at_silence(
         let chunk_start_ms = segment.start_timestamp_ms + (pos as f64 * ms_per_sample);
         let chunk_end_ms = segment.start_timestamp_ms + (chunk_end as f64 * ms_per_sample);
 
-        result.push(crate::audio::vad::SpeechSegment {
+        result.push(SpeechSegment {
             samples: chunk_samples,
             start_timestamp_ms: chunk_start_ms,
             end_timestamp_ms: chunk_end_ms,
-            confidence: segment.confidence,
         });
 
         // Advance position to where the current chunk actually ends

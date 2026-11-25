@@ -21,7 +21,6 @@ export interface PermissionReport {
 export interface OnboardingPermissions {
   microphone: PermissionStatus;
   systemAudio: PermissionStatus;
-  screenRecording: PermissionStatus;
 }
 
 export interface OnboardingContainerProps {

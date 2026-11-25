@@ -1,9 +1,11 @@
-import React, { useEffect, useState } from 'react';
+import React from 'react';
 import { Info } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { OnboardingContainer } from '../OnboardingContainer';
 import { useOnboarding } from '@/contexts/OnboardingContext';
 import { formatBytes } from '@/lib/download-display';
+import { onboardingDownloadTotal } from '@/lib/liveNotesOnboarding';
+import { TranscriptionUnsupportedNotice } from '@/components/TranscriptionUnsupportedNotice';
 import {
   Tooltip,
   TooltipContent,
@@ -17,47 +19,50 @@ const SIZE_UNKNOWN = 'Checking size…';
 export function SetupOverviewStep() {
   const {
     goNext,
-    parakeetSizeBytes,
+    speechSizeBytes,
+    transcriptionSupported,
     summaryModelSizeBytes,
+    liveNotesModelSizeBytes,
+    liveNotesOptIn,
+    setLiveNotesOptIn,
     selectedSummaryModel,
     startBackgroundDownloads,
   } = useOnboarding();
-  const [isMac, setIsMac] = useState(false);
-
-  useEffect(() => {
-    const checkPlatform = async () => {
-      try {
-        const { platform } = await import('@tauri-apps/plugin-os');
-        setIsMac(platform() === 'macos');
-      } catch (e) {
-        setIsMac(navigator.userAgent.includes('Mac'));
-      }
-    };
-    checkPlatform();
-  }, []);
-
-  const steps = [
+  // Before macOS 15 the speech models cannot run, so their download is left out entirely.
+  const allSteps = [
     {
-      number: 1,
       type: 'transcription',
-      title: 'Download Transcription Engine',
-      sizeBytes: parakeetSizeBytes,
-      note: 'Required — setup waits for this one.',
+      title: 'Download Speech Models',
+      sizeBytes: speechSizeBytes,
+      note: 'Required — setup waits for the transcript models; live text and speakers follow in the background.',
     },
     {
-      number: 2,
       type: 'summarization',
       title: 'Download Summarization Engine',
       sizeBytes: summaryModelSizeBytes,
       note: 'Continues in the background — you can start using Minutes before it finishes.',
     },
+    {
+      type: 'live-notes',
+      title: 'Live Notes Engine (optional)',
+      sizeBytes: liveNotesModelSizeBytes,
+      note: transcriptionSupported
+        ? 'A small, faster model for notes while you record. Downloads after the two above finish.'
+        : 'A small, faster model for notes while you record. Downloads after the one above finishes.',
+    },
   ];
+  const steps = allSteps
+    .filter((step) => transcriptionSupported || step.type !== 'transcription')
+    .map((step, index) => ({ ...step, number: index + 1 }));
 
-  // A total is only honest once both numbers are real, so a half-known total is no total.
-  const totalLabel =
-    parakeetSizeBytes !== null && summaryModelSizeBytes !== null
-      ? formatBytes(parakeetSizeBytes + summaryModelSizeBytes)
-      : SIZE_UNKNOWN;
+  // A total is only honest once its numbers are real, so a half-known total is no total.
+  const total = onboardingDownloadTotal(
+    transcriptionSupported ? speechSizeBytes : 0,
+    summaryModelSizeBytes,
+    liveNotesModelSizeBytes,
+    liveNotesOptIn,
+  );
+  const totalLabel = total !== null ? formatBytes(total) : SIZE_UNKNOWN;
 
   const handleContinue = () => {
     // This click is where the transfer is authorised, but nothing about it should hold the
@@ -65,7 +70,7 @@ export function SetupOverviewStep() {
     // summary model, which the next screen picks up, and the next screen also reports and
     // retries failures — so navigate either way.
     startBackgroundDownloads({
-      includeParakeet: true,
+      includeSpeech: transcriptionSupported,
       includeSummary: true,
       summaryModel: selectedSummaryModel,
     }).catch((error) => {
@@ -77,11 +82,15 @@ export function SetupOverviewStep() {
   return (
     <OnboardingContainer
       title="Setup Overview"
-      description="Minutes requires that you download the Transcription & Summarization AI models for the software to work."
+      description="Minutes requires that you download the speech and summarization AI models for the software to work."
       step={2}
-      totalSteps={isMac ? 4 : 3}
+      totalSteps={5}
     >
       <div className="flex flex-col items-center space-y-10">
+        {!transcriptionSupported && (
+          <TranscriptionUnsupportedNotice className="w-full max-w-md" />
+        )}
+
         {/* Steps Card */}
         <div className="w-full max-w-md bg-surface-raised rounded-lg border border-hairline p-4">
           <div className="space-y-4">
@@ -115,6 +124,17 @@ export function SetupOverviewStep() {
                       {step.sizeBytes !== null ? formatBytes(step.sizeBytes) : SIZE_UNKNOWN} ·{' '}
                       {step.note}
                     </p>
+                    {step.type === 'live-notes' && (
+                      <label className="mt-2 flex cursor-pointer items-center gap-2 text-sm text-ink">
+                        <input
+                          type="checkbox"
+                          checked={liveNotesOptIn}
+                          onChange={(event) => setLiveNotesOptIn(event.target.checked)}
+                          className="rounded border-hairline text-ink focus:ring-2 focus:ring-focus"
+                        />
+                        <span className="select-none">Download the live notes engine</span>
+                      </label>
+                    )}
                   </div>
                 </div>
               );

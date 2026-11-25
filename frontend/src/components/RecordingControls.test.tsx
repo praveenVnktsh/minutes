@@ -22,7 +22,7 @@ mock.module('@/contexts/RecordingControllerContext', () => ({
 }))
 mock.module('@/contexts/RecordingStateContext', () => ({
   ...originalRecording,
-  useRecordingState: () => ({ isPaused: false, recordingDuration: 12 }),
+  useRecordingState: () => ({ isPaused: false, recordingDuration: 12, activeDuration: 9 }),
 }))
 mock.module('@/components/ui/tooltip', () => ({
   ...originalTooltip,
@@ -34,10 +34,8 @@ const { RecordingControllerFeedback } = await import('./RecordingControllerFeedb
 
 const controls = <RecordingControls
   isRecording
-  barHeights={[]}
   onRecordingStop={() => {}}
   onRecordingStart={() => {}}
-  onTranscriptReceived={() => {}}
   isRecordingDisabled={false}
   isParentProcessing={false}
 />
@@ -61,6 +59,15 @@ describe('recording feedback composition', () => {
     expect(renderer.root.findAllByProps({ children: 'Retry' })).toHaveLength(1)
     await act(async () => renderer.root.findByProps({ children: 'Retry' }).props.onClick())
     expect(retryFeedback).toHaveBeenCalledTimes(1)
+    renderer.unmount()
+  })
+
+  test('shows activeDuration (excluding pauses) rather than recordingDuration', () => {
+    const renderer = create(controls)
+    const rendered = JSON.stringify(renderer.toJSON())
+    // activeDuration: 9 -> "00:09"; recordingDuration: 12 -> "00:12"
+    expect(rendered).toContain('00:09')
+    expect(rendered).not.toContain('00:12')
     renderer.unmount()
   })
 

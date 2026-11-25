@@ -1,5 +1,6 @@
 import React from 'react';
 import { Check, Lock, Download, CheckCircle2, BrainCircuit } from 'lucide-react';
+import { badge } from '@/lib/theme-classes';
 
 interface ProgressIndicatorProps {
   current: number;
@@ -34,18 +35,18 @@ export function ProgressIndicator({ current, total, onStepClick }: ProgressIndic
                 disabled={!isClickable}
                 className={`relative flex items-center justify-center transition-all duration-300 ${
                   isCompleted
-                    ? 'w-7 h-7 bg-green-600 rounded-full'
+                    ? `w-7 h-7 ${badge.success} rounded-full`
                     : isActive
                       ? 'w-8 h-8 bg-brand rounded-full'
                       : 'w-6 h-6 bg-surface-2 rounded-full'
                 } ${isClickable ? 'cursor-pointer hover:scale-110 hover:shadow-md' : 'cursor-default'}`}
               >
                 {isCompleted ? (
-                  <Check className="w-4 h-4 text-white" />
+                  <Check className="w-4 h-4" />
                 ) : (
                   <StepIcon
                     className={`transition-all duration-300 ${
-                      isActive ? 'w-4 h-4 text-white' : 'w-3 h-3 text-ink-muted'
+                      isActive ? 'w-4 h-4 text-brand-foreground' : 'w-3 h-3 text-ink-muted'
                     }`}
                   />
                 )}
@@ -55,7 +56,7 @@ export function ProgressIndicator({ current, total, onStepClick }: ProgressIndic
               {index < visibleSteps.length - 1 && (
                 <div
                   className={`h-0.5 w-6 transition-all duration-300 ${
-                    isCompleted ? 'bg-green-600' : 'bg-surface-2'
+                    isCompleted ? 'bg-success' : 'bg-surface-2'
                   }`}
                 />
               )}

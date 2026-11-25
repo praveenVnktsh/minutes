@@ -1,4 +1,4 @@
-use crate::api::{TranscriptSearchResult, TranscriptSegment};
+use crate::api::{MeetingTranscriptMatch, TranscriptSearchResult, TranscriptSegment};
 use chrono::Utc;
 use sqlx::{Connection, Error as SqlxError, SqlitePool};
 use tracing::{error, info};
@@ -38,7 +38,12 @@ impl TranscriptsRepository {
         let meeting_id = match meeting_id {
             Some(existing_id) => {
                 let updated = sqlx::query(
-                    "UPDATE meetings SET title = ?, folder_path = ?, updated_at = ? WHERE id = ?",
+                    // A title the user chose is kept: the frontend sends the
+                    // title the recording started with.
+                    "UPDATE meetings
+                     SET title = CASE WHEN title_edited = 1 THEN title ELSE ? END,
+                         folder_path = ?, updated_at = ?
+                     WHERE id = ?",
                 )
                 .bind(meeting_title)
                 .bind(&folder_path)
@@ -170,6 +175,45 @@ impl TranscriptsRepository {
         Ok(results)
     }
 
+    /// The rows of one meeting whose text contains `query` (case-insensitive,
+    /// taken literally: `%` and `_` are not wildcards), ordered like the
+    /// paginated transcript (by audio start time).
+    pub async fn search_meeting_transcript(
+        pool: &SqlitePool,
+        meeting_id: &str,
+        query: &str,
+    ) -> Result<Vec<MeetingTranscriptMatch>, SqlxError> {
+        let query = query.trim();
+        if query.is_empty() || meeting_id.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        let escaped = query
+            .to_lowercase()
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let pattern = format!("%{}%", escaped);
+
+        let rows = sqlx::query_as::<_, (String, Option<f64>)>(
+            "SELECT id, audio_start_time
+             FROM transcripts
+             WHERE meeting_id = ? AND LOWER(transcript) LIKE ? ESCAPE '\\'
+             ORDER BY audio_start_time ASC",
+        )
+        .bind(meeting_id)
+        .bind(&pattern)
+        .fetch_all(pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|(id, audio_start_time)| MeetingTranscriptMatch {
+                id,
+                audio_start_time,
+            })
+            .collect())
+    }
+
     /// Helper function to extract a snippet of text around the first match of a query.
     fn get_match_context(transcript: &str, query: &str) -> String {
         let transcript_lower = transcript.to_lowercase();
@@ -207,7 +251,8 @@ mod tests {
                 title TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
-                folder_path TEXT
+                folder_path TEXT,
+                title_edited INTEGER NOT NULL DEFAULT 0
             )",
         )
         .execute(&pool)
@@ -289,6 +334,80 @@ mod tests {
         assert_eq!(transcript_count(&pool, &meeting_id).await, 2);
     }
 
+    async fn meeting_title(pool: &SqlitePool, meeting_id: &str) -> String {
+        sqlx::query_as::<_, (String,)>("SELECT title FROM meetings WHERE id = ?")
+            .bind(meeting_id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+            .0
+    }
+
+    // The save at the end of a recording (or a resumed one) sends the title the
+    // recording started with; a rename made in the meantime must survive it.
+    #[tokio::test]
+    async fn saving_an_existing_meeting_keeps_a_title_the_user_chose() {
+        let pool = test_pool().await;
+        let first_batch = [segment("hello", 0.0, 1.0)];
+        let meeting_id = TranscriptsRepository::save_transcript(
+            &pool,
+            "Meeting 24_11_26_10_00_00",
+            &first_batch,
+            None,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE meetings SET title = 'Board prep', title_edited = 1 WHERE id = ?")
+            .bind(&meeting_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        for append in [false, true] {
+            TranscriptsRepository::save_transcript(
+                &pool,
+                "Meeting 24_11_26_10_00_00",
+                &[segment("again", 20.0, 21.0)],
+                Some("/tmp/folder".to_string()),
+                Some(&meeting_id),
+                append,
+            )
+            .await
+            .unwrap();
+            assert_eq!(meeting_title(&pool, &meeting_id).await, "Board prep");
+        }
+    }
+
+    #[tokio::test]
+    async fn saving_an_existing_unedited_meeting_takes_the_new_title() {
+        let pool = test_pool().await;
+        let meeting_id = TranscriptsRepository::save_transcript(
+            &pool,
+            "Meeting 24_11_26_10_00_00",
+            &[segment("hello", 0.0, 1.0)],
+            None,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+
+        TranscriptsRepository::save_transcript(
+            &pool,
+            "Standup",
+            &[segment("world", 10.0, 11.0)],
+            None,
+            Some(&meeting_id),
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(meeting_title(&pool, &meeting_id).await, "Standup");
+    }
+
     #[tokio::test]
     async fn non_append_replaces_existing_rows() {
         let pool = test_pool().await;
@@ -320,5 +439,113 @@ mod tests {
         .unwrap();
 
         assert_eq!(transcript_count(&pool, &meeting_id).await, 1);
+    }
+
+    /// The text of each matched row, looked up by the id the search returned.
+    async fn matched_texts(pool: &SqlitePool, matches: &[MeetingTranscriptMatch]) -> Vec<String> {
+        let mut texts = Vec::new();
+        for found in matches {
+            let (text,) =
+                sqlx::query_as::<_, (String,)>("SELECT transcript FROM transcripts WHERE id = ?")
+                    .bind(&found.id)
+                    .fetch_one(pool)
+                    .await
+                    .unwrap();
+            texts.push(text);
+        }
+        texts
+    }
+
+    #[tokio::test]
+    async fn meeting_search_covers_every_row_in_transcript_order() {
+        let pool = test_pool().await;
+        // More rows than one page of the panel, with the matches far apart.
+        let mut segments: Vec<TranscriptSegment> = (0..250)
+            .map(|index| {
+                segment(
+                    &format!("filler line {}", index),
+                    index as f64,
+                    index as f64 + 0.5,
+                )
+            })
+            .collect();
+        segments[3].text = "Budget review".to_string();
+        segments[240].text = "the BUDGET is final".to_string();
+        let meeting_id =
+            TranscriptsRepository::save_transcript(&pool, "Planning", &segments, None, None, false)
+                .await
+                .unwrap();
+        TranscriptsRepository::save_transcript(
+            &pool,
+            "Other",
+            &[segment("budget elsewhere", 0.0, 1.0)],
+            None,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+
+        let matches =
+            TranscriptsRepository::search_meeting_transcript(&pool, &meeting_id, " budget ")
+                .await
+                .unwrap();
+        assert_eq!(
+            matches
+                .iter()
+                .map(|found| found.audio_start_time)
+                .collect::<Vec<_>>(),
+            vec![Some(3.0), Some(240.0)]
+        );
+        assert_eq!(
+            matched_texts(&pool, &matches).await,
+            vec![
+                "Budget review".to_string(),
+                "the BUDGET is final".to_string()
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn meeting_search_takes_wildcards_literally_and_ignores_blank_queries() {
+        let pool = test_pool().await;
+        let segments = [
+            segment("50% done", 0.0, 1.0),
+            segment("fully done", 1.0, 2.0),
+            segment("snake_case", 2.0, 3.0),
+            segment("snakeXcase", 3.0, 4.0),
+        ];
+        let meeting_id = TranscriptsRepository::save_transcript(
+            &pool,
+            "Wildcards",
+            &segments,
+            None,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+
+        let percent = TranscriptsRepository::search_meeting_transcript(&pool, &meeting_id, "0%")
+            .await
+            .unwrap();
+        assert_eq!(
+            matched_texts(&pool, &percent).await,
+            vec!["50% done".to_string()]
+        );
+        let underscore =
+            TranscriptsRepository::search_meeting_transcript(&pool, &meeting_id, "e_c")
+                .await
+                .unwrap();
+        assert_eq!(
+            matched_texts(&pool, &underscore).await,
+            vec!["snake_case".to_string()]
+        );
+        assert!(
+            TranscriptsRepository::search_meeting_transcript(&pool, &meeting_id, "   ")
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 }

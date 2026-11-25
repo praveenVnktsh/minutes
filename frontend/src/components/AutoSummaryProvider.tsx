@@ -44,7 +44,7 @@ export function AutoSummaryProvider() {
         await generateAutomaticSummary(meetingId, config);
       } catch (error) {
         console.error('[AutoSummary] Failed to start summary:', error);
-        toast.error('Automatic summary could not start', {
+        toast.error('AI notes could not start', {
           description: error instanceof Error ? error.message : String(error),
         });
       } finally {

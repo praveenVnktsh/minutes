@@ -1,4 +1,5 @@
 import React from 'react';
+import { toneFill } from '@/lib/theme-classes';
 
 interface AudioLevelMeterProps {
   rmsLevel: number;    // 0.0 to 1.0
@@ -31,9 +32,9 @@ export function AudioLevelMeter({
 
   // Color coding based on level
   const getLevelColor = (level: number) => {
-    if (level < 0.3) return 'bg-green-500';
-    if (level < 0.7) return 'bg-yellow-500';
-    return 'bg-red-500';
+    if (level < 0.3) return toneFill.success;
+    if (level < 0.7) return toneFill.warning;
+    return toneFill.error;
   };
 
   const rmsColor = getLevelColor(logRms);
@@ -64,7 +65,7 @@ export function AudioLevelMeter({
     <div className={`flex items-center space-x-2 ${className}`}>
       {/* Device activity indicator */}
       <div className={`w-2 h-2 rounded-full ${
-        isActive ? 'bg-green-400 animate-pulse' : 'bg-surface-2'
+        isActive ? `${toneFill.success} animate-pulse` : 'bg-surface-2'
       }`} title={`${deviceName} - ${isActive ? 'Active' : 'Inactive'}`} />
 
       {/* Level meter container */}
@@ -89,11 +90,11 @@ export function AudioLevelMeter({
         {/* Level markers */}
         <div className="absolute inset-0 flex justify-between items-center px-1 pointer-events-none">
           {/* 25% marker */}
-          <div className="w-px h-full bg-gray-400 opacity-30" style={{ marginLeft: '25%' }} />
+          <div className="w-px h-full bg-ink-subtle opacity-30" style={{ marginLeft: '25%' }} />
           {/* 50% marker */}
-          <div className="w-px h-full bg-gray-400 opacity-30" style={{ marginLeft: '50%' }} />
+          <div className="w-px h-full bg-ink-subtle opacity-30" style={{ marginLeft: '50%' }} />
           {/* 75% marker */}
-          <div className="w-px h-full bg-gray-400 opacity-30" style={{ marginLeft: '75%' }} />
+          <div className="w-px h-full bg-ink-subtle opacity-30" style={{ marginLeft: '75%' }} />
         </div>
       </div>
 
@@ -124,16 +125,16 @@ export function CompactAudioLevelMeter({
   const rmsPercent = Math.round(logRms * 100);
 
   const getLevelColor = (level: number) => {
-    if (level < 0.3) return 'bg-green-400';
-    if (level < 0.7) return 'bg-yellow-400';
-    return 'bg-red-400';
+    if (level < 0.3) return toneFill.success;
+    if (level < 0.7) return toneFill.warning;
+    return toneFill.error;
   };
 
   return (
     <div className={`flex items-center space-x-1 ${className}`}>
       {/* Activity dot */}
       <div className={`w-1.5 h-1.5 rounded-full ${
-        isActive ? 'bg-green-400' : 'bg-surface-2'
+        isActive ? toneFill.success : 'bg-surface-2'
       }`} />
 
       {/* Mini meter */}

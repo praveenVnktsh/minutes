@@ -1,0 +1,3 @@
+module NemotronCore {
+    header "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/NemotronCore.build/include/NemotronCore-Swift.h"
+}

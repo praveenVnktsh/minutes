@@ -1,12 +1,33 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
 /// Global flag to enable/disable live transcription during recording.
 /// When false, audio chunks are not sent to the transcription engine (saves CPU/GPU).
 /// Recording continues normally regardless of this flag.
 pub static LIVE_TRANSCRIPTION_ENABLED: AtomicBool = AtomicBool::new(true);
-use super::batch_processor::AudioMetricsBatcher;
-use crate::batch_audio_metric;
+
+/// Beta flag: echo-cancel the mic against system audio before transcribing it.
+/// Set from the frontend's "Mic Echo Cancellation" beta feature. Read once when
+/// a recording's pipeline starts, so toggling it mid-recording takes effect on
+/// the next recording rather than disturbing audio the canceller is holding.
+pub static MIC_ECHO_CANCELLATION_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Live path mode for the next pipeline: `true` sends every aligned window of
+/// each source, continuously, to the streaming recognizer (Nemotron); `false`
+/// sends nothing live (the final pass transcribes the recording afterwards).
+/// Set from the recording's live plan before capture starts, read once when
+/// the pipeline is built.
+pub static LIVE_STREAMING_MODE: AtomicBool = AtomicBool::new(false);
+
+/// RMS of the latest mixed recording window (an `f32` stored as its bits), for
+/// the record bar's live waveform. Written every ~50ms while a pipeline runs
+/// and reset to 0 when it ends; read by the `get_recording_level` command.
+pub static RECORDING_LEVEL: AtomicU32 = AtomicU32::new(0);
+
+/// The latest mixed-window RMS, 0.0 when nothing is recording.
+pub fn recording_level() -> f32 {
+    f32::from_bits(RECORDING_LEVEL.load(Ordering::Relaxed))
+}
 use anyhow::Result;
 use log::{debug, error, info, warn};
 use rubato::{
@@ -16,29 +37,10 @@ use std::collections::VecDeque;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use super::audio_processing::{
-    audio_to_mono, HighPassFilter, LoudnessNormalizer, NoiseSuppressionProcessor,
-};
+use super::audio_processing::{audio_to_mono, HighPassFilter, LoudnessNormalizer};
 use super::devices::AudioDevice;
+use super::echo_canceller::MicEchoCanceller;
 use super::recording_state::{AudioChunk, AudioError, DeviceType, RecordingState};
-use super::vad::ContinuousVadProcessor;
-
-/// How long a silence must last before the VAD closes a speech segment, and
-/// therefore how long the audio clips handed to the ASR engine are.
-///
-/// Live-path policy: 500ms for responsive incremental transcription.
-/// The batch paths (`import.rs` / `retranscription.rs`) use 2000ms instead —
-/// they have no latency requirement, so they optimize purely for ASR request
-/// length. The live path cannot: with continuous audio (e.g. a podcast played
-/// as system audio) a 2000ms redemption keeps one VAD segment open
-/// indefinitely, withholds live transcript emission, and overruns the
-/// accumulated-speech-buffer warning threshold. Bounded live segmentation
-/// during continuous speech is tracked separately in #756.
-const VAD_REDEMPTION_TIME_MS: u32 = 500;
-
-/// Force-emit a live speech segment once it reaches this length so long
-/// monologues don't wait for a pause. Kept below Whisper's 30s window.
-const LIVE_MAX_SEGMENT_MS: u64 = 15_000;
 
 /// Ring buffer for synchronized audio mixing
 /// Accumulates samples from mic and system streams until we have aligned windows
@@ -179,6 +181,22 @@ impl AudioMixerRingBuffer {
 
         Some((mic_window, sys_window))
     }
+
+    /// Take whatever is left in both buffers as one final, shorter-than-a-window
+    /// pair. The shorter side is zero-padded to the longer one's length (the same
+    /// alignment `extract_window` uses) so the two sources stay on one timeline.
+    fn drain_remaining(&mut self) -> Option<(Vec<f32>, Vec<f32>)> {
+        let len = self.mic_buffer.len().max(self.system_buffer.len());
+        if len == 0 {
+            return None;
+        }
+
+        let mut mic: Vec<f32> = self.mic_buffer.drain(..).collect();
+        let mut sys: Vec<f32> = self.system_buffer.drain(..).collect();
+        mic.resize(len, 0.0);
+        sys.resize(len, 0.0);
+        Some((mic, sys))
+    }
 }
 
 /// Simple audio mixer without aggressive ducking
@@ -248,7 +266,6 @@ pub struct AudioCapture {
     resampler_input_buffer: Arc<std::sync::Mutex<Vec<f32>>>,
     resampler_chunk_size: usize, // Fixed chunk size for resampler (512 samples)
     // Audio enhancement processors (microphone only)
-    noise_suppressor: Arc<std::sync::Mutex<Option<NoiseSuppressionProcessor>>>,
     high_pass_filter: Arc<std::sync::Mutex<Option<HighPassFilter>>>,
     // EBU R128 normalizer for microphone audio (per-device, stateful)
     normalizer: Arc<std::sync::Mutex<Option<LoudnessNormalizer>>>,
@@ -308,28 +325,7 @@ impl AudioCapture {
 
         // Initialize audio enhancement processors for MICROPHONE ONLY
         // System audio doesn't need enhancement (already clean)
-        let (noise_suppressor, high_pass_filter, normalizer) = if matches!(
-            device_type,
-            DeviceType::Microphone
-        ) {
-            // Initialize noise suppression (RNNoise) at 48kHz - CONDITIONAL based on flag
-            let ns = if super::ffmpeg_mixer::RNNOISE_APPLY_ENABLED {
-                match NoiseSuppressionProcessor::new(TARGET_SAMPLE_RATE) {
-                    Ok(processor) => {
-                        info!("✅ RNNoise noise suppression ENABLED for microphone '{}' (10-15 dB reduction)", device.name);
-                        Some(processor)
-                    }
-                    Err(e) => {
-                        warn!("⚠️ Failed to create noise suppressor: {}, continuing without noise suppression", e);
-                        None
-                    }
-                }
-            } else {
-                info!("ℹ️ RNNoise noise suppression DISABLED for microphone '{}' (flag: RNNOISE_APPLY_ENABLED=false)", device.name);
-                info!("   Whisper handles noise well internally - RNNoise is optional");
-                None
-            };
-
+        let (high_pass_filter, normalizer) = if matches!(device_type, DeviceType::Microphone) {
             // Initialize high-pass filter (removes rumble below 80 Hz)
             let hpf = {
                 let filter = HighPassFilter::new(TARGET_SAMPLE_RATE, 80.0);
@@ -358,14 +354,14 @@ impl AudioCapture {
                 }
             };
 
-            (ns, hpf, norm)
+            (hpf, norm)
         } else {
             // System audio: no enhancement needed
             info!(
                 "ℹ️ System audio '{}' captured raw (no enhancement)",
                 device.name
             );
-            (None, None, None)
+            (None, None)
         };
 
         // CRITICAL FIX: Initialize persistent resampler to preserve energy across chunks
@@ -438,7 +434,6 @@ impl AudioCapture {
                 RESAMPLER_CHUNK_SIZE * 2,
             ))),
             resampler_chunk_size: RESAMPLER_CHUNK_SIZE,
-            noise_suppressor: Arc::new(std::sync::Mutex::new(noise_suppressor)),
             high_pass_filter: Arc::new(std::sync::Mutex::new(high_pass_filter)),
             normalizer: Arc::new(std::sync::Mutex::new(normalizer)),
             // Using global recording time for sync
@@ -461,7 +456,7 @@ impl AudioCapture {
 
         // CRITICAL FIX: Resample to 48kHz if device uses different sample rate
         // This fixes Bluetooth devices (like Sony WH-1000XM4) that report 16kHz or 44.1kHz
-        // Without this, audio is sped up 3x and VAD fails
+        // Without this, audio is sped up 3x and speech recognition fails
         //
         // IMPORTANT: Uses PERSISTENT resampler with BUFFERING to preserve energy across chunks
         // Creating a new resampler per chunk causes energy amplification (173.5% RMS)
@@ -570,8 +565,7 @@ impl AudioCapture {
         }
 
         // AUDIO ENHANCEMENT PIPELINE (Microphone Only)
-        // Processing order is critical: high-pass → noise suppression → normalization
-        // This ensures noise is removed before being amplified by the normalizer
+        // Processing order: high-pass → normalization
         if matches!(self.device_type, DeviceType::Microphone) {
             // STEP 1: Apply high-pass filter to remove low-frequency rumble (< 80 Hz)
             if let Ok(mut hpf_lock) = self.high_pass_filter.lock() {
@@ -580,45 +574,7 @@ impl AudioCapture {
                 }
             }
 
-            // STEP 2: Apply RNNoise noise suppression (10-15 dB reduction) - CONDITIONAL
-            if super::ffmpeg_mixer::RNNOISE_APPLY_ENABLED {
-                if let Ok(mut ns_lock) = self.noise_suppressor.lock() {
-                    if let Some(ref mut suppressor) = *ns_lock {
-                        let before_len = mono_data.len();
-                        mono_data = suppressor.process(&mono_data);
-                        let after_len = mono_data.len();
-
-                        // CRITICAL MONITORING: Track buffer health
-                        let chunk_id = self.chunk_counter.load(std::sync::atomic::Ordering::SeqCst);
-                        if chunk_id % 100 == 0 {
-                            let buffered = suppressor.buffered_samples();
-                            let length_delta = (before_len as i32 - after_len as i32).abs();
-
-                            debug!("🔇 Noise suppression health: in={}, out={}, delta={}, buffered={}, RMS={:.4}",
-                                   before_len, after_len, length_delta, buffered,
-                                   if !mono_data.is_empty() {
-                                       (mono_data.iter().map(|&x| x * x).sum::<f32>() / mono_data.len() as f32).sqrt()
-                                   } else { 0.0 });
-
-                            // WARN if accumulating samples (potential latency buildup)
-                            if buffered > 1000 {
-                                warn!("⚠️ RNNoise accumulating samples: {} buffered (potential latency issue!)",
-                                      buffered);
-                            }
-
-                            // WARN if significant length mismatch
-                            if length_delta > 50 {
-                                warn!(
-                                    "⚠️ RNNoise length mismatch: input={} output={} (delta={})",
-                                    before_len, after_len, length_delta
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-
-            // STEP 3: Apply EBU R128 normalization (professional loudness standard)
+            // STEP 2: Apply EBU R128 normalization (professional loudness standard)
             if let Ok(mut normalizer_lock) = self.normalizer.lock() {
                 if let Some(ref mut normalizer) = *normalizer_lock {
                     mono_data = normalizer.normalize_loudness(&mono_data);
@@ -749,20 +705,43 @@ impl AudioCapture {
     }
 }
 
-/// VAD-driven audio processing pipeline
-/// Uses Voice Activity Detection to segment speech in real-time and send only speech to Whisper
+/// Build the in-band signal that tells `AudioPipeline::run` to flush. Any chunk
+/// with an ID of at least `u64::MAX - 10` is treated as a flush, not audio.
+fn flush_signal_chunk(chunk_id: u64) -> AudioChunk {
+    AudioChunk {
+        data: vec![], // Empty data signals flush
+        sample_rate: 16000,
+        timestamp: 0.0,
+        chunk_id,
+        device_type: DeviceType::Microphone,
+    }
+}
+
+/// Audio processing pipeline: mixes mic and system audio for the recording and
+/// streams each source's aligned windows to the live recognizer
 pub struct AudioPipeline {
     receiver: mpsc::UnboundedReceiver<AudioChunk>,
     transcription_sender: mpsc::UnboundedSender<AudioChunk>,
-    mic_vad_processor: ContinuousVadProcessor,
-    system_vad_processor: ContinuousVadProcessor,
+    // Removes speaker echo from the mic before live transcription, using system audio as
+    // the reference, so remote speech is not transcribed a second time as "mic".
+    // `None` when the beta flag was off as this recording started.
+    mic_echo_canceller: Option<MicEchoCanceller>,
+    /// Streaming live model: send continuous windows; otherwise send none.
+    streaming_mode: bool,
+    /// System samples handed to the live path so far: the recording position
+    /// stamped on streaming windows.
+    live_position_samples: u64,
+    /// The same for the microphone. It differs from the system count only
+    /// while the echo canceller holds mic audio back; every cleaned sample
+    /// keeps its original position, so counting output samples is exact.
+    live_mic_position_samples: u64,
     sample_rate: u32,
     chunk_id_counter: u64,
+    // Timestamp of the latest audio chunk, for mixed audio drained on flush
+    last_chunk_timestamp: f64,
     // Performance optimization: reduce logging frequency
     last_summary_time: std::time::Instant,
     processed_chunks: u64,
-    // Smart batching for audio metrics
-    metrics_batcher: Option<AudioMetricsBatcher>,
     // PROFESSIONAL AUDIO MIXING: Ring buffer + RMS-based mixer
     ring_buffer: AudioMixerRingBuffer,
     mixer: ProfessionalAudioMixer,
@@ -807,42 +786,8 @@ impl AudioPipeline {
             system_audio.kind,
         );
 
-        // Create VAD processor. The VAD processor handles 48kHz->16kHz resampling
-        // internally.
-        //
-        // Redemption time is how long a silence must last before the VAD closes a
-        // speech segment, so it decides how long the audio clips handed to the ASR
-        // engine are. Conversational speech pauses constantly for breath and
-        // mid-sentence thought, and every pause longer than this becomes a segment
-        // boundary and therefore a separate transcription request.
-        //
-        // This was 400ms, which fragmented a 26-minute meeting into 322 requests with
-        // a median length of 3.5s. Whisper is a fixed 30-second-window model: below
-        // that it zero-pads the window and leans on its language-model prior, which
-        // was trained on web subtitles, so short clips come back as memorised
-        // boilerplate ("subscribe to the channel", "thank you") instead of speech.
-        // Measured on a real recording, 47% of segment boundaries sat in the
-        // 0.42-0.75s range that a longer redemption bridges.
-        //
-        // 500ms is the live-path policy (see the constant's doc comment). The
-        // batch value (2000ms, `import.rs`/`retranscription.rs`) was tried here
-        // first, but under continuous system audio it kept a VAD segment open
-        // indefinitely and withheld live transcript emission, so live and batch
-        // deliberately diverge. Bounded live segments under continuous speech
-        // are tracked in #756.
-        // Keep the two capture sources separate until after VAD. Mixing before
+        // The two capture sources stay separate on the live path. Mixing before
         // transcription loses the only deterministic speaker boundary we have.
-        let mut mic_vad_processor =
-            ContinuousVadProcessor::new(sample_rate, VAD_REDEMPTION_TIME_MS)?;
-        let mut system_vad_processor =
-            ContinuousVadProcessor::new(sample_rate, VAD_REDEMPTION_TIME_MS)?;
-        mic_vad_processor.set_max_segment_ms(LIVE_MAX_SEGMENT_MS);
-        system_vad_processor.set_max_segment_ms(LIVE_MAX_SEGMENT_MS);
-        info!(
-            "VAD-driven pipeline: segments dispatched per speech burst (redemption_time={}ms)",
-            VAD_REDEMPTION_TIME_MS
-        );
-
         // Initialize professional audio mixing components
         let ring_buffer = AudioMixerRingBuffer::new(sample_rate);
         let mixer = ProfessionalAudioMixer::new(sample_rate);
@@ -850,15 +795,18 @@ impl AudioPipeline {
         Ok(Self {
             receiver,
             transcription_sender,
-            mic_vad_processor,
-            system_vad_processor,
+            mic_echo_canceller: MIC_ECHO_CANCELLATION_ENABLED
+                .load(Ordering::SeqCst)
+                .then(|| MicEchoCanceller::new(sample_rate)),
+            streaming_mode: LIVE_STREAMING_MODE.load(Ordering::SeqCst),
+            live_position_samples: 0,
+            live_mic_position_samples: 0,
             sample_rate,
             chunk_id_counter: 0,
+            last_chunk_timestamp: 0.0,
             // Performance optimization: reduce logging frequency
             last_summary_time: std::time::Instant::now(),
             processed_chunks: 0,
-            // Initialize metrics batcher for smart batching
-            metrics_batcher: Some(AudioMetricsBatcher::new()),
             // Initialize professional audio mixing
             ring_buffer,
             mixer,
@@ -866,9 +814,9 @@ impl AudioPipeline {
         })
     }
 
-    /// Run the VAD-driven audio processing pipeline
+    /// Run the audio processing pipeline
     pub async fn run(mut self) -> Result<()> {
-        info!("VAD-driven audio pipeline started - segments sent in real-time based on speech detection");
+        info!("Audio pipeline started");
 
         // CRITICAL FIX: Continue processing until channel is closed, not based on recording state
         // This ensures ALL chunks are processed during shutdown, fixing premature meeting completion
@@ -885,35 +833,22 @@ impl AudioPipeline {
                 Ok(Some(chunk)) => {
                     // PERFORMANCE: Check for flush signal (special chunk with ID >= u64::MAX - 10)
                     // Multiple flush signals may be sent to ensure processing
+                    // A flush can come mid-recording (on pause) as well as at stop, so it
+                    // must leave the pipeline able to take more audio afterwards.
                     if chunk.chunk_id >= u64::MAX - 10 {
                         info!(
-                            "📥 Received FLUSH signal #{} - flushing VAD processor",
+                            "📥 Received FLUSH signal #{} - flushing live audio",
                             u64::MAX - chunk.chunk_id
                         );
                         self.flush_remaining_audio()?;
                         // Continue processing to handle any remaining chunks
                         continue;
                     }
+                    self.last_chunk_timestamp = chunk.timestamp;
 
                     // PERFORMANCE OPTIMIZATION: Eliminate per-chunk logging overhead
                     // Logging in hot paths causes severe performance degradation
                     self.processed_chunks += 1;
-
-                    // Smart batching: collect metrics instead of logging every chunk
-                    if let Some(ref batcher) = self.metrics_batcher {
-                        let avg_level = chunk.data.iter().map(|&x| x.abs()).sum::<f32>()
-                            / chunk.data.len() as f32;
-                        let duration_ms =
-                            chunk.data.len() as f64 / chunk.sample_rate as f64 * 1000.0;
-
-                        batch_audio_metric!(
-                            Some(batcher),
-                            chunk.chunk_id,
-                            chunk.data.len(),
-                            duration_ms,
-                            avg_level
-                        );
-                    }
 
                     // CRITICAL: Log summary only every 200 chunks OR every 60 seconds (99.5% reduction)
                     // This eliminates I/O overhead in the audio processing hot path
@@ -939,35 +874,7 @@ impl AudioPipeline {
                     // STEP 2: Mix audio in fixed windows when both streams have sufficient data
                     while self.ring_buffer.can_mix() {
                         if let Some((mic_window, sys_window)) = self.ring_buffer.extract_window() {
-                            // Simple mixing without aggressive ducking
-                            let mixed_clean = self.mixer.mix_window(&mic_window, &sys_window);
-
-                            // NO POST-GAIN NEEDED: Microphone already normalized by EBU R128 to -23 LUFS
-                            // This is broadcast-standard loudness (Netflix/YouTube/Spotify level)
-                            // System audio at natural levels
-                            // Previous 2x gain was causing excessive limiting/distortion
-                            let mixed_with_gain = mixed_clean;
-
-                            // STEP 3: Transcribe each source independently. Both
-                            // processors receive the same aligned windows, so their
-                            // timestamps share the recording timeline.
-                            // Skip VAD processing entirely when live transcription is disabled (saves CPU/GPU)
-                            if LIVE_TRANSCRIPTION_ENABLED.load(Ordering::Relaxed) {
-                                self.process_source_audio(&mic_window, DeviceType::Microphone);
-                                self.process_source_audio(&sys_window, DeviceType::System);
-                            }
-
-                            // STEP 4: Send mixed audio for recording (WAV file)
-                            if let Some(ref sender) = self.recording_sender_for_mixed {
-                                let recording_chunk = AudioChunk {
-                                    data: mixed_with_gain,
-                                    sample_rate: self.sample_rate,
-                                    timestamp: chunk.timestamp,
-                                    chunk_id: self.chunk_id_counter,
-                                    device_type: DeviceType::Microphone, // Mixed audio
-                                };
-                                let _ = sender.send(recording_chunk);
-                            }
+                            self.mix_and_dispatch_window(mic_window, sys_window);
                         }
                     }
                 }
@@ -979,17 +886,85 @@ impl AudioPipeline {
                     break;
                 }
                 Err(_) => {
-                    // Timeout - just continue, VAD handles all segmentation
+                    // Timeout - just continue
                     continue;
                 }
             }
         }
 
-        // Flush any remaining VAD segments
+        RECORDING_LEVEL.store(0, Ordering::Relaxed);
+
+        // Flush any remaining live audio
         self.flush_remaining_audio()?;
 
-        info!("VAD-driven audio pipeline ended");
+        info!("Audio pipeline ended");
         Ok(())
+    }
+
+    /// STEPS 3-4 for one aligned mic/system window: mix it for the recording and
+    /// stream each source to the live recognizer.
+    fn mix_and_dispatch_window(&mut self, mic_window: Vec<f32>, sys_window: Vec<f32>) {
+        // Simple mixing without aggressive ducking
+        let mixed_clean = self.mixer.mix_window(&mic_window, &sys_window);
+        if !mixed_clean.is_empty() {
+            let rms =
+                (mixed_clean.iter().map(|&x| x * x).sum::<f32>() / mixed_clean.len() as f32).sqrt();
+            RECORDING_LEVEL.store(rms.to_bits(), Ordering::Relaxed);
+        }
+
+        // NO POST-GAIN NEEDED: Microphone already normalized by EBU R128 to -23 LUFS
+        // This is broadcast-standard loudness (Netflix/YouTube/Spotify level)
+        // System audio at natural levels
+        // Previous 2x gain was causing excessive limiting/distortion
+        let mixed_with_gain = mixed_clean;
+
+        // STEP 3: Transcribe each source independently. Both
+        // sources receive the same aligned windows, so their
+        // timestamps share the recording timeline.
+        // The mic is echo-cancelled against the system window first. The
+        // canceller (beta, off by default) holds back ~200ms of mic, but returns
+        // every sample at its original position, so the mic timeline is unchanged. Only the
+        // transcription path gets the cleaned mic; the recording keeps the raw one.
+        // Skip the live path entirely when live transcription is disabled (saves CPU/GPU)
+        let window_start = self.live_position_samples;
+        self.live_position_samples += mic_window.len() as u64;
+        if LIVE_TRANSCRIPTION_ENABLED.load(Ordering::Relaxed) {
+            let cleaned_mic = self
+                .mic_echo_canceller
+                .as_mut()
+                .map(|canceller| canceller.process(&mic_window, &sys_window));
+            let mic_for_live = cleaned_mic.as_deref().unwrap_or(&mic_window);
+            if self.streaming_mode {
+                // Streaming models keep their own context: send everything,
+                // continuously, on the recording timeline.
+                let mic_start = self.live_mic_position_samples;
+                self.live_mic_position_samples += mic_for_live.len() as u64;
+                if !mic_for_live.is_empty() {
+                    self.send_stream_window(
+                        mic_for_live.to_vec(),
+                        DeviceType::Microphone,
+                        mic_start,
+                    );
+                }
+                self.send_stream_window(sys_window.clone(), DeviceType::System, window_start);
+            }
+        } else {
+            // Nothing reaches the canceller while live text is off, so the mic
+            // resumes in step with the system timeline if it is turned on.
+            self.live_mic_position_samples = self.live_position_samples;
+        }
+
+        // STEP 4: Send mixed audio for recording (WAV file)
+        if let Some(ref sender) = self.recording_sender_for_mixed {
+            let recording_chunk = AudioChunk {
+                data: mixed_with_gain,
+                sample_rate: self.sample_rate,
+                timestamp: self.last_chunk_timestamp,
+                chunk_id: self.chunk_id_counter,
+                device_type: DeviceType::Microphone, // Mixed audio
+            };
+            let _ = sender.send(recording_chunk);
+        }
     }
 
     fn flush_remaining_audio(&mut self) -> Result<()> {
@@ -998,76 +973,57 @@ impl AudioPipeline {
             self.processed_chunks
         );
 
-        // Skip VAD flush if live transcription is disabled (no segments buffered)
-        if !LIVE_TRANSCRIPTION_ENABLED.load(Ordering::Relaxed) {
-            info!("Live transcription disabled, skipping VAD flush");
+        // The ring buffer holds up to a window of audio that has not been mixed or
+        // sent to the live path yet. Push it through now so a flush (pause or stop) covers
+        // everything captured so far instead of holding the tail back.
+        if let Some((mic_tail, sys_tail)) = self.ring_buffer.drain_remaining() {
+            self.mix_and_dispatch_window(mic_tail, sys_tail);
+        }
+
+        // Nothing is buffered live when live transcription is disabled or the
+        // recording has no streaming engine.
+        if !LIVE_TRANSCRIPTION_ENABLED.load(Ordering::Relaxed) || !self.streaming_mode {
             return Ok(());
         }
 
-        let mic_segments = self.mic_vad_processor.flush();
-        self.send_source_segments(mic_segments, DeviceType::Microphone, true);
-        let system_segments = self.system_vad_processor.flush();
-        self.send_source_segments(system_segments, DeviceType::System, true);
+        // Hand over the mic audio the echo canceller still holds, at its
+        // own position, so the end of the last utterance is not lost.
+        if let Some(canceller) = self.mic_echo_canceller.as_mut() {
+            let held_mic = canceller.flush();
+            if !held_mic.is_empty() {
+                let start = self.live_mic_position_samples;
+                self.live_mic_position_samples += held_mic.len() as u64;
+                self.send_stream_window(held_mic, DeviceType::Microphone, start);
+            }
+        }
+        // An empty window tells the streaming worker to close the
+        // utterance in progress on that source.
+        let mic_position = self.live_mic_position_samples;
+        let system_position = self.live_position_samples;
+        self.send_stream_window(Vec::new(), DeviceType::Microphone, mic_position);
+        self.send_stream_window(Vec::new(), DeviceType::System, system_position);
 
         Ok(())
     }
 
-    fn process_source_audio(&mut self, samples: &[f32], device_type: DeviceType) {
-        let segments = match device_type {
-            DeviceType::Microphone => self.mic_vad_processor.process_audio(samples),
-            DeviceType::System => self.system_vad_processor.process_audio(samples),
-        };
-        self.send_source_segments(segments, device_type, false);
-    }
-
-    fn send_source_segments(
+    /// Streaming mode: forward one source window at its recording position.
+    /// Empty `samples` is the flush marker.
+    fn send_stream_window(
         &mut self,
-        segments: Result<Vec<super::vad::SpeechSegment>>,
+        samples: Vec<f32>,
         device_type: DeviceType,
-        is_flush: bool,
+        start_samples: u64,
     ) {
-        let source = match device_type {
-            DeviceType::Microphone => "microphone",
-            DeviceType::System => "system audio",
+        let chunk = AudioChunk {
+            data: samples,
+            sample_rate: self.sample_rate,
+            timestamp: start_samples as f64 / self.sample_rate as f64,
+            chunk_id: self.chunk_id_counter,
+            device_type,
         };
-
-        match segments {
-            Ok(segments) => {
-                for segment in segments {
-                    let duration_ms = segment.end_timestamp_ms - segment.start_timestamp_ms;
-                    if segment.samples.len() < 800 {
-                        debug!(
-                            "⏭️ Dropping short {} VAD segment: {:.1}ms ({} samples < 800)",
-                            source,
-                            duration_ms,
-                            segment.samples.len()
-                        );
-                        continue;
-                    }
-
-                    info!(
-                        "📤 Sending {}{} VAD segment: {:.1}ms, {} samples",
-                        if is_flush { "final " } else { "" },
-                        source,
-                        duration_ms,
-                        segment.samples.len()
-                    );
-                    let transcription_chunk = AudioChunk {
-                        data: segment.samples,
-                        sample_rate: 16000,
-                        timestamp: segment.start_timestamp_ms / 1000.0,
-                        chunk_id: self.chunk_id_counter,
-                        device_type: device_type.clone(),
-                    };
-
-                    if let Err(e) = self.transcription_sender.send(transcription_chunk) {
-                        warn!("Failed to send {} VAD segment: {}", source, e);
-                    } else {
-                        self.chunk_id_counter += 1;
-                    }
-                }
-            }
-            Err(e) => warn!("⚠️ {} VAD error: {}", source, e),
+        self.chunk_id_counter += 1;
+        if self.transcription_sender.send(chunk).is_err() {
+            perf_debug!("Streaming live window dropped: transcription worker gone");
         }
     }
 }
@@ -1152,6 +1108,21 @@ impl AudioPipelineManager {
         }
     }
 
+    /// Ask the running pipeline to transcribe everything it has buffered, without
+    /// stopping it. Used on pause so speech in progress is transcribed at pause time
+    /// rather than held until resume; the pipeline keeps accepting audio afterwards.
+    pub fn flush(&self) -> Result<()> {
+        let sender = self
+            .audio_sender
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Cannot flush audio pipeline: it is not running"))?;
+        sender
+            .send(flush_signal_chunk(u64::MAX))
+            .map_err(|e| anyhow::anyhow!("Failed to send flush signal to pipeline: {}", e))?;
+        info!("📤 Sent flush signal to pipeline (pipeline keeps running)");
+        Ok(())
+    }
+
     /// Force immediate flush of accumulated audio and stop pipeline
     /// PERFORMANCE CRITICAL: Eliminates 30+ second shutdown delays
     pub async fn force_flush_and_stop(&mut self) -> Result<()> {
@@ -1160,13 +1131,7 @@ impl AudioPipelineManager {
         // If we have a sender, send a special flush signal first
         if let Some(sender) = &self.audio_sender {
             // Create a special flush chunk to trigger immediate processing
-            let flush_chunk = AudioChunk {
-                data: vec![], // Empty data signals flush
-                sample_rate: 16000,
-                timestamp: 0.0,
-                chunk_id: u64::MAX, // Special ID to indicate flush
-                device_type: super::recording_state::DeviceType::Microphone,
-            };
+            let flush_chunk = flush_signal_chunk(u64::MAX);
 
             if let Err(e) = sender.send(flush_chunk) {
                 warn!("Failed to send flush signal: {}", e);
@@ -1180,14 +1145,7 @@ impl AudioPipelineManager {
                 // Send multiple flush signals to ensure the pipeline catches it
                 // This aggressive approach eliminates shutdown delay issues
                 for i in 0..3 {
-                    let additional_flush = AudioChunk {
-                        data: vec![],
-                        sample_rate: 16000,
-                        timestamp: 0.0,
-                        chunk_id: u64::MAX - (i as u64),
-                        device_type: super::recording_state::DeviceType::Microphone,
-                    };
-                    let _ = sender.send(additional_flush);
+                    let _ = sender.send(flush_signal_chunk(u64::MAX - (i as u64)));
                 }
 
                 info!("📤 Sent additional flush signals for reliability");
@@ -1210,10 +1168,59 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_live_vad_redemption_matches_pro_policy() {
-        // Live uses the established 500ms pause policy; it does not bound
-        // uninterrupted speech. Batch import/retranscription use 2000ms.
-        // See #679 and #756.
-        assert_eq!(VAD_REDEMPTION_TIME_MS, 500);
+    fn test_flush_without_running_pipeline_errors() {
+        let manager = AudioPipelineManager::new();
+        assert!(manager.flush().is_err());
+    }
+
+    #[test]
+    fn test_flush_sends_one_signal_and_keeps_pipeline_open() {
+        let (sender, mut receiver) = mpsc::unbounded_channel::<AudioChunk>();
+        let mut manager = AudioPipelineManager::new();
+        manager.audio_sender = Some(sender);
+
+        manager.flush().expect("flush should succeed");
+
+        let signal = receiver.try_recv().expect("flush signal should be queued");
+        assert_eq!(signal.chunk_id, u64::MAX);
+        assert!(signal.data.is_empty());
+        assert!(
+            matches!(receiver.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "flush must send exactly one signal and leave the channel open"
+        );
+        assert!(manager.audio_sender.is_some());
+
+        // Still usable: a second pause flushes again.
+        manager.flush().expect("second flush should succeed");
+        assert_eq!(receiver.try_recv().unwrap().chunk_id, u64::MAX);
+    }
+
+    #[test]
+    fn test_flush_errors_when_pipeline_task_is_gone() {
+        let (sender, receiver) = mpsc::unbounded_channel::<AudioChunk>();
+        let mut manager = AudioPipelineManager::new();
+        manager.audio_sender = Some(sender);
+        drop(receiver);
+
+        assert!(manager.flush().is_err());
+    }
+
+    #[test]
+    fn test_ring_buffer_drain_remaining_aligns_sources() {
+        let mut ring = AudioMixerRingBuffer::new(48000);
+        ring.add_samples(DeviceType::Microphone, vec![0.5; 1000]);
+        ring.add_samples(DeviceType::System, vec![0.25; 400]);
+        assert!(!ring.can_mix(), "fixture must stay below one mixing window");
+
+        let (mic, sys) = ring.drain_remaining().expect("buffered audio should drain");
+        assert_eq!(mic, vec![0.5; 1000]);
+        assert_eq!(sys.len(), 1000);
+        assert_eq!(&sys[..400], &[0.25; 400][..]);
+        assert!(sys[400..].iter().all(|&s| s == 0.0));
+
+        assert!(
+            ring.drain_remaining().is_none(),
+            "drain must empty both buffers"
+        );
     }
 }

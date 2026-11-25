@@ -4,7 +4,6 @@ import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import type { SummaryProcessResponse } from '../../src/types';
 
 const originalCore = { ...await import('@tauri-apps/api/core') };
-const originalAnalytics = { ...await import('../../src/lib/analytics') };
 const originalPreferences = { ...await import('../../src/lib/summary-language-preferences') };
 const originalToast = { ...await import('sonner') };
 const originalNavigation = { ...await import('next/navigation') };
@@ -16,7 +15,6 @@ const originalRecordingState = { ...await import('../../src/contexts/RecordingSt
 const originalPageContent = { ...await import('../../src/app/meeting-details/page-content') };
 afterAll(() => {
   mock.module('@tauri-apps/api/core', () => originalCore);
-  mock.module('../../src/lib/analytics', () => originalAnalytics);
   mock.module('../../src/lib/summary-language-preferences', () => originalPreferences);
   mock.module('sonner', () => originalToast);
   mock.module('next/navigation', () => originalNavigation);
@@ -43,10 +41,6 @@ mock.module('../../src/contexts/ConfigContext', () => ({ useConfig: () => ({
 }) }));
 const notify = mock(() => {});
 mock.module('sonner', () => ({ toast: { info: notify, error: notify, success: notify, warning: notify } }));
-mock.module('../../src/lib/analytics', () => ({ default: {
-  trackPageView() {}, trackBackendConnection() {}, trackSummaryGenerationStarted: async () => {},
-  trackSummaryGenerationCompleted: async () => {},
-} }));
 mock.module('../../src/lib/summary-language-preferences', () => ({
   readCachedDetectedSummaryLanguage: async () => null,
   detectAndCacheSummaryLanguage: async () => ({ language: 'en' }),

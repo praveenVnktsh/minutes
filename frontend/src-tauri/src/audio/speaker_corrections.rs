@@ -57,6 +57,62 @@ fn overlap(start_a: f64, end_a: f64, start_b: f64, end_b: f64) -> f64 {
     (end_a.min(end_b) - start_a.max(start_b)).max(0.0)
 }
 
+/// A timed override (a segment the user reassigned, kept by its time range so
+/// it survives retranscription) applies to a new segment only when it covers
+/// at least this share of it. A short override must not take over a much
+/// longer segment that merely touches it.
+const MIN_OVERRIDE_SHARE: f64 = 0.5;
+
+/// The share of the segment `start..end` that the override covers. A
+/// zero-length segment counts as fully covered when it lies inside.
+fn override_share(start: f64, end: f64, override_start: f64, override_end: f64) -> f64 {
+    let length = end - start;
+    if length <= 0.0 {
+        return if start >= override_start && start <= override_end {
+            1.0
+        } else {
+            0.0
+        };
+    }
+    overlap(start, end, override_start, override_end) / length
+}
+
+/// The speaker the timed overrides give a segment, if any. Coverage is
+/// summed per target speaker, so several short corrections to the same
+/// person that a retranscription merged into one segment still win it
+/// together; the speaker with the most coverage needs at least
+/// [`MIN_OVERRIDE_SHARE`] of the segment.
+fn timed_override_speaker<'a>(
+    start: f64,
+    end: f64,
+    overrides: &'a [OverrideRow],
+) -> Option<&'a str> {
+    let mut coverage: Vec<(&str, f64)> = Vec::new();
+    for item in overrides {
+        let (Some(override_start), Some(override_end)) =
+            (item.audio_start_time, item.audio_end_time)
+        else {
+            continue;
+        };
+        let share = override_share(start, end, override_start, override_end);
+        if share <= 0.0 {
+            continue;
+        }
+        match coverage
+            .iter_mut()
+            .find(|(speaker, _)| *speaker == item.speaker_id)
+        {
+            Some((_, total)) => *total += share,
+            None => coverage.push((item.speaker_id.as_str(), share)),
+        }
+    }
+    coverage
+        .into_iter()
+        .filter(|(_, total)| *total >= MIN_OVERRIDE_SHARE)
+        .max_by(|left, right| left.1.total_cmp(&right.1).then_with(|| right.0.cmp(left.0)))
+        .map(|(speaker, _)| speaker)
+}
+
 async fn correction_rows(
     pool: &SqlitePool,
     meeting_id: &str,
@@ -91,19 +147,12 @@ pub async fn resolve_transcript_speakers(
             .iter()
             .find(|item| item.transcript_id == transcript.id);
         let timed = match (transcript.audio_start_time, transcript.audio_end_time) {
-            (Some(start), Some(end)) => overrides
-                .iter()
-                .filter_map(|item| {
-                    let amount = overlap(start, end, item.audio_start_time?, item.audio_end_time?);
-                    (amount > 0.0).then_some((item, amount))
-                })
-                .max_by(|left, right| left.1.total_cmp(&right.1))
-                .map(|(item, _)| item),
+            (Some(start), Some(end)) => timed_override_speaker(start, end, &overrides),
             _ => None,
         };
         let Some(base_id) = direct
-            .or(timed)
             .map(|item| item.speaker_id.as_str())
+            .or(timed)
             .or(transcript.speaker.as_deref())
         else {
             continue;
@@ -367,5 +416,79 @@ mod tests {
         assert_eq!(resolved["new-transcript-id"].display_name, "Avery");
         assert_eq!(regenerated[0].transcript, "new-transcript-id");
         assert_eq!(regenerated[0].audio_start_time, Some(10.2));
+    }
+
+    #[test]
+    fn a_short_override_does_not_take_over_a_longer_segment() {
+        // Regression: any overlap applied the override, so a 2 s correction
+        // relabelled a 30 s segment that merely touched it.
+        assert!(override_share(0.0, 30.0, 10.0, 12.0) < MIN_OVERRIDE_SHARE);
+        assert!(override_share(10.2, 11.8, 10.0, 12.0) >= MIN_OVERRIDE_SHARE);
+        assert!(override_share(9.0, 12.0, 10.0, 12.0) >= MIN_OVERRIDE_SHARE);
+        assert_eq!(override_share(11.0, 11.0, 10.0, 12.0), 1.0);
+        assert_eq!(override_share(13.0, 13.0, 10.0, 12.0), 0.0);
+    }
+
+    fn override_row(start: f64, end: f64, speaker: &str) -> OverrideRow {
+        OverrideRow {
+            transcript_id: format!("old-{start}"),
+            audio_start_time: Some(start),
+            audio_end_time: Some(end),
+            speaker_id: speaker.into(),
+        }
+    }
+
+    #[test]
+    fn adjacent_corrections_to_one_speaker_add_up() {
+        // Regression: three 3 s corrections merged into one 9 s segment each
+        // covered a third, so each failed the 50% rule and the user's
+        // correction silently reverted.
+        let overrides = vec![
+            override_row(0.0, 3.0, "speaker_04"),
+            override_row(3.0, 6.0, "speaker_04"),
+            override_row(6.0, 9.0, "speaker_04"),
+        ];
+        assert_eq!(
+            timed_override_speaker(0.0, 9.0, &overrides),
+            Some("speaker_04")
+        );
+        // Split between two speakers, neither reaches half.
+        let split = vec![
+            override_row(0.0, 4.0, "speaker_01"),
+            override_row(4.0, 8.0, "speaker_02"),
+        ];
+        assert_eq!(timed_override_speaker(0.0, 10.0, &split), None);
+        // A short correction still cannot take over a long segment.
+        assert_eq!(timed_override_speaker(0.0, 30.0, &overrides[..1]), None);
+    }
+
+    #[tokio::test]
+    async fn timed_overrides_only_apply_to_segments_they_mostly_cover() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::query(
+            "CREATE TABLE speaker_identities (meeting_id TEXT, speaker_id TEXT, display_name TEXT, merged_into TEXT, updated_at TEXT, PRIMARY KEY (meeting_id, speaker_id))",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TABLE speaker_segment_overrides (id TEXT PRIMARY KEY, meeting_id TEXT, transcript_id TEXT, audio_start_time REAL, audio_end_time REAL, speaker_id TEXT, updated_at TEXT)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO speaker_segment_overrides VALUES ('override', 'meeting', 'old', 10.0, 12.0, 'speaker_05', 'now')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let regenerated = vec![
+            transcript("long", 0.0, 30.0, "speaker_01"),
+            transcript("short", 10.1, 11.9, "speaker_01"),
+        ];
+        let resolved = resolve_transcript_speakers(&pool, "meeting", &regenerated)
+            .await
+            .unwrap();
+        assert_eq!(resolved["long"].speaker_id, "speaker_01");
+        assert_eq!(resolved["short"].speaker_id, "speaker_05");
     }
 }

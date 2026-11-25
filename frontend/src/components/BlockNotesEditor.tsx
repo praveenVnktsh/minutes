@@ -1,11 +1,23 @@
 'use client';
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { Block, PartialBlock } from '@blocknote/core';
 import { useCreateBlockNote } from '@blocknote/react';
 import { BlockNoteView } from '@blocknote/shadcn';
+import { closeHistory } from '@tiptap/pm/history';
 import { blocksToMarkdownSafely } from '@/lib/blocknote-markdown';
 import type { LiveNote, LiveNotesDocument } from '@/lib/liveNotes';
+import type { TimelineEntry } from '@/lib/liveTimeline';
+import {
+  AI_NOTES_PAUSE_MS,
+  aiBlocksCss,
+  aiNoteText,
+  insertPlace,
+  pendingGroups,
+  remainingAiBlocks,
+  type AiBlocks,
+} from '@/lib/aiRawNotes';
+import { useShowAiNotes } from '@/lib/aiNotes';
 import '@blocknote/shadcn/style.css';
 import '@blocknote/core/fonts/inter.css';
 
@@ -39,14 +51,31 @@ function documentSignature(document: LiveNotesDocument): string {
   return JSON.stringify([document.updatedAt, document.editorBlocks ?? document.notes]);
 }
 
+function newBlockId(): string {
+  return typeof crypto !== 'undefined' && crypto.randomUUID
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+/** The index of the top-level block holding block `id` (it may be nested). */
+function topLevelIndex(blocks: Block[], id: string): number {
+  const contains = (block: Block): boolean =>
+    block.id === id || block.children.some((child) => contains(child as Block));
+  return blocks.findIndex(contains);
+}
+
 export function BlockNotesEditor({
   document,
   onChange,
   editable = true,
+  aiEntries,
 }: {
   document: LiveNotesDocument;
   onChange?: (document: LiveNotesDocument) => void;
   editable?: boolean;
+  /** Live notes to write into the notes as AI lines while the meeting
+   * records; undefined after it. */
+  aiEntries?: TimelineEntry[];
 }) {
   const startingBlocks = useRef(initialBlocks(document)).current;
   const timestamps = useRef(new Map(document.notes.map((note) => [note.id, note.timestampSeconds])));
@@ -55,6 +84,14 @@ export function BlockNotesEditor({
   const changeVersion = useRef(0);
   const applyingExternalDocument = useRef(false);
   const appliedSignature = useRef(documentSignature(document));
+  const aiBlocks = useRef<AiBlocks>({ ...(document.aiBlocks ?? {}) });
+  const aiInserted = useRef(new Set(document.aiEntries ?? []));
+  const writingAi = useRef(false);
+  const lastUserEditAt = useRef(0);
+  const latestAiEntries = useRef(aiEntries);
+  latestAiEntries.current = aiEntries;
+  const [, bumpAi] = useState(0);
+  const [showAi] = useShowAiNotes();
   const editor = useCreateBlockNote({
     initialContent: startingBlocks,
     placeholders: {
@@ -74,6 +111,9 @@ export function BlockNotesEditor({
     applyingExternalDocument.current = true;
     appliedSignature.current = nextSignature;
     timestamps.current = new Map(document.notes.map((note) => [note.id, note.timestampSeconds]));
+    aiBlocks.current = { ...(document.aiBlocks ?? {}) };
+    aiInserted.current = new Set(document.aiEntries ?? []);
+    bumpAi((value) => value + 1);
     editor.replaceBlocks(editor.document, initialBlocks(document));
     void Promise.resolve().then(() => {
       applyingExternalDocument.current = false;
@@ -84,6 +124,7 @@ export function BlockNotesEditor({
     if (!onChange || !editable) return;
     return editor.onChange(() => {
       if (applyingExternalDocument.current) return;
+      if (!writingAi.current) lastUserEditAt.current = Date.now();
       const version = ++changeVersion.current;
       const blocks = editor.document;
       const nowSeconds = Math.max(0, (Date.now() - latestDocument.current.meetingStartedAtMs) / 1000);
@@ -99,13 +140,23 @@ export function BlockNotesEditor({
           important: previous?.important ?? false,
         };
       });
-      const draft = {
+      // An AI line the user deleted or edited is no longer the AI's.
+      const before = Object.keys(aiBlocks.current).length;
+      aiBlocks.current = remainingAiBlocks(
+        aiBlocks.current,
+        new Map(notes.map((note) => [note.id, note.text])),
+      );
+      if (Object.keys(aiBlocks.current).length !== before) bumpAi((value) => value + 1);
+      const hasAi = Object.keys(aiBlocks.current).length > 0 || aiInserted.current.size > 0;
+      const draft: LiveNotesDocument = {
         ...latestDocument.current,
         version: 2,
         updatedAt: new Date().toISOString(),
         notes,
         rawMarkdown: undefined,
         editorBlocks: blocks,
+        aiBlocks: hasAi ? { ...aiBlocks.current } : undefined,
+        aiEntries: hasAi ? [...aiInserted.current] : undefined,
       };
       appliedSignature.current = documentSignature(draft);
       latestDocument.current = draft;
@@ -128,8 +179,68 @@ export function BlockNotesEditor({
     });
   }, [document.rawMarkdown, editable, editor, onChange]);
 
+  /** A block with no text (and no nested blocks), e.g. the starting bullet. */
+  function isEmptyBlock(block: Block): boolean {
+    if (block.children && block.children.length > 0) return false;
+    const content = block.content;
+    if (!Array.isArray(content)) return false;
+    return content.every((item) => item.type === 'text' && item.text.trim() === '');
+  }
+
+  // Live notes written into the notes, once the user pauses typing: under
+  // their topic below the cursor, else at the end; one undo step of their own.
+  const aiOn = aiEntries !== undefined && editable && Boolean(onChange);
+  useEffect(() => {
+    if (!aiOn) return;
+    const timer = window.setInterval(() => {
+      if (applyingExternalDocument.current) return;
+      if (Date.now() - lastUserEditAt.current < AI_NOTES_PAUSE_MS) return;
+      const groups = pendingGroups(latestAiEntries.current ?? [], aiInserted.current);
+      if (groups.length === 0) return;
+      writingAi.current = true;
+      try {
+        editor.transact((tr) => closeHistory(tr));
+        for (const group of groups) {
+          const blocks = editor.document;
+          let cursorIndex = -1;
+          try {
+            cursorIndex = topLevelIndex(blocks, editor.getTextCursorPosition().block.id);
+          } catch {
+            cursorIndex = -1;
+          }
+          const emptyIds = new Set(blocks.filter(isEmptyBlock).map((block) => block.id));
+          const place = insertPlace(blocks.map((block) => block.id), cursorIndex, aiBlocks.current, group.topic, emptyIds);
+          if (!place) continue;
+          const added: PartialBlock[] = [];
+          if (place.withHeading) {
+            const id = newBlockId();
+            aiBlocks.current[id] = { entryId: '', text: group.topic, topic: group.topic };
+            added.push({ id, type: 'heading', props: { level: 3 }, content: group.topic });
+          }
+          for (const entry of group.entries) {
+            const id = newBlockId();
+            const text = aiNoteText(entry);
+            aiBlocks.current[id] = { entryId: entry.id, text, topic: group.topic };
+            aiInserted.current.add(entry.id);
+            added.push({ id, type: 'bulletListItem', content: text });
+          }
+          editor.transact(() => {
+            editor.insertBlocks(added, place.afterBlockId, place.before ? 'before' : 'after');
+          });
+        }
+        editor.transact((tr) => closeHistory(tr));
+      } finally {
+        writingAi.current = false;
+      }
+      bumpAi((value) => value + 1);
+    }, 500);
+    return () => window.clearInterval(timer);
+  }, [aiOn, editor]);
+
+  const aiCss = aiBlocksCss(aiBlocks.current, showAi);
   return (
-    <div className="raw-notes-editor min-h-full text-[15px] text-ink">
+    <div className="raw-notes-editor min-h-full text-ink">
+      {aiCss && <style>{aiCss}</style>}
       <BlockNoteView editor={editor} editable={editable} theme="light" />
     </div>
   );

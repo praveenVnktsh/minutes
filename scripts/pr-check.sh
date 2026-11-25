@@ -8,8 +8,8 @@
 # a build agent that passes a local sequence CI does not run would open pull
 # requests that go red, and every red one costs the card an attempt.
 #
-# Needs pnpm, bun and a Rust toolchain on PATH, plus the Tauri system libraries
-# (see CONTRIBUTING.md). Runs CPU-only.
+# Needs an Apple Silicon Mac (Minutes is Mac-only) with pnpm, bun and a Rust
+# toolchain on PATH (see CONTRIBUTING.md).
 set -euo pipefail
 
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -28,6 +28,8 @@ pnpm lint
 # Runs each test file in its own process; see scripts/test-each.mjs for why.
 step "frontend tests"
 pnpm test
+step "replay viewer tests"
+node --test ../site/replay/parser.test.js ../site/replay/app.test.js
 # Also produces frontend/out, which the Rust app embeds at compile time
 # (tauri.conf.json's frontendDist), so it must come before the Rust build.
 step "build frontend"
@@ -46,7 +48,19 @@ target_dir="${CARGO_TARGET_DIR:-$root/target}"
 mkdir -p frontend/src-tauri/binaries
 cp "$target_dir/debug/llama-helper" "frontend/src-tauri/binaries/llama-helper-${target}"
 
+# The FluidAudio speech helper (Swift: transcription, VAD, diarization) is the other externalBin.
+step "test and stage the speech-helper sidecar"
+swift test --package-path speech-helper
+bash speech-helper/build.sh debug
+
 step "rust tests"
 cargo test -p meetily
+
+# The replay harness's server (replay::serve) is only compiled with the
+# developer feature, so release builds carry no HTTP server: its tests and the
+# replay example are checked here.
+step "replay harness tests (dev-replay)"
+cargo test -p meetily --features dev-replay --lib replay::
+cargo check -p meetily --features dev-replay --example replay
 
 printf '\nPR Check passed.\n'

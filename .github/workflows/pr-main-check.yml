@@ -63,5 +63,5 @@ jobs:
           echo "### Next Steps" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "1. Run **Build and Test - DevTest** for unsigned builds" >> $GITHUB_STEP_SUMMARY
-          echo "2. Run **Build and Test** for signed builds on all platforms" >> $GITHUB_STEP_SUMMARY
+          echo "2. Run **Build and Test** for signed macOS builds" >> $GITHUB_STEP_SUMMARY
           echo "3. Run **Release** to create a production release" >> $GITHUB_STEP_SUMMARY

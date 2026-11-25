@@ -17,9 +17,14 @@ afterAll(() => {
 })
 
 let selectedDeviceWrites: Array<{ micDevice: string | null; systemDevice: string | null }> = []
+let savedPreferences: Array<Record<string, unknown>> = []
 
 mock.module('@tauri-apps/api/core', () => ({
-  invoke: async (command: string) => {
+  invoke: async (command: string, args?: { preferences?: Record<string, unknown> }) => {
+    if (command === 'set_recording_preferences' && args?.preferences) {
+      savedPreferences.push(args.preferences)
+      return undefined
+    }
     if (command === 'get_recording_preferences') {
       return {
         save_folder: '/recordings',
@@ -37,7 +42,11 @@ mock.module('@tauri-apps/api/core', () => ({
 }))
 mock.module('@/contexts/ConfigContext', () => ({
   ...originalConfig,
-  useConfig: () => ({ setSelectedDevices: (devices: never) => selectedDeviceWrites.push(devices) }),
+  useConfig: () => ({
+    setSelectedDevices: (devices: never) => selectedDeviceWrites.push(devices),
+    betaFeatures: { liveTranscription: true },
+    toggleBetaFeature: () => {},
+  }),
 }))
 mock.module('@/contexts/RecordingStateContext', () => ({
   ...originalRecordingState,
@@ -46,7 +55,6 @@ mock.module('@/contexts/RecordingStateContext', () => ({
 mock.module('@tauri-apps/plugin-store', () => ({
   Store: { load: async () => ({ get: async () => true, set: async () => {}, save: async () => {} }) },
 }))
-mock.module('@/lib/analytics', () => ({ default: { track: async () => {} } }))
 mock.module('@/components/DeviceSelection', () => ({
   ...originalDeviceSelection,
   DeviceSelection: () => null,
@@ -67,7 +75,24 @@ const { RecordingSettings } = await import('./RecordingSettings')
 describe('RecordingSettings and the setup check', () => {
   beforeEach(() => {
     selectedDeviceWrites = []
+    savedPreferences = []
     panelProps = {}
+  })
+
+  test('the menu bar recording indicator is off unless switched on, and the switch saves it', async () => {
+    let renderer!: ReturnType<typeof create>
+    await act(async () => {
+      renderer = create(<RecordingSettings />)
+    })
+    const toggle = renderer.root.find(
+      (node) => node.props['aria-label'] === 'Show the recording indicator in the menu bar' && typeof node.props.onCheckedChange === 'function',
+    )
+    expect(Boolean(toggle.props.checked)).toBe(false)
+    await act(async () => {
+      await toggle.props.onCheckedChange(true)
+    })
+    expect(savedPreferences.at(-1)?.show_menu_bar_indicator).toBe(true)
+    await act(async () => renderer.unmount())
   })
 
   test('a device chosen inside the check reaches the in-memory selection the start path reads', async () => {
@@ -102,5 +127,20 @@ describe('RecordingSettings and the setup check', () => {
     expect(selectedDeviceWrites).toEqual([
       { micDevice: 'Scarlett Solo (input)', systemDevice: 'BlackHole 2ch (output)' },
     ])
+  })
+
+  test('groups the tab into Audio, Meeting detection and Devices, with the capture backend under Advanced', async () => {
+    let renderer!: ReturnType<typeof create>
+    await act(async () => {
+      renderer = create(<RecordingSettings />)
+    })
+    const sections = renderer.root.findAll((node) => node.type === 'section').map((node) => node.props['aria-label'])
+    expect(sections).toEqual(['Audio', 'Meeting detection', 'Devices'])
+    const advanced = renderer.root.findByType('details')
+    expect(JSON.stringify(renderer.toJSON())).toContain('Advanced')
+    // Folded away, and not even mounted, until opened.
+    expect(advanced.props.open).toBeUndefined()
+    expect(renderer.root.findAll((node) => (node.type as { name?: string }).name === 'AudioBackendSelector')).toHaveLength(0)
+    await act(async () => renderer.unmount())
   })
 })

@@ -32,8 +32,7 @@ describe('meeting export', () => {
     const markdown = buildMeetingExport({
       title: 'Planning',
       createdAt: '2026-09-18T10:00:00Z',
-      originalNotes: '',
-      enhancedNotes: '',
+      notes: '',
       transcripts: result,
     });
     expect(markdown).toContain('[00:10] **You** segment 1');
@@ -102,11 +101,10 @@ describe('meeting export', () => {
 
     const exported = buildMeetingExport({
       title: 'Notes only',
-      originalNotes: markdown,
-      enhancedNotes: '',
+      notes: markdown,
       transcripts: [],
     });
-    expect(exported).toContain('## Original notes');
+    expect(exported).toContain('## Notes');
     expect(exported).not.toContain('## Transcript');
   });
 

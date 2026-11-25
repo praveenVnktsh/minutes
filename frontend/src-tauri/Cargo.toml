@@ -6,7 +6,7 @@ authors = ["Meetily contributors"]
 license = "MIT"
 repository = "https://github.com/praveenvnktsh/minutes"
 edition = "2021"
-rust-version = "1.80"
+rust-version = "1.91"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -15,51 +15,24 @@ name = "app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 
-# Hardware acceleration features for whisper-rs
-# Cross-platform GPU acceleration with smart defaults
-#
-# BUILD INSTRUCTIONS:
-# ===================
-# macOS:     cargo build --release              (Metal GPU auto-enabledon)
-#
-# Windows:   cargo build --release              (CPU with OpenBLAS)
-#            cargo build --release --features cuda    (NVIDIA GPU)
-#            cargo build --release --features vulkan  (AMD/Intel GPU)
-#
-# Linux:     cargo build --release              (CPU with OpenBLAS)
-#            cargo build --release --features cuda    (NVIDIA GPU)
-#            cargo build --release --features hipblas (AMD GPU with ROCm)
-#            cargo build --release --features vulkan  (Other GPUs)
-#
-# QUICK START: Use the helper scripts!
-#   ./build-gpu.sh (Unix/macOS)
-#   .\build-gpu.ps1 (Windows PowerShell)
-#
+# Minutes is a macOS (Apple Silicon) app. Every speech model runs on Core ML
+# through FluidAudio in the speech-helper sidecar (speech-helper/ at the repo
+# root), so this crate has no GPU or ONNX features of its own.
 [features]
-default = ["platform-default"]  # Automatically enables best backend per platform
+default = []
 
-# Platform-appropriate defaults - see target-specific dependencies below
-platform-default = []
+# Developer tool: the pipeline replay harness (examples/replay.rs), which runs
+# the app headless on Tauri's mock runtime. Never part of a release build.
+dev-replay = ["tauri/test"]
 
-# Manual GPU acceleration options (for power users to override defaults)
-metal = ["whisper-rs/metal"]       # macOS: Apple Metal GPU (Auto-enabled on macOS)
-coreml = ["whisper-rs/coreml"]     # macOS: Apple CoreML acceleration
-cuda = ["whisper-rs/cuda"]         # Windows/Linux: NVIDIA CUDA GPU
-vulkan = ["whisper-rs/vulkan"]     # Windows/Linux: AMD/Intel Vulkan GPU
-hipblas = ["whisper-rs/hipblas"]   # Linux: AMD ROCm HIP
-
-# CPU optimizations (fallback for systems without GPU)
-openblas = ["whisper-rs/openblas"] # Optimized BLAS (Auto-enabled on Windows/Linux)
-openmp = ["whisper-rs/openmp"]     # OpenMP parallel processing
+[[example]]
+name = "replay"
+required-features = ["dev-replay"]
 
 [build-dependencies]
 tauri-build = { version = "2.3.0", features = [] }
 reqwest = { version = "0.11", features = ["blocking", "multipart", "json", "stream"] }
-which = "6.0.1"
-zip = "2.2"           # ZIP extraction (Windows, macOS)
-tar = "0.4"           # TAR extraction (Linux)
-xz2 = "0.1"           # XZ decompression (Linux)
-sha2 = "0.10"
+zip = "2.2"           # ZIP extraction (FFmpeg sidecar download)
 
 
 [dependencies]
@@ -68,19 +41,12 @@ serde = { version = "1.0", features = ["derive"] }
 anyhow = "1.0"
 once_cell = "1.17.1"
 uuid = { version = "1.0", features = ["v4", "serde"] }
-posthog-rs = "0.3.7"
 hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
 
-# Cross-platform audio capture
+# Microphone capture
 cpal = "0.15.3"
-
-# Wav encoding - now using manual WAV creation instead of hound
-# hound = "3.5"
-
-# Cli ! shouldn't be required if using as lib
-clap = { version = "4.3", features = ["derive"] }
 
 # Dates
 chrono = { version = "0.4.31", features = ["serde"] }
@@ -97,18 +63,13 @@ bytemuck = "1.16.1"
 # EBU R128 loudness normalization (professional broadcast standard)
 ebur128 = "0.1"
 
-# Noise suppression - RNNoise-based neural network noise reduction
-nnnoiseless = "0.5"
+# Acoustic echo cancellation for the live mic transcription path.
+# Pure-Rust port of WebRTC AEC3, so it adds no C++ build step. Needs Rust 1.91.
+sonora = { version = "0.2", default-features = false }
 
-# Speech recognition and async utilities
-# NOTE: whisper-rs is declared in platform-specific sections below (macOS/Windows/Linux)
-# to ensure correct GPU features are enabled per platform
+# Async utilities and error types
 futures-util = "0.3"
-silero_rs = { git = "https://github.com/emotechlab/silero-rs", rev = "26a6460", package = "silero" }
-
-# Parakeet (ONNX-based fast transcription) dependencies
-ort = { version = "2.0.0-rc.10" }  # ONNX Runtime for Parakeet models
-thiserror = "2.0.16"                # Error handling for Parakeet
+thiserror = "2.0.16"
 
 # Async
 tokio = { version = "1.32.0", features = ["full", "tracing"] }
@@ -119,7 +80,6 @@ reqwest = { version = "0.11", features = ["blocking", "multipart", "json", "stre
 
 # crossbeam
 crossbeam = "0.8.4"
-dashmap = "6.1.0"
 
 # Directories
 dirs = "5.0.1"
@@ -131,7 +91,6 @@ url = "2.5.0"
 # Pinned: 0.17.13 provides Calendar::calendar_events + CalendarEvent recurrence.
 icalendar = { version = "0.17.13", features = ["parser", "recurrence"] }
 rrule = "0.14"
-chrono-tz = "0.10"
 
 
 # System monitoring for resource management
@@ -140,12 +99,8 @@ sysinfo = "0.32"
 lazy_static = { version = "1.4.0" }
 realfft = "3.4.0"
 regex = "1.11.0"
-ndarray = "0.16"
 bytes = { version = "1.9.0", features = ["serde"] }
-
-esaxx-rs = "0.1.10"
 symphonia = { version = "0.5.4", features = ["aac", "isomp4", "mp3", "flac", "ogg", "vorbis", "pcm", "wav", "opt-simd"] }
-rand = "0.8.5"
 rayon = "1.10"
 rubato = "0.15.0"
 ringbuf = "0.4.8"
@@ -167,62 +122,19 @@ tauri-plugin-process = "2.3.0"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-deep-link = "2"
 
-# Desktop-only single instance guard
-[target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
 tauri-plugin-single-instance = "=2.3.7"
-
-# macOS-specific dependencies with Metal GPU acceleration
-[target.'cfg(target_os = "macos")'.dependencies]
-tauri = { version = "2.6.2", features = ["protocol-asset", "macos-private-api", "tray-icon"] }
-once_cell = "1.17.1"
-objc = "0.2.7"
 tauri-plugin-log = { version = "2.6.0", features = ["colored"] }
-anyhow = "1.0"
+
+# macOS system integration
+objc = "0.2.7"
+libc = "0.2"           # pthread QoS for quiet post-meeting work
 time = { version = "0.3", features = ["formatting"] }
-reqwest = { version = "0.11", features = ["multipart", "json"] }
-core-graphics = "0.23"
 cidre = { git = "https://github.com/yury/cidre", rev = "a9587fa", features = ["av"] }
-dasp = "0.11.0"
-futures-channel = "0.3.31"
-sherpa-onnx = "1.13.8"
-bzip2 = "0.4"
-tar = "0.4"
-
-# PERFORMANCE: Enable Metal GPU + CoreML acceleration automatically on macOS
-# CoreML provides additional acceleration for Apple Silicon chips
-whisper-rs = { version = "0.13.2", features = ["raw-api", "metal", "coreml"] }
-
-# Windows-specific dependencies
-# Default: CPU-only build (no BLAS)
-# Users can enable features manually:
-#   --features cuda     (NVIDIA GPUs)
-#   --features vulkan   (AMD/Intel GPUs)
-#   --features openblas (OpenBLAS optimization, requires BLAS_INCLUDE_DIRS)
-[target.'cfg(target_os = "windows")'.dependencies]
-whisper-rs = { version = "0.13.2", features = ["raw-api"] }
-ort = { version = "2.0.0-rc.10", features = ["load-dynamic"] }
-futures-channel = "0.3.31"
-
-# Linux-specific dependencies
-# Default: CPU-only build (no BLAS)
-# Users can enable features manually:
-#   --features cuda     (NVIDIA GPUs)
-#   --features vulkan   (AMD/Intel GPUs)
-#   --features hipblas  (AMD ROCm)
-#   --features openblas (OpenBLAS optimization, requires BLAS_INCLUDE_DIRS)
-[target.'cfg(target_os = "linux")'.dependencies]
-whisper-rs = { version = "0.13.2", features = ["raw-api"] }
 futures-channel = "0.3.31"
 
 [dev-dependencies]
+clap = { version = "4.3", features = ["derive"] }  # examples/replay.rs CLI
 tempfile = "3.3.0"
-infer = "0.15"
-criterion = { version = "0.5.1", features = ["async_tokio"] }
-memory-stats = "1.0"
-strsim = "0.10.0"
-futures = "0.3.31"
-tracing-subscriber = "0.3.16"
 
 [patch.crates-io]
 cpal = { git = "https://github.com/RustAudio/cpal", rev = "51c3b43" }
-esaxx-rs = { git = "https://github.com/thewh1teagle/esaxx-rs.git", branch = "feat/dynamic-msvc-link" }

@@ -1,5 +1,4 @@
 import { toast } from 'sonner';
-import Analytics from '@/lib/analytics';
 
 /**
  * Shows the recording notification toast with compliance message.
@@ -25,13 +24,13 @@ export async function showRecordingNotification(): Promise<void> {
             <p className="text-sm font-medium text-ink">
               Inform all participants this meeting is being recorded.
             </p>
-            <label className="flex items-center gap-2 text-xs cursor-pointer hover:bg-blue-100 p-2 rounded transition-colors">
+            <label className="flex items-center gap-2 text-xs cursor-pointer hover:bg-surface-2 p-2 rounded transition-colors">
               <input
                 type="checkbox"
                 onChange={(e) => {
                   dontShowAgain = e.target.checked;
                 }}
-                className="rounded border-hairline text-blue-600 focus:ring-blue-500 focus:ring-2"
+                className="rounded border-hairline text-ink focus:ring-focus focus:ring-2"
               />
               <span className="select-none text-ink">Don't show this again</span>
             </label>
@@ -43,7 +42,6 @@ export async function showRecordingNotification(): Promise<void> {
                   await store.set('show_recording_notification', false);
                   await store.save();
                 }
-                Analytics.trackButtonClick('recording_notification_acknowledged', 'toast');
                 toast.dismiss(toastId);
               }}
               className="w-full px-3 py-1.5 bg-brand text-brand-foreground text-xs rounded hover:bg-brand transition-colors font-medium"
@@ -53,7 +51,6 @@ export async function showRecordingNotification(): Promise<void> {
           </div>
         ),
         duration: 10000,
-        position: 'bottom-center',
       });
     }
   } catch (notificationError) {

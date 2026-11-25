@@ -301,7 +301,7 @@ impl SettingsRepository {
                 "{}" = $1
             "#,
             api_key_column,
-            crate::config::DEFAULT_PARAKEET_MODEL,
+            crate::audio::common::FINAL_MODEL,
             api_key_column
         );
         sqlx::query(&query).bind(api_key).execute(pool).await?;

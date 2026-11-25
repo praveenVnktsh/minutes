@@ -14,7 +14,7 @@ export function WelcomeStep() {
     },
     {
       icon: Sparkles,
-      title: 'Intelligent summaries & insights',
+      title: 'AI notes written while you talk',
     },
     {
       icon: Cpu,
@@ -25,7 +25,7 @@ export function WelcomeStep() {
   return (
     <OnboardingContainer
       title="Welcome to Minutes"
-      description="Record. Transcribe. Summarize. All on your device."
+      description="Record. Transcribe. Take notes. All on your device."
       step={1}
       hideProgress={true}
     >

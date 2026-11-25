@@ -1,14 +1,13 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Switch } from '@/components/ui/switch';
-import { FolderOpen } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { DeviceSelection, SelectedDevices } from '@/components/DeviceSelection';
-import Analytics from '@/lib/analytics';
-import { toast } from 'sonner';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
 import { useConfig } from '@/contexts/ConfigContext';
-import { SaveFeedback, StatusFeedback, type SaveFeedbackState } from '@/components/ui/status-feedback';
+import { SaveFeedback, type SaveFeedbackState } from '@/components/ui/status-feedback';
 import { SetupCheckPanel } from '@/components/SetupCheckPanel';
+import { MeetingDetectionIgnoreList } from '@/components/MeetingDetectionIgnoreList';
+import { AudioBackendSelector } from '@/components/AudioBackendSelector';
 import {
   CHANNEL_OUTCOMES,
   MODEL_CHECK_OUTCOMES,
@@ -28,6 +27,7 @@ export interface RecordingPreferences {
   min_meeting_duration_seconds: number;
   preferred_mic_device: string | null;
   preferred_system_device: string | null;
+  show_menu_bar_indicator: boolean;
 }
 
 interface RecordingSettingsProps {
@@ -87,23 +87,19 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
     automatic_record_prompt: true,
     min_meeting_duration_seconds: 10,
     preferred_mic_device: null,
-    preferred_system_device: null
+    preferred_system_device: null,
+    show_menu_bar_indicator: false
   });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [showRecordingNotification, setShowRecordingNotification] = useState(true);
   const [preferenceSaveState, setPreferenceSaveState] = useState<SaveFeedbackState | null>(null);
   const [preferenceMessage, setPreferenceMessage] = useState('Recording preference');
-  const [notificationSaveState, setNotificationSaveState] = useState<SaveFeedbackState | null>(null);
-  const [notificationFailureMessage, setNotificationFailureMessage] = useState('Could not save participant reminder; previous setting restored');
-  const [notificationHydration, setNotificationHydration] = useState<'loading' | 'ready' | 'error'>('loading');
-  const notificationRevision = useRef(0);
-  const notificationSaving = useRef(false);
   const { isRecording } = useRecordingState();
-  const { setSelectedDevices } = useConfig();
+  const { setSelectedDevices, betaFeatures, toggleBetaFeature } = useConfig();
   const [setupCheckRecord, setSetupCheckRecord] = useState<SetupCheckRecord | null>(null);
   const [setupCheckLoading, setSetupCheckLoading] = useState(true);
   const [showSetupCheck, setShowSetupCheck] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(false);
 
   // Load recording preferences on component mount
   useEffect(() => {
@@ -128,26 +124,6 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
     loadPreferences();
   }, []);
 
-  // Load recording notification preference
-  useEffect(() => {
-    const loadNotificationPref = async () => {
-      const revision = notificationRevision.current;
-      try {
-        const { Store } = await import('@tauri-apps/plugin-store');
-        const store = await Store.load('preferences.json');
-        const show = await store.get<boolean>('show_recording_notification') ?? true;
-        if (revision === notificationRevision.current) {
-          setShowRecordingNotification(show);
-          setNotificationHydration('ready');
-        }
-      } catch (error) {
-        console.error('Failed to load notification preference:', error);
-        if (revision === notificationRevision.current) setNotificationHydration('error');
-      }
-    };
-    loadNotificationPref();
-  }, []);
-
   // Load whatever the onboarding setup check last found, so re-offering it from settings can
   // show what is already known instead of asking the user to run it blind.
   useEffect(() => {
@@ -170,13 +146,7 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
     setPreferences(newPreferences);
     if (!await savePreferences(newPreferences, 'Audio recording preference')) {
       setPreferences(previous);
-      return;
     }
-
-    // Track auto-save setting change
-    await Analytics.track('auto_save_recording_toggled', {
-      enabled: enabled.toString()
-    });
   };
 
   const handleAutomaticPromptToggle = async (enabled: boolean) => {
@@ -185,12 +155,16 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
     setPreferences(newPreferences);
     if (!await savePreferences(newPreferences, 'Meeting detection preference')) {
       setPreferences(previous);
-      return;
     }
+  };
 
-    await Analytics.track('automatic_record_prompt_toggled', {
-      enabled: enabled.toString()
-    });
+  const handleMenuBarIndicatorToggle = async (enabled: boolean) => {
+    const previous = preferences;
+    const newPreferences = { ...preferences, show_menu_bar_indicator: enabled };
+    setPreferences(newPreferences);
+    if (!await savePreferences(newPreferences, 'Menu bar indicator preference')) {
+      setPreferences(previous);
+    }
   };
 
   const handleMinDurationChange = async (value: string) => {
@@ -220,59 +194,6 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
         micDevice: previous.preferred_mic_device,
         systemDevice: previous.preferred_system_device,
       });
-      return;
-    }
-
-    // Track default device preference changes
-    // Note: Individual device selection analytics are tracked in DeviceSelection component
-    await Analytics.track('default_devices_changed', {
-      has_preferred_microphone: (!!devices.micDevice).toString(),
-      has_preferred_system_audio: (!!devices.systemDevice).toString()
-    });
-  };
-
-  const handleOpenFolder = async () => {
-    try {
-      await invoke('open_recordings_folder');
-    } catch (error) {
-      console.error('Failed to open recordings folder:', error);
-      toast.error('Could not open recordings folder', { description: String(error) });
-    }
-  };
-
-  const handleNotificationToggle = async (enabled: boolean) => {
-    if (notificationSaving.current || notificationHydration !== 'ready') return;
-    notificationSaving.current = true;
-    notificationRevision.current += 1;
-    const previous = showRecordingNotification;
-    setShowRecordingNotification(enabled);
-    setNotificationSaveState('saving');
-    setNotificationFailureMessage('Could not save participant reminder; previous setting restored');
-    let store: { set: (key: string, value: unknown) => Promise<void>; save: () => Promise<void> } | null = null;
-    try {
-      const { Store } = await import('@tauri-apps/plugin-store');
-      store = await Store.load('preferences.json');
-      await store.set('show_recording_notification', enabled);
-      await store.save();
-      setNotificationSaveState('saved');
-      await Analytics.track('recording_notification_preference_changed', {
-        enabled: enabled.toString()
-      });
-    } catch (error) {
-      console.error('Failed to save notification preference:', error);
-      setShowRecordingNotification(previous);
-      if (store) {
-        try {
-          await store.set('show_recording_notification', previous);
-          await store.save();
-        } catch (restoreError) {
-          console.error('Failed to restore notification preference:', restoreError);
-          setNotificationFailureMessage('Could not save or restore the participant reminder; reopen settings to verify it');
-        }
-      }
-      setNotificationSaveState('error');
-    } finally {
-      notificationSaving.current = false;
     }
   };
 
@@ -352,176 +273,145 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h3 className="text-lg font-semibold mb-4">Recording Settings</h3>
-        <p className="text-sm text-ink-muted mb-6">
-          Configure how your audio recordings are saved during meetings.
-        </p>
-        {preferenceSaveState && (
-          <SaveFeedback
-            state={preferenceSaveState}
-            labels={{
-              saving: `Saving ${preferenceMessage.toLowerCase()}`,
-              saved: `${preferenceMessage} saved`,
-              error: `Could not save ${preferenceMessage.toLowerCase()}; previous setting restored`,
-            }}
-          />
-        )}
-      </div>
-
-      {/* Auto Save Toggle */}
-      <div className="flex items-center justify-between p-4 border rounded-lg">
-        <div className="flex-1">
-          <div className="font-medium">Save Audio Recordings</div>
-          <div className="text-sm text-ink-muted">
-            Automatically save audio files when recording stops
-          </div>
-        </div>
-        <Switch
-          aria-label="Save audio recordings"
-          checked={preferences.auto_save}
-          onCheckedChange={handleAutoSaveToggle}
-          disabled={saving}
-        />
-      </div>
-
-      <div className="flex items-center justify-between p-4 border rounded-lg">
-        <div className="flex-1 pr-4">
-          <div className="font-medium">Meeting Detection Prompt</div>
-          <div className="text-sm text-ink-muted">
-            Ask before recording when sustained audio is detected from a supported meeting app
-          </div>
-        </div>
-        <Switch
-          aria-label="Show meeting detection prompt"
-          checked={preferences.automatic_record_prompt}
-          onCheckedChange={handleAutomaticPromptToggle}
-          disabled={saving}
-        />
-      </div>
-
-      <div className="flex items-center justify-between p-4 border rounded-lg">
-        <div className="flex-1 pr-4">
-          <div className="font-medium">Discard short recordings</div>
-          <div className="text-sm text-ink-muted">
-            Delete meetings shorter than this that have no transcript or notes (0 disables).
-          </div>
-        </div>
-        <div className="flex items-center gap-2">
-          <input
-            type="number"
-            min={0}
-            max={3600}
-            value={preferences.min_meeting_duration_seconds}
-            onChange={(event) => void handleMinDurationChange(event.target.value)}
-            aria-label="Minimum meeting duration in seconds"
-            disabled={saving}
-            className="h-9 w-20 rounded-md border border-hairline bg-surface-2 px-2 text-sm text-ink"
-          />
-          <span className="text-sm text-ink-muted">seconds</span>
-        </div>
-      </div>
-
-      {/* Folder Location - Only shown when auto_save is enabled */}
-      {preferences.auto_save && (
-        <div className="space-y-4">
-          <div className="p-4 border rounded-lg bg-surface-2">
-            <div className="font-medium mb-2">Save Location</div>
-            <div className="text-sm text-ink-muted mb-3 break-all">
-              {preferences.save_folder || 'Default folder'}
-            </div>
-            <button
-              onClick={handleOpenFolder}
-              className="flex items-center gap-2 px-3 py-2 text-sm border border-hairline rounded-md hover:bg-surface-2 transition-colors"
-            >
-              <FolderOpen className="w-4 h-4" />
-              Open Folder
-            </button>
-          </div>
-
-          <div className="rounded-lg border border-info bg-info-subtle p-4">
-            <div className="text-sm text-info">
-              <strong>File Format:</strong> {preferences.file_format.toUpperCase()} files
-            </div>
-            <div className="mt-1 text-xs text-info">
-              Recordings are saved with timestamp: recording_YYYYMMDD_HHMMSS.{preferences.file_format}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Info when auto_save is disabled */}
-      {!preferences.auto_save && (
-        <div className="rounded-lg border border-warning bg-warning-subtle p-4">
-          <div className="text-sm text-warning">
-            Audio recording is disabled. Enable Save Audio Recordings to automatically save your meeting audio.
-          </div>
-        </div>
-      )}
-
-      {/* Recording Notification Toggle */}
-      <div className="flex items-center justify-between p-4 border rounded-lg">
-        <div className="flex-1">
-          <div className="font-medium">Recording Start Notification</div>
-          <div className="text-sm text-ink-muted">
-            Show reminder to inform participants when recording starts
-          </div>
-        </div>
-        <Switch
-          aria-label="Remind me to inform participants when recording starts"
-          checked={showRecordingNotification}
-          onCheckedChange={handleNotificationToggle}
-          disabled={notificationHydration !== 'ready' || notificationSaveState === 'saving'}
-        />
-      </div>
-      {notificationHydration === 'loading' && <StatusFeedback pending>Loading participant reminder preference</StatusFeedback>}
-      {notificationHydration === 'error' && <StatusFeedback tone="error">Could not load participant reminder preference</StatusFeedback>}
-      {notificationSaveState && (
+      {preferenceSaveState && (
         <SaveFeedback
-          state={notificationSaveState}
+          state={preferenceSaveState}
           labels={{
-            saving: 'Saving participant reminder',
-            saved: 'Participant reminder saved',
-            error: notificationFailureMessage,
+            saving: `Saving ${preferenceMessage.toLowerCase()}`,
+            saved: `${preferenceMessage} saved`,
+            error: `Could not save ${preferenceMessage.toLowerCase()}; previous setting restored`,
           }}
         />
       )}
 
-      {/* Device Preferences */}
-      <div className="space-y-4">
-        <div className="border-t pt-6">
-          <h4 className="text-base font-medium text-ink mb-4">Default Audio Devices</h4>
-          <p className="text-sm text-ink-muted mb-4">
-            Set your preferred microphone and system audio devices for recording. These will be automatically selected when starting new recordings.
-          </p>
+      <SettingsCard title="Audio" description="What is kept from each meeting.">
+        <div className="flex items-center justify-between p-4 border rounded-lg">
+          <div className="flex-1">
+            <div className="font-medium">Save Audio Recordings</div>
+            <div className="text-sm text-ink-muted">
+              Keep each meeting&apos;s audio as <span className="font-mono">audio.mp4</span> in its folder
+              under the recordings folder (open it from General)
+            </div>
+          </div>
+          <Switch
+            aria-label="Save audio recordings"
+            checked={preferences.auto_save}
+            onCheckedChange={handleAutoSaveToggle}
+            disabled={saving}
+          />
+        </div>
 
-          {isRecording && (
-            <p
-              role="status"
-              aria-live="polite"
-              className="mb-4 rounded-md border border-warning bg-warning-subtle p-2 text-sm text-warning"
-            >
-              Device selection is locked while a recording is in progress. Connecting a new device mid-recording will not switch to it. Stop the current meeting to change devices.
-            </p>
-          )}
+        {/* Info when auto_save is disabled */}
+        {!preferences.auto_save && (
+          <div className="rounded-lg border border-warning bg-warning-subtle p-4">
+            <div className="text-sm text-warning">
+              Audio recording is disabled. Enable Save Audio Recordings to automatically save your meeting audio.
+            </div>
+          </div>
+        )}
 
-          <div className="border rounded-lg p-4 bg-surface-2">
-            <DeviceSelection
-              selectedDevices={{
-                micDevice: preferences.preferred_mic_device,
-                systemDevice: preferences.preferred_system_device
-              }}
-              onDeviceChange={handleDeviceChange}
-              disabled={saving || isRecording}
+        <div className="flex items-center justify-between p-4 border rounded-lg">
+          <div className="flex-1 pr-4">
+            <div className="font-medium">Discard short recordings</div>
+            <div className="text-sm text-ink-muted">
+              Delete meetings shorter than this that have no transcript or notes (0 disables).
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <input
+              type="number"
+              min={0}
+              max={3600}
+              value={preferences.min_meeting_duration_seconds}
+              onChange={(event) => void handleMinDurationChange(event.target.value)}
+              aria-label="Minimum meeting duration in seconds"
+              disabled={saving}
+              className="h-9 w-20 rounded-md border border-hairline bg-surface-2 px-2 text-sm text-ink"
             />
+            <span className="text-sm text-ink-muted">seconds</span>
           </div>
         </div>
-      </div>
 
-      {/* Setup Check */}
-      <div className="space-y-4">
-        <div className="border-t pt-6">
-          <h4 className="text-base font-medium text-ink mb-4">Check your setup</h4>
+        <div className="flex items-center justify-between p-4 border rounded-lg">
+          <div className="flex-1 pr-4">
+            <div className="font-medium">Live transcription switch</div>
+            <div className="text-sm text-ink-muted">
+              Show a switch in the live transcript that turns live transcription off during a
+              recording. Audio is still recorded, and the meeting is transcribed after it ends. When
+              this is off, every recording is transcribed live.
+            </div>
+          </div>
+          <Switch
+            aria-label="Show the live transcription switch"
+            checked={betaFeatures.liveTranscription}
+            onCheckedChange={(checked) => toggleBetaFeature('liveTranscription', checked)}
+          />
+        </div>
+
+        <div className="flex items-center justify-between p-4 border rounded-lg">
+          <div className="flex-1 pr-4">
+            <div className="font-medium">Recording indicator in the menu bar</div>
+            <div className="text-sm text-ink-muted">
+              Turn the menu bar icon red and show the elapsed time while recording. When this is
+              off, the icon stays as it is; pause and stop are still in its menu.
+            </div>
+          </div>
+          <Switch
+            aria-label="Show the recording indicator in the menu bar"
+            checked={preferences.show_menu_bar_indicator ?? false}
+            onCheckedChange={handleMenuBarIndicatorToggle}
+            disabled={saving}
+          />
+        </div>
+      </SettingsCard>
+
+      <SettingsCard title="Meeting detection" description="Notice when a meeting app starts using the microphone.">
+        <div className="flex items-center justify-between p-4 border rounded-lg">
+          <div className="flex-1 pr-4">
+            <div className="font-medium">Meeting Detection Prompt</div>
+            <div className="text-sm text-ink-muted">
+              Ask before recording when a meeting app starts using the microphone
+            </div>
+          </div>
+          <Switch
+            aria-label="Show meeting detection prompt"
+            checked={preferences.automatic_record_prompt}
+            onCheckedChange={handleAutomaticPromptToggle}
+            disabled={saving}
+          />
+        </div>
+
+        <MeetingDetectionIgnoreList />
+      </SettingsCard>
+
+      <SettingsCard
+        title="Devices"
+        description="The microphone and system audio new recordings start with, and a check that a meeting will actually be heard."
+      >
+        {isRecording && (
+          <p
+            role="status"
+            aria-live="polite"
+            className="rounded-md border border-warning bg-warning-subtle p-2 text-sm text-warning"
+          >
+            Device selection is locked while a recording is in progress. Connecting a new device mid-recording will not switch to it. Stop the current meeting to change devices.
+          </p>
+        )}
+
+        <div className="border rounded-lg p-4 bg-surface-2">
+          <DeviceSelection
+            selectedDevices={{
+              micDevice: preferences.preferred_mic_device,
+              systemDevice: preferences.preferred_system_device
+            }}
+            onDeviceChange={handleDeviceChange}
+            disabled={saving || isRecording}
+          />
+        </div>
+
+        {/* Setup Check */}
+        <div className="border-t border-hairline pt-4">
+          <h4 className="text-base font-medium text-ink mb-2">Check your setup</h4>
           <p className="text-sm text-ink-muted mb-4">
             Run the same microphone, system audio and transcription model check onboarding ends
             with, any time you want to be sure a meeting will actually be heard.
@@ -570,8 +460,35 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
             </div>
           )}
         </div>
-      </div>
+      </SettingsCard>
+
+      {/* The capture backend is jargon most people never need, so it starts folded away. */}
+      <details
+        className="group rounded-lg border border-hairline bg-surface-raised shadow-sm"
+        onToggle={(event) => setShowAdvanced(event.currentTarget.open)}
+      >
+        <summary className="cursor-pointer select-none px-6 py-4 text-sm font-semibold text-ink-muted hover:text-ink">
+          Advanced
+        </summary>
+        <div className="border-t border-hairline px-6 py-4">
+          {/* Mounted only when opened, so the tab does not query capture backends up front. */}
+          {showAdvanced && <AudioBackendSelector disabled={saving || isRecording} />}
+        </div>
+      </details>
     </div>
+  );
+}
+
+/** One titled card of the Recording tab. */
+function SettingsCard({ title, description, children }: { title: string; description: string; children: React.ReactNode }) {
+  return (
+    <section aria-label={title} className="space-y-4 rounded-lg border border-hairline bg-surface-raised p-6 shadow-sm">
+      <div>
+        <h3 className="text-lg font-semibold text-ink">{title}</h3>
+        <p className="mt-1 text-sm text-ink-muted">{description}</p>
+      </div>
+      {children}
+    </section>
   );
 }
 

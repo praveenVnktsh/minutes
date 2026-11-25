@@ -114,14 +114,6 @@ export class UpdateService {
   }
 
   /**
-   * Get the current app version
-   * @returns Promise with version string
-   */
-  async getCurrentVersion(): Promise<string> {
-    return getVersion();
-  }
-
-  /**
    * Check if an update check was performed recently
    * @returns true if checked within the interval
    */

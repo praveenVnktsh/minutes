@@ -27,15 +27,9 @@ pub(crate) fn recommend_summary_model(_is_macos: bool, _system_ram_gb: u64) -> &
 
 pub(crate) fn get_recommended_summary_model_for_current_system() -> Result<&'static str, String> {
     let system_ram_gb = get_system_ram_gb()?;
-    let is_macos = cfg!(target_os = "macos");
+    log::info!("System RAM detected: {} GB", system_ram_gb);
 
-    log::info!(
-        "System RAM detected: {} GB, Platform: {}",
-        system_ram_gb,
-        if is_macos { "macOS" } else { "other" }
-    );
-
-    Ok(recommend_summary_model(is_macos, system_ram_gb))
+    Ok(recommend_summary_model(true, system_ram_gb))
 }
 
 // ============================================================================
@@ -174,6 +168,15 @@ pub async fn builtin_ai_download_model<R: Runtime>(
         .await
     {
         Ok(_) => {
+            if model_name == super::models::LIVE_NOTES_MODEL {
+                // The fine-tuned adapters run on it; fetch them in the background.
+                let models_dir = super::models::get_models_directory(
+                    &app.path().app_data_dir().map_err(|e| e.to_string())?,
+                );
+                tauri::async_runtime::spawn(async move {
+                    super::adapters::ensure_downloaded(&models_dir).await;
+                });
+            }
             // Download task completed successfully (validation passed, status set to Available).
             // Report the model's real catalogue size so listeners (toast, onboarding) show
             // the finished download's actual size instead of "0 / 0".

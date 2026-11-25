@@ -1,0 +1,12 @@
+{
+  "": {
+    "swift-dependencies": "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/nemotron_helper.build/primary.swiftdeps"
+  },
+  "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/Sources/nemotron-helper/main.swift": {
+    "dependencies": "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/nemotron_helper.build/main.d",
+    "object": "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/nemotron_helper.build/main.swift.o",
+    "swiftmodule": "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/nemotron_helper.build/main~partial.swiftmodule",
+    "swift-dependencies": "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/nemotron_helper.build/main.swiftdeps",
+    "diagnostics": "/Users/praveenvnktsh/orca/workspaces/minutes/porbeagle/nemotron-helper/.build/arm64-apple-macosx/debug/nemotron_helper.build/main.dia"
+  }
+}

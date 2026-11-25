@@ -106,67 +106,38 @@ pub fn parse_audio_device(name: &str) -> Result<AudioDevice> {
 pub async fn get_device_and_config(
     audio_device: &AudioDevice,
 ) -> Result<(cpal::Device, cpal::SupportedStreamConfig)> {
-    #[cfg(target_os = "windows")]
-    {
-        return super::platform::get_windows_device(audio_device);
-    }
+    use cpal::traits::{DeviceTrait, HostTrait};
 
-    #[cfg(not(target_os = "windows"))]
-    {
-        use cpal::traits::{DeviceTrait, HostTrait};
+    let host = cpal::default_host();
 
-        let host = cpal::default_host();
-
-        match audio_device.device_type {
-            DeviceType::Input => {
-                for device in host.input_devices()? {
-                    if let Ok(name) = device.name() {
-                        if name == audio_device.name {
-                            let default_config = device.default_input_config().map_err(|e| {
-                                anyhow!("Failed to get default input config: {}", e)
-                            })?;
-                            return Ok((device, default_config));
-                        }
-                    }
-                }
-            }
-            DeviceType::Output => {
-                #[cfg(target_os = "macos")]
-                {
-                    // Use default host for all macOS output devices
-                    // Core Audio backend uses direct cidre API for system capture, not cpal
-                    for device in host.output_devices()? {
-                        if let Ok(name) = device.name() {
-                            if name == audio_device.name {
-                                let default_config = device
-                                    .default_output_config()
-                                    .map_err(|e| anyhow!("Failed to get output config: {}", e))?;
-                                return Ok((device, default_config));
-                            }
-                        }
-                    }
-                }
-
-                #[cfg(target_os = "linux")]
-                {
-                    // For Linux, we use PulseAudio monitor sources for system audio
-                    if let Ok(pulse_host) = cpal::host_from_id(cpal::HostId::Alsa) {
-                        for device in pulse_host.input_devices()? {
-                            if let Ok(name) = device.name() {
-                                if name == audio_device.name {
-                                    let default_config =
-                                        device.default_input_config().map_err(|e| {
-                                            anyhow!("Failed to get default input config: {}", e)
-                                        })?;
-                                    return Ok((device, default_config));
-                                }
-                            }
-                        }
+    match audio_device.device_type {
+        DeviceType::Input => {
+            for device in host.input_devices()? {
+                if let Ok(name) = device.name() {
+                    if name == audio_device.name {
+                        let default_config = device
+                            .default_input_config()
+                            .map_err(|e| anyhow!("Failed to get default input config: {}", e))?;
+                        return Ok((device, default_config));
                     }
                 }
             }
         }
-
-        Err(anyhow!("Device not found: {}", audio_device.name))
+        DeviceType::Output => {
+            // Use default host for all macOS output devices
+            // Core Audio backend uses direct cidre API for system capture, not cpal
+            for device in host.output_devices()? {
+                if let Ok(name) = device.name() {
+                    if name == audio_device.name {
+                        let default_config = device
+                            .default_output_config()
+                            .map_err(|e| anyhow!("Failed to get output config: {}", e))?;
+                        return Ok((device, default_config));
+                    }
+                }
+            }
+        }
     }
+
+    Err(anyhow!("Device not found: {}", audio_device.name))
 }

@@ -138,6 +138,7 @@
     --error-subtle-rgb: 253 235 234;
     --error-subtle: rgb(var(--error-subtle-rgb));
     --recording-rgb: 180 35 24;
+    --recording-foreground: #ffffff;
     --recording: rgb(var(--recording-rgb));
     --recording-subtle-rgb: 254 236 235;
     --recording-subtle: rgb(var(--recording-subtle-rgb));
@@ -207,6 +208,7 @@
     --error-subtle-rgb: 67 31 29;
     --error-subtle: rgb(var(--error-subtle-rgb));
     --recording-rgb: 255 170 163;
+    --recording-foreground: #1b1b1b;
     --recording: rgb(var(--recording-rgb));
     --recording-subtle-rgb: 71 28 26;
     --recording-subtle: rgb(var(--recording-subtle-rgb));
@@ -353,10 +355,13 @@
   .bn-container {
     --bn-font-family: var(--font-source-serif-4), ui-serif, Georgia, Cambria, "Times New Roman", serif;
     font-family: var(--bn-font-family);
+    /* Match the app's body size (Tailwind text-sm); headings stay in em so they still scale */
+    --bn-document-font-size: 0.875rem;
   }
 
   .bn-default-styles {
     font-family: var(--bn-font-family) !important;
+    font-size: var(--bn-document-font-size) !important;
   }
 
   /* BlockNote ships its own scoped shadcn vars on .bn-shadcn (dark defaults to
