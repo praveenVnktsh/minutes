@@ -43,6 +43,8 @@ const FALLBACK_MODELS: Partial<Record<ModelProvider, string[]>> = {
   claude: ['claude-sonnet-5', 'claude-opus-5', 'claude-fable-5-1', 'claude-haiku-4-5-20251001'],
   groq: ['llama-3.3-70b-versatile', 'llama-3.1-70b-versatile', 'mixtral-8x7b-32768'],
   openai: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'gpt-4'],
+  // Mirrors OPENROUTER_FALLBACK_MODELS in src-tauri/src/model_catalog/fallback.rs.
+  openrouter: ['anthropic/claude-sonnet-4.5', 'openai/gpt-4o', 'google/gemini-2.5-pro', 'meta-llama/llama-3.3-70b-instruct'],
 };
 
 const KEY_PROVIDERS = new Set<ModelProvider>(['claude', 'groq', 'openai', 'openrouter']);
@@ -189,7 +191,7 @@ export function ModelConfigForm({
       if (provider === 'ollama') {
         result = await invoke<RemoteModel[]>('get_ollama_models', { endpoint: endpoint?.trim() || null });
       } else if (provider === 'openrouter') {
-        result = await invoke<RemoteModel[]>('get_openrouter_models');
+        result = await invoke<RemoteModel[]>('get_openrouter_models', { apiKey: apiKey?.trim() || null });
       } else if (provider === 'openai' && apiKey?.trim()) {
         result = await invoke<RemoteModel[]>('get_openai_models', { apiKey });
       } else if (provider === 'claude' && apiKey?.trim()) {
