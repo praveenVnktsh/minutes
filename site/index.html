@@ -3,13 +3,13 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Minutes — the meeting recorder that never leaves the room</title>
-<meta name="description" content="Minutes records your meetings, transcribes them on your own machine, and writes notes while people talk, right next to yours. When the meeting ends it writes the wrap-up. No bot in the call. No cloud. No account. Free and open source for Apple Silicon Macs." />
+<title>Minutes: local meeting notes for Mac</title>
+<meta name="description" content="An open-source, local alternative to Granola for Mac. It records your calls, transcribes them on your Mac, and a fine-tuned model takes notes during the meeting." />
 <meta name="theme-color" content="#121211" media="(prefers-color-scheme: dark)" />
 <meta name="theme-color" content="#fbfaf7" media="(prefers-color-scheme: light)" />
 <meta property="og:type" content="website" />
-<meta property="og:title" content="Minutes — every word kept, nothing sent" />
-<meta property="og:description" content="Local-first AI meeting notes. Records mic + system audio, transcribes on-device, and writes notes live with a model trained for meetings." />
+<meta property="og:title" content="Minutes: local meeting notes for Mac" />
+<meta property="og:description" content="An open-source, local alternative to Granola for Mac. A fine-tuned model takes notes during the meeting, entirely on your Mac." />
 <meta property="og:url" content="https://praveenvnktsh.github.io/minutes/" />
 <meta property="og:image" content="https://praveenvnktsh.github.io/minutes/screens/workspace.png" />
 <meta name="twitter:card" content="summary_large_image" />
@@ -546,10 +546,10 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
     <div class="wrap">
       <div class="hero-copy">
         <a class="pill reveal" href="#model">
-          <span class="dot"><span class="rec-dot"></span>New</span> Live notes from a model trained for meetings
+          <span class="dot"><span class="rec-dot"></span>New</span> Live notes from a fine-tuned Gemma 4 E2B
         </a>
-        <h1 class="reveal d1"><span style="white-space:nowrap">Every word, kept.</span><br /><span class="soft">Nothing sent.</span></h1>
-        <p class="lede reveal d2">Minutes records your meetings, transcribes them on your own machine, and writes notes while people talk, right next to the ones you type. When it ends, you get the summary, the decisions and who owes what. No bot in the call. No cloud. No account.</p>
+        <h1 class="reveal d1"><span style="white-space:nowrap">Meeting notes,</span><br /><span class="soft">written live.</span></h1>
+        <p class="lede reveal d2">Minutes is an open-source Granola alternative that runs entirely on your Mac. It records your calls, transcribes them locally, and a model I fine-tuned takes notes while people are still talking, next to the ones you type.</p>
         <div class="hero-ctas reveal d3">
           <div class="dl-cmd">
             <code><span class="p">$</span><span class="cmd">curl -fsSL https://praveenvnktsh.github.io/minutes/install.sh | bash</span></code>
@@ -615,26 +615,6 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
       </div>
     </div>
 
-    <div class="ticker" aria-label="At a glance">
-      <div class="ticker-track">
-        <span class="ticker-item"><b>0 bytes</b> of audio uploaded</span><i>✦</i>
-        <span class="ticker-item"><b>0 bots</b> joining your calls</span><i>✦</i>
-        <span class="ticker-item"><b>$0</b> per month, forever</span><i>✦</i>
-        <span class="ticker-item"><b>Mic + system</b> audio, mixed</span><i>✦</i>
-        <span class="ticker-item"><b>Nemotron</b> &amp; <b>Parakeet</b> on-device</span><i>✦</i>
-        <span class="ticker-item"><b>Neural Engine</b> acceleration</span><i>✦</i>
-        <span class="ticker-item"><b>Works</b> in airplane mode</span><i>✦</i>
-        <span class="ticker-item"><b>Notes</b> written as people talk</span><i>✦</i>
-        <span aria-hidden="true" class="ticker-item"><b>0 bytes</b> of audio uploaded</span><i aria-hidden="true">✦</i>
-        <span aria-hidden="true" class="ticker-item"><b>0 bots</b> joining your calls</span><i aria-hidden="true">✦</i>
-        <span aria-hidden="true" class="ticker-item"><b>$0</b> per month, forever</span><i aria-hidden="true">✦</i>
-        <span aria-hidden="true" class="ticker-item"><b>Mic + system</b> audio, mixed</span><i aria-hidden="true">✦</i>
-        <span aria-hidden="true" class="ticker-item"><b>Nemotron</b> &amp; <b>Parakeet</b> on-device</span><i aria-hidden="true">✦</i>
-        <span aria-hidden="true" class="ticker-item"><b>Neural Engine</b> acceleration</span><i aria-hidden="true">✦</i>
-        <span aria-hidden="true" class="ticker-item"><b>Works</b> in airplane mode</span><i aria-hidden="true">✦</i>
-        <span aria-hidden="true" class="ticker-item"><b>Notes</b> written as people talk</span><i aria-hidden="true">✦</i>
-      </div>
-    </div>
   </section>
 
   <!-- ================= HOW ================= -->
@@ -642,14 +622,14 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
     <div class="wrap">
       <div class="section-head">
         <span class="eyebrow reveal">How it works</span>
-        <h2 class="reveal d1">Notes that keep up with the meeting.</h2>
-        <p class="lede reveal d2">Most AI notetakers hand you a generic report an hour later. Minutes writes notes while the meeting happens, in the same document you're typing in, and never rewrites a line you wrote.</p>
+        <h2 class="reveal d1">It takes notes while you're in the meeting.</h2>
+        <p class="lede reveal d2">Most notetakers give you a summary after the call. Minutes writes notes during it, in the same doc you're typing in, and leaves your own lines alone.</p>
       </div>
       <div class="steps">
         <article class="step reveal">
           <span class="n">01</span>
           <h3>Hit record.</h3>
-          <p>Minutes captures your microphone and the call's audio together, mixed so nobody drowns anybody out. No bot, no invite, no permission slip.</p>
+          <p>It records your mic and the call audio together. Nothing joins the call, so it works with Zoom, Meet, Teams or anything else.</p>
           <div class="step-vis"><div class="lanes">
             <div class="lane">MIC<canvas data-lane="mic" width="400" height="44"></canvas></div>
             <div class="lane">SYSTEM<canvas data-lane="sys" width="400" height="44"></canvas></div>
@@ -657,8 +637,8 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
         </article>
         <article class="step reveal d1">
           <span class="n">02</span>
-          <h3>Notes appear as people talk.</h3>
-          <p>Every few seconds of conversation, Minutes adds topics, points and decisions, marked as its own. Action items wait for the wrap-up. Type a few words whenever you like; your lines stay exactly as you wrote them.</p>
+          <h3>Notes show up as people talk.</h3>
+          <p>About every 30 seconds, at a pause, it adds topics, points and decisions, marked as AI. Type whatever you want and it won't touch your lines. Action items wait until the end.</p>
           <div class="step-vis"><div class="jot">
             <div>offline mode <span class="hl">first</span></div>
             <div class="ai">Offline is ~2 sprints, reusing the sync engine</div>
@@ -667,8 +647,8 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
         </article>
         <article class="step reveal d2">
           <span class="n">03</span>
-          <h3>The wrap-up writes itself.</h3>
-          <p>When you stop, the notes taken during the meeting and your own are turned into the summary, decisions, action items with owners, and open questions. Anything the live notes missed is filled in from the transcript first.</p>
+          <h3>You get a wrap-up at the end.</h3>
+          <p>When you stop, it writes a summary, decisions, action items with owners, and open questions from the live notes, your notes and the transcript. If the live notes skipped a stretch, it fills that in from the transcript first.</p>
           <div class="step-vis"><div class="enh">
             <div><b>Decided</b> <span>Offline mode first, for the October pilots.</span></div>
             <div><b>Priya</b> <span>Pricing draft by Friday.</span></div>
@@ -683,13 +663,13 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
     <div class="wrap">
       <div class="section-head">
         <span class="eyebrow reveal">Features</span>
-        <h2 class="reveal d1">Everything a recorder should do. <span class="muted">Nothing it shouldn't.</span></h2>
+        <h2 class="reveal d1">What's in it</h2>
       </div>
 
       <div class="bento">
         <article class="card w4 wide-sm reveal">
-          <h3>Nobody else in the room.</h3>
-          <p>Cloud notetakers join as a guest and announce themselves to everyone. Minutes listens from your own machine, like you do.</p>
+          <h3>No bot in the call.</h3>
+          <p>Cloud notetakers join as a guest and everyone sees it. Minutes just records the audio on your machine.</p>
           <div class="vis nobot" aria-hidden="true">
             <div class="tile"><div class="av" style="background:var(--spk-1-bg);color:var(--spk-1)">MA</div></div>
             <div class="tile"><div class="av" style="background:var(--spk-2-bg);color:var(--spk-2)">DV</div></div>
@@ -699,18 +679,18 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
           </div>
         </article>
         <article class="card reveal d1">
-          <h3>Live, or later.</h3>
-          <p>Watch the transcript stream in, or transcribe after the call to keep your laptop cool.</p>
+          <h3>Live or after the call.</h3>
+          <p>Watch the transcript come in live, or transcribe after the call if your laptop is busy.</p>
           <div class="vis"><div class="modes" id="modes"><span class="on">Live</span><span>After the call</span></div></div>
         </article>
         <article class="card w4 wide-sm reveal">
-          <h3>A model trained for meetings.</h3>
-          <p>The live notes come from Gemma 4 E2B fine-tuned for one job: keeping a meeting's notes current in a few tokens at a time, so it keeps up with live transcription on your Mac. A second adapter writes the wrap-up. Both are open on <a href="https://huggingface.co/praveenvnktsh00/minutes-notes-gemma4-e2b">Hugging Face</a>.</p>
+          <h3>A fine-tuned notes model.</h3>
+          <p>Live notes come from Gemma 4 E2B, fine-tuned to make small edits to the notes so it keeps up with transcription on a laptop. A second adapter writes the wrap-up. Both are on <a href="https://huggingface.co/praveenvnktsh00/minutes-notes-gemma4-e2b">Hugging Face</a>.</p>
           <div class="vis gpu" aria-hidden="true"><span class="hot">Gemma 4 E2B</span><span>Live notes LoRA</span><span>Wrap-up LoRA</span><span>On-device</span></div>
         </article>
         <article class="card reveal d1">
-          <h3>Knows who said it.</h3>
-          <p>On-device speaker diarization, with a speaker manager to name and reassign.</p>
+          <h3>Speaker labels.</h3>
+          <p>Speakers are separated on-device. You can rename them and fix wrong labels.</p>
           <div class="vis speakers" aria-hidden="true">
             <div class="row"><span class="spk s1">Maya</span><span class="bar" style="width:62%;background:var(--spk-1)"></span></div>
             <div class="row"><span class="spk s2">Dev</span><span class="bar" style="width:38%;background:var(--spk-2)"></span></div>
@@ -718,28 +698,28 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
           </div>
         </article>
         <article class="card w4 wide-sm reveal">
-          <h3>Ask your meeting anything.</h3>
-          <p>Chat across the transcript and your notes, during the call or after. Ask what was decided, what you missed, or pull out every action item.</p>
+          <h3>Copilot.</h3>
+          <p>Ask questions about the transcript and your notes, during the call or after. Answers cite timestamps in the transcript.</p>
           <div class="vis chat" aria-hidden="true">
             <div class="bubble me">What did we promise the pilot customers?</div>
             <div class="bubble ai">An offline-capable build for the October pilots, about two sprints of work. Dev owns the spec. <cite>00:19</cite></div>
           </div>
         </article>
         <article class="card reveal d1">
-          <h3>Fast on your hardware.</h3>
-          <p>Core ML runs transcription on the Neural Engine; Metal runs the notes model on the GPU.</p>
+          <h3>Runs on Apple Silicon.</h3>
+          <p>Transcription runs on the Neural Engine through Core ML, and the notes model on the GPU through Metal.</p>
           <div class="vis gpu" aria-hidden="true"><span class="hot">Neural Engine</span><span>Core ML</span><span>Metal</span></div>
         </article>
         <article class="card w3 reveal">
-          <h3>Starts when your meeting does.</h3>
-          <p>Minutes notices when a supported meeting begins and offers to record. One click, and it lives in your menu bar.</p>
+          <h3>Meeting detection.</h3>
+          <p>When a call starts, Minutes asks if you want to record it.</p>
           <div class="vis" aria-hidden="true">
             <div class="toast"><span class="ic"><svg><use href="#logo"/></svg></span><div><b>Meeting detected</b><small>Start recording with Minutes?</small></div><span class="go">Record</span></div>
           </div>
         </article>
         <article class="card w3 reveal d1">
-          <h3>Find any word you ever heard.</h3>
-          <p>Full-text search across every transcript, stored in a local SQLite database you own.</p>
+          <h3>Search.</h3>
+          <p>Full-text search across all your transcripts, stored in a local SQLite file.</p>
           <div class="vis kbar" aria-hidden="true">
             <div class="q"><svg><use href="#i-search"/></svg>pilot<kbd>⌘K</kbd></div>
             <div class="r"><span>Q3 roadmap: offline mode &amp; <mark>pilot</mark>s</span><small>00:12</small></div>
@@ -747,18 +727,18 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
           </div>
         </article>
         <article class="card reveal">
-          <h3>Bring old recordings.</h3>
-          <p>Import any audio file and Minutes transcribes it in a background queue.</p>
+          <h3>Import recordings.</h3>
+          <p>Drop in an audio file and it gets transcribed in the background.</p>
           <div class="vis gpu" aria-hidden="true"><span>.wav</span><span>.mp3</span><span>.m4a</span><span>…</span></div>
         </article>
         <article class="card reveal d1">
-          <h3>Your models, your call.</h3>
-          <p>Built-in local models or Ollama. Claude, Groq and OpenRouter only if you add a key.</p>
+          <h3>Other models if you want them.</h3>
+          <p>Built-in models by default, or Ollama. Claude, Groq and OpenRouter work too if you add a key.</p>
           <div class="vis gpu" aria-hidden="true"><span class="hot">Built-in</span><span>Ollama</span><span>Bring your own key</span></div>
         </article>
         <article class="card reveal d2">
-          <h3>Your lines and the AI's, apart.</h3>
-          <p>AI lines are marked in your notes. One switch hides them, and copy and export follow it.</p>
+          <h3>Your notes stay yours.</h3>
+          <p>AI lines are marked. One switch hides them, and copy and export respect it.</p>
           <div class="vis"><div class="modes"><span class="on">Show AI notes</span></div></div>
         </article>
       </div>
@@ -770,8 +750,8 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
     <div class="wrap">
       <div class="section-head">
         <span class="eyebrow reveal">The model</span>
-        <h2 class="reveal d1">Small model. One job.<br />Trained for it.</h2>
-        <p class="lede reveal d2">A general model asked to "update the notes" rewrites everything, narrates, and is too slow to run next to live transcription on a laptop. So Minutes uses Gemma 4 E2B, a 2B-parameter model, with two adapters fine-tuned for meetings on the AMI Meeting Corpus. Both are open on Hugging Face.</p>
+        <h2 class="reveal d1">Why a fine-tuned model</h2>
+        <p class="lede reveal d2">Big general models are too slow to run next to live transcription on a laptop, and they narrate instead of taking notes. So I fine-tuned Gemma 4 E2B (2B parameters) on the AMI meeting corpus. Both adapters are on Hugging Face.</p>
       </div>
       <div class="model-grid">
         <div class="ops reveal" aria-label="Example output of the live notes model: a few compact edit operations">
@@ -784,9 +764,9 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
           <div class="ln"><span class="op">.</span><span class="c">nothing worth noting, most windows</span></div>
         </div>
         <div class="model-points">
-          <div class="reveal"><b>Edits, not essays.</b><p>Every pause in the conversation, the live notes adapter reads your notes, its own and the newest 30 seconds of transcript, and answers with a few tiny edits. That's how it keeps up in real time. It can't touch your lines.</p></div>
-          <div class="reveal d1"><b>A checked wrap-up.</b><p>When you stop, a second adapter writes the summary, decisions, action items and open questions from the live notes and the full transcript. Every number must appear in the transcript, and owners are only named when someone in the meeting said them. If the check fails, you get a wrap-up built from the live notes instead.</p></div>
-          <div class="reveal d2"><b>Trained on one Mac.</b><p>Both adapters were trained on a single 24 GB Apple Silicon Mac, the hour-long wrap-up inputs by running the backward pass one layer at a time.</p></div>
+          <div class="reveal"><b>It outputs edits.</b><p>Every 30 seconds or so it reads the notes and the latest transcript and replies with a few short edits, usually under 100 tokens. That's why it keeps up. It can't edit your lines.</p></div>
+          <div class="reveal d1"><b>The wrap-up gets checked.</b><p>At the end, a second adapter writes the summary, decisions, action items and open questions. The app checks it: numbers have to appear in the transcript, and owners are only named if someone actually said it. If it fails the check, you get a simpler wrap-up from the live notes.</p></div>
+          <div class="reveal d2"><b>Trained on one Mac.</b><p>Both adapters were trained on one 24 GB Mac. To fit hour-long meetings in memory for the wrap-up, the backward pass runs one layer at a time.</p></div>
         </div>
       </div>
       <div class="stack reveal">
@@ -802,13 +782,13 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
     <div class="wrap priv-grid">
       <div>
         <span class="eyebrow reveal">Privacy</span>
-        <h2 class="reveal d1" style="margin-top:18px">Airplane mode is a feature.</h2>
-        <p class="lede reveal d2" style="margin-top:22px">Your meetings hold salaries, roadmaps, diagnoses and deals. They belong on your disk, not in somebody's training set.</p>
+        <h2 class="reveal d1" style="margin-top:18px">Nothing leaves your Mac.</h2>
+        <p class="lede reveal d2" style="margin-top:22px">Audio, transcripts and notes stay on your disk. The only network traffic is downloading models from Hugging Face and checking GitHub for updates, unless you add a cloud AI key.</p>
         <div class="priv-points">
           <div class="reveal"><svg><use href="#i-shield"/></svg><p><b>Transcribed on your machine.</b><span>Nemotron and Parakeet run locally on the Neural Engine.</span></p></div>
-          <div class="reveal d1"><svg><use href="#i-shield"/></svg><p><b>No account, no telemetry.</b><span>Minutes has no usage telemetry or analytics code. Nothing to sign up for.</span></p></div>
-          <div class="reveal d2"><svg><use href="#i-shield"/></svg><p><b>Cloud AI is opt-in, and obvious.</b><span>Only if you add your own provider key does anything leave, and only to the provider you chose.</span></p></div>
-          <div class="reveal d3"><svg><use href="#i-shield"/></svg><p><b>Open source, so you don't have to trust us.</b><span>Every line is on GitHub under the MIT license. Read it, build it, audit it.</span></p></div>
+          <div class="reveal d1"><svg><use href="#i-shield"/></svg><p><b>No account or telemetry.</b><span>There is no analytics code in the app and nothing to sign up for.</span></p></div>
+          <div class="reveal d2"><svg><use href="#i-shield"/></svg><p><b>Cloud AI only if you add a key.</b><span>Then the meeting text goes to that provider, and only that one.</span></p></div>
+          <div class="reveal d3"><svg><use href="#i-shield"/></svg><p><b>Open source.</b><span>MIT licensed. You can read the code or build it yourself.</span></p></div>
         </div>
       </div>
 
@@ -842,8 +822,8 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
     <div class="wrap">
       <div class="section-head">
         <span class="eyebrow reveal">Compare</span>
-        <h2 class="reveal d1">The recorder you'd build for yourself.</h2>
-        <p class="lede reveal d2">A cloud notetaker is someone else's server with a microphone in your meeting. Here's the difference, line by line.</p>
+        <h2 class="reveal d1">Minutes vs. cloud notetakers</h2>
+        <p class="lede reveal d2">How it compares to a typical cloud notetaker.</p>
       </div>
       <div class="compare reveal">
         <table>
@@ -855,7 +835,7 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
             <tr><td>Works offline</td><td class="us">Yes</td><td class="them">No</td></tr>
             <tr><td>Notes during the meeting</td><td class="us">Yes, as people talk</td><td class="them">A report after the call</td></tr>
             <tr><td>Your own notes</td><td class="us">Kept word for word</td><td class="them">Replaced by a template</td></tr>
-            <tr><td>Price</td><td class="us">Free, forever</td><td class="them">Monthly per-seat subscription</td></tr>
+            <tr><td>Price</td><td class="us">Free</td><td class="them">Monthly per-seat subscription</td></tr>
             <tr><td>Source code</td><td class="us">Open, MIT licensed</td><td class="them">Closed</td></tr>
           </tbody>
         </table>
@@ -868,7 +848,7 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
     <div class="wrap">
       <div class="section-head">
         <span class="eyebrow reveal">The app</span>
-        <h2 class="reveal d1">One calm screen, start to finish.</h2>
+        <h2 class="reveal d1">Screenshots</h2>
       </div>
       <div class="gallery-tabs reveal" role="tablist" aria-label="Screenshots">
         <button role="tab" aria-selected="true" data-shot="0">Workspace</button>
@@ -889,7 +869,7 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
     <div class="wrap">
       <div class="section-head">
         <span class="eyebrow reveal">Under the hood</span>
-        <h2 class="reveal d1">Native, not a web page in a costume.</h2>
+        <h2 class="reveal d1">What it's built with</h2>
       </div>
       <div class="stack reveal">
         <div><small>CORE</small><b>Rust</b><span>Audio capture, mixing, inference and storage in a Tauri 2 core.</span></div>
@@ -904,8 +884,8 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
   <section class="section" id="install" style="padding-top:clamp(40px,6vw,80px)">
     <div class="wrap dl">
       <span class="eyebrow reveal">Install</span>
-      <h2 class="reveal d1">Take better notes by tomorrow's standup.</h2>
-      <p class="lede reveal d2">Free, open source, and yours. No sign-up between you and the record button.</p>
+      <h2 class="reveal d1">Try it on your next call.</h2>
+      <p class="lede reveal d2">It's free and open source, and there's no account.</p>
       <div class="dl-cmd reveal">
         <code><span class="p">$</span><span class="cmd">curl -fsSL https://praveenvnktsh.github.io/minutes/install.sh | bash</span></code>
         <button type="button" class="copy-cmd">Copy</button>
@@ -921,7 +901,7 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
   <div class="wrap foot">
     <div>
       <a class="brand" href="#top"><span class="logo"><svg><use href="#logo"/></svg></span>minutes</a>
-      <p class="fine">This page loads no trackers, no analytics and no third-party fonts either. Built on FluidAudio, llama.cpp, Screenpipe, NVIDIA Nemotron and Parakeet, and Gemma 4. MIT licensed.</p>
+      <p class="fine">No trackers or analytics on this page. Built on FluidAudio, llama.cpp, Screenpipe, NVIDIA Nemotron and Parakeet, and Gemma 4. MIT licensed.</p>
     </div>
     <nav aria-label="Footer">
       <a href="https://github.com/praveenvnktsh/minutes">GitHub</a>
