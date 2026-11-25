@@ -353,7 +353,7 @@ export function applyTidyWrapUp(
   return writer.done(inserted);
 }
 
-/** AI notes Markdown (a whole-transcript summary) as wrap-up groups: each
+/** AI notes Markdown (the stored summary result) as wrap-up groups: each
  * heading starts a topic, list items become bullets, other lines paragraphs. */
 export function markdownWrapUp(markdown: string, ms = 0): WrapUpGroup[] {
   const groups: WrapUpGroup[] = [];

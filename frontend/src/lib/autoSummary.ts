@@ -1,11 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { ModelConfig } from '@/services/configService';
 import type { Transcript } from '@/types';
-import {
-  detectAndCacheSummaryLanguage,
-  readCachedDetectedSummaryLanguage,
-  readMeetingSummaryLanguage,
-} from '@/lib/summary-language-preferences';
 import { fetchCompleteTranscripts, originalNotesMarkdown } from '@/lib/meetingExport';
 import { formatSummaryTranscript } from '@/lib/summaryTranscript';
 import {
@@ -90,17 +85,6 @@ async function fetchAllTranscripts(meetingId: string): Promise<Transcript[]> {
   return fetchCompleteTranscripts(meetingId, (args) => invoke('api_get_meeting_transcripts', args));
 }
 
-async function resolveSummaryLanguage(meetingId: string, transcriptTexts: string[]) {
-  const meetingPreference = await readMeetingSummaryLanguage(meetingId).catch(() => null);
-  if (meetingPreference?.language) return meetingPreference.language;
-
-  const cachedLanguage = await readCachedDetectedSummaryLanguage(meetingId).catch(() => null);
-  if (cachedLanguage) return cachedLanguage;
-
-  const detected = await detectAndCacheSummaryLanguage(meetingId, transcriptTexts).catch(() => null);
-  return detected?.language ?? null;
-}
-
 export async function validateSummaryModel(modelConfig: ModelConfig): Promise<void> {
   if (modelConfig.provider === 'ollama') {
     const models = await invoke<unknown[]>('get_ollama_models', {
@@ -127,7 +111,6 @@ export async function generateAutomaticSummary(meetingId: string, modelConfig: M
     if (transcriptTexts.length === 0) throw new Error('No transcript available for AI notes.');
     const notesContext = await loadSummaryNotesContext(meetingId);
     await validateSummaryModel(modelConfig);
-    const summaryLanguage = await resolveSummaryLanguage(meetingId, transcriptTexts);
     return {
       text: formatSummaryTranscript(transcripts),
       model: modelConfig.provider,
@@ -137,7 +120,6 @@ export async function generateAutomaticSummary(meetingId: string, modelConfig: M
       overlap: 1000,
       customPrompt: notesContext,
       templateId: 'standard_meeting',
-      summaryLanguage,
       replaceExisting: false,
     };
   });

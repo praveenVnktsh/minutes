@@ -8,7 +8,6 @@ const originalNavigation = { ...await import('next/navigation') };
 const originalToast = { ...await import('sonner') };
 const originalRecordingState = { ...await import('../../src/contexts/RecordingStateContext') };
 const originalRecordingController = { ...await import('../../src/contexts/RecordingControllerContext') };
-const originalPreferences = { ...await import('../../src/lib/summary-language-preferences') };
 
 let nativeSummary: SummaryProcessResponse;
 let startPromise: Promise<{ process_id: string }> | null = null;
@@ -51,11 +50,6 @@ mock.module('../../src/contexts/RecordingStateContext', () => ({
 mock.module('../../src/contexts/RecordingControllerContext', () => ({
   ...originalRecordingController,
   useRecordingController: () => ({ command: null, activeMeetingId: null }),
-}));
-mock.module('../../src/lib/summary-language-preferences', () => ({
-  readMeetingSummaryLanguage: async () => ({ language: 'en', storage: 'metadata' }),
-  readCachedDetectedSummaryLanguage: async () => 'en',
-  detectAndCacheSummaryLanguage: async () => ({ language: 'en' }),
 }));
 mock.module('../../src/lib/autoSummary', () => ({
   validateSummaryModel: async () => {}, loadSummaryNotesContext: async () => '',
@@ -124,7 +118,6 @@ afterAll(() => {
   mock.module('../../src/contexts/RecordingStateContext', () => originalRecordingState);
   mock.module('../../src/contexts/RecordingControllerContext', () => originalRecordingController);
   mock.module('../../src/components/ui/dialog', () => originalDialog);
-  mock.module('../../src/lib/summary-language-preferences', () => originalPreferences);
 });
 
 const response = (markdown: string): SummaryProcessResponse => ({
@@ -257,7 +250,6 @@ describe('PageContent owner repair composition', () => {
       overlap: 1000,
       customPrompt: '',
       templateId: 'standard_meeting',
-      summaryLanguage: 'en',
       replaceExisting: true,
     });
     await act(async () => { await Promise.resolve(); });

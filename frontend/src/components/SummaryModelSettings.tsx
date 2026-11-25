@@ -4,8 +4,6 @@ import { ModelConfigForm } from '@/components/settings/ModelConfigForm';
 import { LiveSummarySettings } from '@/components/LiveSummarySettings';
 import { LiveNotesModelSettings } from '@/components/LiveNotesModelSettings';
 import { CopilotSettings } from '@/components/CopilotSettings';
-import { SummaryLanguageSettings } from '@/components/SummaryLanguageSettings';
-import { SummaryPromptSettings } from '@/components/SummaryPromptSettings';
 import { Switch } from '@/components/ui/switch';
 import { useConfig } from '@/contexts/ConfigContext';
 
@@ -42,15 +40,9 @@ export function SummaryModelSettings({ refetchTrigger: _refetchTrigger }: Summar
 
       <CopilotSettings />
 
-      <SummaryLanguageSettings />
-
       <div className="rounded-lg border border-hairline bg-surface-raised p-6 shadow-sm">
         <ModelConfigForm />
       </div>
-
-      <SummaryPromptSettings kind="notes" />
-
-      <SummaryPromptSettings kind="transcriptOnly" />
     </div>
   );
 }
