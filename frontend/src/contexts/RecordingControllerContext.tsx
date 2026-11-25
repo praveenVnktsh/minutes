@@ -474,31 +474,28 @@ export function RecordingControllerProvider({
     return speechReadiness(await speechModelsApi.status().catch(() => null));
   }, []);
 
-  const persistStartedSession = useCallback(async (session: SessionRecord) => {
+  const persistStartedSession = useCallback(async (session: SessionRecord): Promise<void> => {
+    let meetingId: string;
     try {
-      session.folderPath = await recordingFolderPath();
+      session.folderPath ??= await recordingFolderPath();
       session.recoveryMeetingId ??= sessionStorage.getItem('indexeddb_current_meeting_id');
       sessionsRef.current.set(session.sessionId, session);
       persistSessions(sessionsRef.current);
-      let meetingId = session.resumed ? session.meetingId : null;
-      if (!meetingId) {
+      let existingMeetingId = session.meetingId;
+      if (!existingMeetingId) {
         const created = await storageService.createMeeting(
           session.title,
           session.folderPath,
           cachedDebugMode(),
         );
         if (!created.meeting_id) throw new Error('The meeting row was not created.');
-        meetingId = created.meeting_id;
+        existingMeetingId = created.meeting_id;
       }
+      meetingId = existingMeetingId;
       session.meetingId = meetingId;
       sessionsRef.current.set(session.sessionId, session);
       sessionStorage.setItem(ACTIVE_MEETING_KEY, meetingId);
       persistSessions(sessionsRef.current);
-      await meetingActivityService.bindActiveRecordingMeeting(session.sessionId, meetingId);
-      setCurrentMeeting({ id: meetingId, title: session.title });
-      await refetchMeetings();
-      await flushNotes();
-      router.push(`/meeting-details?id=${encodeURIComponent(meetingId)}`);
     } catch (error) {
       reportError(
         'persistence',
@@ -506,13 +503,40 @@ export function RecordingControllerProvider({
           ? 'Recording resumed, but its meeting could not be prepared'
           : 'Recording started, but its meeting could not be prepared',
         `${messageOf(error)} Recording is still active and can be stopped safely.`,
+        undefined,
+        () => persistStartedSession(session),
       );
+      return;
     }
+
+    // The meeting exists, so open it. Nothing after this point may keep the
+    // user away from the meeting they are recording: a failed bind is
+    // re-attempted on rehydrate, and unsaved notes stay in their local draft.
+    try {
+      await meetingActivityService.bindActiveRecordingMeeting(session.sessionId, meetingId);
+    } catch (error) {
+      console.warn('Could not bind the recording to its meeting yet:', error);
+    }
+    setCurrentMeeting({ id: meetingId, title: session.title });
+    try {
+      await flushNotes();
+    } catch (error) {
+      console.warn('Could not save notes before opening the new meeting:', error);
+    }
+    router.push(`/meeting-details?id=${encodeURIComponent(meetingId)}`);
+    await refetchMeetings().catch((error) => {
+      console.warn('Could not refresh the meetings list:', error);
+    });
   }, [refetchMeetings, reportError, router, setCurrentMeeting]);
 
   const performStart = useCallback(async (options: StartRecordingOptions = {}) => {
     if (recording && ['starting', 'recording', 'paused', 'saving'].includes(recording.status)) {
-      if (recording.meeting_id) await flushNotes().then(() => router.push(`/meeting-details?id=${encodeURIComponent(recording.meeting_id!)}`));
+      if (recording.meeting_id) {
+        await flushNotes().catch((error) => {
+          console.warn('Could not save notes before returning to the recording:', error);
+        });
+        router.push(`/meeting-details?id=${encodeURIComponent(recording.meeting_id)}`);
+      }
       return;
     }
 
@@ -638,11 +662,40 @@ export function RecordingControllerProvider({
   }, []);
 
   const startRecording = useCallback((options: StartRecordingOptions = {}): Promise<void> => {
-    if ([...finalizationsRef.current.values()].some((state) => !state.completed)) {
-      return Promise.reject(new LifecycleBusyError('Finish saving the previous meeting before starting another.'));
+    const refuse = (message: string) => {
+      const error = new LifecycleBusyError(message);
+      reportError(
+        'capture',
+        options.resumeMeetingId ? 'Recording could not resume' : 'Recording could not start',
+        error,
+        'recording',
+      );
+      return Promise.reject(error);
+    };
+    const unfinished = [...finalizationsRef.current.entries()].filter(([, state]) => !state.completed);
+    if (unfinished.some(([, state]) => state.promise)) {
+      return refuse('Finish saving the previous meeting before starting another.');
     }
-    return runLifecycle('start', null, () => performStart(options));
-  }, [performStart, runLifecycle]);
+    const active = lifecycleOperationRef.current;
+    if (active && active.kind !== 'start') {
+      return refuse(active.kind === 'finalize'
+        ? 'Finish saving the previous meeting before starting another.'
+        : `Wait for ${active.kind} to finish before starting another meeting.`);
+    }
+    if (unfinished.length === 0) return runLifecycle('start', null, () => performStart(options));
+    // A previous meeting whose saving failed gets one more try, but it never
+    // blocks a new recording: its files and retry stay available either way.
+    return runLifecycle('start', null, async () => {
+      for (const [sessionId] of unfinished) {
+        if (!sessionsRef.current.has(sessionId)) {
+          finalizationsRef.current.delete(sessionId);
+          continue;
+        }
+        await finalizeHandlerRef.current(sessionId, true).catch(() => {});
+      }
+      await performStart(options);
+    });
+  }, [performStart, reportError, runLifecycle]);
   startHandlerRef.current = startRecording;
 
   const resumeMeeting = useCallback((meetingId: string): Promise<void> => (
@@ -1085,19 +1138,23 @@ export function RecordingControllerProvider({
   ), [performResume, recording?.session_id, runLifecycle]);
 
   const returnToRecording = useCallback(async () => {
-    const meetingId = authoritativeMeetingId;
+    // Until the native session is bound, the meeting this controller created
+    // for it is still the right place to go.
+    const latestSessionId = recording?.session_id ?? latestSessionIdRef.current;
+    const meetingId = authoritativeMeetingId
+      ?? (latestSessionId ? sessionsRef.current.get(latestSessionId)?.meetingId : null)
+      ?? null;
     if (!meetingId) {
       reportError('persistence', 'Recording workspace unavailable', 'The recording is active, but its meeting row has not been created yet.');
       return;
     }
     try {
       await flushNotes();
-      router.push(`/meeting-details?id=${encodeURIComponent(meetingId)}`);
     } catch (error) {
-      reportError('persistence', 'Notes could not be saved before navigation', error);
-      throw error;
+      console.warn('Could not save notes before returning to the recording:', error);
     }
-  }, [authoritativeMeetingId, reportError, router]);
+    router.push(`/meeting-details?id=${encodeURIComponent(meetingId)}`);
+  }, [authoritativeMeetingId, recording?.session_id, reportError, router]);
 
   requestHandlerRef.current = (request) => {
     if (handledRequestsRef.current.has(request.request_id)) return;

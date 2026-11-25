@@ -84,7 +84,7 @@ export function ShellActivitySurface() {
             <span className={`h-2.5 w-2.5 rounded-full ${recordingState.isPaused ? 'bg-paused' : 'animate-pulse bg-recording'}`} />
             <span className="text-sm font-semibold text-ink">{recordingState.isPaused ? 'Recording paused' : 'Recording in progress'}</span>
             <div className="ml-auto flex gap-2">
-              {controller.activeMeetingId && <Button size="sm" variant="ghost" disabled={controller.isCommandPending} onClick={() => void controller.returnToRecording().catch(() => {})}>Return</Button>}
+              <Button size="sm" variant="ghost" disabled={controller.isCommandPending} onClick={() => void controller.returnToRecording().catch(() => {})}>Return</Button>
               <Button
                 size="sm"
                 variant="ghost"
