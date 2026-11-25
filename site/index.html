@@ -440,6 +440,19 @@ section { position: relative; }
 @media (max-width: 900px) { .stack { grid-template-columns: 1fr 1fr; } .stack div:nth-child(2) { border-right: 0; } .stack div:nth-child(-n+2) { border-bottom: 1px solid var(--hairline); } }
 @media (max-width: 520px) { .stack { grid-template-columns: 1fr; } .stack div { border-right: 0; border-bottom: 1px solid var(--hairline); } .stack div:last-child { border-bottom: 0; } }
 
+/* ---------- model ---------- */
+.model-grid { display: grid; grid-template-columns: 1.3fr 1fr; gap: clamp(28px, 4vw, 56px); align-items: start; margin-bottom: clamp(32px, 5vw, 56px); }
+.ops { border: 1px solid var(--hairline); border-radius: 18px; background: var(--surface-1); padding: 22px 24px; font: 13px/1.95 var(--mono); overflow-x: auto; box-shadow: var(--shadow); }
+.ops .hd { font: 600 12px var(--sans); letter-spacing: .12em; text-transform: uppercase; color: var(--ink-subtle); margin-bottom: 10px; display: flex; justify-content: space-between; gap: 12px; }
+.ops .ln { white-space: nowrap; }
+.ops .op { color: var(--info); font-weight: 600; }
+.ops .t { color: var(--ink-subtle); }
+.ops .c { color: var(--ink-subtle); font-family: var(--sans); font-size: 13px; margin-left: 10px; }
+.model-points { display: grid; gap: 22px; }
+.model-points p { color: var(--ink-muted); }
+.model-points b { color: var(--ink); display: block; font-size: 18px; margin-bottom: 4px; }
+@media (max-width: 900px) { .model-grid { grid-template-columns: 1fr; } }
+
 /* ---------- download ---------- */
 .dl { text-align: center; display: grid; justify-items: center; gap: 22px; }
 .dl h2 { font-size: clamp(44px, 7.5vw, 96px); letter-spacing: -.035em; line-height: .98; max-width: 14ch; }
@@ -516,6 +529,7 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
     <nav class="nav-links" aria-label="Sections">
       <a href="#how">How it works</a>
       <a href="#features">Features</a>
+      <a href="#model">Model</a>
       <a href="#privacy">Privacy</a>
       <a href="#compare">Compare</a>
     </nav>
@@ -535,7 +549,7 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
     <div class="hero-bg" aria-hidden="true"><canvas id="bgwave"></canvas></div>
     <div class="wrap">
       <div class="hero-copy">
-        <a class="pill reveal" href="https://github.com/praveenvnktsh/minutes/releases/latest">
+        <a class="pill reveal" href="#model">
           <span class="dot"><span class="rec-dot"></span>New</span> Live notes from a model trained for meetings
         </a>
         <h1 class="reveal d1"><span style="white-space:nowrap">Every word, kept.</span><br /><span class="soft">Nothing sent.</span></h1>
@@ -755,6 +769,38 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
   </section>
 
   <!-- ================= PRIVACY ================= -->
+  <section class="section" id="model" style="padding-top:0">
+    <div class="wrap">
+      <div class="section-head">
+        <span class="eyebrow reveal">The model</span>
+        <h2 class="reveal d1">Small model. One job.<br />Trained for it.</h2>
+        <p class="lede reveal d2">A general model asked to "update the notes" rewrites everything, narrates, and is too slow to run next to live transcription on a laptop. So Minutes uses Gemma 4 E2B, a 2B-parameter model, with two adapters fine-tuned for meetings on the AMI Meeting Corpus. Both are open on Hugging Face.</p>
+      </div>
+      <div class="model-grid">
+        <div class="ops reveal" aria-label="Example output of the live notes model: a few compact edit operations">
+          <div class="hd"><span>What the live model writes</span><span>&lt; 100 tokens</span></div>
+          <div class="ln"><span class="op">T=</span>Offline mode<span class="c">new topic</span></div>
+          <div class="ln"><span class="op">+d</span> <span class="t">00:35</span>|Offline mode ships first, for the October pilots<span class="c">decision</span></div>
+          <div class="ln"><span class="op">+p</span> <span class="t">00:11</span>|About two sprints if it reuses the sync engine<span class="c">point</span></div>
+          <div class="ln"><span class="op">&gt;4 p</span> <span class="t">00:24</span>|Two of three pilots need it to roll out<span class="c">sub-bullet</span></div>
+          <div class="ln"><span class="op">~2</span>|Pricing draft due Friday; seat-based with a usage tier<span class="c">fixes its note</span></div>
+          <div class="ln"><span class="op">.</span><span class="c">nothing worth noting, most windows</span></div>
+        </div>
+        <div class="model-points">
+          <div class="reveal"><b>Edits, not essays.</b><p>Every pause in the conversation, the live notes adapter reads your notes, its own and the newest 30 seconds of transcript, and answers with a few tiny edits. That's how it keeps up in real time. It can't touch your lines.</p></div>
+          <div class="reveal d1"><b>A checked wrap-up.</b><p>When you stop, a second adapter writes the summary, decisions, action items and open questions from the live notes and the full transcript. Every number must appear in the transcript, and owners are only named when someone in the meeting said them. If the check fails, you get a wrap-up built from the live notes instead.</p></div>
+          <div class="reveal d2"><b>Trained on one Mac.</b><p>Both adapters were trained on a single 24 GB Apple Silicon Mac, the hour-long wrap-up inputs by running the backward pass one layer at a time.</p></div>
+        </div>
+      </div>
+      <div class="stack reveal">
+        <div><small>BASE</small><b>Gemma 4 E2B</b><span>2B parameters, Q4_K_M on llama.cpp with Metal. Loaded once; the adapters swap.</span></div>
+        <div><small>LIVE NOTES</small><b>86% clean edits</b><span>Run closed loop over 10 held-out meetings, building on its own notes as the app does.</span></div>
+        <div><small>WRAP-UP</small><b>8 of 10 vs 0 of 10</b><span>Passing the format and grounding checks, against the same model without the adapter.</span></div>
+        <div><small>OPEN</small><b>Apache 2.0</b><span><a href="https://huggingface.co/praveenvnktsh00/minutes-notes-gemma4-e2b">Live notes</a> and <a href="https://huggingface.co/praveenvnktsh00/minutes-tidy-gemma4-e2b">wrap-up</a> adapters on Hugging Face.</span></div>
+      </div>
+    </div>
+  </section>
+
   <section class="section privacy" id="privacy">
     <div class="wrap priv-grid">
       <div>
