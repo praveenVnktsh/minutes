@@ -9,11 +9,7 @@
   in the same document as yours. No bot in the call. No cloud. No account. Free and open source.
 </p>
 
-<p align="center">
-  <a href="https://github.com/praveenvnktsh/minutes/releases/latest/download/minutes-macos-arm64.dmg"><img src="https://img.shields.io/badge/Download%20for%20macOS-Apple%20Silicon-000000?style=for-the-badge&logo=apple&logoColor=white" alt="Download for macOS (Apple Silicon)" /></a>
-</p>
-
-<p align="center">or, in Terminal:</p>
+<p align="center"><b>Install on an Apple Silicon Mac</b> by pasting this into Terminal:</p>
 
 ```bash
 curl -fsSL https://praveenvnktsh.github.io/minutes/install.sh | bash
@@ -131,23 +127,15 @@ Speech runs through [FluidAudio](https://github.com/FluidInference/FluidAudio) o
 
 **Requirements:** an Apple Silicon Mac (M1 or later) on macOS 15 or later. The app opens on macOS 13 and 14, but transcription needs 15.
 
-**Fastest:** paste this into Terminal:
+Paste this into Terminal:
 
 ```bash
 curl -fsSL https://praveenvnktsh.github.io/minutes/install.sh | bash
 ```
 
-It downloads the latest release from GitHub, puts Minutes in your Applications folder, and opens it. Downloads made this way skip the "Apple could not verify" warning. Running it again updates Minutes. [Read the script](site/install.sh) first if you like; it's short.
+It downloads the latest release from GitHub, puts Minutes in your Applications folder (or `~/Applications` if you can't write to `/Applications`), and opens it. Run it again any time to reinstall. The app also updates itself. [Read the script](site/install.sh) first if you like; it's short.
 
-**Or download the app:**
-
-1. Download **[minutes-macos-arm64.dmg](https://github.com/praveenvnktsh/minutes/releases/latest/download/minutes-macos-arm64.dmg)** and drag Minutes into Applications.
-2. **First launch:** Minutes isn't notarized by Apple yet, so macOS will say it can't verify the app. Right-click the app and choose **Open**, then **Open** again. Or run this once:
-   ```bash
-   xattr -dr com.apple.quarantine /Applications/minutes.app
-   ```
-
-**Then:**
+**After it opens:**
 
 1. Grant **Microphone** and **Screen & System Audio Recording** permissions when asked. macOS requires the second one to capture call audio. Minutes doesn't record your screen.
 2. Let Minutes download its models. Speech models and the built-in AI are a few GB in total, downloaded once from Hugging Face.
@@ -175,9 +163,9 @@ Any app that plays audio on your Mac: Zoom, Google Meet, Microsoft Teams, Slack,
 </details>
 
 <details>
-<summary><b>Why the security warning on first launch?</b></summary>
+<summary><b>Why a Terminal command instead of a download button?</b></summary>
 
-Apple charges for the developer account needed to notarize apps, and this project doesn't have one yet. macOS shows the warning only for files downloaded through a browser, so the Terminal install command avoids it. The app is ad-hoc signed and its updates are signed with the project's updater key. The full source is here if you'd rather build it yourself.
+Minutes isn't notarized by Apple yet; that needs a paid developer account this project doesn't have. A browser download gets marked as "from the internet", and macOS then refuses to open the app without a detour through System Settings. A file fetched with `curl` doesn't get that mark, so the one-line install just works. The app is ad-hoc signed, its updates are signed with the project's updater key, and you can [read the installer](site/install.sh) or [build from source](#build-from-source) instead.
 </details>
 
 <details>

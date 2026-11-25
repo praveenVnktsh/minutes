@@ -161,7 +161,7 @@ section { position: relative; }
   content: ""; position: absolute; inset: -20% -10% auto; height: 900px;
   background: radial-gradient(ellipse 50% 40% at 50% 30%, var(--glow), transparent 70%);
 }
-.hero-copy { text-align: center; display: grid; justify-items: center; gap: 26px; }
+.hero-copy { text-align: center; display: grid; grid-template-columns: minmax(0, 1fr); justify-items: center; gap: 26px; }
 .pill {
   display: inline-flex; align-items: center; gap: 10px; padding: 6px 14px 6px 8px; border-radius: 999px;
   border: 1px solid var(--hairline); background: color-mix(in srgb, var(--raised) 70%, transparent);
@@ -176,7 +176,8 @@ section { position: relative; }
 }
 .hero h1 .soft { color: var(--ink-subtle); }
 .hero .lede { text-align: center; margin-inline: auto; max-width: 56ch; }
-.hero-ctas { display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; }
+.hero-ctas { display: flex; flex-direction: column; align-items: center; gap: 14px; width: 100%; }
+.hero-ctas .dl-cmd { width: min(720px, 100%); }
 .hero-meta { font-size: 14px; color: var(--ink-subtle); display: flex; gap: 18px; flex-wrap: wrap; justify-content: center; }
 .hero-meta span { display: inline-flex; align-items: center; gap: 7px; }
 .hero-meta svg { width: 15px; height: 15px; }
@@ -454,7 +455,7 @@ section { position: relative; }
 @media (max-width: 900px) { .model-grid { grid-template-columns: 1fr; } }
 
 /* ---------- download ---------- */
-.dl-cmd { display: flex; align-items: center; gap: 10px; width: min(680px, 100%); min-width: 0; border: 1px solid var(--hairline-strong); background: var(--surface-1); border-radius: 14px; padding: 6px 6px 6px 18px; font: 14px/1.4 var(--mono); }
+.dl-cmd { display: flex; align-items: center; gap: 10px; width: min(720px, 100%); min-width: 0; border: 1px solid var(--hairline-strong); background: var(--surface-1); border-radius: 14px; padding: 6px 6px 6px 18px; font: 14px/1.4 var(--mono); }
 .dl-cmd code { flex: 1; min-width: 0; white-space: nowrap; overflow-x: auto; text-align: left; scrollbar-width: none; }
 .dl-cmd code::-webkit-scrollbar { display: none; }
 .dl-cmd .p { color: var(--ink-subtle); user-select: none; margin-right: 8px; }
@@ -462,17 +463,6 @@ section { position: relative; }
 .dl-or { color: var(--ink-subtle); font-size: 14px; }
 .dl { text-align: center; display: grid; justify-items: center; gap: 22px; }
 .dl h2 { font-size: clamp(44px, 7.5vw, 96px); letter-spacing: -.035em; line-height: .98; max-width: 14ch; }
-.dl-cards { display: grid; grid-template-columns: minmax(0, 340px); gap: 16px; margin-top: 26px; width: 100%; justify-content: center; }
-@media (max-width: 720px) { .dl-cards { grid-template-columns: 1fr; } }
-.dl-card { border: 1px solid var(--hairline); border-radius: 20px; padding: 24px; background: var(--surface-1); text-align: left; display: grid; gap: 14px; text-decoration: none; transition: border-color .25s, transform .25s; }
-.dl-card:hover { border-color: var(--ink-subtle); transform: translateY(-2px); }
-.dl-card.primary { background: var(--ink); color: var(--bg); border-color: var(--ink); }
-.dl-card.primary small { color: color-mix(in srgb, var(--bg) 65%, transparent); }
-.dl-card .os { display: flex; align-items: center; gap: 12px; font-size: 20px; font-weight: 650; }
-.dl-card .os svg { width: 26px; height: 26px; }
-.dl-card small { color: var(--ink-subtle); font-size: 14px; }
-.dl-card .get { font-weight: 650; display: inline-flex; align-items: center; gap: 8px; font-size: 15px; }
-.dl-card .get svg { width: 16px; height: 16px; }
 .dl-note { max-width: 640px; font-size: 14.5px; color: var(--ink-subtle); }
 .dl-note code { font: 13px var(--mono); background: var(--surface-2); padding: 2px 6px; border-radius: 5px; color: var(--ink-muted); word-break: break-all; }
 
@@ -544,7 +534,7 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
         <svg class="sun"><use href="#i-sun"/></svg><svg class="moon" style="display:none"><use href="#i-moon"/></svg>
       </button>
       <a class="icon-btn" href="https://github.com/praveenvnktsh/minutes" aria-label="Minutes on GitHub"><svg><use href="#i-gh"/></svg></a>
-      <a class="btn btn-primary" href="#download">Download</a>
+      <a class="btn btn-primary" href="#install">Install</a>
     </div>
   </div>
 </header>
@@ -561,9 +551,10 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
         <h1 class="reveal d1"><span style="white-space:nowrap">Every word, kept.</span><br /><span class="soft">Nothing sent.</span></h1>
         <p class="lede reveal d2">Minutes records your meetings, transcribes them on your own machine, and writes notes while people talk, right next to the ones you type. When it ends, you get the summary, the decisions and who owes what. No bot in the call. No cloud. No account.</p>
         <div class="hero-ctas reveal d3">
-          <a class="btn btn-primary dl-primary" href="#download">
-            <svg class="os-icon"><use href="#i-down"/></svg><span class="dl-label">Download Minutes</span>
-          </a>
+          <div class="dl-cmd">
+            <code><span class="p">$</span><span class="cmd">curl -fsSL https://praveenvnktsh.github.io/minutes/install.sh | bash</span></code>
+            <button type="button" class="copy-cmd">Copy</button>
+          </div>
           <a class="btn btn-ghost" href="https://github.com/praveenvnktsh/minutes"><svg><use href="#i-gh"/></svg>Star on GitHub</a>
         </div>
         <div class="hero-meta reveal d3">
@@ -909,26 +900,18 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
     </div>
   </section>
 
-  <!-- ================= DOWNLOAD ================= -->
-  <section class="section" id="download" style="padding-top:clamp(40px,6vw,80px)">
+  <!-- ================= INSTALL ================= -->
+  <section class="section" id="install" style="padding-top:clamp(40px,6vw,80px)">
     <div class="wrap dl">
-      <span class="eyebrow reveal">Download</span>
+      <span class="eyebrow reveal">Install</span>
       <h2 class="reveal d1">Take better notes by tomorrow's standup.</h2>
       <p class="lede reveal d2">Free, open source, and yours. No sign-up between you and the record button.</p>
       <div class="dl-cmd reveal">
-        <code><span class="p">$</span><span id="install-cmd">curl -fsSL https://praveenvnktsh.github.io/minutes/install.sh | bash</span></code>
-        <button type="button" id="copy-install">Copy</button>
+        <code><span class="p">$</span><span class="cmd">curl -fsSL https://praveenvnktsh.github.io/minutes/install.sh | bash</span></code>
+        <button type="button" class="copy-cmd">Copy</button>
       </div>
-      <p class="dl-note reveal" style="margin-top:-8px">Paste into Terminal. It installs the latest release into Applications and opens it, with no security prompt. Run it again to update. <a href="install.sh">Read the script</a>.</p>
-      <span class="dl-or reveal">or download the app</span>
-      <div class="dl-cards">
-        <a class="dl-card reveal" id="dl-mac" href="https://github.com/praveenvnktsh/minutes/releases/latest/download/minutes-macos-arm64.dmg">
-          <span class="os"><svg><use href="#i-apple"/></svg>macOS</span>
-          <small>Apple Silicon · macOS 15 or later</small>
-          <span class="get"><svg><use href="#i-down"/></svg>minutes-macos-arm64.dmg</span>
-        </a>
-      </div>
-      <p class="dl-note reveal">Minutes isn't notarized by Apple yet, so a browser download makes macOS warn on first launch. Right-click the app and choose <b>Open</b>, or run <code>xattr -dr com.apple.quarantine /Applications/minutes.app</code> once. Updates after that are signed and automatic.</p>
+      <p class="dl-note reveal" style="margin-top:-8px">Paste into Terminal. It installs the latest release into Applications and opens it. Run it again to update. <a href="install.sh">Read the script</a>.</p>
+      <p class="dl-note reveal">Apple Silicon Mac · macOS 15 or later (the app opens on 13 and 14, but transcription needs 15). Updates install automatically from inside the app.</p>
       <p class="dl-note reveal"><a href="https://github.com/praveenvnktsh/minutes/releases/latest">All releases &amp; notes</a> · <a href="https://github.com/praveenvnktsh/minutes#build-from-source">Build from source</a></p>
     </div>
   </section>
@@ -973,16 +956,6 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
   /* ---------- nav border on scroll ---------- */
   const nav = $('#nav');
   addEventListener('scroll', () => nav.classList.toggle('scrolled', scrollY > 8), { passive: true });
-
-  /* ---------- Mac-aware download button (Minutes is Mac-only) ---------- */
-  const ua = navigator.userAgent;
-  if (/Mac/.test(ua) && !/iPhone|iPad/.test(ua)) {
-    const a = $('.dl-primary');
-    a.href = $('#dl-mac').href;
-    $('.dl-label', a).textContent = 'Download for macOS';
-    $('.os-icon use', a).setAttribute('href', '#i-apple');
-    $('#dl-mac').classList.add('primary');
-  }
 
   /* ---------- reveal on scroll ---------- */
   const io = new IntersectionObserver(es => es.forEach(e => { if (e.isIntersecting) { e.target.classList.add('in'); io.unobserve(e.target); } }), { rootMargin: '0px 0px -8% 0px' });
@@ -1063,12 +1036,12 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
   setInterval(() => modes.forEach(m => m.classList.toggle('on')), 2600);
 
   /* ---------- copy install command ---------- */
-  const copyBtn = document.getElementById('copy-install');
-  if (copyBtn) copyBtn.addEventListener('click', async () => {
-    try { await navigator.clipboard.writeText(document.getElementById('install-cmd').textContent); copyBtn.textContent = 'Copied'; }
-    catch (e) { copyBtn.textContent = 'Select and copy'; }
-    setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1800);
-  });
+  $$('.copy-cmd').forEach(btn => btn.addEventListener('click', async () => {
+    const text = btn.parentElement.querySelector('.cmd').textContent;
+    try { await navigator.clipboard.writeText(text); btn.textContent = 'Copied'; }
+    catch (e) { btn.textContent = 'Select and copy'; }
+    setTimeout(() => { btn.textContent = 'Copy'; }, 1800);
+  }));
 
   /* ---------- gallery ---------- */
   const caps = [
