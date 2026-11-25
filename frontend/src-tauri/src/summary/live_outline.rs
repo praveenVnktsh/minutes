@@ -33,9 +33,6 @@ use crate::database::repositories::timeline::TimelineEntryRow;
 use crate::live_summary::notes::{strip_narration, Narration};
 use crate::live_summary::parse::is_repeat;
 
-/// Fewer live notes than one per this many minutes means the old path: the
-/// live summary was mostly off or failing.
-pub const MINUTES_PER_NOTE_LIMIT: i64 = 5;
 /// A topic run with at most this many notes is not written by the model; its
 /// notes go under "Also discussed".
 pub const SMALL_TOPIC_NOTES: usize = 2;
@@ -165,30 +162,26 @@ pub struct UserNote {
     pub text: String,
 }
 
-/// Why a meeting's notes are written the old way (the whole transcript).
+/// Why a meeting's Enhanced notes cannot be written from its live notes
+/// (after the missing stretches were written, `live_summary::backfill`).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Fallback {
+pub enum Unwritable {
+    /// Not one note, even after the backfill: too little speech.
     NoNotes,
     /// Notes made before live notes had topics.
     NoTopics,
     /// The transcript lines carry no `[mm:ss]` to slice by.
     NoTimestamps,
-    Sparse {
-        notes: usize,
-        minutes: i64,
-    },
 }
 
-impl std::fmt::Display for Fallback {
+impl std::fmt::Display for Unwritable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NoNotes => f.write_str("the meeting has no live notes"),
-            Self::NoTopics => f.write_str("the live notes have no topics"),
+            Self::NoNotes => {
+                f.write_str("no notes could be written from the transcript (too little speech)")
+            }
+            Self::NoTopics => f.write_str("the meeting's live notes have no topics"),
             Self::NoTimestamps => f.write_str("the transcript has no timestamps"),
-            Self::Sparse { notes, minutes } => write!(
-                f,
-                "{notes} live notes for {minutes} minutes is fewer than one per {MINUTES_PER_NOTE_LIMIT} minutes"
-            ),
         }
     }
 }
@@ -247,29 +240,17 @@ pub fn transcript_line(start_ms: i64, speaker: &str, text: &str) -> TranscriptLi
 }
 
 /// Whether the meeting's live notes can carry its enhanced notes, or why not.
-pub fn check(notes: &[LiveNote], lines: &[TranscriptLine], timed: usize) -> Result<(), Fallback> {
+/// How much of the meeting they cover is the backfill's concern.
+pub fn check(notes: &[LiveNote], timed: usize) -> Result<(), Unwritable> {
     let notes: Vec<&LiveNote> = notes.iter().filter(|n| !n.text.is_empty()).collect();
     if notes.is_empty() {
-        return Err(Fallback::NoNotes);
+        return Err(Unwritable::NoNotes);
     }
     if notes.iter().all(|n| n.topic.is_none()) {
-        return Err(Fallback::NoTopics);
+        return Err(Unwritable::NoTopics);
     }
     if timed == 0 {
-        return Err(Fallback::NoTimestamps);
-    }
-    let duration = lines
-        .iter()
-        .map(|l| l.ms)
-        .chain(notes.iter().map(|n| n.end_ms))
-        .max()
-        .unwrap_or(0);
-    let minutes = (duration + 59_999) / 60_000;
-    if (notes.len() as i64) * MINUTES_PER_NOTE_LIMIT < minutes {
-        return Err(Fallback::Sparse {
-            notes: notes.len(),
-            minutes,
-        });
+        return Err(Unwritable::NoTimestamps);
     }
     Ok(())
 }
@@ -1188,24 +1169,14 @@ mod tests {
     }
 
     #[test]
-    fn falls_back_without_notes_topics_timestamps_or_density() {
-        let lines = transcript(30);
-        assert_eq!(check(&[], &lines, 60), Err(Fallback::NoNotes));
+    fn notes_need_a_note_a_topic_and_timestamps() {
+        assert_eq!(check(&[], 60), Err(Unwritable::NoNotes));
         let untopiced = vec![note(1.0, "point", "a note here", None)];
-        assert_eq!(check(&untopiced, &lines, 60), Err(Fallback::NoTopics));
+        assert_eq!(check(&untopiced, 60), Err(Unwritable::NoTopics));
         let one = vec![note(1.0, "point", "a note here", Some("A"))];
-        assert_eq!(check(&one, &lines, 0), Err(Fallback::NoTimestamps));
-        assert_eq!(
-            check(&one, &lines, 60),
-            Err(Fallback::Sparse {
-                notes: 1,
-                minutes: 30
-            })
-        );
-        let dense: Vec<LiveNote> = (0..6)
-            .map(|i| note(i as f64 * 5.0, "point", "a note here", Some("A")))
-            .collect();
-        assert_eq!(check(&dense, &lines, 60), Ok(()));
+        assert_eq!(check(&one, 0), Err(Unwritable::NoTimestamps));
+        // One note for a long meeting is enough: coverage is the backfill's.
+        assert_eq!(check(&one, 60), Ok(()));
     }
 
     #[test]

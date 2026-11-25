@@ -2,9 +2,9 @@
 ///
 /// This module contains:
 /// - LLM client for communicating with various AI providers (OpenAI, Claude, Groq, Ollama, OpenRouter, CustomOpenAI)
-/// - Processor for chunking transcripts and generating summaries
-/// - Service layer for orchestrating summary generation
-/// - Templates for structured meeting summary generation
+/// - Service layer for the AI notes job, written from the meeting's live notes
+///   (`live_enhanced`, `live_outline`)
+/// - Markdown cleaning (`markdown`) and meeting titles (`title`)
 /// - Tauri commands for frontend integration
 use serde::{Deserialize, Serialize};
 
@@ -33,37 +33,24 @@ pub(crate) mod budget;
 pub mod commands;
 #[cfg(test)]
 mod enhanced_eval;
-pub(crate) mod language_detection;
 pub(crate) mod live_enhanced;
 pub(crate) mod live_outline;
 pub mod llm_client;
-pub(crate) mod metadata;
-pub mod processor;
-pub mod prompt_settings;
+pub(crate) mod markdown;
 pub mod service;
 pub mod summary_engine;
 pub mod template_commands;
 pub mod templates;
 pub(crate) mod tidy;
+pub(crate) mod title;
 
 // Re-export Tauri commands (with their generated __cmd__ variants)
 pub use commands::{
-    __cmd__api_cancel_summary, __cmd__api_detect_transcript_summary_language,
-    __cmd__api_get_meeting_detected_summary_language, __cmd__api_get_meeting_summary_language,
-    __cmd__api_get_summary, __cmd__api_process_transcript,
-    __cmd__api_save_meeting_detected_summary_language, __cmd__api_save_meeting_summary,
-    __cmd__api_save_meeting_summary_language, __tauri_command_name_api_cancel_summary,
-    __tauri_command_name_api_detect_transcript_summary_language,
-    __tauri_command_name_api_get_meeting_detected_summary_language,
-    __tauri_command_name_api_get_meeting_summary_language, __tauri_command_name_api_get_summary,
-    __tauri_command_name_api_process_transcript,
-    __tauri_command_name_api_save_meeting_detected_summary_language,
-    __tauri_command_name_api_save_meeting_summary,
-    __tauri_command_name_api_save_meeting_summary_language, api_cancel_summary,
-    api_detect_transcript_summary_language, api_get_meeting_detected_summary_language,
-    api_get_meeting_summary_language, api_get_summary, api_process_transcript,
-    api_save_meeting_detected_summary_language, api_save_meeting_summary,
-    api_save_meeting_summary_language,
+    __cmd__api_cancel_summary, __cmd__api_get_summary, __cmd__api_process_transcript,
+    __cmd__api_save_meeting_summary, __tauri_command_name_api_cancel_summary,
+    __tauri_command_name_api_get_summary, __tauri_command_name_api_process_transcript,
+    __tauri_command_name_api_save_meeting_summary, api_cancel_summary, api_get_summary,
+    api_process_transcript, api_save_meeting_summary,
 };
 
 // Re-export template commands
@@ -71,15 +58,6 @@ pub use template_commands::{
     __cmd__api_list_templates, __tauri_command_name_api_list_templates, api_list_templates,
 };
 
-// Re-export summary prompt settings commands
-pub use prompt_settings::{
-    __cmd__api_get_summary_prompt, __cmd__api_reset_summary_prompt, __cmd__api_save_summary_prompt,
-    __tauri_command_name_api_get_summary_prompt, __tauri_command_name_api_reset_summary_prompt,
-    __tauri_command_name_api_save_summary_prompt, api_get_summary_prompt, api_reset_summary_prompt,
-    api_save_summary_prompt,
-};
-
 // Re-export commonly used items
 pub use llm_client::LLMProvider;
-pub use processor::{chunk_text, extract_meeting_name_from_markdown, rough_token_count};
 pub use service::SummaryService;

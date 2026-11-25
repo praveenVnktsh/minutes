@@ -8,6 +8,7 @@
 //!
 //! See docs/superpowers/specs/2026-10-16-live-summary-timeline-design.md.
 
+pub mod backfill;
 pub mod enhancer;
 pub mod facts;
 pub mod finetuned;
@@ -235,37 +236,12 @@ impl<R: Runtime> WorkerHost for AppHost<R> {
     }
 
     async fn update_entries(&self, rows: &[TimelineEntryRow]) -> Result<()> {
-        let pool = self.pool()?;
-        let mut transaction = pool.begin().await?;
-        for row in rows {
-            sqlx::query(
-                "UPDATE meeting_timeline_entries SET end_ms = ?, kind = ?, text = ?, speaker = ?
-                 WHERE id = ? AND meeting_id = ?",
-            )
-            .bind(row.end_ms)
-            .bind(&row.kind)
-            .bind(&row.text)
-            .bind(&row.speaker)
-            .bind(&row.id)
-            .bind(&row.meeting_id)
-            .execute(&mut *transaction)
-            .await?;
-        }
-        transaction.commit().await?;
+        TimelineRepository::update_entries(&self.pool()?, rows).await?;
         Ok(())
     }
 
     async fn delete_entries(&self, meeting_id: &str, ids: &[String]) -> Result<()> {
-        let pool = self.pool()?;
-        let mut transaction = pool.begin().await?;
-        for id in ids {
-            sqlx::query("DELETE FROM meeting_timeline_entries WHERE id = ? AND meeting_id = ?")
-                .bind(id)
-                .bind(meeting_id)
-                .execute(&mut *transaction)
-                .await?;
-        }
-        transaction.commit().await?;
+        TimelineRepository::delete_entries(&self.pool()?, meeting_id, ids).await?;
         Ok(())
     }
 
@@ -514,22 +490,28 @@ pub async fn get_live_timeline() -> Option<TimelineSnapshot> {
     LATEST.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
-/// Whether a meeting's Enhanced notes are built from its live notes (the
-/// summary then needs no pass over the final transcript, so the stop can
-/// start it at once).
+/// Whether a meeting's live notes cover its saved transcript, so its
+/// Enhanced notes need nothing written from the transcript and the stop can
+/// start them at once. Otherwise the summary waits for the final transcript,
+/// which the missing stretches are then written from (`backfill`).
 #[tauri::command]
 pub async fn has_live_enhanced_notes(
     meeting_id: String,
     state: State<'_, AppState>,
 ) -> Result<bool, String> {
+    let pool = state.db_manager.pool();
     let notes: Vec<crate::summary::live_outline::LiveNote> =
-        TimelineRepository::list_for_meeting(state.db_manager.pool(), &meeting_id)
+        TimelineRepository::list_for_meeting(pool, &meeting_id)
             .await
             .map_err(|e| format!("Could not load the meeting's live notes: {e}"))?
             .iter()
             .map(crate::summary::live_outline::LiveNote::from)
             .collect();
-    Ok(crate::summary::live_outline::check(&notes, &[], 1).is_ok())
+    if crate::summary::live_outline::check(&notes, 1).is_err() {
+        return Ok(false);
+    }
+    let segments = backfill::saved_segments(pool, &meeting_id).await?;
+    Ok(backfill::uncovered(&notes, &segments).is_empty())
 }
 
 #[tauri::command]

@@ -1,9 +1,13 @@
-//! Context-window budgeting for local summary models (built-in AI and Ollama).
+//! Context-window budgeting for local models (built-in AI and Ollama).
 //!
 //! Every local call must fit `prompt + output budget` inside the context the
-//! model actually runs with. These are the pure pieces of that arithmetic; the
-//! processor supplies real token counts (llama-helper's tokenizer for built-in
-//! AI, a conservative estimate for Ollama).
+//! model actually runs with. Ollama's `num_ctx` comes from here, and
+//! [`fit_builtin_output`] sizes one-off built-in calls (meeting chat, title)
+//! with llama-helper's own token count.
+
+use std::path::PathBuf;
+
+use crate::summary::llm_client::LLMProvider;
 
 /// Sampling temperature sent to every provider that accepts one, unless the
 /// user configured their own (custom OpenAI-compatible endpoints).
@@ -20,8 +24,7 @@ pub const OLLAMA_MAX_NUM_CTX: usize = 16_384;
 /// Smallest context we will budget against; below this a summary cannot fit.
 const MIN_NUM_CTX: usize = 2_048;
 
-/// Contexts below this get a larger output share and a "pick a model with
-/// more context" hint when a summary still does not fit.
+/// Contexts below this get a larger output share.
 pub const SMALL_CONTEXT: usize = 8_192;
 
 /// Default output budget for one local summary call.
@@ -29,13 +32,6 @@ pub const DEFAULT_MAX_OUTPUT_TOKENS: usize = 4_096;
 
 /// Smallest output budget worth asking for.
 pub const MIN_OUTPUT_TOKENS: usize = 256;
-
-/// Chunks smaller than this are not worth re-splitting; a context overflow at
-/// this size means the prompt overhead itself does not fit.
-pub const MIN_CHUNK_TOKENS: usize = 256;
-
-/// When a chunk overflows, retry it at this fraction of its size.
-const SHRINK_FACTOR: f64 = 0.6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ContextBudget {
@@ -65,12 +61,6 @@ impl ContextBudget {
         }
     }
 
-    /// Whether the context is small enough that summaries may not fit well,
-    /// for guidance in errors.
-    pub fn is_small(&self) -> bool {
-        self.n_ctx < SMALL_CONTEXT
-    }
-
     /// Ollama budget: the model's advertised context, capped for memory. The
     /// same `n_ctx` must be sent as `options.num_ctx` on every request.
     pub fn for_ollama(model_context: usize) -> Self {
@@ -82,13 +72,6 @@ impl ContextBudget {
         (self.n_ctx / 32).max(256)
     }
 
-    /// Tokens left for variable input (transcript or summaries) once the
-    /// output budget, the fixed prompt overhead and the margin are reserved.
-    pub fn input_budget(&self, prompt_overhead_tokens: usize) -> usize {
-        self.n_ctx
-            .saturating_sub(self.max_output + prompt_overhead_tokens + self.safety_margin())
-    }
-
     /// Output budget for a one-off call whose prompt is `prompt_tokens` long:
     /// `max_output`, shrunk to what is left after the prompt and the margin.
     /// None when not even `MIN_OUTPUT_TOKENS` fit.
@@ -98,17 +81,6 @@ impl ContextBudget {
             .saturating_sub(prompt_tokens + self.safety_margin());
         let output = self.max_output.min(room);
         (output >= MIN_OUTPUT_TOKENS).then_some(output)
-    }
-
-    /// A larger output budget for retrying a truncated reply, or None when the
-    /// context has no room for one. Doubles the budget, bounded by what is
-    /// left after the prompt.
-    pub fn grown_output(&self, current_output: usize, prompt_tokens: usize) -> Option<usize> {
-        let room = self
-            .n_ctx
-            .saturating_sub(prompt_tokens + self.safety_margin());
-        let grown = (current_output * 2).min(room);
-        (grown > current_output).then_some(grown)
     }
 }
 
@@ -128,27 +100,10 @@ pub fn estimate_tokens(text: &str) -> usize {
     ascii.div_ceil(3) + other
 }
 
-/// Characters per token measured on `text`, for turning token budgets into
-/// chunk sizes. Falls back to a conservative 2.0 when the count is unusable.
-pub fn chars_per_token(text: &str, tokens: usize) -> f64 {
-    let chars = text.chars().count();
-    if tokens == 0 || chars == 0 {
-        return 2.0;
-    }
-    (chars as f64 / tokens as f64).clamp(0.5, 8.0)
-}
-
-/// Token budget for re-splitting a chunk that overflowed the context, or None
-/// when it is already too small to shrink further.
-pub fn shrink_chunk_tokens(current_tokens: usize) -> Option<usize> {
-    let shrunk = (current_tokens as f64 * SHRINK_FACTOR).floor() as usize;
-    (shrunk >= MIN_CHUNK_TOKENS && shrunk < current_tokens).then_some(shrunk)
-}
-
 /// True when a hosted provider's HTTP error body says the prompt did not fit
 /// the context window. Only for raw provider bodies: the app's own errors are
-/// typed (`llm_client::LlmErrorKind`, `processor::StageError`), and its
-/// truncation message mentions "context window" too.
+/// typed (`llm_client::LlmErrorKind`), and its truncation message mentions
+/// "context window" too.
 pub fn is_context_overflow_error(error: &str) -> bool {
     let error = error.to_ascii_lowercase();
     [
@@ -167,53 +122,91 @@ pub fn is_context_overflow_error(error: &str) -> bool {
     .any(|needle| error.contains(needle))
 }
 
-/// Groups consecutive items so each group's token total stays within
-/// `budget_tokens`. An item larger than the budget gets a group of its own.
-/// `separator_tokens` is charged between items of the same group.
-pub fn group_within_budget(
-    item_tokens: &[usize],
-    budget_tokens: usize,
-    separator_tokens: usize,
-) -> Vec<std::ops::Range<usize>> {
-    let mut groups = Vec::new();
-    let mut start = 0;
-    let mut used = 0;
-    for (index, tokens) in item_tokens.iter().copied().enumerate() {
-        let cost = if index == start {
-            tokens
-        } else {
-            tokens + separator_tokens
-        };
-        if index > start && used + cost > budget_tokens {
-            groups.push(start..index);
-            start = index;
-            used = tokens;
-        } else {
-            used += cost;
+/// Chat-template tokens added around a prompt, for estimates.
+const CHAT_TEMPLATE_TOKENS: usize = 32;
+
+/// Rough token count from the character count (0.35 tokens per character).
+pub fn rough_token_count(s: &str) -> usize {
+    let char_count = s.chars().count();
+    (char_count as f64 * 0.35).ceil() as usize
+}
+
+/// Tokens in the full built-in prompt (chat template included), counted by
+/// llama-helper; an estimate when this llama-helper cannot count.
+async fn builtin_prompt_tokens(
+    app_data_dir: &PathBuf,
+    model_name: &str,
+    system_prompt: &str,
+    user_prompt: &str,
+) -> Result<usize, String> {
+    use crate::summary::summary_engine::{
+        count_builtin_tokens, format_builtin_prompt, BuiltinError,
+    };
+    let formatted = format_builtin_prompt(model_name, system_prompt, user_prompt)
+        .map_err(|error| error.to_string())?;
+    match count_builtin_tokens(app_data_dir, model_name, &formatted, None).await {
+        Ok(count) => Ok(count),
+        // An older llama-helper without `tokenize`: budget on the estimate.
+        Err(error)
+            if matches!(
+                error.downcast_ref::<BuiltinError>(),
+                Some(BuiltinError::UnsupportedRequest(_))
+            ) =>
+        {
+            log::warn!("llama-helper cannot count tokens ({error}); using an estimate");
+            Ok(estimate_tokens(&formatted))
+        }
+        Err(error) => Err(format!("Could not count prompt tokens: {error}")),
+    }
+}
+
+/// Output budget for a one-off built-in AI call (meeting chat, title): the
+/// requested budget (or the model default), shrunk so prompt + output fit the
+/// model's context. llama-helper refuses a request that does not fit up
+/// front, so a long prompt asking for the full default would fail outright.
+/// Other providers keep `requested`. When the prompt leaves no useful room,
+/// `requested` is kept and llama-helper reports the overflow.
+pub(crate) async fn fit_builtin_output(
+    provider: &LLMProvider,
+    model_name: &str,
+    app_data_dir: Option<&PathBuf>,
+    system_prompt: &str,
+    user_prompt: &str,
+    requested: Option<u32>,
+) -> Option<u32> {
+    if *provider != LLMProvider::BuiltInAI {
+        return requested;
+    }
+    let Some(model) = crate::summary::summary_engine::get_model_by_name(model_name) else {
+        return requested;
+    };
+    let mut budget = ContextBudget::new(model.context_size as usize);
+    if let Some(requested) = requested {
+        budget.max_output = requested as usize;
+    }
+    let counted = match app_data_dir {
+        Some(dir) => builtin_prompt_tokens(dir, model_name, system_prompt, user_prompt).await,
+        None => Err("app_data_dir is required for BuiltInAI provider".to_string()),
+    };
+    let prompt_tokens = counted.unwrap_or_else(|error| {
+        log::warn!("Could not count prompt tokens ({error}); using an estimate");
+        estimate_tokens(system_prompt) + estimate_tokens(user_prompt) + CHAT_TEMPLATE_TOKENS
+    });
+    match budget.output_for_prompt(prompt_tokens) {
+        Some(output) => Some(u32::try_from(output).unwrap_or(u32::MAX)),
+        None => {
+            log::warn!(
+                "Prompt of {prompt_tokens} tokens leaves no output room in a {}-token context",
+                budget.n_ctx
+            );
+            requested
         }
     }
-    if start < item_tokens.len() {
-        groups.push(start..item_tokens.len());
-    }
-    groups
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn input_budget_reserves_output_overhead_and_margin() {
-        let budget = ContextBudget::new(32_768);
-        assert_eq!(budget.max_output, 4_096);
-        assert_eq!(budget.safety_margin(), 1_024);
-        assert_eq!(budget.input_budget(1_500), 32_768 - 4_096 - 1_500 - 1_024);
-    }
-
-    #[test]
-    fn input_budget_saturates_when_overhead_exceeds_context() {
-        assert_eq!(ContextBudget::new(4_096).input_budget(10_000), 0);
-    }
 
     #[test]
     fn small_contexts_reserve_more_room_for_output() {
@@ -222,27 +215,16 @@ mod tests {
         let budget = ContextBudget::new(4_000);
         assert_eq!(budget.max_output, 1_500);
         assert_eq!(budget.safety_margin(), 256);
-        assert!(budget.is_small());
         assert_eq!(ContextBudget::new(100).n_ctx, 2_048);
         assert_eq!(ContextBudget::new(2_048).max_output, 768);
         // From 8k up, a quarter (capped) as before.
         assert_eq!(ContextBudget::new(8_192).max_output, 2_048);
-        assert!(!ContextBudget::new(8_192).is_small());
     }
 
     #[test]
     fn ollama_budget_caps_num_ctx_for_memory() {
         assert_eq!(ContextBudget::for_ollama(131_072).n_ctx, OLLAMA_MAX_NUM_CTX);
         assert_eq!(ContextBudget::for_ollama(8_192).n_ctx, 8_192);
-    }
-
-    #[test]
-    fn grown_output_doubles_within_remaining_room() {
-        let budget = ContextBudget::new(32_768);
-        assert_eq!(budget.grown_output(4_096, 10_000), Some(8_192));
-        // Only 32768 - 26000 - 1024 = 5744 tokens are left.
-        assert_eq!(budget.grown_output(4_096, 26_000), Some(5_744));
-        assert_eq!(budget.grown_output(4_096, 28_000), None);
     }
 
     #[test]
@@ -267,21 +249,6 @@ mod tests {
     }
 
     #[test]
-    fn chars_per_token_is_measured_and_clamped() {
-        assert_eq!(chars_per_token("abcdefgh", 2), 4.0);
-        assert_eq!(chars_per_token("abc", 0), 2.0);
-        assert_eq!(chars_per_token("a", 100), 0.5);
-    }
-
-    #[test]
-    fn shrinking_reduces_until_minimum() {
-        assert_eq!(shrink_chunk_tokens(10_000), Some(6_000));
-        assert_eq!(shrink_chunk_tokens(430), Some(258));
-        assert_eq!(shrink_chunk_tokens(420), None);
-        assert_eq!(shrink_chunk_tokens(0), None);
-    }
-
-    #[test]
     fn overflow_errors_are_recognised_across_providers() {
         for error in [
             "Generation failed: context overflow: prompt has 9000 tokens",
@@ -298,13 +265,5 @@ mod tests {
         ] {
             assert!(!is_context_overflow_error(error), "{error}");
         }
-    }
-
-    #[test]
-    fn grouping_respects_budget_and_separators() {
-        assert_eq!(group_within_budget(&[40, 40, 40], 100, 5), vec![0..2, 2..3]);
-        assert_eq!(group_within_budget(&[40, 40, 40], 130, 5), vec![0..3]);
-        assert_eq!(group_within_budget(&[150, 10], 100, 0), vec![0..1, 1..2]);
-        assert!(group_within_budget(&[], 100, 0).is_empty());
     }
 }

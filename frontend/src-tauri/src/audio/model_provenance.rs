@@ -3,9 +3,9 @@
 //! Nothing new is stored in the database for this. The transcription model is
 //! written into the meeting folder's `metadata.json` when the transcript is
 //! made; the diarization engine comes from the latest `diarization_runs` row;
-//! the summary model comes from the source that `summary/service.rs` records in
-//! the `english_cache` of `summary_processes.result`. Meetings made before any
-//! of these existed simply report `None` for that part.
+//! the summary model comes from the `model` that `summary/service.rs` records in
+//! `summary_processes.result` (older summaries: the `english_cache` source).
+//! Meetings made before any of these existed simply report `None` for that part.
 
 use crate::state::AppState;
 use anyhow::{anyhow, Context, Result};
@@ -19,7 +19,10 @@ use tauri::{AppHandle, Manager, Runtime};
 const TRANSCRIPTION_MODEL_KEY: &str = "transcription_model";
 
 /// Field of `summary_processes.result` that `summary/service.rs` writes the
-/// summary's source (including its provider and model) under.
+/// summary's `{provider, model}` under.
+pub(crate) const SUMMARY_MODEL_FIELD: &str = "model";
+/// Where summaries written before `SUMMARY_MODEL_FIELD` kept their provider
+/// and model (`source.model_provider`, `source.model_name`).
 const ENGLISH_CACHE_FIELD: &str = "english_cache";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -136,12 +139,18 @@ async fn latest_diarization_model(
 }
 
 /// The provider and model recorded in a `summary_processes.result` blob, or
-/// `None` when it has no `english_cache` source (older or hand-edited summaries).
+/// `None` when it records none (older or hand-edited summaries).
 fn summary_model_from_result(raw: &str) -> Option<SummaryModel> {
     let value: Value = serde_json::from_str(raw).ok()?;
-    let source = value.get(ENGLISH_CACHE_FIELD)?.get("source")?;
-    let provider = source.get("model_provider")?.as_str()?.trim();
-    let model = source.get("model_name")?.as_str()?.trim();
+    let (provider, model) = match value.get(SUMMARY_MODEL_FIELD) {
+        Some(model) => (model.get("provider")?, model.get("model")?),
+        None => {
+            let source = value.get(ENGLISH_CACHE_FIELD)?.get("source")?;
+            (source.get("model_provider")?, source.get("model_name")?)
+        }
+    };
+    let provider = provider.as_str()?.trim();
+    let model = model.as_str()?.trim();
     if provider.is_empty() || model.is_empty() {
         return None;
     }
@@ -308,7 +317,27 @@ mod tests {
     }
 
     #[test]
-    fn summary_model_comes_from_the_english_cache_source() {
+    fn summary_model_comes_from_the_recorded_model() {
+        let raw = serde_json::json!({
+            "markdown": "## Notes",
+            "model": {"provider": "builtin-ai", "model": "gemma4:e2b"}
+        })
+        .to_string();
+        assert_eq!(
+            summary_model_from_result(&raw),
+            Some(SummaryModel {
+                provider: "builtin-ai".into(),
+                model: "gemma4:e2b".into()
+            })
+        );
+        assert_eq!(
+            summary_model_from_result(r#"{"model":{"provider":"","model":"x"}}"#),
+            None
+        );
+    }
+
+    #[test]
+    fn summary_model_of_an_older_summary_comes_from_the_english_cache_source() {
         let raw = serde_json::json!({
             "markdown": "# Notes",
             "english_cache": {

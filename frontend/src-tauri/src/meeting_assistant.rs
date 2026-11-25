@@ -1,7 +1,8 @@
 use crate::database::repositories::setting::SettingsRepository;
 use crate::state::AppState;
+use crate::summary::budget::fit_builtin_output;
 use crate::summary::llm_client::{generate_summary, GenerationOptions, LLMProvider};
-use crate::summary::processor::{clean_llm_markdown_detailed, fit_builtin_output};
+use crate::summary::markdown::clean_llm_markdown_detailed;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, Runtime, State};
