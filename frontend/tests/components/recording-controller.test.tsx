@@ -346,6 +346,70 @@ describe('RecordingControllerProvider', () => {
     expect(push).toHaveBeenCalledWith('/meeting-details?id=meeting-created');
   });
 
+  test('opens the new meeting even when binding it to the native session fails', async () => {
+    bindActiveRecordingMeeting.mockImplementationOnce(async () => { throw new Error('bind failed'); });
+    await mount();
+    const start = controller.startRecording({ source: 'app_shell' });
+    startResult.resolve({ session_id: 'bind-fails-session' });
+    await act(async () => { await start; });
+
+    expect(push).toHaveBeenCalledWith('/meeting-details?id=meeting-created');
+  });
+
+  test('opens the new meeting even when the current notes cannot be saved first', async () => {
+    flushNotesImpl = async () => { throw new Error('disk full'); };
+    await mount();
+    const start = controller.startRecording({ source: 'app_shell' });
+    startResult.resolve({ session_id: 'flush-fails-session' });
+    await act(async () => { await start; });
+
+    expect(push).toHaveBeenCalledWith('/meeting-details?id=meeting-created');
+  });
+
+  test('a previous meeting that failed to save does not block a new meeting', async () => {
+    activityRecording = {
+      session_id: 'stuck-session', meeting_id: 'meeting-stuck', status: 'recording', error: null,
+    };
+    recordingDuration = 30;
+    transcriptHistory = [{ id: 'one', text: 'kept', display_time: '00:01', audio_end_time: 1 }];
+    saveMeeting.mockImplementation(async () => { throw new Error('database busy'); });
+    try {
+      await mount();
+      await act(async () => { await controller.stopRecording().catch(() => {}); });
+      expect(controller.feedback?.title).toBe('Meeting needs attention');
+
+      activityRecording = null;
+      await act(async () => renderer!.update(<RecordingControllerProvider><Probe /></RecordingControllerProvider>));
+      const start = controller.startRecording({ source: 'app_shell' });
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+      startResult.resolve({ session_id: 'next-session' });
+      await act(async () => { await start; });
+
+      expect(startRecordingWithDevices).toHaveBeenCalledTimes(1);
+      expect(push).toHaveBeenCalledWith('/meeting-details?id=meeting-created');
+    } finally {
+      saveMeeting.mockImplementation(async () => ({ meeting_id: 'meeting-created' }));
+    }
+  });
+
+  test('explains a refused new meeting instead of failing silently', async () => {
+    activityRecording = {
+      session_id: 'busy-session', meeting_id: 'meeting-busy', status: 'recording', error: null,
+    };
+    const pendingStop = deferred<void>();
+    stopRecording.mockImplementationOnce(() => pendingStop.promise);
+    await mount();
+    let stop!: Promise<void>;
+    act(() => { stop = controller.stopRecording(); });
+    await act(async () => {
+      await controller.startRecording({ source: 'app_shell' }).catch(() => {});
+    });
+
+    expect(controller.feedback?.title).toBe('Recording could not start');
+    pendingStop.resolve();
+    await act(async () => { await stop.catch(() => {}); });
+  });
+
   test('claims a pending native request and relies on the start command auto-ack', async () => {
     await mount();
     await act(async () => {
