@@ -2,7 +2,6 @@
 #![allow(clippy::module_inception)]
 
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex as StdMutex;
 use tauri_plugin_deep_link::DeepLinkExt;
 // Removed unused import
@@ -77,8 +76,6 @@ use std::sync::Arc;
 use tauri::{AppHandle, Manager, Runtime};
 use tokio::sync::RwLock;
 
-static RECORDING_FLAG: AtomicBool = AtomicBool::new(false);
-
 // Global language preference storage (default to "auto-translate" for automatic translation to English)
 static LANGUAGE_PREFERENCE: std::sync::LazyLock<StdMutex<String>> =
     std::sync::LazyLock::new(|| StdMutex::new("auto-translate".to_string()));
@@ -140,7 +137,7 @@ async fn start_recording<R: Runtime>(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StartCommand {
     /// `start_recording`: refuses an active recording before touching audio,
-    /// sets `RECORDING_FLAG`, and prefixes errors with "Failed to start recording: ".
+    /// and prefixes errors with "Failed to start recording: ".
     StartRecording,
     /// `start_recording_with_devices_and_meeting`: returns the audio layer's
     /// error unchanged.
@@ -186,11 +183,6 @@ async fn start_recording_command<R: Runtime>(
     .await
     {
         Ok(session_id) => {
-            if command == StartCommand::StartRecording {
-                RECORDING_FLAG.store(true, Ordering::SeqCst);
-                tray::update_tray_menu(&app);
-            }
-
             if let Some(request_id) = request_id {
                 if let Err(error) =
                     meeting_prompt::associate_started_session(&request_id, &session_id)
@@ -263,7 +255,6 @@ async fn stop_recording<R: Runtime>(app: AppHandle<R>, args: RecordingArgs) -> R
     .await
     {
         Ok(_) => {
-            RECORDING_FLAG.store(false, Ordering::SeqCst);
             tray::update_tray_menu(&app);
 
             // Create the save directory if it doesn't exist
@@ -296,8 +287,7 @@ async fn stop_recording<R: Runtime>(app: AppHandle<R>, args: RecordingArgs) -> R
         }
         Err(e) => {
             log_error!("Failed to stop audio recording: {}", e);
-            // Still update the flag even if stopping failed
-            RECORDING_FLAG.store(false, Ordering::SeqCst);
+            // Still refresh the tray even if stopping failed
             tray::update_tray_menu(&app);
             Err(format!("Failed to stop recording: {}", e))
         }
@@ -375,7 +365,6 @@ async fn is_audio_level_monitoring() -> bool {
 fn get_recording_level() -> f32 {
     audio::pipeline::recording_level()
 }
-
 
 #[tauri::command]
 async fn get_audio_devices() -> Result<Vec<AudioDevice>, String> {
