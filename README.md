@@ -13,6 +13,12 @@
   <a href="https://github.com/praveenvnktsh/minutes/releases/latest/download/minutes-macos-arm64.dmg"><img src="https://img.shields.io/badge/Download%20for%20macOS-Apple%20Silicon-000000?style=for-the-badge&logo=apple&logoColor=white" alt="Download for macOS (Apple Silicon)" /></a>
 </p>
 
+<p align="center">or, in Terminal:</p>
+
+```bash
+curl -fsSL https://praveenvnktsh.github.io/minutes/install.sh | bash
+```
+
 <p align="center">
   <a href="https://github.com/praveenvnktsh/minutes/releases/latest"><img src="https://img.shields.io/github/v/release/praveenvnktsh/minutes?style=flat-square&label=release&color=2ea043" alt="Latest release" /></a>
   <img src="https://img.shields.io/badge/100%25-on--device-2ea043?style=flat-square" alt="100% on-device" />
@@ -125,13 +131,26 @@ Speech runs through [FluidAudio](https://github.com/FluidInference/FluidAudio) o
 
 **Requirements:** an Apple Silicon Mac (M1 or later) on macOS 15 or later. The app opens on macOS 13 and 14, but transcription needs 15.
 
+**Fastest:** paste this into Terminal:
+
+```bash
+curl -fsSL https://praveenvnktsh.github.io/minutes/install.sh | bash
+```
+
+It downloads the latest release from GitHub, puts Minutes in your Applications folder, and opens it. Downloads made this way skip the "Apple could not verify" warning. Running it again updates Minutes. [Read the script](site/install.sh) first if you like; it's short.
+
+**Or download the app:**
+
 1. Download **[minutes-macos-arm64.dmg](https://github.com/praveenvnktsh/minutes/releases/latest/download/minutes-macos-arm64.dmg)** and drag Minutes into Applications.
 2. **First launch:** Minutes isn't notarized by Apple yet, so macOS will say it can't verify the app. Right-click the app and choose **Open**, then **Open** again. Or run this once:
    ```bash
    xattr -dr com.apple.quarantine /Applications/minutes.app
    ```
-3. Grant **Microphone** and **Screen & System Audio Recording** permissions when asked. macOS requires the second one to capture call audio. Minutes doesn't record your screen.
-4. Let Minutes download its models. Speech models and the built-in AI are a few GB in total, downloaded once from Hugging Face.
+
+**Then:**
+
+1. Grant **Microphone** and **Screen & System Audio Recording** permissions when asked. macOS requires the second one to capture call audio. Minutes doesn't record your screen.
+2. Let Minutes download its models. Speech models and the built-in AI are a few GB in total, downloaded once from Hugging Face.
 
 After that, updates are signed and install automatically. Windows and Linux are not supported.
 
@@ -158,7 +177,7 @@ Any app that plays audio on your Mac: Zoom, Google Meet, Microsoft Teams, Slack,
 <details>
 <summary><b>Why the security warning on first launch?</b></summary>
 
-Apple charges for the developer account needed to notarize apps, and this project doesn't have one yet. The app is ad-hoc signed and its updates are signed with the project's updater key. The full source is here if you'd rather build it yourself.
+Apple charges for the developer account needed to notarize apps, and this project doesn't have one yet. macOS shows the warning only for files downloaded through a browser, so the Terminal install command avoids it. The app is ad-hoc signed and its updates are signed with the project's updater key. The full source is here if you'd rather build it yourself.
 </details>
 
 <details>

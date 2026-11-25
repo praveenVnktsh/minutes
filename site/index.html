@@ -454,6 +454,12 @@ section { position: relative; }
 @media (max-width: 900px) { .model-grid { grid-template-columns: 1fr; } }
 
 /* ---------- download ---------- */
+.dl-cmd { display: flex; align-items: center; gap: 10px; width: min(680px, 100%); min-width: 0; border: 1px solid var(--hairline-strong); background: var(--surface-1); border-radius: 14px; padding: 6px 6px 6px 18px; font: 14px/1.4 var(--mono); }
+.dl-cmd code { flex: 1; min-width: 0; white-space: nowrap; overflow-x: auto; text-align: left; scrollbar-width: none; }
+.dl-cmd code::-webkit-scrollbar { display: none; }
+.dl-cmd .p { color: var(--ink-subtle); user-select: none; margin-right: 8px; }
+.dl-cmd button { flex: none; font: 600 13px var(--sans); height: 36px; padding: 0 14px; border-radius: 10px; border: 0; background: var(--ink); color: var(--bg); cursor: pointer; }
+.dl-or { color: var(--ink-subtle); font-size: 14px; }
 .dl { text-align: center; display: grid; justify-items: center; gap: 22px; }
 .dl h2 { font-size: clamp(44px, 7.5vw, 96px); letter-spacing: -.035em; line-height: .98; max-width: 14ch; }
 .dl-cards { display: grid; grid-template-columns: minmax(0, 340px); gap: 16px; margin-top: 26px; width: 100%; justify-content: center; }
@@ -909,6 +915,12 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
       <span class="eyebrow reveal">Download</span>
       <h2 class="reveal d1">Take better notes by tomorrow's standup.</h2>
       <p class="lede reveal d2">Free, open source, and yours. No sign-up between you and the record button.</p>
+      <div class="dl-cmd reveal">
+        <code><span class="p">$</span><span id="install-cmd">curl -fsSL https://praveenvnktsh.github.io/minutes/install.sh | bash</span></code>
+        <button type="button" id="copy-install">Copy</button>
+      </div>
+      <p class="dl-note reveal" style="margin-top:-8px">Paste into Terminal. It installs the latest release into Applications and opens it, with no security prompt. Run it again to update. <a href="install.sh">Read the script</a>.</p>
+      <span class="dl-or reveal">or download the app</span>
       <div class="dl-cards">
         <a class="dl-card reveal" id="dl-mac" href="https://github.com/praveenvnktsh/minutes/releases/latest/download/minutes-macos-arm64.dmg">
           <span class="os"><svg><use href="#i-apple"/></svg>macOS</span>
@@ -916,8 +928,8 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
           <span class="get"><svg><use href="#i-down"/></svg>minutes-macos-arm64.dmg</span>
         </a>
       </div>
-      <p class="dl-note reveal">Minutes isn't notarized by Apple yet, so macOS may warn on first launch. Right-click the app and choose <b>Open</b>, or run <code>xattr -dr com.apple.quarantine /Applications/minutes.app</code> once. Updates after that are signed and automatic.</p>
-      <p class="dl-note reveal"><a href="https://github.com/praveenvnktsh/minutes/releases/latest">All releases &amp; notes</a> · <a href="https://github.com/praveenvnktsh/minutes#quick-start">Build from source</a></p>
+      <p class="dl-note reveal">Minutes isn't notarized by Apple yet, so a browser download makes macOS warn on first launch. Right-click the app and choose <b>Open</b>, or run <code>xattr -dr com.apple.quarantine /Applications/minutes.app</code> once. Updates after that are signed and automatic.</p>
+      <p class="dl-note reveal"><a href="https://github.com/praveenvnktsh/minutes/releases/latest">All releases &amp; notes</a> · <a href="https://github.com/praveenvnktsh/minutes#build-from-source">Build from source</a></p>
     </div>
   </section>
 </main>
@@ -1049,6 +1061,14 @@ footer { border-top: 1px solid var(--hairline); padding: 44px 0 56px; font-size:
   /* ---------- live / after toggle ---------- */
   const modes = $$('#modes span');
   setInterval(() => modes.forEach(m => m.classList.toggle('on')), 2600);
+
+  /* ---------- copy install command ---------- */
+  const copyBtn = document.getElementById('copy-install');
+  if (copyBtn) copyBtn.addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(document.getElementById('install-cmd').textContent); copyBtn.textContent = 'Copied'; }
+    catch (e) { copyBtn.textContent = 'Select and copy'; }
+    setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1800);
+  });
 
   /* ---------- gallery ---------- */
   const caps = [
