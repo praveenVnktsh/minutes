@@ -1,6 +1,8 @@
 use crate::database::models::{Setting, Transcript};
 use crate::database::repositories::{
-    meeting::MeetingsRepository, setting::SettingsRepository, summary::SummaryProcessesRepository,
+    meeting::{MeetingsRepository, TitleSource, TitleUpdate},
+    setting::SettingsRepository,
+    summary::SummaryProcessesRepository,
 };
 use crate::ollama::metadata::ModelMetadataCache;
 use crate::summary::budget::ContextBudget;
@@ -843,14 +845,25 @@ impl SummaryService {
                                     "Keeping meeting name for {}: generated title '{}' echoes the prompt example",
                                     meeting_id, name
                                 );
-                            } else if let Err(error) =
-                                MeetingsRepository::update_meeting_name(&pool, &meeting_id, &name)
-                                    .await
-                            {
-                                error!(
-                                    "Failed to update meeting name for {}: {}",
-                                    meeting_id, error
-                                );
+                            } else {
+                                match MeetingsRepository::update_meeting_name(
+                                    &pool,
+                                    &meeting_id,
+                                    &name,
+                                    TitleSource::Generated,
+                                )
+                                .await
+                                {
+                                    Ok(TitleUpdate::Kept) => info!(
+                                        "Keeping the user's title for {}: not renaming it to '{}'",
+                                        meeting_id, name
+                                    ),
+                                    Ok(_) => {}
+                                    Err(error) => error!(
+                                        "Failed to update meeting name for {}: {}",
+                                        meeting_id, error
+                                    ),
+                                }
                             }
                         }
                         info!("Summary saved successfully for meeting_id: {}", meeting_id);
@@ -988,12 +1001,23 @@ impl SummaryService {
         let title = sanitize_generated_title(&completion.content)
             .ok_or_else(|| "The model did not return a usable title".to_string())?;
 
-        match MeetingsRepository::update_meeting_name(pool, meeting_id, &title).await {
-            Ok(true) => {
+        // The user asked for this title, so it is saved even over their own
+        // rename, and later automatic passes keep it.
+        match MeetingsRepository::update_meeting_name(
+            pool,
+            meeting_id,
+            &title,
+            TitleSource::Requested,
+        )
+        .await
+        {
+            Ok(TitleUpdate::Saved) => {
                 info!("Regenerated title for meeting_id {}: {}", meeting_id, title);
                 Ok(title)
             }
-            Ok(false) => Err(format!("Meeting not found: {}", meeting_id)),
+            Ok(TitleUpdate::Kept | TitleUpdate::NotFound) => {
+                Err(format!("Meeting not found: {}", meeting_id))
+            }
             Err(e) => Err(format!("Failed to save meeting title: {}", e)),
         }
     }
