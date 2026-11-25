@@ -7,6 +7,24 @@ use uuid::Uuid;
 
 pub struct MeetingsRepository;
 
+/// Who asked for a generated meeting title.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TitleSource {
+    /// An automatic pass (the AI notes naming the meeting).
+    Generated,
+    /// The user clicked "Regenerate title".
+    Requested,
+}
+
+/// What `update_meeting_name` did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TitleUpdate {
+    Saved,
+    /// The user chose this meeting's title, so the generated one was dropped.
+    Kept,
+    NotFound,
+}
+
 impl MeetingsRepository {
     /// Create an empty meeting row. Used so a meeting exists before recording
     /// starts, letting the workspace own the whole recording lifecycle.
@@ -219,6 +237,8 @@ impl MeetingsRepository {
         Ok((transcripts, total.0))
     }
 
+    /// The user's rename (meeting header, sidebar, command palette). It marks
+    /// the title as the user's, so no automatic path changes it again.
     pub async fn update_meeting_title(
         pool: &SqlitePool,
         meeting_id: &str,
@@ -235,13 +255,14 @@ impl MeetingsRepository {
 
         let now = Utc::now().naive_utc();
 
-        let rows_affected =
-            sqlx::query("UPDATE meetings SET title = ?, updated_at = ? WHERE id = ?")
-                .bind(new_title)
-                .bind(now)
-                .bind(meeting_id)
-                .execute(&mut *transaction)
-                .await?;
+        let rows_affected = sqlx::query(
+            "UPDATE meetings SET title = ?, title_edited = 1, updated_at = ? WHERE id = ?",
+        )
+        .bind(new_title)
+        .bind(now)
+        .bind(meeting_id)
+        .execute(&mut *transaction)
+        .await?;
         if rows_affected.rows_affected() == 0 {
             transaction.rollback().await?;
             return Ok(false);
@@ -250,26 +271,48 @@ impl MeetingsRepository {
         Ok(true)
     }
 
+    /// Saves a generated meeting title.
+    ///
+    /// `TitleSource::Generated` (the AI notes naming the meeting) never
+    /// overwrites a title the user chose and returns `TitleUpdate::Kept`
+    /// instead. `TitleSource::Requested` ("Regenerate title") always saves,
+    /// and counts as the user choosing that title, so later automatic passes
+    /// keep it too.
     pub async fn update_meeting_name(
         pool: &SqlitePool,
         meeting_id: &str,
         new_title: &str,
-    ) -> Result<bool, SqlxError> {
+        source: TitleSource,
+    ) -> Result<TitleUpdate, SqlxError> {
         let mut transaction = pool.begin().await?;
         let now = Utc::now();
 
-        // Update meetings table
-        let meeting_update =
-            sqlx::query("UPDATE meetings SET title = ?, updated_at = ? WHERE id = ?")
-                .bind(new_title)
-                .bind(now)
-                .bind(meeting_id)
-                .execute(&mut *transaction)
-                .await?;
+        let query = match source {
+            TitleSource::Generated => {
+                "UPDATE meetings SET title = ?, updated_at = ? WHERE id = ? AND title_edited = 0"
+            }
+            TitleSource::Requested => {
+                "UPDATE meetings SET title = ?, title_edited = 1, updated_at = ? WHERE id = ?"
+            }
+        };
+        let meeting_update = sqlx::query(query)
+            .bind(new_title)
+            .bind(now)
+            .bind(meeting_id)
+            .execute(&mut *transaction)
+            .await?;
 
         if meeting_update.rows_affected() == 0 {
+            let exists: Option<(i64,)> = sqlx::query_as("SELECT 1 FROM meetings WHERE id = ?")
+                .bind(meeting_id)
+                .fetch_optional(&mut *transaction)
+                .await?;
             transaction.rollback().await?;
-            return Ok(false); // Meeting not found
+            return Ok(if exists.is_some() {
+                TitleUpdate::Kept
+            } else {
+                TitleUpdate::NotFound
+            });
         }
 
         // Update transcript_chunks table
@@ -280,7 +323,7 @@ impl MeetingsRepository {
             .await?;
 
         transaction.commit().await?;
-        Ok(true)
+        Ok(TitleUpdate::Saved)
     }
 
     /// Pin (favorite) or unpin a meeting.
@@ -430,5 +473,147 @@ mod tests {
         let result = MeetingsRepository::get_meeting(&pool, "deleted-meeting").await;
 
         assert!(matches!(result, Err(SqlxError::RowNotFound)));
+    }
+
+    async fn migrated_pool() -> SqlitePool {
+        // One connection: each in-memory connection is its own database.
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        pool
+    }
+
+    async fn title_and_flag(pool: &SqlitePool, meeting_id: &str) -> (String, i64) {
+        sqlx::query_as("SELECT title, title_edited FROM meetings WHERE id = ?")
+            .bind(meeting_id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn new_meetings_start_unedited_and_take_generated_titles() {
+        let pool = migrated_pool().await;
+        let id =
+            MeetingsRepository::create_meeting(&pool, "Meeting 24_11_26_10_00_00", None, false)
+                .await
+                .unwrap();
+
+        let update =
+            MeetingsRepository::update_meeting_name(&pool, &id, "Pricing", TitleSource::Generated)
+                .await
+                .unwrap();
+
+        assert_eq!(update, TitleUpdate::Saved);
+        assert_eq!(title_and_flag(&pool, &id).await, ("Pricing".to_string(), 0));
+    }
+
+    #[tokio::test]
+    async fn a_rename_marks_the_title_and_generated_titles_keep_it() {
+        let pool = migrated_pool().await;
+        let id =
+            MeetingsRepository::create_meeting(&pool, "Meeting 24_11_26_10_00_00", None, false)
+                .await
+                .unwrap();
+
+        assert!(
+            MeetingsRepository::update_meeting_title(&pool, &id, "Board prep")
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            title_and_flag(&pool, &id).await,
+            ("Board prep".to_string(), 1)
+        );
+
+        let update = MeetingsRepository::update_meeting_name(
+            &pool,
+            &id,
+            "Roadmap Sync",
+            TitleSource::Generated,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(update, TitleUpdate::Kept);
+        assert_eq!(
+            title_and_flag(&pool, &id).await,
+            ("Board prep".to_string(), 1)
+        );
+    }
+
+    #[tokio::test]
+    async fn regenerate_title_replaces_a_rename_and_stays_chosen() {
+        let pool = migrated_pool().await;
+        let id =
+            MeetingsRepository::create_meeting(&pool, "Meeting 24_11_26_10_00_00", None, false)
+                .await
+                .unwrap();
+        MeetingsRepository::update_meeting_title(&pool, &id, "Board prep")
+            .await
+            .unwrap();
+
+        let regenerated = MeetingsRepository::update_meeting_name(
+            &pool,
+            &id,
+            "Q4 budget",
+            TitleSource::Requested,
+        )
+        .await
+        .unwrap();
+        assert_eq!(regenerated, TitleUpdate::Saved);
+        assert_eq!(
+            title_and_flag(&pool, &id).await,
+            ("Q4 budget".to_string(), 1)
+        );
+
+        let later = MeetingsRepository::update_meeting_name(
+            &pool,
+            &id,
+            "Roadmap Sync",
+            TitleSource::Generated,
+        )
+        .await
+        .unwrap();
+        assert_eq!(later, TitleUpdate::Kept);
+        assert_eq!(title_and_flag(&pool, &id).await.0, "Q4 budget");
+    }
+
+    #[tokio::test]
+    async fn regenerate_title_on_an_unedited_meeting_marks_it_chosen() {
+        let pool = migrated_pool().await;
+        let id =
+            MeetingsRepository::create_meeting(&pool, "Meeting 24_11_26_10_00_00", None, false)
+                .await
+                .unwrap();
+
+        MeetingsRepository::update_meeting_name(&pool, &id, "Q4 budget", TitleSource::Requested)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            title_and_flag(&pool, &id).await,
+            ("Q4 budget".to_string(), 1)
+        );
+    }
+
+    #[tokio::test]
+    async fn generated_titles_for_a_missing_meeting_report_not_found() {
+        let pool = migrated_pool().await;
+
+        for source in [TitleSource::Generated, TitleSource::Requested] {
+            let update = MeetingsRepository::update_meeting_name(&pool, "gone", "Pricing", source)
+                .await
+                .unwrap();
+            assert_eq!(update, TitleUpdate::NotFound);
+        }
+        assert!(
+            !MeetingsRepository::update_meeting_title(&pool, "gone", "Pricing")
+                .await
+                .unwrap()
+        );
     }
 }
