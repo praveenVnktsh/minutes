@@ -2,6 +2,10 @@
 //! transcript segments, asks the model for entries when a window is due (one
 //! request at a time), stores them once the meeting exists, and publishes
 //! snapshots. It never touches the recording; the host gives it everything.
+//!
+//! [`run_offline`] drives the same worker over saved transcript after the
+//! meeting (`live_summary::backfill`): the same windows, prompts, parser and
+//! fine-tuned format, on the transcript's own audio time instead of the clock.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -22,7 +26,7 @@ use super::llm::{FailureKind, GenerateError, Generated, Generator, REQUEST_TIMEO
 use super::notes::{decide_topic, NoteContext, MIN_TOPIC_MS};
 use super::parse::{parse_notes, parse_topic_decision, ParsedEntry, TopicDecision};
 use super::prompt::{self, PreviousEntry, PromptContext};
-use super::scheduler::{Scheduler, Segment, Window, WindowScheduler, CADENCE};
+use super::scheduler::{PauseScheduler, Scheduler, Segment, Window, WindowScheduler, CADENCE};
 use crate::database::repositories::enhanced_sections::EnhancedSectionRow;
 use crate::database::repositories::timeline::TimelineEntryRow;
 use crate::summary::live_outline::{
@@ -447,9 +451,42 @@ struct Worker {
     /// write once the meeting exists.
     pending_updates: Vec<TimelineEntry>,
     pending_deletes: Vec<String>,
+    /// Offline (`run_offline`): the audio time of the transcript fed so far,
+    /// which stands in for the clock in the scheduler and the back-off.
+    offline_now: Option<Duration>,
+    /// What went wrong with the last request, if it failed.
+    last_failure: Option<FailureKind>,
 }
 
 impl Worker {
+    fn new(host: Arc<dyn WorkerHost>, config: WorkerConfig, snapshot: TimelineSnapshot) -> Self {
+        Self {
+            snapshot,
+            host,
+            config,
+            started: crate::clock::now(),
+            scheduler: Scheduler::Timed(WindowScheduler::with_cadence(
+                Duration::ZERO,
+                config.cadence,
+            )),
+            requests: 0,
+            unsaved: Vec::new(),
+            carryover: Vec::new(),
+            failures: 0,
+            in_flight: None,
+            history: Vec::new(),
+            sections: Sections::default(),
+            section_in_flight: None,
+            stopping: false,
+            finetuned: None,
+            finetuned_request: false,
+            pending_updates: Vec::new(),
+            pending_deletes: Vec::new(),
+            offline_now: None,
+            last_failure: None,
+        }
+    }
+
     fn accept(&mut self, segment: Segment) {
         self.history.push(segment.clone());
         self.scheduler.push(segment);
@@ -613,7 +650,8 @@ impl Worker {
     }
 
     fn now(&self) -> Duration {
-        crate::clock::now().saturating_duration_since(self.started)
+        self.offline_now
+            .unwrap_or_else(|| crate::clock::now().saturating_duration_since(self.started))
     }
 
     fn set_status(&mut self, status: TimelineStatus, error: Option<String>) {
@@ -823,6 +861,7 @@ impl Worker {
     /// Back off after a failed request; the window's text goes back into the
     /// queue when the failure was the request's, not the reply's.
     fn record_failure(&mut self, window: Option<Window>, kind: FailureKind) {
+        self.last_failure = Some(kind);
         if kind != FailureKind::Preempted {
             self.failures += 1;
         }
@@ -848,6 +887,7 @@ impl Worker {
     }
 
     async fn start_request(&mut self, window: Window, final_window: bool) {
+        self.last_failure = None;
         let generator = match self.host.generator().await {
             Ok(generator) => generator,
             Err(error) => {
@@ -1234,39 +1274,18 @@ pub async fn run(
     config: WorkerConfig,
 ) -> TimelineSnapshot {
     let enabled = host.enabled();
-    let mut worker = Worker {
-        snapshot: TimelineSnapshot {
-            session_id,
-            meeting_id: host.meeting_id(),
-            status: if enabled {
-                TimelineStatus::Listening
-            } else {
-                TimelineStatus::Disabled
-            },
-            error: None,
-            entries: Vec::new(),
+    let snapshot = TimelineSnapshot {
+        session_id,
+        meeting_id: host.meeting_id(),
+        status: if enabled {
+            TimelineStatus::Listening
+        } else {
+            TimelineStatus::Disabled
         },
-        host,
-        config,
-        started: crate::clock::now(),
-        scheduler: Scheduler::Timed(WindowScheduler::with_cadence(
-            Duration::ZERO,
-            config.cadence,
-        )),
-        requests: 0,
-        unsaved: Vec::new(),
-        carryover: Vec::new(),
-        failures: 0,
-        in_flight: None,
-        history: Vec::new(),
-        sections: Sections::default(),
-        section_in_flight: None,
-        stopping: false,
-        finetuned: None,
-        finetuned_request: false,
-        pending_updates: Vec::new(),
-        pending_deletes: Vec::new(),
+        error: None,
+        entries: Vec::new(),
     };
+    let mut worker = Worker::new(host, config, snapshot);
     worker.host.publish(&worker.snapshot);
     // The fine-tuned live notes model gets its own windows from the start.
     if enabled
@@ -1321,6 +1340,198 @@ pub async fn run(
     }
     worker.finish(&mut segments, config.stop_grace).await;
     worker.snapshot
+}
+
+/// Failed windows in a row that end an offline run: the model is not
+/// answering, and the AI notes job reports why instead of writing less.
+pub const OFFLINE_MAX_FAILURES: u32 = 3;
+/// How long an offline run pauses after each window while a recording is
+/// running, so the recording's own live notes get the model first.
+pub const OFFLINE_YIELD: Duration = Duration::from_secs(2);
+
+/// Why an offline run stopped before the end.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OfflineStop {
+    Cancelled,
+    Failed(String),
+}
+
+impl std::fmt::Display for OfflineStop {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Cancelled => f.write_str("Summary generation was cancelled"),
+            Self::Failed(reason) => f.write_str(reason),
+        }
+    }
+}
+
+impl Worker {
+    /// One offline window, start to end. A window Copilot pre-empted goes
+    /// back in the queue after `PREEMPTED_RETRY`; a refusal, or
+    /// `OFFLINE_MAX_FAILURES` failures in a row, ends the run.
+    async fn offline_window(
+        &mut self,
+        window: Window,
+        cancel: &CancellationToken,
+    ) -> std::result::Result<(), OfflineStop> {
+        if cancel.is_cancelled() {
+            return Err(OfflineStop::Cancelled);
+        }
+        self.start_request(window, false).await;
+        let Some(InFlight {
+            mut handle,
+            cancel: request,
+        }) = self.in_flight.take()
+        else {
+            return match self.snapshot.status {
+                TimelineStatus::Unavailable => Err(OfflineStop::Failed(
+                    "No model is available to write the live notes".into(),
+                )),
+                _ => Ok(()),
+            };
+        };
+        let outcome = tokio::select! {
+            outcome = &mut handle => outcome,
+            _ = cancel.cancelled() => {
+                request.cancel();
+                drop(handle);
+                self.scheduler.complete();
+                return Err(OfflineStop::Cancelled);
+            }
+        };
+        self.finish_request(outcome).await;
+        match self.last_failure {
+            None => Ok(()),
+            Some(FailureKind::Preempted) => {
+                tokio::select! {
+                    _ = crate::clock::sleep(PREEMPTED_RETRY) => Ok(()),
+                    _ = cancel.cancelled() => Err(OfflineStop::Cancelled),
+                }
+            }
+            Some(FailureKind::Unavailable) => Err(OfflineStop::Failed(
+                "The summary provider refused the request (check its API key, quota or rate limit)"
+                    .into(),
+            )),
+            Some(FailureKind::Transient) if self.failures >= OFFLINE_MAX_FAILURES => {
+                let reason = self
+                    .snapshot
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "The summary model failed".into());
+                Err(OfflineStop::Failed(format!(
+                    "Live notes could not be written for this meeting: {reason}"
+                )))
+            }
+            Some(FailureKind::Transient) => Ok(()),
+        }
+    }
+}
+
+/// Writes live notes over stretches of saved transcript after the meeting:
+/// imports, meetings whose live notes never ran or stopped, the parts a
+/// recording's notes missed. Each stretch is fed through the live worker as
+/// if it were being heard (its audio time is the clock), so its windows,
+/// prompts, topic step, parser and fine-tuned format are the live ones. The
+/// notes before a stretch are its context, as they were live. Requests run
+/// one at a time at the live notes' background priority; while `yield_to_live`
+/// says a recording is running, each window is followed by `OFFLINE_YIELD`.
+///
+/// The entries go to `host.persist` as they are made, and nothing else of
+/// the live worker runs (no sections, no snapshots). Returns how many notes
+/// it wrote.
+pub async fn run_offline(
+    host: Arc<dyn WorkerHost>,
+    existing: Vec<TimelineEntry>,
+    stretches: Vec<Vec<Segment>>,
+    yield_to_live: &(dyn Fn() -> bool + Send + Sync),
+    cancel: &CancellationToken,
+) -> std::result::Result<usize, OfflineStop> {
+    let generator = host
+        .generator()
+        .await
+        .map_err(|error| OfflineStop::Failed(format!("{error:#}")))?;
+    let finetuned = generator.live_notes_adapter().is_some();
+    let config = WorkerConfig::default();
+    let snapshot = TimelineSnapshot {
+        session_id: "offline".to_string(),
+        meeting_id: host.meeting_id(),
+        status: TimelineStatus::Listening,
+        error: None,
+        entries: Vec::new(),
+    };
+    let mut worker = Worker::new(host, config, snapshot);
+    // No Enhanced sections: the AI notes job writes them afterwards.
+    worker.stopping = true;
+    if finetuned {
+        worker.use_finetuned(Vec::new());
+    }
+    let seeded: std::collections::HashSet<String> = existing.iter().map(|e| e.id.clone()).collect();
+    let mut existing = existing;
+    existing.sort_by_key(|e| e.start_ms);
+    let mut existing = existing.into_iter().peekable();
+    let total = stretches.len();
+    let at = |ms: i64| Duration::from_millis(ms.max(0) as u64);
+    for (index, stretch) in stretches.into_iter().enumerate() {
+        let Some(first) = stretch.first() else {
+            continue;
+        };
+        let start = at(first.start_ms);
+        while let Some(entry) = existing.next_if(|e| at(e.start_ms) < start) {
+            worker.snapshot.entries.push(entry);
+        }
+        worker.snapshot.entries.sort_by_key(|e| e.start_ms);
+        // A fresh window schedule, as at the start of a recording.
+        worker.carryover.clear();
+        worker.scheduler = if finetuned {
+            Scheduler::Pauses(PauseScheduler::default())
+        } else {
+            Scheduler::Timed(WindowScheduler::with_cadence(start, config.cadence))
+        };
+        for mut segment in stretch {
+            segment.received_at = at(segment.start_ms);
+            worker.offline_now = Some(segment.received_at);
+            worker.accept(segment);
+            while let Some(window) = worker.scheduler.poll(worker.now(), false) {
+                worker.offline_window(window, cancel).await?;
+                if yield_to_live() {
+                    crate::clock::sleep(OFFLINE_YIELD).await;
+                }
+            }
+        }
+        // The stretch's end is a stop: its last text goes out too.
+        while let Some(window) = worker.scheduler.flush(worker.now()) {
+            worker.offline_window(window, cancel).await?;
+            if yield_to_live() {
+                crate::clock::sleep(OFFLINE_YIELD).await;
+            }
+        }
+        info!(
+            "Live notes backfill: stretch {}/{total} done, {} notes so far",
+            index + 1,
+            worker
+                .snapshot
+                .entries
+                .iter()
+                .filter(|e| !seeded.contains(&e.id))
+                .count()
+        );
+    }
+    let mut tries = 0;
+    while !worker.persist_unsaved().await {
+        tries += 1;
+        if tries >= 5 || cancel.is_cancelled() {
+            return Err(OfflineStop::Failed(
+                "The live notes could not be stored".into(),
+            ));
+        }
+        tokio::time::sleep(config.final_persist_retry).await;
+    }
+    Ok(worker
+        .snapshot
+        .entries
+        .iter()
+        .filter(|e| !seeded.contains(&e.id))
+        .count())
 }
 
 #[cfg(test)]
@@ -2324,5 +2535,137 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(snapshot.status, TimelineStatus::Stopped);
+    }
+
+    // --- offline (the backfill) -------------------------------------------
+
+    fn never() -> bool {
+        false
+    }
+
+    /// Speech every 10 s over `[from_s, to_s]`.
+    fn stretch(from_s: i64, to_s: i64) -> Vec<Segment> {
+        (from_s / 10..=to_s / 10).map(|i| speech(i * 10)).collect()
+    }
+
+    fn live_entry(start_ms: i64, text: &str) -> TimelineEntry {
+        TimelineEntry {
+            id: "live-1".into(),
+            start_ms,
+            end_ms: start_ms + 10_000,
+            kind: "point".into(),
+            text: text.into(),
+            speaker: None,
+            provider: "builtin-ai".into(),
+            model: "qwen3.5:4b".into(),
+            created_at: String::new(),
+            topic: Some("launch plan".into()),
+            parent: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn offline_runs_the_live_windows_over_each_stretch_on_audio_time() {
+        let generator = Arc::new(FakeGenerator::new(Duration::ZERO));
+        let host = host_with(generator.clone());
+        let existing = vec![live_entry(400_000, "Venue booked in Lisbon for the launch")];
+        let written = run_offline(
+            host.clone(),
+            existing,
+            vec![stretch(0, 300), stretch(900, 1200)],
+            &never,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+        // A window per minute of audio, one request at a time, as live.
+        assert_eq!(generator.calls.load(Ordering::SeqCst), 10);
+        assert_eq!(generator.max_active.load(Ordering::SeqCst), 1);
+        let persisted = host.persisted.lock().unwrap().clone();
+        assert_eq!(persisted.len(), written);
+        assert!(written >= 6, "{written}");
+        // Only inside the stretches; the live note is kept, not rewritten.
+        assert!(persisted.iter().all(|e| e.id != "live-1"));
+        assert!(persisted
+            .iter()
+            .all(|e| (0..=305_000).contains(&e.start_ms)
+                || (900_000..=1_205_000).contains(&e.start_ms)));
+        // The notes before a stretch are its context, as they were live.
+        let prompts = generator.prompts.lock().unwrap().clone();
+        assert!(!prompts[0].contains("Venue booked in Lisbon"));
+        assert!(
+            prompts[5].contains("Venue booked in Lisbon"),
+            "{}",
+            prompts[5]
+        );
+        // No sections: the AI notes job writes them.
+        assert!(generator.section_prompts.lock().unwrap().is_empty());
+        assert!(host.sections.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancelling_stops_the_offline_run() {
+        let generator = Arc::new(FakeGenerator {
+            hang: true,
+            ..FakeGenerator::new(Duration::ZERO)
+        });
+        let host = host_with(generator.clone());
+        let cancel = CancellationToken::new();
+        let token = cancel.clone();
+        let task = tokio::spawn(async move {
+            run_offline(host, Vec::new(), vec![stretch(0, 600)], &never, &token).await
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        cancel.cancel();
+        let result = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("the run stops at once")
+            .unwrap();
+        assert_eq!(result, Err(OfflineStop::Cancelled));
+        assert_eq!(generator.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn an_offline_run_fails_after_repeated_failures_or_a_refusal() {
+        let failing = Arc::new(FakeGenerator {
+            fail_first: 100,
+            ..FakeGenerator::new(Duration::ZERO)
+        });
+        let result = run_offline(
+            host_with(failing.clone()),
+            Vec::new(),
+            vec![stretch(0, 900)],
+            &never,
+            &CancellationToken::new(),
+        )
+        .await;
+        assert!(
+            matches!(&result, Err(OfflineStop::Failed(reason)) if reason.contains("model offline")),
+            "{result:?}"
+        );
+        assert_eq!(
+            failing.calls.load(Ordering::SeqCst),
+            OFFLINE_MAX_FAILURES as usize
+        );
+
+        let refused = Arc::new(FakeGenerator {
+            fail_first: 100,
+            fail_kind: FailureKind::Unavailable,
+            ..FakeGenerator::new(Duration::ZERO)
+        });
+        let result = run_offline(
+            host_with(refused.clone()),
+            Vec::new(),
+            vec![stretch(0, 900)],
+            &never,
+            &CancellationToken::new(),
+        )
+        .await;
+        assert!(
+            matches!(&result, Err(OfflineStop::Failed(reason)) if reason.contains("refused")),
+            "{result:?}"
+        );
+        assert_eq!(refused.calls.load(Ordering::SeqCst), 1);
     }
 }

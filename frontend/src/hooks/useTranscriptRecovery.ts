@@ -9,8 +9,6 @@ import { useState, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { indexedDBService, MeetingMetadata, StoredTranscript } from '@/services/indexedDBService';
 import { storageService } from '@/services/storageService';
-import { applyPinnedSummaryLanguageToMeeting } from '@/lib/summary-language-preferences';
-import { toast } from 'sonner';
 
 export interface AudioRecoveryStatus {
   status: string; // "success" | "partial" | "failed" | "none"
@@ -316,14 +314,6 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
         }
       }
 
-      try {
-        await applyPinnedSummaryLanguageToMeeting(savedMeetingId);
-      } catch (error) {
-        console.warn('Failed to apply pinned summary language to recovered meeting:', error);
-        toast.warning('Could not apply the default AI notes language', {
-          description: 'The recovered meeting was saved, but the default AI notes language was not applied.',
-        });
-      }
 
       if (audioRecoveryStatus?.status === 'failed' || audioRecoveryStatus?.status === 'partial') {
         return {

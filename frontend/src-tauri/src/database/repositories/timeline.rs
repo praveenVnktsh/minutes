@@ -87,6 +87,47 @@ impl TimelineRepository {
             .await?;
         Ok(result.rows_affected())
     }
+
+    /// Store entries the fine-tuned live notes model edited: their span,
+    /// kind, text and speaker.
+    pub async fn update_entries(
+        pool: &SqlitePool,
+        rows: &[TimelineEntryRow],
+    ) -> Result<(), SqlxError> {
+        let mut transaction = pool.begin().await?;
+        for row in rows {
+            sqlx::query(
+                "UPDATE meeting_timeline_entries SET end_ms = ?, kind = ?, text = ?, speaker = ?
+                 WHERE id = ? AND meeting_id = ?",
+            )
+            .bind(row.end_ms)
+            .bind(&row.kind)
+            .bind(&row.text)
+            .bind(&row.speaker)
+            .bind(&row.id)
+            .bind(&row.meeting_id)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        transaction.commit().await
+    }
+
+    /// Remove a meeting's entries by id.
+    pub async fn delete_entries(
+        pool: &SqlitePool,
+        meeting_id: &str,
+        ids: &[String],
+    ) -> Result<(), SqlxError> {
+        let mut transaction = pool.begin().await?;
+        for id in ids {
+            sqlx::query("DELETE FROM meeting_timeline_entries WHERE id = ? AND meeting_id = ?")
+                .bind(id)
+                .bind(meeting_id)
+                .execute(&mut *transaction)
+                .await?;
+        }
+        transaction.commit().await
+    }
 }
 
 #[cfg(test)]

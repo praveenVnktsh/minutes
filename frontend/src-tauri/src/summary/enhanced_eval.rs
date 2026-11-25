@@ -1,8 +1,6 @@
-//! Developer A/B of the Enhanced notes on replay runs, with the real
-//! built-in models: the old end-of-meeting summary (the summary model over
-//! the whole transcript) against the new notes written from the live notes
-//! (each closed topic during the meeting, the last one and the title at
-//! stop, on the live notes model).
+//! Developer evaluation of the Enhanced notes on replay runs, with the real
+//! built-in live notes model: the notes written from the live notes (each
+//! closed topic during the meeting, the last one and the title at stop).
 //!
 //! The live notes are a saved run of the current live-notes code
 //! (`bench/<label>.json` from `live_summary::bench`, default `e2b-goal-r1`).
@@ -20,9 +18,7 @@
 //!   cargo test -p meetily --lib summary::enhanced_eval -- --ignored --nocapture
 //! ```
 //!
-//! `MEETILY_EVAL_OLD=0` skips the old path; `MEETILY_EVAL_NOTES` names
-//! another bench label; `MEETILY_SMOKE_MODEL` is the summary model
-//! (default `qwen3.5:4b`).
+//! `MEETILY_EVAL_NOTES` names another bench label.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -36,15 +32,10 @@ use tokio_util::sync::CancellationToken;
 use crate::live_summary::eval::load_segments;
 use crate::live_summary::llm::SummaryModelGenerator;
 use crate::live_summary::scheduler::Segment;
-use crate::summary::budget::ContextBudget;
 use crate::summary::live_enhanced::{finish_notes, write_section, NotesInputs, SectionSink};
 use crate::summary::live_outline::{
     format_transcript_clock, parse_transcript, parse_transcript_clock, topic_runs, LiveNote,
     TopicRun, WrittenSection,
-};
-use crate::summary::llm_client::{GenerationOptions, LLMProvider};
-use crate::summary::processor::{
-    generate_meeting_summary, resolve_summary_system_prompt, ProviderBackend,
 };
 use crate::summary::summary_engine::models::LIVE_NOTES_MODEL;
 
@@ -212,7 +203,6 @@ async fn enhanced_live_eval() {
         .ok()
         .and_then(|r| r.parse().ok())
         .unwrap_or(2);
-    let with_old = std::env::var("MEETILY_EVAL_OLD").map_or(true, |v| v != "0");
     let label = std::env::var("MEETILY_EVAL_NOTES").unwrap_or_else(|_| "e2b-goal-r1".into());
     let app_data = std::env::var("MEETILY_SMOKE_APP_DATA")
         .map(PathBuf::from)
@@ -220,11 +210,6 @@ async fn enhanced_live_eval() {
             PathBuf::from(std::env::var("HOME").unwrap())
                 .join("Library/Application Support/com.meetily.ai")
         });
-    let summary_model =
-        std::env::var("MEETILY_SMOKE_MODEL").unwrap_or_else(|_| "qwen3.5:4b".into());
-    let context = crate::summary::summary_engine::get_model_by_name(&summary_model)
-        .map_or(32_768, |m| m.context_size as usize);
-    let client = reqwest::Client::new();
 
     for dir in replays.split(';').map(str::trim).filter(|d| !d.is_empty()) {
         let dir = PathBuf::from(dir);
@@ -239,48 +224,12 @@ async fn enhanced_live_eval() {
         let duration_ms = segments.iter().map(|s| s.end_ms).max().unwrap_or(0);
         let topic_list = topic_runs(&notes, duration_ms);
         let mut report = format!(
-            "# Enhanced notes, old vs live — {name}\n\nLocal only: quotes meeting content. {} min, {} live notes ({label}), {} topic runs ({} written by the model).\n\n",
+            "# Enhanced notes from live notes — {name}\n\nLocal only: quotes meeting content. {} min, {} live notes ({label}), {} topic runs ({} written by the model).\n\n",
             duration_ms / 60_000,
             notes.len(),
             topic_list.len(),
             topic_list.iter().filter(|r| !r.is_small()).count()
         );
-
-        let mut old: Option<(f64, String)> = None;
-        if with_old {
-            crate::summary::summary_engine::client::force_shutdown_sidecar()
-                .await
-                .ok();
-            let backend = ProviderBackend {
-                client: &client,
-                provider: &LLMProvider::BuiltInAI,
-                model_name: &summary_model,
-                api_key: "",
-                ollama_endpoint: None,
-                custom_openai_endpoint: None,
-                app_data_dir: Some(&app_data),
-                cancellation_token: None,
-            };
-            println!("== phase: old");
-            let started = Instant::now();
-            let generated = generate_meeting_summary(
-                &backend,
-                &summary_model,
-                &text,
-                "",
-                &resolve_summary_system_prompt(None, None, ""),
-                Some(ContextBudget::new(context)),
-                &GenerationOptions::default(),
-                None,
-                Some("en"),
-                None,
-            )
-            .await
-            .expect("old summary");
-            let seconds = started.elapsed().as_secs_f64();
-            println!("[{name} old] {seconds:.1}s");
-            old = Some((seconds, generated.final_markdown));
-        }
 
         crate::summary::summary_engine::client::force_shutdown_sidecar()
             .await
@@ -304,65 +253,40 @@ async fn enhanced_live_eval() {
         let words = |m: &str| m.split_whitespace().count();
         let headings = |m: &str| m.lines().filter(|l| l.starts_with("## ")).count();
         let (total, on_line, in_section) = links(&first.markdown, &segments, &topic_list);
-        let _ = writeln!(report, "| | old | new |\n|---|---|---|");
-        if let Some((seconds, markdown)) = &old {
-            let (o_total, o_on, _) = links(markdown, &segments, &[]);
-            let _ = writeln!(
-                report,
-                "| post-stop time to ready (model) | {seconds:.1} s | {:.1} s |",
-                first.after_s
-            );
-            let _ = writeln!(
-                report,
-                "| model busy during + after | 0 + {seconds:.1} s | {:.1} + {:.1} s |",
-                first.during_s, first.after_s
-            );
-            let _ = writeln!(
-                report,
-                "| words | {} | {} |",
-                words(markdown),
-                words(&first.markdown)
-            );
-            let _ = writeln!(
-                report,
-                "| ## sections | {} | {} |",
-                headings(markdown),
-                headings(&first.markdown)
-            );
-            let _ = writeln!(
-                report,
-                "| action items | {} | {} |",
-                section_items(markdown, "Action items").len(),
-                section_items(&first.markdown, "Action items").len()
-            );
-            let _ = writeln!(report, "| links (on a line / in section) | {o_total} ({o_on}) | {total} ({on_line} / {in_section}) |");
-        } else {
-            let _ = writeln!(
-                report,
-                "| post-stop time to ready (model) | – | {:.1} s |",
-                first.after_s
-            );
-        }
+        let _ = writeln!(report, "| | new |\n|---|---|");
         let _ = writeln!(
             report,
-            "| new: calls during / after | | {} / {} |",
+            "| post-stop time to ready (model) | {:.1} s |",
+            first.after_s
+        );
+        let _ = writeln!(report, "| words | {} |", words(&first.markdown));
+        let _ = writeln!(report, "| ## sections | {} |", headings(&first.markdown));
+        let _ = writeln!(
+            report,
+            "| action items | {} |",
+            section_items(&first.markdown, "Action items").len()
+        );
+        let _ = writeln!(
+            report,
+            "| links (on a line / in section) | {total} ({on_line} / {in_section}) |"
+        );
+        let _ = writeln!(
+            report,
+            "| new: calls during / after | {} / {} |",
             first.during_calls, first.after_calls
         );
         let _ = writeln!(
             report,
-            "| new: identical across {runs} runs | | {identical} |"
+            "| new: identical across {runs} runs | {identical} |"
         );
         for (i, run) in new_runs.iter().enumerate() {
             let _ = writeln!(
                 report,
-                "| new run {}: during / after | | {:.1} s / {:.1} s |",
+                "| new run {}: during / after | {:.1} s / {:.1} s |",
                 i + 1,
                 run.during_s,
                 run.after_s
             );
-        }
-        if let Some((_, markdown)) = &old {
-            let _ = writeln!(report, "\n## Old output\n\n````markdown\n{markdown}\n````");
         }
         let _ = writeln!(
             report,

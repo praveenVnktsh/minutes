@@ -831,16 +831,7 @@ pub fn run() {
             summary::commands::api_regenerate_meeting_title,
             summary::commands::api_get_summary,
             summary::commands::api_save_meeting_summary,
-            summary::commands::api_get_meeting_summary_language,
-            summary::commands::api_save_meeting_summary_language,
-            summary::commands::api_get_meeting_detected_summary_language,
-            summary::commands::api_save_meeting_detected_summary_language,
-            summary::commands::api_detect_transcript_summary_language,
             summary::commands::api_cancel_summary,
-            // Summary prompt settings commands
-            summary::prompt_settings::api_get_summary_prompt,
-            summary::prompt_settings::api_save_summary_prompt,
-            summary::prompt_settings::api_reset_summary_prompt,
             // Template commands
             summary::template_commands::api_list_templates,
             // Built-in AI commands

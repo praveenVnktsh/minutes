@@ -38,7 +38,6 @@ export interface SummaryStartRequest {
   overlap: number;
   customPrompt: string;
   templateId: string;
-  summaryLanguage: string | null;
   replaceExisting?: boolean;
 }
 

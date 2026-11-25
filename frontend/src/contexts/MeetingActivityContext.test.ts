@@ -22,7 +22,6 @@ const request = (meetingId = 'meeting-a') => ({
   overlap: 1000,
   customPrompt: '',
   templateId: 'standard_meeting',
-  summaryLanguage: 'en',
 });
 
 describe('MeetingActivityStore', () => {

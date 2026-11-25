@@ -635,8 +635,8 @@ pub async fn run(
         .and_then(|c| parse_transcript_clock(&c[1]));
     let sections = sections_from_live_notes(inputs.runs, inputs.user_notes, first_line_ms);
     let prompt = build_input(meeting_minutes(inputs.end_ms), &sections, &transcript);
-    let estimate = crate::summary::processor::rough_token_count(SYSTEM_PROMPT)
-        + crate::summary::processor::rough_token_count(&prompt);
+    let estimate = crate::summary::budget::rough_token_count(SYSTEM_PROMPT)
+        + crate::summary::budget::rough_token_count(&prompt);
     if estimate > MAX_PROMPT_TOKENS {
         info!("Tidy pass skipped: the meeting is too long for one call (~{estimate} tokens)");
         return None;

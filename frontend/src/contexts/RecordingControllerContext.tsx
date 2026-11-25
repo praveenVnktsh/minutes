@@ -36,10 +36,6 @@ import { markDeferredMeetingForAutoSummary } from '@/lib/autoSummary';
 import { finalPassNotice, finalPassTookOver, finalPassWaitsForModels } from '@/lib/liveTranscriptionModels';
 import { toast } from 'sonner';
 import { showRecordingNotification } from '@/lib/recordingNotification';
-import {
-  applyPinnedSummaryLanguageToMeeting,
-  detectAndCacheSummaryLanguage,
-} from '@/lib/summary-language-preferences';
 import { meetingActivityService } from '@/services/meetingActivityService';
 import { recordingService } from '@/services/recordingService';
 import { storageService } from '@/services/storageService';
@@ -920,13 +916,6 @@ export function RecordingControllerProvider({
           finalization.postProcessingStarted = true;
           checkpointFinalization(session, finalization, sessionsRef.current);
         } else if (!finalization.postProcessingStarted) {
-          const pinned = await applyPinnedSummaryLanguageToMeeting(savedMeetingId).catch(() => false);
-          if (!pinned) {
-            await detectAndCacheSummaryLanguage(
-              savedMeetingId,
-              freshTranscripts.map((transcript) => transcript.text),
-            ).catch(() => {});
-          }
           window.dispatchEvent(new CustomEvent('meetily:meeting-ready-for-summary', {
             detail: { meetingId: savedMeetingId },
           }));

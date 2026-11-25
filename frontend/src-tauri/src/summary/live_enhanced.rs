@@ -5,6 +5,10 @@
 //! the title (`finish_notes`, from the summary job). Re-enhance writes every
 //! section again from the current transcript.
 //!
+//! This is the only way AI notes are written. Stretches of the meeting the
+//! live notes missed (or all of it, for an import) get their live notes
+//! first, from the saved transcript (`live_summary::backfill`).
+//!
 //! Calls go to the live notes model (Gemma 4 E2B once downloaded, else the
 //! summary model) with the live notes' deterministic settings: low
 //! temperature and the fixed seed.
@@ -19,9 +23,9 @@ use crate::summary::live_outline::{
     section_body, section_system_prompt, section_user_prompt, title_source, topic_runs,
     user_notes_in, LiveNote, TopicRun, TranscriptLine, UserNote, WrittenSection, SECTION_MAX_LINES,
 };
-use crate::summary::processor::{
-    build_title_user_prompt, clean_llm_markdown_detailed, sanitize_generated_title,
-    title_system_prompt,
+use crate::summary::markdown::clean_llm_markdown_detailed;
+use crate::summary::title::{
+    build_title_user_prompt, sanitize_generated_title, title_system_prompt,
 };
 
 /// Writes one run's section: its notes, its transcript slice and the user's
@@ -254,25 +258,6 @@ pub async fn tidy_notes(
 /// its last window and the section it was writing.
 pub const SETTLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
 
-/// Why a meeting's notes are written the old way (the whole transcript).
-pub fn old_path_reason(
-    notes: &[LiveNote],
-    transcript_text: &str,
-    has_prompt_override: bool,
-    language: Option<&str>,
-) -> Option<String> {
-    if has_prompt_override {
-        return Some("a custom summary prompt is saved".to_string());
-    }
-    if language.is_some_and(|code| !code.trim().to_lowercase().starts_with("en")) {
-        return Some("the notes are not in English".to_string());
-    }
-    let (lines, timed) = parse_transcript(transcript_text);
-    crate::summary::live_outline::check(notes, &lines, timed)
-        .err()
-        .map(|reason| reason.to_string())
-}
-
 /// Whether the built-in summary model is the live notes model (then both
 /// run on the one helper).
 async fn summary_model_is_live_notes_model(pool: &sqlx::SqlitePool) -> bool {
@@ -340,46 +325,69 @@ async fn meeting_user_notes(
     }
 }
 
-/// The meeting's Enhanced notes from its live notes, or `Ok(None)` when the
-/// old path should write them (the reason is logged). `regenerate` is
-/// Re-enhance: every section is written again.
-#[allow(clippy::too_many_arguments)]
+/// The meeting's live notes as stored.
+async fn stored_live_notes(
+    pool: &sqlx::SqlitePool,
+    meeting_id: &str,
+) -> Result<Vec<LiveNote>, String> {
+    use crate::database::repositories::timeline::TimelineRepository;
+    Ok(TimelineRepository::list_for_meeting(pool, meeting_id)
+        .await
+        .map_err(|e| format!("Could not load the live notes: {e}"))?
+        .iter()
+        .map(LiveNote::from)
+        .collect())
+}
+
+/// The meeting's live notes, with the stretches of its saved transcript they
+/// miss written first (`live_summary::backfill`).
+pub async fn live_notes_with_backfill(
+    pool: &sqlx::SqlitePool,
+    meeting_id: &str,
+    generator: std::sync::Arc<dyn Generator>,
+    cancel: &CancellationToken,
+) -> Result<Vec<LiveNote>, String> {
+    let notes = stored_live_notes(pool, meeting_id).await?;
+    let written =
+        crate::live_summary::backfill::backfill(pool, meeting_id, &notes, generator, cancel)
+            .await?;
+    if written == 0 {
+        return Ok(notes);
+    }
+    stored_live_notes(pool, meeting_id).await
+}
+
+/// The meeting's Enhanced notes from its live notes, after the stretches
+/// they miss are written. An error says why there are none: there is no
+/// other way to write them. `regenerate` is Re-enhance: every section is
+/// written again.
 pub async fn notes_from_live_notes<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     pool: &sqlx::SqlitePool,
     meeting_id: &str,
     transcript_text: &str,
     user_notes_markdown: &str,
-    language: Option<&str>,
     regenerate: bool,
     cancel: &CancellationToken,
-) -> Result<Option<FinishedNotes>, String> {
+) -> Result<FinishedNotes, String> {
     use crate::database::repositories::enhanced_sections::EnhancedSectionsRepository;
-    use crate::database::repositories::timeline::TimelineRepository;
-    use crate::summary::prompt_settings::{load_prompt, PromptKind};
     use tauri::Manager;
 
     // The worker's last window and section land before the notes are read.
     crate::live_summary::settle_meeting(meeting_id, SETTLE_TIMEOUT).await;
-    let notes: Vec<LiveNote> = TimelineRepository::list_for_meeting(pool, meeting_id)
+    let generator = std::sync::Arc::new(
+        crate::live_summary::llm::SummaryModelGenerator::from_settings(
+            pool,
+            app.path().app_data_dir().ok(),
+            crate::live_summary::model_choice::choice(app),
+        )
         .await
-        .map_err(|e| format!("Could not load the live notes: {e}"))?
-        .iter()
-        .map(LiveNote::from)
-        .collect();
-    let has_override = load_prompt(app, PromptKind::Notes).is_some()
-        || load_prompt(app, PromptKind::TranscriptOnly).is_some();
-    if let Some(reason) = old_path_reason(&notes, transcript_text, has_override, language) {
-        info!("Enhanced notes for {meeting_id} from the whole transcript: {reason}");
-        return Ok(None);
-    }
-    let generator = crate::live_summary::llm::SummaryModelGenerator::from_settings(
-        pool,
-        app.path().app_data_dir().ok(),
-        crate::live_summary::model_choice::choice(app),
-    )
-    .await
-    .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("AI notes need a summary model: {e}"))?,
+    );
+    let notes = live_notes_with_backfill(pool, meeting_id, generator.clone(), cancel).await?;
+    let (_, timed) = parse_transcript(transcript_text);
+    crate::summary::live_outline::check(&notes, timed)
+        .map_err(|reason| format!("AI notes could not be written: {reason}."))?;
     let stored = EnhancedSectionsRepository::list_for_meeting(pool, meeting_id)
         .await
         .unwrap_or_default()
@@ -424,8 +432,8 @@ pub async fn notes_from_live_notes<R: tauri::Runtime>(
             adapter,
             own_helper,
         };
-        if let Some(finished) = tidy_notes(&tidy_model, &generator, &inputs, cancel).await {
-            return Ok(Some(finished));
+        if let Some(finished) = tidy_notes(&tidy_model, generator.as_ref(), &inputs, cancel).await {
+            return Ok(finished);
         }
         if cancel.is_cancelled() {
             return Err("Summary generation was cancelled".to_string());
@@ -436,9 +444,7 @@ pub async fn notes_from_live_notes<R: tauri::Runtime>(
         notes.len(),
         generator.model()
     );
-    finish_notes(&generator, inputs, &sink, cancel)
-        .await
-        .map(Some)
+    finish_notes(generator.as_ref(), inputs, &sink, cancel).await
 }
 
 #[cfg(test)]
@@ -697,5 +703,247 @@ Pricing and hiring review: the plan is forty per seat, annual first, and two eng
             "## Pricing\n\n- Pricing at forty per seat [00:00]\n- Annual plan first [01:00]\n- Three year discount [02:00]\n"
         ));
         assert!(!finished.markdown.contains("- Old"));
+    }
+
+    // --- a meeting's notes end to end, with the backfill ----------------
+
+    /// A cloud summary model (one request per live window, no topic step):
+    /// notes under "Pricing" for the first four windows, then "Hiring";
+    /// sections and the title by the request. Records every prompt.
+    #[derive(Default)]
+    struct MeetingModel {
+        prompts: Mutex<Vec<(String, String)>>,
+        windows: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl Generator for MeetingModel {
+        fn provider(&self) -> &str {
+            "claude"
+        }
+        fn model(&self) -> &str {
+            "claude-sonnet"
+        }
+        async fn generate(
+            &self,
+            system: &str,
+            user: &str,
+            _: &CancellationToken,
+        ) -> Result<Generated, GenerateError> {
+            self.prompts
+                .lock()
+                .unwrap()
+                .push((system.to_string(), user.to_string()));
+            let text = if system == title_system_prompt() {
+                "Pricing and Hiring".to_string()
+            } else if system == section_system_prompt() {
+                "- Written bullet for this part [00:30]".to_string()
+            } else {
+                assert_eq!(system, crate::live_summary::prompt::system_prompt());
+                let call = self
+                    .windows
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let topic = if call < 4 { "Pricing" } else { "Hiring" };
+                let text = [
+                    "Budget for Acme Robotics approved by finance",
+                    "Hiring freeze lifted for the support team",
+                    "Launch slips by a week after design review",
+                    "Pricing tiers stay unchanged through the summer",
+                    "Roadmap adds offline sync before the beta",
+                    "Support hours extend into weekends",
+                    "Interview loop shortened to two rounds",
+                    "Contractors convert after the probation period",
+                    "Referral bonus doubles for senior engineers",
+                    "Onboarding buddy assigned to every new hire",
+                    "Office budget moves to the remote stipend",
+                    "Recruiter joins the weekly planning call",
+                ][call % 12];
+                format!(
+                    r#"{{"entries":[{{"kind":"point","text":"{text}","speaker":"Others","topic":"{topic}"}}]}}"#
+                )
+            };
+            Ok(Generated {
+                text,
+                truncated: false,
+            })
+        }
+    }
+
+    async fn pool() -> sqlx::SqlitePool {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        pool
+    }
+
+    async fn new_meeting(pool: &sqlx::SqlitePool) -> String {
+        crate::database::repositories::meeting::MeetingsRepository::create_meeting(
+            pool, "Imported", None, false,
+        )
+        .await
+        .unwrap()
+    }
+
+    /// A meeting with one transcript line every 20 s for `minutes`, each
+    /// naming its index; returns its id and the summary transcript text.
+    async fn meeting_with_transcript(pool: &sqlx::SqlitePool, minutes: i64) -> (String, String) {
+        let meeting_id = new_meeting(pool).await;
+        let mut text = Vec::new();
+        for i in 0..minutes * 3 {
+            let start = (i * 20) as f64;
+            let line = format!(
+                "segment-{i} we went through the plan in detail and everyone agreed on the next steps for the team after the review on Tuesday"
+            );
+            sqlx::query(
+                "INSERT INTO transcripts (id, meeting_id, transcript, timestamp, speaker, audio_start_time, audio_end_time)
+                 VALUES (?, ?, ?, '', 'system', ?, ?)",
+            )
+            .bind(format!("t{i}"))
+            .bind(&meeting_id)
+            .bind(&line)
+            .bind(start)
+            .bind(start + 15.0)
+            .execute(pool)
+            .await
+            .unwrap();
+            text.push(format!(
+                "[{}] [Others] {line}",
+                format_transcript_clock(i * 20_000)
+            ));
+        }
+        (meeting_id, text.join("\n"))
+    }
+
+    /// What `notes_from_live_notes` does without the app: the backfill, the
+    /// check, then the sections and the title.
+    async fn write_notes(
+        pool: &sqlx::SqlitePool,
+        meeting_id: &str,
+        transcript: &str,
+        model: std::sync::Arc<MeetingModel>,
+    ) -> Result<FinishedNotes, String> {
+        let cancel = CancellationToken::new();
+        let notes = live_notes_with_backfill(pool, meeting_id, model.clone(), &cancel).await?;
+        let (_, timed) = parse_transcript(transcript);
+        crate::summary::live_outline::check(&notes, timed).map_err(|r| r.to_string())?;
+        finish_notes(
+            model.as_ref(),
+            NotesInputs {
+                notes: &notes,
+                transcript_text: transcript,
+                user_notes: Vec::new(),
+                user_notes_markdown: "",
+                stored: Vec::new(),
+                regenerate: false,
+            },
+            &Sink::default(),
+            &cancel,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn a_meeting_without_live_notes_gets_its_notes_from_the_backfill() {
+        use crate::database::repositories::timeline::TimelineRepository;
+        let pool = pool().await;
+        let (meeting_id, transcript) = meeting_with_transcript(&pool, 12).await;
+        let model = std::sync::Arc::new(MeetingModel::default());
+        let finished = write_notes(&pool, &meeting_id, &transcript, model.clone())
+            .await
+            .unwrap();
+
+        let stored = TimelineRepository::list_for_meeting(&pool, &meeting_id)
+            .await
+            .unwrap();
+        assert!(stored.len() >= 8, "{} live notes", stored.len());
+        assert!(
+            finished.markdown.starts_with("# Pricing and Hiring\n"),
+            "{}",
+            finished.markdown
+        );
+        assert!(finished.markdown.contains("## Pricing\n"));
+        assert!(finished.markdown.contains("## Hiring\n"));
+
+        // No call ever reads the whole transcript: the live windows, the
+        // sections and the title each see a part of it at most.
+        let prompts = model.prompts.lock().unwrap().clone();
+        let last = format!("segment-{} ", 12 * 3 - 1);
+        assert!(prompts.iter().any(|(_, user)| user.contains(&last)));
+        assert!(!prompts
+            .iter()
+            .any(|(_, user)| user.contains("segment-0 ") && user.contains(&last)));
+    }
+
+    #[tokio::test]
+    async fn the_backfill_writes_only_what_the_live_notes_missed() {
+        use crate::database::repositories::timeline::{TimelineEntryRow, TimelineRepository};
+        let pool = pool().await;
+        let (meeting_id, transcript) = meeting_with_transcript(&pool, 20).await;
+        // Live notes for the first eight minutes, then the worker stopped.
+        let live: Vec<TimelineEntryRow> = (0..8)
+            .map(|m| TimelineEntryRow {
+                id: format!("live-{m}"),
+                meeting_id: meeting_id.clone(),
+                start_ms: m * 60_000,
+                end_ms: m * 60_000 + 50_000,
+                kind: "point".into(),
+                text: format!("Live note number {m} about pricing"),
+                speaker: None,
+                provider: "claude".into(),
+                model: "claude-sonnet".into(),
+                created_at: String::new(),
+                topic: Some("Pricing".into()),
+            })
+            .collect();
+        TimelineRepository::insert_entries(&pool, &live)
+            .await
+            .unwrap();
+        let model = std::sync::Arc::new(MeetingModel::default());
+        write_notes(&pool, &meeting_id, &transcript, model.clone())
+            .await
+            .unwrap();
+
+        let stored = TimelineRepository::list_for_meeting(&pool, &meeting_id)
+            .await
+            .unwrap();
+        // The live notes are kept as they were...
+        for note in &live {
+            assert!(stored.contains(note), "{} was changed", note.id);
+        }
+        // ...and the new ones all come after them.
+        let new: Vec<_> = stored
+            .iter()
+            .filter(|e| !e.id.starts_with("live-"))
+            .collect();
+        assert!(!new.is_empty());
+        assert!(new.iter().all(|e| e.start_ms >= 7 * 60_000 + 50_000));
+        // The windows never saw the covered part of the transcript.
+        let prompts = model.prompts.lock().unwrap().clone();
+        let windows: Vec<_> = prompts
+            .iter()
+            .filter(|(system, _)| system == crate::live_summary::prompt::system_prompt())
+            .collect();
+        assert!(!windows.is_empty());
+        assert!(windows
+            .iter()
+            .all(|(_, user)| !user.contains("segment-3 ") && !user.contains("segment-20 ")));
+    }
+
+    #[tokio::test]
+    async fn too_little_speech_fails_with_a_reason_instead_of_another_summary() {
+        let pool = pool().await;
+        let meeting_id = new_meeting(&pool).await;
+        let model = std::sync::Arc::new(MeetingModel::default());
+        let error = write_notes(&pool, &meeting_id, "[00:00] [You] hi", model.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error,
+            crate::summary::live_outline::Unwritable::NoNotes.to_string()
+        );
+        assert!(model.prompts.lock().unwrap().is_empty());
     }
 }

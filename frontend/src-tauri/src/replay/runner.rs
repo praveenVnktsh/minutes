@@ -1345,7 +1345,6 @@ async fn summarize(
         Some(notes.to_string()),
         Some("standard_meeting".to_string()),
         None,
-        None,
     )
     .await
     .map_err(|e| anyhow!(e))?;

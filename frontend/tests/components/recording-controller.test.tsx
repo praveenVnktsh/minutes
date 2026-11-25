@@ -221,10 +221,6 @@ mock.module('../../src/components/Sidebar/SidebarProvider', () => ({
 mock.module('../../src/lib/debugMode', () => ({ cachedDebugMode: () => false }));
 mock.module('../../src/lib/recordingNotification', () => ({ showRecordingNotification: mock(async () => {}) }));
 mock.module('../../src/lib/autoSummary', () => ({ markDeferredMeetingForAutoSummary: () => {} }));
-mock.module('../../src/lib/summary-language-preferences', () => ({
-  applyPinnedSummaryLanguageToMeeting: async () => true,
-  detectAndCacheSummaryLanguage: async () => {},
-}));
 mock.module('../../src/services/notePersistenceService', () => ({
   flushNotes,
   meetingNotesTarget: (meetingId: string) => ({ kind: 'meeting', meetingId }),

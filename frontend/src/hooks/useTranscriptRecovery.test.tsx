@@ -35,24 +35,16 @@ const getMeeting = mock(async (id: string) => {
 const originalCore = { ...await import('@tauri-apps/api/core') };
 const originalIndexedDB = { ...await import('@/services/indexedDBService') };
 const originalStorage = { ...await import('@/services/storageService') };
-const originalSummaryLanguage = { ...await import('@/lib/summary-language-preferences') };
-const originalToast = { ...await import('sonner') };
 afterAll(() => {
   mock.module('@tauri-apps/api/core', () => originalCore);
   mock.module('@/services/indexedDBService', () => originalIndexedDB);
   mock.module('@/services/storageService', () => originalStorage);
-  mock.module('@/lib/summary-language-preferences', () => originalSummaryLanguage);
-  mock.module('sonner', () => originalToast);
 });
 mock.module('@tauri-apps/api/core', () => ({ invoke }));
 mock.module('@/services/indexedDBService', () => ({
   indexedDBService: { getMeetingMetadata, getTranscriptsStrict, markMeetingSavedStrict, markResumeAppendedStrict },
 }));
 mock.module('@/services/storageService', () => ({ storageService: { saveMeeting, getMeeting } }));
-mock.module('@/lib/summary-language-preferences', () => ({
-  applyPinnedSummaryLanguageToMeeting: async () => {},
-}));
-mock.module('sonner', () => ({ toast: { warning() {} } }));
 
 const { useTranscriptRecovery } = await import('./useTranscriptRecovery');
 

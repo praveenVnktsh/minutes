@@ -325,7 +325,8 @@ export default function PageContent({
   ) : null;
 
   // "Regenerate AI notes" works on any stopped meeting with a transcript. It
-  // writes AI notes from the whole transcript; when the notes document already
+  // writes AI notes from the live notes, first filling in any stretch of the
+  // transcript the live notes missed; when the notes document already
   // has AI lines, the new notes replace those lines (the user's are kept). An
   // old meeting without AI lines shows them below its notes, as before.
   const canWriteAiNotes = meetingData.transcripts.length > 0
@@ -418,8 +419,8 @@ export default function PageContent({
           <DialogHeader>
             <DialogTitle>Regenerate AI notes?</DialogTitle>
             <DialogDescription>
-              New AI notes are written from the whole transcript. Lines you wrote or edited are kept;
-              the AI&apos;s lines are replaced.
+              New AI notes are written from the live notes, with any part of the transcript they
+              missed filled in first. Lines you wrote or edited are kept; the AI&apos;s lines are replaced.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

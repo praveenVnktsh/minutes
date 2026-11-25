@@ -5,30 +5,21 @@ use crate::database::repositories::{
     summary::SummaryProcessesRepository,
 };
 use crate::ollama::metadata::ModelMetadataCache;
-use crate::summary::budget::ContextBudget;
-use crate::summary::language_detection::detect_summary_language;
+use crate::summary::budget::{fit_builtin_output, ContextBudget};
 use crate::summary::llm_client::{generate_summary, GenerationOptions, LLMProvider};
-use crate::summary::metadata::read_detected_summary_language_from_metadata;
-use crate::summary::processor::{
-    build_title_user_prompt, clean_llm_markdown_detailed, extract_meeting_name_from_markdown,
-    generate_meeting_summary, is_prompt_echo_title, language_name_from_code,
-    require_visible_markdown, resolve_summary_system_prompt, sanitize_generated_title,
-    title_system_prompt, ProviderBackend,
+use crate::summary::markdown::{clean_llm_markdown_detailed, require_visible_markdown};
+use crate::summary::title::{
+    build_title_user_prompt, extract_meeting_name_from_markdown, sanitize_generated_title,
+    title_system_prompt,
 };
-use crate::summary::templates::{self, Template};
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
-
-/// Cache-key threshold recorded for hosted models, which run single-pass.
-const HOSTED_TOKEN_THRESHOLD: usize = 100_000;
 
 /// When an app call to an Ollama model happens. Ollama reloads the model
 /// whenever `num_ctx` changes, and sizes its KV cache to it, so every call
@@ -40,8 +31,8 @@ pub(crate) enum OllamaPhase {
     /// live transcription (16k on an 8B model is ~2 GB, too much for an
     /// 8 GB Mac).
     Recording,
-    /// After the meeting: the summary, titles and chat. One model reload
-    /// when the meeting ends is the price of the larger context.
+    /// After the meeting: titles and chat. One model reload when the meeting
+    /// ends is the price of the larger context.
     AfterMeeting,
 }
 
@@ -150,120 +141,27 @@ fn strip_title_if_present(markdown: &str) -> String {
     }
 }
 
-const ENGLISH_CACHE_FIELD: &str = "english_cache";
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct SummaryCacheSource {
-    transcript_fingerprint: String,
-    custom_prompt_fingerprint: String,
-    template_id: String,
-    template_fingerprint: String,
-    #[serde(default)]
-    notes_prompt_fingerprint: String,
-    token_threshold: usize,
-    model_provider: String,
-    model_name: String,
-    ollama_endpoint: Option<String>,
-    custom_openai_endpoint: Option<String>,
-    max_tokens: Option<u32>,
-    temperature: Option<f32>,
-    top_p: Option<f32>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct EnglishSummaryCache {
-    markdown: String,
-    source: SummaryCacheSource,
-    output_language: Option<String>,
-}
-
-fn stable_text_fingerprint(text: &str) -> String {
-    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
-    const FNV_PRIME: u64 = 0x100000001b3;
-
-    let mut hash = FNV_OFFSET;
-    for byte in text.as_bytes() {
-        hash ^= *byte as u64;
-        hash = hash.wrapping_mul(FNV_PRIME);
-    }
-    format!("{:016x}:{}", hash, text.len())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn build_summary_cache_source(
-    text: &str,
-    custom_prompt: &str,
-    template_id: &str,
-    template_fingerprint: &str,
-    notes_prompt_fingerprint: &str,
-    token_threshold: usize,
+/// The stored result of an AI notes job: the notes without their title
+/// line (the title becomes the meeting's name), the model the job ran for
+/// (`audio::model_provenance` reads it) and whether reasoning was removed.
+fn build_summary_result_json(
+    markdown: &str,
     model_provider: &str,
     model_name: &str,
-    ollama_endpoint: Option<&str>,
-    custom_openai_endpoint: Option<&str>,
-    max_tokens: Option<u32>,
-    temperature: Option<f32>,
-    top_p: Option<f32>,
-) -> SummaryCacheSource {
-    SummaryCacheSource {
-        transcript_fingerprint: stable_text_fingerprint(text),
-        custom_prompt_fingerprint: stable_text_fingerprint(custom_prompt),
-        template_id: template_id.to_string(),
-        template_fingerprint: template_fingerprint.to_string(),
-        notes_prompt_fingerprint: notes_prompt_fingerprint.to_string(),
-        token_threshold,
-        model_provider: model_provider.to_string(),
-        model_name: model_name.to_string(),
-        ollama_endpoint: ollama_endpoint.map(str::to_string),
-        custom_openai_endpoint: custom_openai_endpoint.map(str::to_string),
-        max_tokens,
-        temperature,
-        top_p,
-    }
-}
-
-fn template_cache_fingerprint(template: &Template) -> String {
-    let rendered_template = format!(
-        "{}\n---SECTION-INSTRUCTIONS---\n{}",
-        template.to_markdown_structure(),
-        template.to_section_instructions()
-    );
-    stable_text_fingerprint(&rendered_template)
-}
-
-fn normalise_summary_language_for_cache(summary_language: Option<&str>) -> Option<String> {
-    language_name_from_code(summary_language?.trim()).map(str::to_string)
-}
-
-fn build_summary_result_json(
-    final_markdown: &str,
-    english_markdown: &str,
-    source: SummaryCacheSource,
-    output_language: Option<&str>,
-    reasoning_stripped: bool,
-    normalization_fallback: bool,
 ) -> Result<serde_json::Value, String> {
-    let cleaned_final = clean_llm_markdown_detailed(final_markdown);
-    require_visible_markdown("Final summary", &cleaned_final)?;
-    let markdown = strip_title_if_present(&cleaned_final.markdown);
-    if markdown.trim().is_empty() {
-        return Err("Final summary contains no visible content after title removal".to_string());
+    let cleaned = clean_llm_markdown_detailed(markdown);
+    require_visible_markdown("AI notes", &cleaned)?;
+    let body = strip_title_if_present(&cleaned.markdown);
+    if body.trim().is_empty() {
+        return Err("AI notes contain no visible content after title removal".to_string());
     }
-
-    let cleaned_english = clean_llm_markdown_detailed(english_markdown);
-    require_visible_markdown("English summary", &cleaned_english)?;
-
     Ok(serde_json::json!({
-        "markdown": markdown,
-        ENGLISH_CACHE_FIELD: EnglishSummaryCache {
-            markdown: cleaned_english.markdown,
-            source,
-            output_language: normalise_summary_language_for_cache(output_language),
+        "markdown": body,
+        crate::audio::model_provenance::SUMMARY_MODEL_FIELD: {
+            "provider": model_provider,
+            "model": model_name,
         },
-        "reasoning_stripped": reasoning_stripped
-            || cleaned_final.reasoning_stripped
-            || cleaned_english.reasoning_stripped,
-        "normalization_fallback": normalization_fallback,
+        "reasoning_stripped": cleaned.reasoning_stripped,
     }))
 }
 
@@ -283,45 +181,6 @@ fn with_tidy_wrap_up(
         }
     }
     result
-}
-
-/// Parses a `summary_processes.result` JSON blob and extracts a cached English
-/// summary only when it was produced from exactly the same source inputs and
-/// the user is switching to a different non-English target language.
-fn extract_cached_english_markdown(
-    raw: &str,
-    expected_source: &SummaryCacheSource,
-    requested_language: Option<&str>,
-) -> Result<Option<String>, serde_json::Error> {
-    let requested_language = match normalise_summary_language_for_cache(requested_language) {
-        Some(language) if language != "English" => language,
-        _ => return Ok(None),
-    };
-
-    let value: serde_json::Value = serde_json::from_str(raw)?;
-    let Some(cache_value) = value.get(ENGLISH_CACHE_FIELD) else {
-        return Ok(None);
-    };
-
-    let cache: EnglishSummaryCache = match serde_json::from_value(cache_value.clone()) {
-        Ok(cache) => cache,
-        Err(_) => return Ok(None),
-    };
-
-    if cache.source != *expected_source {
-        return Ok(None);
-    }
-
-    if cache.output_language.as_deref() == Some(requested_language.as_str()) {
-        return Ok(None);
-    }
-
-    let markdown = cache.markdown.trim();
-    if markdown.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(cache.markdown))
-    }
 }
 
 /// Everything an LLM call needs beyond the prompts, resolved from saved settings.
@@ -506,73 +365,21 @@ impl SummaryService {
         }
     }
 
-    async fn read_detected_summary_language(pool: &SqlitePool, meeting_id: &str) -> Option<String> {
-        let meeting = match MeetingsRepository::get_meeting_metadata(pool, meeting_id).await {
-            Ok(Some(meeting)) => meeting,
-            Ok(None) => {
-                warn!(
-                    "Meeting not found while reading detected summary language: {}",
-                    meeting_id
-                );
-                return None;
-            }
-            Err(e) => {
-                warn!(
-                    "Failed to read meeting metadata for detected summary language (meeting_id={}): {}",
-                    meeting_id, e
-                );
-                return None;
-            }
-        };
-
-        let folder_path = meeting.folder_path.filter(|p| !p.trim().is_empty())?;
-
-        match read_detected_summary_language_from_metadata(Path::new(&folder_path)) {
-            Ok(language) => language,
-            Err(e) => {
-                warn!(
-                    "Failed to read detected summary language metadata for meeting_id={}: {}",
-                    meeting_id, e
-                );
-                None
-            }
-        }
-    }
-
-    fn detect_summary_language_from_text(text: &str) -> Option<String> {
-        let transcript_texts = [text.to_string()];
-        let detection = detect_summary_language(&transcript_texts);
-        match &detection.language {
-            Some(language) => {
-                info!(
-                    "Detected transcript summary language for normalization: {}",
-                    language
-                );
-            }
-            None => {
-                info!(
-                    "Transcript summary language unknown for normalization: {:?}",
-                    detection.reason
-                );
-            }
-        }
-        detection.language
-    }
-
-    /// Processes transcript in the background and generates summary
-    ///
-    /// This function is designed to be spawned as an async task and does not block
-    /// the main thread. It updates the database with progress and results.
+    /// Writes a meeting's AI notes in the background, from its live notes
+    /// (`live_enhanced::notes_from_live_notes`), and stores them. Stretches the
+    /// live notes missed are written first from the saved transcript
+    /// (`live_summary::backfill`). There is no other way to write them: when
+    /// that fails, the job fails with the reason and the UI offers a retry.
     ///
     /// # Arguments
-    /// * `app` - Tauri app handle (used for app data dir and the saved notes-prompt override)
+    /// * `app` - Tauri app handle (app data dir and the live notes model choice)
     /// * `pool` - SQLx connection pool
     /// * `meeting_id` - Unique identifier for the meeting
-    /// * `text` - Full transcript text
-    /// * `model_provider` - LLM provider name (e.g., "ollama", "openai")
-    /// * `model_name` - Specific model (e.g., "gpt-4", "llama3.2:latest")
-    /// * `custom_prompt` - Optional user-provided context
-    /// * `template_id` - Template identifier (e.g., "daily_standup", "standard_meeting")
+    /// * `text` - Full transcript text, one `[mm:ss] [Speaker] text` line per segment
+    /// * `model_provider` / `model_name` - the summary model the job was started
+    ///   for, recorded with the result
+    /// * `custom_prompt` - The user's notes as Markdown
+    /// * `regenerate` - Re-enhance: every section is written again
     // This task boundary carries the persisted command inputs into detached processing.
     #[allow(clippy::too_many_arguments)]
     pub async fn process_transcript_background<R: tauri::Runtime>(
@@ -585,8 +392,6 @@ impl SummaryService {
         model_provider: String,
         model_name: String,
         custom_prompt: String,
-        template_id: String,
-        summary_language: Option<String>,
         regenerate: bool,
     ) {
         let start_time = Instant::now();
@@ -595,230 +400,35 @@ impl SummaryService {
             meeting_id
         );
 
-        let LlmConfig {
-            provider,
-            model_name,
-            api_key: final_api_key,
-            ollama_endpoint,
-            custom_openai_endpoint,
-            max_tokens: custom_openai_max_tokens,
-            temperature: custom_openai_temperature,
-            top_p: custom_openai_top_p,
-        } = match load_llm_config(&pool, &model_provider, &model_name, None).await {
-            Ok(config) => config,
-            Err(e) => {
-                Self::fail_and_cleanup(&pool, &meeting_id, started_at, &e).await;
-                return;
-            }
-        };
-
-        // Local models get a context budget: the window the model runs with.
-        // Ollama is sent the same value as num_ctx; hosted models take the
-        // whole transcript in one pass.
-        let context_budget = if provider == LLMProvider::Ollama {
-            let model_context = ollama_model_context(&model_name, ollama_endpoint.as_deref()).await;
-            let budget =
-                ContextBudget::new(ollama_context_for(OllamaPhase::AfterMeeting, model_context));
-            info!(
-                "✓ Ollama context for {}: model max {:?} tokens, running with num_ctx {}",
-                model_name, model_context, budget.n_ctx
-            );
-            Some(budget)
-        } else if provider == LLMProvider::BuiltInAI {
-            use crate::summary::summary_engine::models;
-            match models::get_model_by_name(&model_name) {
-                Some(model_def) => {
-                    info!(
-                        "✓ Using BuiltInAI context size: {} tokens",
-                        model_def.context_size
-                    );
-                    Some(ContextBudget::new(model_def.context_size as usize))
-                }
-                None => {
-                    warn!("Unknown model: {}, using a 2048-token budget", model_name);
-                    Some(ContextBudget::new(2048))
-                }
-            }
-        } else {
-            None
-        };
-        // Recorded in the cache key; hosted models keep the legacy value.
-        let token_threshold = context_budget.map_or(HOSTED_TOKEN_THRESHOLD, |budget| budget.n_ctx);
-
-        // Get app data directory for BuiltInAI provider
-        let app_data_dir = app.path().app_data_dir().ok();
-
-        use crate::summary::prompt_settings::{load_prompt, PromptKind};
-        let effective_notes_prompt = resolve_summary_system_prompt(
-            load_prompt(&app, PromptKind::Notes).as_deref(),
-            load_prompt(&app, PromptKind::TranscriptOnly).as_deref(),
-            &custom_prompt,
-        );
-
-        if let Some(code) = &summary_language {
-            info!("📝 Summary language preference: {}", code);
-        }
-
-        let detected_summary_language = Self::read_detected_summary_language(&pool, &meeting_id)
-            .await
-            .or_else(|| Self::detect_summary_language_from_text(&text));
-
-        if let Some(code) = &detected_summary_language {
-            info!("📝 Detected transcript summary language: {}", code);
-        }
-
-        let template = match templates::get_template(&template_id) {
-            Ok(template) => template,
-            Err(e) => {
-                let err_msg = format!("Failed to load template '{}': {}", template_id, e);
-                Self::fail_and_cleanup(&pool, &meeting_id, started_at, &err_msg).await;
-                return;
-            }
-        };
-        let template_fingerprint = template_cache_fingerprint(&template);
-
-        let notes_prompt_fingerprint = stable_text_fingerprint(&effective_notes_prompt.text);
-
-        let cache_source = build_summary_cache_source(
-            &text,
-            &custom_prompt,
-            &template_id,
-            &template_fingerprint,
-            &notes_prompt_fingerprint,
-            token_threshold,
-            &model_provider,
-            &model_name,
-            ollama_endpoint.as_deref(),
-            custom_openai_endpoint.as_deref(),
-            custom_openai_max_tokens,
-            custom_openai_temperature,
-            custom_openai_top_p,
-        );
-
-        let cached_english = match SummaryProcessesRepository::get_summary_data(&pool, &meeting_id).await {
-            Err(e) => {
-                warn!(
-                    "Failed to load prior summary row for cache lookup (meeting_id={}): {}. Falling back to full pass-1 generation.",
-                    meeting_id, e
-                );
-                None
-            }
-            Ok(None) => None,
-            Ok(Some(process)) => process.result.and_then(|raw| {
-                match extract_cached_english_markdown(
-                    &raw,
-                    &cache_source,
-                    summary_language.as_deref(),
-                ) {
-                    Ok(opt) => opt,
-                    Err(e) => {
-                        warn!(
-                            "Cached summary result for meeting_id={} is not valid JSON ({}); ignoring cache.",
-                            meeting_id, e
-                        );
-                        None
-                    }
-                }
-            }),
-        };
-
-        // Meetings with live notes: the sections written during the meeting,
-        // the last topic and the title on the live notes model. No pass over
-        // the whole transcript.
-        let from_live_notes = crate::summary::live_enhanced::notes_from_live_notes(
+        let result = crate::summary::live_enhanced::notes_from_live_notes(
             &app,
             &pool,
             &meeting_id,
             &text,
             &custom_prompt,
-            summary_language
-                .as_deref()
-                .or(detected_summary_language.as_deref()),
             regenerate,
             &cancellation_token,
         )
         .await;
-        let from_live_notes = match from_live_notes {
-            Ok(notes) => notes,
-            Err(_) if cancellation_token.is_cancelled() => None,
-            Err(error) => {
-                warn!(
-                    "Enhanced notes from live notes failed ({error}); using the whole transcript"
-                );
-                None
-            }
-        };
-
-        let client = reqwest::Client::new();
-        let backend = ProviderBackend {
-            client: &client,
-            provider: &provider,
-            model_name: &model_name,
-            api_key: &final_api_key,
-            ollama_endpoint: ollama_endpoint.as_deref(),
-            custom_openai_endpoint: custom_openai_endpoint.as_deref(),
-            app_data_dir: app_data_dir.as_ref(),
-            cancellation_token: Some(&cancellation_token),
-        };
-        // The notes document's wrap-up from the tidy pass, stored with the
-        // summary for the notes editor (`completeAiNotes`).
-        let tidy_wrap_up = from_live_notes
-            .as_ref()
-            .and_then(|notes| notes.tidy.clone());
-        let result = match from_live_notes {
-            Some(notes) => Ok(crate::summary::processor::GeneratedMeetingSummary {
-                final_markdown: notes.markdown.clone(),
-                english_markdown: notes.markdown,
-                successful_chunk_count: notes.calls as i64,
-                reasoning_stripped: false,
-                normalization_fallback: false,
-            }),
-            None if cancellation_token.is_cancelled() => {
-                Err("Summary generation was cancelled".to_string())
-            }
-            None => {
-                generate_meeting_summary(
-                    &backend,
-                    &model_name,
-                    &text,
-                    &custom_prompt,
-                    &effective_notes_prompt,
-                    context_budget,
-                    &GenerationOptions {
-                        max_tokens: custom_openai_max_tokens,
-                        temperature: custom_openai_temperature,
-                        top_p: custom_openai_top_p,
-                        num_ctx: None,
-                        ..Default::default()
-                    },
-                    summary_language.as_deref(),
-                    detected_summary_language.as_deref(),
-                    cached_english.as_deref(),
-                )
-                .await
-            }
-        };
-
         let duration = start_time.elapsed().as_secs_f64();
 
         match result {
-            Ok(generated) => {
+            Ok(notes) => {
                 info!(
-                    "✓ Successfully processed {} chunks for meeting_id: {}. Duration: {:.2}s",
-                    generated.successful_chunk_count, meeting_id, duration
+                    "✓ AI notes written for meeting_id: {} with {} model calls. Duration: {:.2}s",
+                    meeting_id, notes.calls, duration
                 );
+                // The notes document's wrap-up from the tidy pass, stored with
+                // the summary for the notes editor (`completeAiNotes`).
+                let tidy_wrap_up = notes.tidy.clone();
                 let result_json = match build_summary_result_json(
-                    &generated.final_markdown,
-                    &generated.english_markdown,
-                    cache_source,
-                    summary_language.as_deref(),
-                    generated.reasoning_stripped,
-                    generated.normalization_fallback,
+                    &notes.markdown,
+                    &model_provider,
+                    &model_name,
                 ) {
                     Ok(result) => with_tidy_wrap_up(result, tidy_wrap_up.as_ref()),
                     Err(error) => {
-                        Self::update_process_failed(&pool, &meeting_id, started_at, &error).await;
-                        Self::cleanup_cancellation_token(&meeting_id, started_at);
+                        Self::fail_and_cleanup(&pool, &meeting_id, started_at, &error).await;
                         return;
                     }
                 };
@@ -828,42 +438,32 @@ impl SummaryService {
                     &meeting_id,
                     started_at,
                     result_json,
-                    generated.successful_chunk_count,
+                    notes.calls as i64,
                     duration,
                 )
                 .await
                 {
                     Ok(true) => {
-                        if let Some(name) =
-                            extract_meeting_name_from_markdown(&generated.final_markdown)
-                                .filter(|name| !name.is_empty())
+                        if let Some(name) = extract_meeting_name_from_markdown(&notes.markdown)
+                            .filter(|name| !name.is_empty())
                         {
-                            // Old notes-prompt overrides still carry the example title,
-                            // which small models copy verbatim instead of naming the meeting.
-                            if is_prompt_echo_title(&name, &text) {
-                                warn!(
-                                    "Keeping meeting name for {}: generated title '{}' echoes the prompt example",
+                            match MeetingsRepository::update_meeting_name(
+                                &pool,
+                                &meeting_id,
+                                &name,
+                                TitleSource::Generated,
+                            )
+                            .await
+                            {
+                                Ok(TitleUpdate::Kept) => info!(
+                                    "Keeping the user's title for {}: not renaming it to '{}'",
                                     meeting_id, name
-                                );
-                            } else {
-                                match MeetingsRepository::update_meeting_name(
-                                    &pool,
-                                    &meeting_id,
-                                    &name,
-                                    TitleSource::Generated,
-                                )
-                                .await
-                                {
-                                    Ok(TitleUpdate::Kept) => info!(
-                                        "Keeping the user's title for {}: not renaming it to '{}'",
-                                        meeting_id, name
-                                    ),
-                                    Ok(_) => {}
-                                    Err(error) => error!(
-                                        "Failed to update meeting name for {}: {}",
-                                        meeting_id, error
-                                    ),
-                                }
+                                ),
+                                Ok(_) => {}
+                                Err(error) => error!(
+                                    "Failed to update meeting name for {}: {}",
+                                    meeting_id, error
+                                ),
                             }
                         }
                         info!("Summary saved successfully for meeting_id: {}", meeting_id);
@@ -959,7 +559,7 @@ impl SummaryService {
         let app_data_dir = app.path().app_data_dir().ok();
         let client = reqwest::Client::new();
         let title_user_prompt = build_title_user_prompt(&transcript, notes.as_deref());
-        let title_max_tokens = crate::summary::processor::fit_builtin_output(
+        let title_max_tokens = fit_builtin_output(
             &config.provider,
             &config.model_name,
             app_data_dir.as_ref(),
@@ -1227,288 +827,6 @@ mod tests {
         );
     }
 
-    fn sample_notes_prompt_fingerprint() -> String {
-        stable_text_fingerprint("standard notes prompt")
-    }
-
-    fn sample_cache_source() -> SummaryCacheSource {
-        let template_fingerprint = stable_text_fingerprint("standard template prompt");
-        let notes_prompt_fingerprint = sample_notes_prompt_fingerprint();
-        build_summary_cache_source(
-            "transcript body",
-            "custom prompt",
-            "standard_meeting",
-            &template_fingerprint,
-            &notes_prompt_fingerprint,
-            3700,
-            "ollama",
-            "gemma3:1b",
-            Some("http://localhost:11434"),
-            None,
-            None,
-            None,
-            None,
-        )
-    }
-
-    fn test_template(section_title: &str) -> Template {
-        Template {
-            name: "Test".to_string(),
-            description: "Test template".to_string(),
-            sections: vec![crate::summary::templates::TemplateSection {
-                title: section_title.to_string(),
-                instruction: "Summarize this section".to_string(),
-                format: "paragraph".to_string(),
-                item_format: None,
-                example_item_format: None,
-            }],
-        }
-    }
-
-    #[test]
-    fn test_template_cache_fingerprint_changes_with_rendered_template() {
-        assert_ne!(
-            template_cache_fingerprint(&test_template("Summary")),
-            template_cache_fingerprint(&test_template("Decisions"))
-        );
-    }
-
-    #[test]
-    fn test_legacy_english_markdown_field_is_cache_miss() {
-        let raw = serde_json::json!({
-            "markdown": "translated",
-            "english_markdown": "# Old English\nBody"
-        })
-        .to_string();
-
-        assert_eq!(
-            extract_cached_english_markdown(&raw, &sample_cache_source(), Some("de")).unwrap(),
-            None
-        );
-    }
-
-    #[test]
-    fn test_matching_source_changed_translation_target_reuses_cache() {
-        let source = sample_cache_source();
-        let raw = build_summary_result_json(
-            "# Reunion\n## Points\nBonjour",
-            "# Meeting\n## Points\nHello",
-            source.clone(),
-            Some("fr"),
-            false,
-            false,
-        )
-        .unwrap()
-        .to_string();
-
-        assert_eq!(
-            extract_cached_english_markdown(&raw, &source, Some("de")).unwrap(),
-            Some("# Meeting\n## Points\nHello".to_string())
-        );
-    }
-
-    #[test]
-    fn test_same_language_regeneration_rejects_cache() {
-        let source = sample_cache_source();
-        let raw = build_summary_result_json(
-            "# Reunion\n## Points\nBonjour",
-            "# Meeting\n## Points\nHello",
-            source.clone(),
-            Some("fr"),
-            false,
-            false,
-        )
-        .unwrap()
-        .to_string();
-
-        assert_eq!(
-            extract_cached_english_markdown(&raw, &source, Some("fr")).unwrap(),
-            None
-        );
-    }
-
-    #[test]
-    fn test_changed_summary_inputs_reject_cache() {
-        let source = sample_cache_source();
-        let template_fingerprint = source.template_fingerprint.clone();
-        let notes_prompt_fingerprint = source.notes_prompt_fingerprint.clone();
-        let raw = build_summary_result_json(
-            "# Reunion\n## Points\nBonjour",
-            "# Meeting\n## Points\nHello",
-            source,
-            Some("fr"),
-            false,
-            false,
-        )
-        .unwrap()
-        .to_string();
-
-        let changed_sources = [
-            build_summary_cache_source(
-                "changed transcript",
-                "custom prompt",
-                "standard_meeting",
-                &template_fingerprint,
-                &notes_prompt_fingerprint,
-                3700,
-                "ollama",
-                "gemma3:1b",
-                Some("http://localhost:11434"),
-                None,
-                None,
-                None,
-                None,
-            ),
-            build_summary_cache_source(
-                "transcript body",
-                "changed prompt",
-                "standard_meeting",
-                &template_fingerprint,
-                &notes_prompt_fingerprint,
-                3700,
-                "ollama",
-                "gemma3:1b",
-                Some("http://localhost:11434"),
-                None,
-                None,
-                None,
-                None,
-            ),
-            build_summary_cache_source(
-                "transcript body",
-                "custom prompt",
-                "daily_standup",
-                &template_fingerprint,
-                &notes_prompt_fingerprint,
-                3700,
-                "ollama",
-                "gemma3:1b",
-                Some("http://localhost:11434"),
-                None,
-                None,
-                None,
-                None,
-            ),
-            build_summary_cache_source(
-                "transcript body",
-                "custom prompt",
-                "standard_meeting",
-                &template_fingerprint,
-                &notes_prompt_fingerprint,
-                3700,
-                "openai",
-                "gemma3:1b",
-                Some("http://localhost:11434"),
-                None,
-                None,
-                None,
-                None,
-            ),
-            build_summary_cache_source(
-                "transcript body",
-                "custom prompt",
-                "standard_meeting",
-                &template_fingerprint,
-                &notes_prompt_fingerprint,
-                3700,
-                "ollama",
-                "qwen2.5:3b",
-                Some("http://localhost:11434"),
-                None,
-                None,
-                None,
-                None,
-            ),
-            build_summary_cache_source(
-                "transcript body",
-                "custom prompt",
-                "standard_meeting",
-                &template_fingerprint,
-                &notes_prompt_fingerprint,
-                3700,
-                "ollama",
-                "gemma3:1b",
-                Some("http://localhost:11500"),
-                None,
-                None,
-                None,
-                None,
-            ),
-            build_summary_cache_source(
-                "transcript body",
-                "custom prompt",
-                "standard_meeting",
-                &template_fingerprint,
-                &notes_prompt_fingerprint,
-                3700,
-                "ollama",
-                "gemma3:1b",
-                Some("http://localhost:11434"),
-                Some("https://custom.example/v1"),
-                Some(2048),
-                Some(0.2),
-                Some(0.9),
-            ),
-        ];
-
-        for changed_source in changed_sources {
-            assert_eq!(
-                extract_cached_english_markdown(&raw, &changed_source, Some("de")).unwrap(),
-                None
-            );
-        }
-    }
-
-    #[test]
-    fn test_changed_template_content_rejects_cache() {
-        let source = sample_cache_source();
-        let raw = build_summary_result_json(
-            "# Reunion\n## Points\nBonjour",
-            "# Meeting\n## Points\nHello",
-            source.clone(),
-            Some("fr"),
-            false,
-            false,
-        )
-        .unwrap()
-        .to_string();
-
-        let changed_template = SummaryCacheSource {
-            template_fingerprint: stable_text_fingerprint("changed template prompt"),
-            ..source
-        };
-
-        assert_eq!(
-            extract_cached_english_markdown(&raw, &changed_template, Some("de")).unwrap(),
-            None
-        );
-    }
-
-    #[test]
-    fn test_changed_notes_prompt_rejects_cache() {
-        let source = sample_cache_source();
-        let raw = build_summary_result_json(
-            "# Reunion\n## Points\nBonjour",
-            "# Meeting\n## Points\nHello",
-            source.clone(),
-            Some("fr"),
-            false,
-            false,
-        )
-        .unwrap()
-        .to_string();
-
-        let changed_notes_prompt = SummaryCacheSource {
-            notes_prompt_fingerprint: stable_text_fingerprint("changed notes prompt"),
-            ..source
-        };
-
-        assert_eq!(
-            extract_cached_english_markdown(&raw, &changed_notes_prompt, Some("de")).unwrap(),
-            None
-        );
-    }
-
     #[test]
     fn ollama_context_is_small_while_recording_and_never_trusts_a_guess() {
         // While recording: 8192, or a known smaller model context.
@@ -1536,61 +854,23 @@ mod tests {
     }
 
     #[test]
-    fn test_changed_token_threshold_rejects_cache() {
-        let source = sample_cache_source();
-        let raw = build_summary_result_json(
-            "# Reunion\n## Points\nBonjour",
-            "# Meeting\n## Points\nHello",
-            source.clone(),
-            Some("fr"),
-            false,
-            false,
-        )
-        .unwrap()
-        .to_string();
-
-        let changed_threshold = SummaryCacheSource {
-            token_threshold: 8192,
-            ..source
-        };
-
-        assert_eq!(
-            extract_cached_english_markdown(&raw, &changed_threshold, Some("de")).unwrap(),
-            None
-        );
-    }
-
-    #[test]
-    fn test_result_json_strips_display_markdown_but_keeps_cache_title() {
-        let result = build_summary_result_json(
-            "# Translated Title\n## Decisions\nDone",
-            "# English Title\n## Decisions\nDone",
-            sample_cache_source(),
-            Some("fr"),
-            false,
-            false,
-        )
-        .unwrap();
-
+    fn result_json_strips_the_title_and_records_the_model() {
+        let result =
+            build_summary_result_json("# Title\n## Decisions\nDone", "builtin-ai", "gemma4:e2b")
+                .unwrap();
         assert_eq!(result["markdown"], "## Decisions\nDone");
         assert_eq!(
-            result["english_cache"]["markdown"],
-            "# English Title\n## Decisions\nDone"
+            result["model"],
+            serde_json::json!({ "provider": "builtin-ai", "model": "gemma4:e2b" })
         );
+        assert!(result.get("english_cache").is_none());
     }
 
     #[test]
     fn result_json_carries_the_tidy_wrap_up_only_when_the_tidy_pass_wrote_the_notes() {
         let result = || {
-            build_summary_result_json(
-                "# Title\n## Summary\nDone",
-                "# Title\n## Summary\nDone",
-                sample_cache_source(),
-                None,
-                false,
-                false,
-            )
-            .unwrap()
+            build_summary_result_json("# Title\n## Summary\nDone", "builtin-ai", "gemma4:e2b")
+                .unwrap()
         };
         assert!(with_tidy_wrap_up(result(), None)
             .get(TIDY_WRAP_UP_FIELD)
@@ -1617,36 +897,21 @@ mod tests {
     #[test]
     fn result_json_rejects_title_only_display_markdown() {
         assert_eq!(
-            build_summary_result_json(
-                "# Title",
-                "# Title",
-                sample_cache_source(),
-                None,
-                false,
-                false,
-            ),
-            Err("Final summary contains no visible content after title removal".to_string())
+            build_summary_result_json("# Title", "builtin-ai", "gemma4:e2b"),
+            Err("AI notes contain no visible content after title removal".to_string())
         );
     }
 
     #[test]
     fn result_json_never_persists_reasoning_text() {
         let result = build_summary_result_json(
-            "# Title\nVisible",
-            "# Title\nVisible",
-            sample_cache_source(),
-            None,
-            true,
-            false,
+            "<think>private</think>\n# Title\nVisible",
+            "builtin-ai",
+            "gemma4:e2b",
         )
         .unwrap();
         assert_eq!(result["reasoning_stripped"], true);
+        assert_eq!(result["markdown"], "Visible");
         assert!(result.get("reasoning").is_none());
-    }
-
-    #[test]
-    fn test_extract_cached_english_from_malformed_json_errors() {
-        let raw = r#"{ not valid json"#;
-        assert!(extract_cached_english_markdown(raw, &sample_cache_source(), Some("de")).is_err());
     }
 }

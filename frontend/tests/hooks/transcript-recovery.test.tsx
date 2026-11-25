@@ -5,13 +5,11 @@ import type { MeetingMetadata, StoredTranscript } from '../../src/services/index
 const originalCore = { ...await import('@tauri-apps/api/core') };
 const originalIndexedDB = { ...await import('../../src/services/indexedDBService') };
 const originalStorage = { ...await import('../../src/services/storageService') };
-const originalSummaryLanguage = { ...await import('../../src/lib/summary-language-preferences') };
 const originalToast = { ...await import('sonner') };
 afterAll(() => {
   mock.module('@tauri-apps/api/core', () => originalCore);
   mock.module('../../src/services/indexedDBService', () => originalIndexedDB);
   mock.module('../../src/services/storageService', () => originalStorage);
-  mock.module('../../src/lib/summary-language-preferences', () => originalSummaryLanguage);
   mock.module('sonner', () => originalToast);
 });
 
@@ -56,7 +54,6 @@ const saveMeeting = mock(async (
   _meetingId?: string | null,
 ) => ({ meeting_id: 'saved-meeting' }));
 const storageService = { saveMeeting };
-const applyPinnedSummaryLanguageToMeeting = mock(async () => {});
 const toast = { success: mock(() => {}), error: mock(() => {}), warning: mock(() => {}), info: mock(() => {}) };
 
 const invoke = mock(async (command: string, args?: Record<string, unknown>): Promise<unknown> => {
@@ -78,7 +75,6 @@ const invoke = mock(async (command: string, args?: Record<string, unknown>): Pro
 mock.module('@tauri-apps/api/core', () => ({ ...originalCore, invoke }));
 mock.module('../../src/services/indexedDBService', () => ({ indexedDBService }));
 mock.module('../../src/services/storageService', () => ({ storageService }));
-mock.module('../../src/lib/summary-language-preferences', () => ({ applyPinnedSummaryLanguageToMeeting }));
 mock.module('sonner', () => ({ toast }));
 
 const { useTranscriptRecovery } = await import('../../src/hooks/useTranscriptRecovery');
@@ -99,7 +95,6 @@ beforeEach(() => {
   indexedDBService.getTranscripts.mockClear();
   indexedDBService.getTranscriptsStrict.mockClear();
   indexedDBService.markMeetingSavedStrict.mockClear();
-  applyPinnedSummaryLanguageToMeeting.mockClear();
   toast.success.mockClear();
   meetingMetadata = null;
   meetingTranscripts = [];
