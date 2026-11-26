@@ -96,6 +96,16 @@ export function PeopleSourceCard({ status, onStatuses, onPeopleChanged }: People
     setTestResult(describeTest(result.test, source));
     onStatuses(result.statuses);
     toast.success(`${copy.title} connected`, { description: describeTest(result.test, source) });
+    // Notion needs a database before it can sync: offer the list straight away.
+    if (source === 'notion') {
+      try {
+        const list = await peopleSyncApi.notionDatabases();
+        setDatabases(list);
+        if (!databaseId && list.length === 1) setDatabaseId(list[0].id);
+      } catch {
+        /* the Choose database button retries */
+      }
+    }
   }, `Could not connect ${copy.title}`);
 
   const test = () => run('test', async () => {

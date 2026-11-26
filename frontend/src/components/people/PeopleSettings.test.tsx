@@ -326,6 +326,16 @@ describe('PeopleSettings', () => {
     expect(button(notion(), 'Sync now').props.disabled).toBe(false)
   })
 
+  test('connecting Notion offers its databases straight away', async () => {
+    const renderer = await render()
+    const notion = card(renderer, 'Notion')
+    await type(field(notion, 'Notion integration token'), 'ntn_abc')
+    await act(async () => { await notion.findByType('form').props.onSubmit({ preventDefault: () => {} }) })
+    expect(lastCall('people_connect')?.args).toEqual({ source: 'notion', token: 'ntn_abc' })
+    expect(lastCall('people_notion_databases')).toBeTruthy()
+    expect(field(card(renderer, 'Notion'), 'Notion database', 'select').props.value).toBe('db1')
+  })
+
   test('refreshes when a background sync finishes', async () => {
     const renderer = await render()
     people = [...people, person('p3', 'Ana Lima')]
