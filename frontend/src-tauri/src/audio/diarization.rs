@@ -15,6 +15,7 @@ use crate::audio::speech::{
     models::{Availability, ModelKind},
 };
 use crate::database::models::Transcript;
+use crate::people::MeetingContext;
 use crate::state::AppState;
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::Utc;
@@ -555,6 +556,78 @@ fn detect_user_speaker_label(transcripts: &[Transcript], turns: &[SpeakerTurn]) 
     (!system_labels.contains(&label)).then_some(label)
 }
 
+/// The cluster that is the meeting's one other attendee, and that attendee's
+/// name: only when there are exactly two clusters, one of them the user's,
+/// and exactly one attendee besides the user (`people.me`).
+fn other_attendee_cluster(
+    people: &MeetingContext,
+    turns: &[SpeakerTurn],
+    user_label: Option<&str>,
+) -> Option<(String, String)> {
+    let user = user_label?;
+    let clusters: HashSet<&str> = turns.iter().map(|turn| turn.speaker.as_str()).collect();
+    if clusters.len() != 2 || !clusters.contains(user) {
+        return None;
+    }
+    let me = people.me.as_ref().map(|person| person.id.as_str());
+    let others: Vec<_> = people
+        .attendees
+        .iter()
+        .filter(|person| Some(person.id.as_str()) != me)
+        .collect();
+    let [other] = others.as_slice() else {
+        return None;
+    };
+    let name = other.name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let label = clusters.into_iter().find(|cluster| *cluster != user)?;
+    Some((label.to_string(), name.to_string()))
+}
+
+/// Seeds friendly speaker names: "You" for the user's channel (`mic`) when
+/// the user's cluster was found, and the other attendee's name for `other`
+/// (cluster label, name). Never touches a speaker the user already renamed or
+/// merged, and never reuses a name the user already gave someone.
+async fn seed_speaker_names(
+    conn: &mut sqlx::SqliteConnection,
+    meeting_id: &str,
+    user_found: bool,
+    other: Option<(&str, &str)>,
+) -> Result<()> {
+    let now = Utc::now().to_rfc3339();
+    // "You", not the user's own name: the transcript UI and the summary
+    // prompts treat "You" as the person recording.
+    if user_found {
+        sqlx::query(
+            "INSERT INTO speaker_identities (meeting_id, speaker_id, display_name, merged_into, updated_at) \
+             VALUES (?, 'mic', 'You', NULL, ?) \
+             ON CONFLICT(meeting_id, speaker_id) DO NOTHING",
+        )
+        .bind(meeting_id)
+        .bind(&now)
+        .execute(&mut *conn)
+        .await?;
+    }
+    if let Some((label, name)) = other {
+        sqlx::query(
+            "INSERT INTO speaker_identities (meeting_id, speaker_id, display_name, merged_into, updated_at) \
+             SELECT ?1, ?2, ?3, NULL, ?4 WHERE NOT EXISTS ( \
+                 SELECT 1 FROM speaker_identities \
+                 WHERE meeting_id = ?1 AND display_name = ?3 COLLATE NOCASE) \
+             ON CONFLICT(meeting_id, speaker_id) DO NOTHING",
+        )
+        .bind(meeting_id)
+        .bind(label)
+        .bind(name)
+        .bind(&now)
+        .execute(&mut *conn)
+        .await?;
+    }
+    Ok(())
+}
+
 async fn persist<R: Runtime>(
     app: &AppHandle<R>,
     meeting_id: &str,
@@ -562,6 +635,7 @@ async fn persist<R: Runtime>(
     transcripts: &[Transcript],
     result: &DiarizationResult,
     user_label: Option<&str>,
+    people: &MeetingContext,
 ) -> Result<()> {
     let state = app
         .try_state::<AppState>()
@@ -578,18 +652,19 @@ async fn persist<R: Runtime>(
             .await?;
     }
 
-    // Seed a friendly name for the user's channel without clobbering a rename.
-    if user_label.is_some() {
-        sqlx::query(
-            "INSERT INTO speaker_identities (meeting_id, speaker_id, display_name, merged_into, updated_at) \
-             VALUES (?, 'mic', 'You', NULL, ?) \
-             ON CONFLICT(meeting_id, speaker_id) DO NOTHING",
-        )
-        .bind(meeting_id)
-        .bind(Utc::now().to_rfc3339())
-        .execute(&mut *tx)
-        .await?;
+    let other = other_attendee_cluster(people, &result.turns, user_label);
+    if let Some((label, _)) = &other {
+        log::info!("Diarization: naming {label} after the meeting's one other attendee");
     }
+    seed_speaker_names(
+        &mut tx,
+        meeting_id,
+        user_label.is_some(),
+        other
+            .as_ref()
+            .map(|(label, name)| (label.as_str(), name.as_str())),
+    )
+    .await?;
     sqlx::query("INSERT INTO diarization_runs (id, meeting_id, engine, segmentation_model, embedding_model, result_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
         .bind(&result.id)
         .bind(meeting_id)
@@ -845,6 +920,12 @@ async fn diarize_and_persist<R: Runtime>(
     let reserved = corrected_speaker_ids(pool, meeting_id).await;
     stabilize_turn_labels(&mut turns, &previous, &reserved);
     let user_label = detect_user_speaker_label(&transcripts, &turns);
+    let people = crate::people::meeting_context(pool, meeting_id)
+        .await
+        .unwrap_or_else(|error| {
+            log::warn!("Diarization: could not load the meeting's people: {error}");
+            MeetingContext::default()
+        });
     if let Some(label) = &user_label {
         log::info!(
             "Diarization: mic channel maps to a single cluster ({}); labeling it as the user",
@@ -880,6 +961,7 @@ async fn diarize_and_persist<R: Runtime>(
         &transcripts,
         &result,
         user_label.as_deref(),
+        &people,
     )
     .await
     .context("Failed to persist diarization output")?;
@@ -1396,6 +1478,199 @@ mod tests {
             confidence: 1.0,
         }];
         assert_eq!(detect_user_speaker_label(&transcripts, &turns), None);
+    }
+
+    fn person(id: &str, name: &str) -> crate::people::Person {
+        crate::people::Person {
+            id: id.into(),
+            name: name.into(),
+            email: None,
+            role: None,
+            team: None,
+            aliases: Vec::new(),
+            projects: Vec::new(),
+            notes: None,
+            is_me: false,
+            locked_fields: Vec::new(),
+            sources: Vec::new(),
+        }
+    }
+
+    fn people(me: Option<&str>, attendees: &[(&str, &str)]) -> MeetingContext {
+        let attendees: Vec<_> = attendees
+            .iter()
+            .map(|(id, name)| person(id, name))
+            .collect();
+        MeetingContext {
+            me: me.and_then(|id| attendees.iter().find(|p| p.id == id).cloned()),
+            attendees,
+            vocabulary: Vec::new(),
+        }
+    }
+
+    fn two_speakers() -> Vec<SpeakerTurn> {
+        vec![turn(0.0, 5.0, "speaker_00"), turn(5.0, 9.0, "speaker_01")]
+    }
+
+    #[test]
+    fn the_one_other_attendee_names_the_other_cluster() {
+        let ctx = people(Some("me"), &[("me", "Praveen V"), ("dev", "Dev Patel")]);
+        assert_eq!(
+            other_attendee_cluster(&ctx, &two_speakers(), Some("speaker_00")),
+            Some(("speaker_01".to_string(), "Dev Patel".to_string()))
+        );
+        // Without `me`, the one attendee listed is the other person.
+        let ctx = people(None, &[("dev", "Dev Patel")]);
+        assert_eq!(
+            other_attendee_cluster(&ctx, &two_speakers(), Some("speaker_01")),
+            Some(("speaker_00".to_string(), "Dev Patel".to_string()))
+        );
+    }
+
+    #[test]
+    fn the_two_person_rule_needs_two_clusters_one_other_attendee_and_the_user() {
+        let ctx = people(Some("me"), &[("me", "Praveen V"), ("dev", "Dev Patel")]);
+        let mut three = two_speakers();
+        three.push(turn(9.0, 12.0, "speaker_02"));
+        assert_eq!(
+            other_attendee_cluster(&ctx, &three, Some("speaker_00")),
+            None
+        );
+        assert_eq!(other_attendee_cluster(&ctx, &two_speakers(), None), None);
+        assert_eq!(
+            other_attendee_cluster(&ctx, &two_speakers(), Some("speaker_09")),
+            None
+        );
+        let crowd = people(
+            Some("me"),
+            &[
+                ("me", "Praveen V"),
+                ("dev", "Dev Patel"),
+                ("pri", "Priya Shah"),
+            ],
+        );
+        assert_eq!(
+            other_attendee_cluster(&crowd, &two_speakers(), Some("speaker_00")),
+            None
+        );
+        // Without `me`, two attendees could be anyone.
+        let unknown = people(None, &[("a", "Praveen V"), ("dev", "Dev Patel")]);
+        assert_eq!(
+            other_attendee_cluster(&unknown, &two_speakers(), Some("speaker_00")),
+            None
+        );
+        assert_eq!(
+            other_attendee_cluster(
+                &people(Some("me"), &[("me", "Praveen V")]),
+                &two_speakers(),
+                Some("speaker_00")
+            ),
+            None
+        );
+    }
+
+    async fn people_pool() -> (sqlx::SqlitePool, String) {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let meeting = crate::database::repositories::meeting::MeetingsRepository::create_meeting(
+            &pool, "Sync", None, false,
+        )
+        .await
+        .unwrap();
+        (pool, meeting)
+    }
+
+    async fn names(pool: &sqlx::SqlitePool, meeting: &str) -> Vec<(String, Option<String>)> {
+        sqlx::query_as(
+            "SELECT speaker_id, display_name FROM speaker_identities WHERE meeting_id = ? ORDER BY speaker_id",
+        )
+        .bind(meeting)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn seeds_you_for_the_user_and_the_attendee_for_the_other_cluster() {
+        let (pool, meeting) = people_pool().await;
+        let mut conn = pool.acquire().await.unwrap();
+        seed_speaker_names(&mut conn, &meeting, true, Some(("speaker_01", "Dev Patel")))
+            .await
+            .unwrap();
+        drop(conn);
+        assert_eq!(
+            names(&pool, &meeting).await,
+            vec![
+                ("mic".to_string(), Some("You".to_string())),
+                ("speaker_01".to_string(), Some("Dev Patel".to_string())),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn seeding_never_overwrites_a_users_rename_or_merge() {
+        let (pool, meeting) = people_pool().await;
+        let now = Utc::now().to_rfc3339();
+        for (id, name, merged) in [
+            ("mic", Some("Praveen"), None),
+            ("speaker_01", Some("Avery"), None),
+            ("speaker_02", None, Some("speaker_01")),
+        ] {
+            sqlx::query("INSERT INTO speaker_identities (meeting_id, speaker_id, display_name, merged_into, updated_at) VALUES (?, ?, ?, ?, ?)")
+                .bind(&meeting)
+                .bind(id)
+                .bind(name)
+                .bind(merged)
+                .bind(&now)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let mut conn = pool.acquire().await.unwrap();
+        seed_speaker_names(&mut conn, &meeting, true, Some(("speaker_01", "Dev Patel")))
+            .await
+            .unwrap();
+        seed_speaker_names(&mut conn, &meeting, true, Some(("speaker_02", "Dev Patel")))
+            .await
+            .unwrap();
+        drop(conn);
+        assert_eq!(
+            names(&pool, &meeting).await,
+            vec![
+                ("mic".to_string(), Some("Praveen".to_string())),
+                ("speaker_01".to_string(), Some("Avery".to_string())),
+                ("speaker_02".to_string(), None),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn seeding_skips_a_name_the_user_already_gave_someone() {
+        let (pool, meeting) = people_pool().await;
+        sqlx::query("INSERT INTO speaker_identities (meeting_id, speaker_id, display_name, merged_into, updated_at) VALUES (?, 'speaker_00', 'dev patel', NULL, ?)")
+            .bind(&meeting)
+            .bind(Utc::now().to_rfc3339())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut conn = pool.acquire().await.unwrap();
+        seed_speaker_names(
+            &mut conn,
+            &meeting,
+            false,
+            Some(("speaker_01", "Dev Patel")),
+        )
+        .await
+        .unwrap();
+        drop(conn);
+        assert_eq!(
+            names(&pool, &meeting).await,
+            vec![("speaker_00".to_string(), Some("dev patel".to_string()))]
+        );
     }
 
     #[test]

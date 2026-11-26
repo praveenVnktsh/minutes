@@ -283,6 +283,18 @@ impl<R: Runtime> Host for AppHost<R> {
             }
         }
     }
+
+    async fn people(&self) -> crate::people::MeetingContext {
+        let (Some(meeting_id), Ok(pool)) = (self.meeting_id(), self.pool()) else {
+            return crate::people::MeetingContext::default();
+        };
+        crate::people::meeting_context(&pool, &meeting_id)
+            .await
+            .unwrap_or_else(|error| {
+                warn!("Copilot: could not load the meeting's people: {error}");
+                crate::people::MeetingContext::default()
+            })
+    }
 }
 
 /// Copilot's model: the built-in one when forced, else the Copilot model

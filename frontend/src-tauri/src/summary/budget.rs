@@ -174,11 +174,34 @@ pub(crate) async fn fit_builtin_output(
     user_prompt: &str,
     requested: Option<u32>,
 ) -> Option<u32> {
+    builtin_output_room(
+        provider,
+        model_name,
+        app_data_dir,
+        system_prompt,
+        user_prompt,
+        requested,
+    )
+    .await
+    .unwrap_or(requested)
+}
+
+/// [`fit_builtin_output`], but `Err(())` when the prompt leaves no useful
+/// output room in the built-in model's context, so a caller can drop
+/// optional context and try again.
+pub(crate) async fn builtin_output_room(
+    provider: &LLMProvider,
+    model_name: &str,
+    app_data_dir: Option<&PathBuf>,
+    system_prompt: &str,
+    user_prompt: &str,
+    requested: Option<u32>,
+) -> Result<Option<u32>, ()> {
     if *provider != LLMProvider::BuiltInAI {
-        return requested;
+        return Ok(requested);
     }
     let Some(model) = crate::summary::summary_engine::get_model_by_name(model_name) else {
-        return requested;
+        return Ok(requested);
     };
     let mut budget = ContextBudget::new(model.context_size as usize);
     if let Some(requested) = requested {
@@ -193,13 +216,13 @@ pub(crate) async fn fit_builtin_output(
         estimate_tokens(system_prompt) + estimate_tokens(user_prompt) + CHAT_TEMPLATE_TOKENS
     });
     match budget.output_for_prompt(prompt_tokens) {
-        Some(output) => Some(u32::try_from(output).unwrap_or(u32::MAX)),
+        Some(output) => Ok(Some(u32::try_from(output).unwrap_or(u32::MAX))),
         None => {
             log::warn!(
                 "Prompt of {prompt_tokens} tokens leaves no output room in a {}-token context",
                 budget.n_ctx
             );
-            requested
+            Err(())
         }
     }
 }

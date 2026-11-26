@@ -180,6 +180,7 @@ async fn new_path(app_data: &Path, notes: &[LiveNote], text: &str) -> NewRun {
             user_notes_markdown: "",
             stored: written,
             regenerate: false,
+            attendee_names: Vec::new(),
         },
         &NoSink,
         &cancel,

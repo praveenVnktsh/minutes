@@ -80,6 +80,11 @@ pub trait Host: Send + Sync + 'static {
     }
     /// Writes finished moments. `Ok(false)`: the meeting is not bound yet.
     async fn persist(&self, rows: &[ChatRow]) -> Result<bool, String>;
+    /// The meeting's people, for the attendee block. Empty by default and
+    /// whenever the meeting or its attendees are unknown.
+    async fn people(&self) -> crate::people::MeetingContext {
+        crate::people::MeetingContext::default()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -749,19 +754,31 @@ impl Core {
         self.publish();
     }
 
-    fn prompt_with(&self, task: &Task, budget: context::Budget) -> context::PromptParts {
+    fn prompt_with(
+        &self,
+        task: &Task,
+        people: &crate::people::MeetingContext,
+        budget: context::Budget,
+    ) -> context::PromptParts {
         let timeline = self.host.timeline();
         let state = self.lock();
-        context::build_with(&state.lines, &timeline, &state.notes, task, budget)
+        context::build_with(&state.lines, &timeline, &state.notes, people, task, budget)
     }
 
-    /// The prompt for `task`, shrunk (oldest transcript first, then the live
-    /// summary) until it fits the model's context with room for the answer.
-    /// Sizes are estimated from characters and, near the limit, counted with
-    /// the model's own tokenizer.
+    /// The prompt for `task`, shrunk (the attendee block first, then the
+    /// oldest transcript, then the live summary) until it fits the model's
+    /// context with room for the answer. Sizes are estimated from characters
+    /// and, near the limit, counted with the model's own tokenizer.
     async fn prompt_for(&self, streamer: &dyn Streamer, task: &Task) -> context::PromptParts {
-        let mut budget = context::Budget::default();
-        let mut parts = self.prompt_with(task, budget);
+        // A yes/no check needs no attendees, and may run on the small live
+        // notes model, so it stays as short as before.
+        let people = if matches!(task, Task::Confirm { .. }) {
+            crate::people::MeetingContext::default()
+        } else {
+            self.host.people().await
+        };
+        let mut budget = context::Budget::with_people(&people);
+        let mut parts = self.prompt_with(task, &people, budget);
         let Some(limit) = streamer.prompt_token_limit(task.max_tokens()) else {
             return parts;
         };
@@ -780,7 +797,7 @@ impl Core {
             }
             let excess_chars = (tokens - limit) * 4 + 400;
             budget = budget.shrink(excess_chars);
-            parts = self.prompt_with(task, budget);
+            parts = self.prompt_with(task, &people, budget);
         }
         parts
     }

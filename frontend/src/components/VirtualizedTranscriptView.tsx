@@ -13,6 +13,7 @@ import { isWholesaleReplacement, nearestSegmentIndex } from "@/lib/transcriptAnc
 import { JUMP_TO_TIME_EVENT } from "@/lib/liveTimeline";
 import { badge, jumpFlashKeyframes, recordingFill, speakerPalette, transcriptHighlight } from "@/lib/theme-classes";
 import { bracketedClock } from '@/lib/format';
+import { AttendeeNameChoices, useAttendeeNames } from "./MeetingDetails/AttendeeNameChoices";
 
 export interface VirtualizedTranscriptViewProps {
     /** Transcript segments to display */
@@ -106,6 +107,90 @@ const ROW_CLICK_SLOP = 4;
 // Controls inside a row that own their own click.
 const INTERACTIVE_SELECTOR = 'button, a, input, textarea, select, [role]';
 
+/**
+ * The speaker picker's contents: the meeting's attendees first (one click
+ * renames the speaker), then a free-text name, then the speakers this line
+ * can be reassigned to.
+ */
+export function SpeakerEditor({
+    transcriptId,
+    label,
+    currentId,
+    attendeeNames,
+    speakerOptions,
+    onSpeakerChange,
+    onRenameSpeaker,
+    onDone,
+}: {
+    transcriptId: string;
+    label: string;
+    currentId: string;
+    attendeeNames: string[];
+    speakerOptions?: Array<{ speaker_id: string; display_name: string }>;
+    onSpeakerChange?: (transcriptId: string, speakerId: string) => void;
+    onRenameSpeaker?: (speakerId: string, displayName: string) => void;
+    onDone: () => void;
+}) {
+    const [draft, setDraft] = useState(label);
+
+    const rename = (name: string) => {
+        const next = name.trim();
+        if (next && next !== label) onRenameSpeaker?.(currentId, next);
+        onDone();
+    };
+
+    return (
+        <>
+            {onRenameSpeaker && (
+                <AttendeeNameChoices names={attendeeNames} current={label} onPick={rename} />
+            )}
+            <div>
+                <label className="mb-1 block text-[11px] font-medium text-ink-muted">Speaker name</label>
+                <div className="flex items-center gap-2">
+                    <input
+                        autoFocus
+                        value={draft}
+                        onChange={(event) => setDraft(event.target.value)}
+                        onKeyDown={(event) => {
+                            if (event.key === 'Enter') {
+                                event.preventDefault();
+                                rename(draft);
+                            }
+                        }}
+                        className="h-8 min-w-0 flex-1 rounded-md border border-hairline bg-surface-1 px-2 text-sm text-ink outline-none focus:border-ink-subtle"
+                    />
+                    <Button size="sm" onClick={() => rename(draft)} disabled={!draft.trim() || draft.trim() === label}>
+                        Rename
+                    </Button>
+                </div>
+                <p className="mt-1 text-[10px] text-ink-subtle">Renames every line for this speaker.</p>
+            </div>
+            {onSpeakerChange && speakerOptions && speakerOptions.length > 0 && (
+                <div className="border-t border-hairline pt-2">
+                    <div className="mb-1 text-[11px] font-medium text-ink-muted">Assign this line to</div>
+                    <div className="flex flex-wrap gap-1">
+                        {speakerOptions
+                            .filter((option) => option.speaker_id !== currentId)
+                            .map((option) => (
+                                <button
+                                    key={option.speaker_id}
+                                    type="button"
+                                    onClick={() => {
+                                        onSpeakerChange(transcriptId, option.speaker_id);
+                                        onDone();
+                                    }}
+                                    className="rounded-full bg-surface-2 px-2 py-0.5 text-[11px] text-ink-muted hover:text-ink"
+                                >
+                                    {option.display_name}
+                                </button>
+                            ))}
+                    </div>
+                </div>
+            )}
+        </>
+    );
+}
+
 // Click-to-edit speaker label. Renaming applies to every segment for that
 // speaker; the list lets you re-assign just this line.
 const EditableSpeakerLabel = memo(function EditableSpeakerLabel({
@@ -126,11 +211,7 @@ const EditableSpeakerLabel = memo(function EditableSpeakerLabel({
     const label = speaker === 'mic' ? 'You' : speaker === 'system' ? 'Others' : (speaker ?? '');
     const currentId = speakerId || speaker || '';
     const [open, setOpen] = useState(false);
-    const [draft, setDraft] = useState(label);
-
-    useEffect(() => {
-        if (open) setDraft(label);
-    }, [open, label]);
+    const attendeeNames = useAttendeeNames();
 
     if (!onRenameSpeaker && !onSpeakerChange) {
         return (
@@ -139,16 +220,6 @@ const EditableSpeakerLabel = memo(function EditableSpeakerLabel({
             </span>
         );
     }
-
-    const commitRename = () => {
-        const next = draft.trim();
-        if (!next || next === label) {
-            setOpen(false);
-            return;
-        }
-        onRenameSpeaker?.(currentId, next);
-        setOpen(false);
-    };
 
     return (
         <Popover open={open} onOpenChange={setOpen}>
@@ -163,49 +234,17 @@ const EditableSpeakerLabel = memo(function EditableSpeakerLabel({
                 </button>
             </PopoverTrigger>
             <PopoverContent align="start" className="w-64 space-y-3 p-3">
-                <div>
-                    <label className="mb-1 block text-[11px] font-medium text-ink-muted">Speaker name</label>
-                    <div className="flex items-center gap-2">
-                        <input
-                            autoFocus
-                            value={draft}
-                            onChange={(event) => setDraft(event.target.value)}
-                            onKeyDown={(event) => {
-                                if (event.key === 'Enter') {
-                                    event.preventDefault();
-                                    commitRename();
-                                }
-                            }}
-                            className="h-8 min-w-0 flex-1 rounded-md border border-hairline bg-surface-1 px-2 text-sm text-ink outline-none focus:border-ink-subtle"
-                        />
-                        <Button size="sm" onClick={commitRename} disabled={!draft.trim() || draft.trim() === label}>
-                            Rename
-                        </Button>
-                    </div>
-                    <p className="mt-1 text-[10px] text-ink-subtle">Renames every line for this speaker.</p>
-                </div>
-                {onSpeakerChange && speakerOptions && speakerOptions.length > 0 && (
-                    <div className="border-t border-hairline pt-2">
-                        <div className="mb-1 text-[11px] font-medium text-ink-muted">Assign this line to</div>
-                        <div className="flex flex-wrap gap-1">
-                            {speakerOptions
-                                .filter((option) => option.speaker_id !== currentId)
-                                .map((option) => (
-                                    <button
-                                        key={option.speaker_id}
-                                        type="button"
-                                        onClick={() => {
-                                            onSpeakerChange(transcriptId, option.speaker_id);
-                                            setOpen(false);
-                                        }}
-                                        className="rounded-full bg-surface-2 px-2 py-0.5 text-[11px] text-ink-muted hover:text-ink"
-                                    >
-                                        {option.display_name}
-                                    </button>
-                                ))}
-                        </div>
-                    </div>
-                )}
+                {/* Mounted only while open, so the draft starts from the current name. */}
+                <SpeakerEditor
+                    transcriptId={transcriptId}
+                    label={label}
+                    currentId={currentId}
+                    attendeeNames={attendeeNames}
+                    speakerOptions={speakerOptions}
+                    onSpeakerChange={onSpeakerChange}
+                    onRenameSpeaker={onRenameSpeaker}
+                    onDone={() => setOpen(false)}
+                />
             </PopoverContent>
         </Popover>
     );

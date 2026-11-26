@@ -25,7 +25,7 @@ use crate::summary::live_outline::{
 };
 use crate::summary::markdown::clean_llm_markdown_detailed;
 use crate::summary::title::{
-    build_title_user_prompt, sanitize_generated_title, title_system_prompt,
+    build_title_user_prompt_with, sanitize_generated_title, title_system_prompt,
 };
 
 /// Writes one run's section: its notes, its transcript slice and the user's
@@ -80,9 +80,10 @@ pub async fn write_title(
     generator: &dyn Generator,
     runs: &[TopicRun],
     user_notes: &str,
+    attendees: &[String],
     cancel: &CancellationToken,
 ) -> Option<String> {
-    let prompt = build_title_user_prompt(&title_source(runs), Some(user_notes));
+    let prompt = build_title_user_prompt_with(&title_source(runs), Some(user_notes), attendees);
     match generator
         .generate_section(title_system_prompt(), &prompt, 2, cancel)
         .await
@@ -121,6 +122,8 @@ pub struct NotesInputs<'a> {
     pub stored: Vec<WrittenSection>,
     /// Re-enhance: write every section again.
     pub regenerate: bool,
+    /// The meeting's attendees' names, for the title call (a general model).
+    pub attendee_names: Vec<String>,
 }
 
 /// The finished Enhanced notes: sections still missing (at stop, the last
@@ -180,8 +183,14 @@ pub async fn finish_notes(
         sink.save(&section, run.end_ms).await;
         written.push(section);
     }
-    let (title, title_calls) =
-        meeting_title(generator, &runs, inputs.user_notes_markdown, cancel).await;
+    let (title, title_calls) = meeting_title(
+        generator,
+        &runs,
+        inputs.user_notes_markdown,
+        &inputs.attendee_names,
+        cancel,
+    )
+    .await;
     calls += title_calls;
     if cancel.is_cancelled() {
         return Err("Summary generation was cancelled".to_string());
@@ -199,9 +208,10 @@ async fn meeting_title(
     generator: &dyn Generator,
     runs: &[TopicRun],
     user_notes_markdown: &str,
+    attendees: &[String],
     cancel: &CancellationToken,
 ) -> (String, usize) {
-    match write_title(generator, runs, user_notes_markdown, cancel).await {
+    match write_title(generator, runs, user_notes_markdown, attendees, cancel).await {
         Some(title) => (title, 1),
         None => (
             runs.iter()
@@ -220,6 +230,7 @@ pub async fn tidy_notes(
     tidy_model: &dyn crate::summary::tidy::TidyModel,
     generator: &dyn Generator,
     inputs: &NotesInputs<'_>,
+    people: &crate::people::MeetingContext,
     cancel: &CancellationToken,
 ) -> Option<FinishedNotes> {
     let (lines, _) = parse_transcript(inputs.transcript_text);
@@ -238,12 +249,19 @@ pub async fn tidy_notes(
             user_notes: &user_notes,
             transcript_text: inputs.transcript_text,
             end_ms,
+            people,
         },
         cancel,
     )
     .await?;
-    let (title, title_calls) =
-        meeting_title(generator, &runs, inputs.user_notes_markdown, cancel).await;
+    let (title, title_calls) = meeting_title(
+        generator,
+        &runs,
+        inputs.user_notes_markdown,
+        &inputs.attendee_names,
+        cancel,
+    )
+    .await;
     if cancel.is_cancelled() {
         return None;
     }
@@ -406,6 +424,12 @@ pub async fn notes_from_live_notes<R: tauri::Runtime>(
         provider: generator.provider().to_string(),
         model: generator.model().to_string(),
     };
+    let people = crate::people::meeting_context(pool, meeting_id)
+        .await
+        .unwrap_or_else(|error| {
+            warn!("Enhanced notes: could not load the meeting's people: {error}");
+            crate::people::MeetingContext::default()
+        });
     let inputs = NotesInputs {
         notes: &notes,
         transcript_text,
@@ -413,6 +437,7 @@ pub async fn notes_from_live_notes<R: tauri::Runtime>(
         user_notes_markdown,
         stored,
         regenerate,
+        attendee_names: people.attendees.iter().map(|p| p.name.clone()).collect(),
     };
     // The tidy pass, when its adapter and model are on disk.
     if let Some((app_data_dir, adapter)) = app
@@ -432,7 +457,9 @@ pub async fn notes_from_live_notes<R: tauri::Runtime>(
             adapter,
             own_helper,
         };
-        if let Some(finished) = tidy_notes(&tidy_model, generator.as_ref(), &inputs, cancel).await {
+        if let Some(finished) =
+            tidy_notes(&tidy_model, generator.as_ref(), &inputs, &people, cancel).await
+        {
             return Ok(finished);
         }
         if cancel.is_cancelled() {
@@ -567,6 +594,7 @@ mod tests {
                 user_notes_markdown: "- ask about remote",
                 stored,
                 regenerate: false,
+                attendee_names: Vec::new(),
             },
             &sink,
             &CancellationToken::new(),
@@ -624,6 +652,7 @@ Pricing and hiring review: the plan is forty per seat, annual first, and two eng
             user_notes_markdown: "",
             stored: Vec::new(),
             regenerate: false,
+            attendee_names: Vec::new(),
         }
     }
 
@@ -635,6 +664,7 @@ Pricing and hiring review: the plan is forty per seat, annual first, and two eng
             &Tidy(TIDY_ANSWER.into()),
             &generator,
             &tidy_inputs(&notes, &transcript),
+            &crate::people::MeetingContext::default(),
             &CancellationToken::new(),
         )
         .await
@@ -661,6 +691,7 @@ Pricing and hiring review: the plan is forty per seat, annual first, and two eng
             &Tidy(broken),
             &generator,
             &tidy_inputs(&notes, &transcript),
+            &crate::people::MeetingContext::default(),
             &CancellationToken::new(),
         )
         .await
@@ -692,6 +723,7 @@ Pricing and hiring review: the plan is forty per seat, annual first, and two eng
                     questions: String::new(),
                 }],
                 regenerate: true,
+                attendee_names: Vec::new(),
             },
             &sink,
             &CancellationToken::new(),
@@ -838,6 +870,7 @@ Pricing and hiring review: the plan is forty per seat, annual first, and two eng
                 user_notes_markdown: "",
                 stored: Vec::new(),
                 regenerate: false,
+                attendee_names: Vec::new(),
             },
             &Sink::default(),
             &cancel,
