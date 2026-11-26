@@ -62,6 +62,7 @@ public struct ModelLayout: Sendable {
     public static let parakeetRepo = "parakeet-tdt-0.6b-v2-coreml"
     public static let vadRepo = "silero-vad-coreml"
     public static let diarizerRepo = "speaker-diarization-coreml"
+    public static let ctcRepo = "parakeet-ctc-110m-coreml"
 
     /// Live ASR: the 560 ms variant's folder inside the Nemotron repo.
     public var nemotron: URL {
@@ -95,6 +96,13 @@ public struct ModelLayout: Sendable {
         "Segmentation.mlmodelc", "FBank.mlmodelc", "Embedding.mlmodelc", "PldaRho.mlmodelc",
         "plda-parameters.json",
     ]
+
+    /// Vocabulary boosting (optional): the Parakeet CTC 110M encoder that
+    /// scores a meeting's names and terms against the audio of the final
+    /// pass. What `CtcModels.loadDirect(from:)` and `CtcTokenizer.load(from:)`
+    /// open.
+    public var ctc: URL { root.appendingPathComponent(Self.ctcRepo, isDirectory: true) }
+    public static let ctcFiles = ["MelSpectrogram.mlmodelc", "AudioEncoder.mlmodelc", "vocab.json", "tokenizer.json"]
 
     /// Throws `missing <path>` for the first of `files` absent from `directory`.
     public static func require(_ files: [String], in directory: URL) throws {

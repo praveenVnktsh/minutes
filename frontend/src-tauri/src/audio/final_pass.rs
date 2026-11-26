@@ -7,6 +7,10 @@
 //! should run on the kept transcript (the auto-summary, and the planned
 //! summarization rework):
 //! `{ meeting_id, task_id, outcome: "replaced" | "kept_live", provider, model, warning }`.
+//!
+//! The transcription itself runs in `retranscription`; [`boost_vocabulary`]
+//! gives it the meeting's names and terms (attendees, their teams and
+//! projects) to boost in the helper.
 
 use log::{info, warn};
 use serde::Serialize;
@@ -56,6 +60,73 @@ pub struct FinalPassStarted {
     /// Always `None`: there is one final model, so nothing falls back. Kept
     /// on the wire for the frontend's type.
     pub fallback_notice: Option<String>,
+}
+
+/// What the final transcript does with a meeting's vocabulary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum BoostPlan {
+    /// Send these terms to the helper.
+    Boost(Vec<String>),
+    /// Nothing to boost: transcribe plainly.
+    NoTerms,
+    /// There are terms but the optional vocabulary model is not on disk:
+    /// transcribe plainly, and fetch the model for the next meeting.
+    NeedsModel,
+}
+
+pub(crate) fn plan_boost(vocabulary: Vec<String>, model_ready: bool) -> BoostPlan {
+    if vocabulary.is_empty() {
+        BoostPlan::NoTerms
+    } else if model_ready {
+        BoostPlan::Boost(vocabulary)
+    } else {
+        BoostPlan::NeedsModel
+    }
+}
+
+/// The meeting's vocabulary ([`crate::people::meeting_context`]) as a
+/// [`BoostPlan`]. A failure to read it is no vocabulary.
+pub(crate) async fn boost_plan(
+    pool: &sqlx::SqlitePool,
+    meeting_id: &str,
+    model_ready: bool,
+) -> BoostPlan {
+    match crate::people::meeting_context(pool, meeting_id).await {
+        Ok(context) => plan_boost(context.vocabulary, model_ready),
+        Err(error) => {
+            warn!("Final pass: could not read the people context of {meeting_id}; transcribing without names: {error}");
+            BoostPlan::NoTerms
+        }
+    }
+}
+
+/// The terms to boost in `meeting_id`'s transcript, or none. With terms but
+/// no vocabulary model, starts its download (in the background, once; see
+/// [`speech_models::spawn_vocabulary_download`]) and returns none, so this
+/// transcript is not held up and later ones get the names right.
+pub(crate) async fn boost_vocabulary<R: Runtime>(
+    app: &AppHandle<R>,
+    meeting_id: &str,
+) -> Vec<String> {
+    let Some(state) = app.try_state::<crate::state::AppState>() else {
+        return Vec::new();
+    };
+    let pool = state.db_manager.pool();
+    match boost_plan(pool, meeting_id, speech_models::vocabulary_ready(app)).await {
+        BoostPlan::Boost(terms) => {
+            info!(
+                "Final pass for {meeting_id}: boosting {} names and terms",
+                terms.len()
+            );
+            terms
+        }
+        BoostPlan::NoTerms => Vec::new(),
+        BoostPlan::NeedsModel => {
+            info!("Final pass for {meeting_id}: the meeting has names to boost, but the vocabulary model is not downloaded; transcribing without it");
+            speech_models::spawn_vocabulary_download(app);
+            Vec::new()
+        }
+    }
 }
 
 /// A failed count is an error, never zero: zero revisions or transcripts would
@@ -881,6 +952,69 @@ mod tests {
         .await
         .unwrap();
         pool
+    }
+
+    #[test]
+    fn the_vocabulary_is_boosted_only_with_terms_and_the_model() {
+        let terms = vec!["Priya Shah".to_string(), "Offline mode".to_string()];
+        assert_eq!(
+            plan_boost(terms.clone(), true),
+            BoostPlan::Boost(terms.clone())
+        );
+        assert_eq!(plan_boost(terms, false), BoostPlan::NeedsModel);
+        assert_eq!(plan_boost(Vec::new(), true), BoostPlan::NoTerms);
+        assert_eq!(plan_boost(Vec::new(), false), BoostPlan::NoTerms);
+    }
+
+    #[tokio::test]
+    async fn a_meetings_attendees_become_its_vocabulary() {
+        use crate::people::{self, PersonInput, Project, SOURCE_LINEAR};
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let meeting = crate::database::repositories::meeting::MeetingsRepository::create_meeting(
+            &pool, "Sync", None, false,
+        )
+        .await
+        .unwrap();
+        // No attendees: nothing to boost, with or without the model.
+        assert_eq!(boost_plan(&pool, &meeting, true).await, BoostPlan::NoTerms);
+
+        let person = people::upsert_from_source(
+            &pool,
+            &PersonInput {
+                source: SOURCE_LINEAR.into(),
+                external_id: "u1".into(),
+                name: "Siobhan Nguyen".into(),
+                team: Some("Platform".into()),
+                projects: vec![Project {
+                    title: "Zephyrine".into(),
+                    url: None,
+                    source: SOURCE_LINEAR.into(),
+                }],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        people::add_meeting_attendee(&pool, &meeting, &person, SOURCE_LINEAR)
+            .await
+            .unwrap();
+        let BoostPlan::Boost(terms) = boost_plan(&pool, &meeting, true).await else {
+            panic!("expected terms to boost");
+        };
+        for term in ["Siobhan Nguyen", "Platform", "Zephyrine"] {
+            assert!(terms.iter().any(|t| t == term), "{term} in {terms:?}");
+        }
+        assert_eq!(
+            boost_plan(&pool, &meeting, false).await,
+            BoostPlan::NeedsModel
+        );
+        // An unknown meeting has no attendees.
+        assert_eq!(boost_plan(&pool, "nope", true).await, BoostPlan::NoTerms);
     }
 
     #[tokio::test]

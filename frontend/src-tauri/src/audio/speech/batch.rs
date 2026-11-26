@@ -6,7 +6,12 @@
 //! [`unload`] stops it after a job. Requests are serialised: the helper takes
 //! one at a time. VAD and diarization read a 16 kHz mono WAV the client
 //! writes to a temporary file; transcription takes the samples in the frame.
+//!
+//! [`transcribe_with_vocabulary`] adds the meeting's names and terms
+//! (FluidAudio's CTC vocabulary boosting in the helper). Boosting is best
+//! effort: when that request fails, the same audio is transcribed plainly.
 
+use std::future::Future;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -47,6 +52,25 @@ pub struct Transcript {
     pub words: Vec<Word>,
     #[serde(default)]
     pub confidence: Option<f32>,
+    /// What vocabulary boosting did (`transcribe_with_vocabulary` only).
+    #[serde(default)]
+    pub vocabulary: Option<BoostReport>,
+}
+
+/// `"vocabulary"` in a boosted reply: the words it replaced, or why it did
+/// not run.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct BoostReport {
+    #[serde(default)]
+    pub replaced: Vec<Replacement>,
+    #[serde(default)]
+    pub skipped: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Replacement {
+    pub from: String,
+    pub to: String,
 }
 
 /// One speaker turn, in seconds. Speakers are numbered from 0 in order of
@@ -90,22 +114,99 @@ pub fn configure(models_dir: PathBuf) {
 
 /// Transcribe up to ~30 s of 16 kHz mono audio with Parakeet.
 pub async fn transcribe(samples_16k: Vec<f32>) -> Result<Transcript> {
+    transcribe_with_vocabulary(samples_16k, &[]).await
+}
+
+/// [`transcribe`], with `vocabulary` (names, teams, project titles) boosted
+/// by the helper's CTC vocabulary model when it is non-empty. Callers pass
+/// terms only when that model is downloaded. Boosting never fails the
+/// transcription: if the boosted request fails (an older helper, a model that
+/// will not load), the audio is transcribed again without it.
+pub async fn transcribe_with_vocabulary(
+    samples_16k: Vec<f32>,
+    vocabulary: &[String],
+) -> Result<Transcript> {
+    transcribe_via(samples_16k, vocabulary, |op, payload, timeout| {
+        request(op, move || Ok((payload, None)), timeout, None)
+    })
+    .await
+}
+
+/// The transcription requests, over `send(op, payload, timeout)`.
+async fn transcribe_via<F, Fut>(
+    samples_16k: Vec<f32>,
+    vocabulary: &[String],
+    mut send: F,
+) -> Result<Transcript>
+where
+    F: FnMut(u8, Vec<u8>, Duration) -> Fut,
+    Fut: Future<Output = Result<Value>>,
+{
     if samples_16k.is_empty() {
         return Ok(Transcript::default());
     }
     let seconds = seconds_of(samples_16k.len());
+    if !vocabulary.is_empty() {
+        let payload = vocabulary_payload(vocabulary, &samples_16k);
+        if payload.len() <= helper::MAX_PAYLOAD {
+            // The CTC pass adds a second, smaller encoder over the audio.
+            let reply = send(
+                op::TRANSCRIBE_WITH_VOCABULARY,
+                payload,
+                timeout_for(seconds, 1.5),
+            )
+            .await
+            .and_then(|reply| {
+                serde_json::from_value::<Transcript>(reply)
+                    .context("unreadable speech-helper transcription reply")
+            });
+            match reply {
+                Ok(transcript) => {
+                    log_boost(&transcript);
+                    return Ok(transcript);
+                }
+                Err(error) => warn!(
+                    "Vocabulary boosting failed; transcribing this segment without it: {error:#}"
+                ),
+            }
+        }
+    }
     let payload = helper::audio_payload(&samples_16k);
     if payload.len() > helper::MAX_PAYLOAD {
         bail!("{seconds:.0} s of audio is too long for one transcription request");
     }
-    let reply = request(
-        op::TRANSCRIBE,
-        move || Ok((payload, None)),
-        timeout_for(seconds, 1.0),
-        None,
-    )
-    .await?;
+    let reply = send(op::TRANSCRIBE, payload, timeout_for(seconds, 1.0)).await?;
     serde_json::from_value(reply).context("unreadable speech-helper transcription reply")
+}
+
+/// `transcribe_with_vocabulary`'s payload: a u32 LE length, the JSON
+/// `{"vocabulary":[...]}`, then the samples as f32 LE.
+fn vocabulary_payload(vocabulary: &[String], samples: &[f32]) -> Vec<u8> {
+    let json = serde_json::to_vec(&json!({ "vocabulary": vocabulary }))
+        .unwrap_or_else(|_| b"{\"vocabulary\":[]}".to_vec());
+    let mut out = Vec::with_capacity(4 + json.len() + samples.len() * 4);
+    out.extend_from_slice(&(json.len() as u32).to_le_bytes());
+    out.extend_from_slice(&json);
+    out.extend_from_slice(&helper::audio_payload(samples));
+    out
+}
+
+fn log_boost(transcript: &Transcript) {
+    match &transcript.vocabulary {
+        Some(BoostReport {
+            skipped: Some(reason),
+            ..
+        }) => info!("Vocabulary boosting skipped: {reason}"),
+        Some(report) if !report.replaced.is_empty() => {
+            let replaced: Vec<String> = report
+                .replaced
+                .iter()
+                .map(|r| format!("'{}' -> '{}'", r.from, r.to))
+                .collect();
+            info!("Vocabulary boosting replaced {}", replaced.join(", "));
+        }
+        _ => {}
+    }
 }
 
 /// The speech in 16 kHz mono audio (Silero VAD), each segment with its
@@ -365,6 +466,126 @@ mod tests {
             serde_json::from_str(r#"{"id":4,"text":"","words":[],"confidence":null,"ms":5}"#)
                 .unwrap();
         assert_eq!(bare, Transcript::default());
+    }
+
+    /// A stand-in for the helper: records each request and answers from
+    /// `answer(op)`.
+    fn fake_helper(
+        answer: impl Fn(u8) -> Result<Value> + 'static,
+    ) -> (
+        std::rc::Rc<std::cell::RefCell<Vec<(u8, Vec<u8>)>>>,
+        impl FnMut(u8, Vec<u8>, Duration) -> std::future::Ready<Result<Value>>,
+    ) {
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let log = sent.clone();
+        let send = move |op: u8, payload: Vec<u8>, _timeout: Duration| {
+            log.borrow_mut().push((op, payload));
+            std::future::ready(answer(op))
+        };
+        (sent, send)
+    }
+
+    fn reply(text: &str) -> Value {
+        json!({ "id": 1, "text": text, "words": [], "confidence": 0.9, "ms": 5 })
+    }
+
+    #[tokio::test]
+    async fn the_vocabulary_goes_to_the_helper_when_there_is_one() {
+        let (sent, send) = fake_helper(|op| {
+            assert_eq!(op, op::TRANSCRIBE_WITH_VOCABULARY);
+            let mut boosted = reply("thanks Devansh");
+            boosted["vocabulary"] = json!({ "replaced": [{ "from": "Dev", "to": "Devansh" }] });
+            Ok(boosted)
+        });
+        let terms = vec!["Devansh".to_string(), "Priya Shah".to_string()];
+        let transcript = transcribe_via(vec![0.5, -0.25], &terms, send)
+            .await
+            .unwrap();
+        assert_eq!(transcript.text, "thanks Devansh");
+        assert_eq!(
+            transcript.vocabulary.unwrap().replaced,
+            vec![Replacement {
+                from: "Dev".into(),
+                to: "Devansh".into()
+            }]
+        );
+        let sent = sent.borrow();
+        assert_eq!(sent.len(), 1);
+        let payload = &sent[0].1;
+        let length = u32::from_le_bytes(payload[..4].try_into().unwrap()) as usize;
+        let body: Value = serde_json::from_slice(&payload[4..4 + length]).unwrap();
+        assert_eq!(body, json!({ "vocabulary": ["Devansh", "Priya Shah"] }));
+        assert_eq!(&payload[4 + length..], helper::audio_payload(&[0.5, -0.25]));
+    }
+
+    #[tokio::test]
+    async fn no_vocabulary_is_a_plain_transcription() {
+        let (sent, send) = fake_helper(|op| {
+            assert_eq!(op, op::TRANSCRIBE);
+            Ok(reply("hello"))
+        });
+        let transcript = transcribe_via(vec![0.5], &[], send).await.unwrap();
+        assert_eq!(transcript.text, "hello");
+        assert_eq!(transcript.vocabulary, None);
+        assert_eq!(
+            *sent.borrow(),
+            vec![(op::TRANSCRIBE, helper::audio_payload(&[0.5]))]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_boost_falls_back_to_a_plain_transcription() {
+        // An older helper, or a boost that failed outright.
+        let (sent, send) = fake_helper(|op| match op {
+            op::TRANSCRIBE_WITH_VOCABULARY => Err(anyhow!("speech-helper: unknown op 11")),
+            _ => Ok(reply("thanks Dev")),
+        });
+        let transcript = transcribe_via(vec![0.5], &["Devansh".to_string()], send)
+            .await
+            .unwrap();
+        assert_eq!(transcript.text, "thanks Dev");
+        let ops: Vec<u8> = sent.borrow().iter().map(|(op, _)| *op).collect();
+        assert_eq!(ops, vec![op::TRANSCRIBE_WITH_VOCABULARY, op::TRANSCRIBE]);
+
+        // An unreadable boosted reply too.
+        let (_, send) = fake_helper(|op| match op {
+            op::TRANSCRIBE_WITH_VOCABULARY => Ok(json!({ "id": 1, "words": 7 })),
+            _ => Ok(reply("plain")),
+        });
+        let transcript = transcribe_via(vec![0.5], &["Devansh".to_string()], send)
+            .await
+            .unwrap();
+        assert_eq!(transcript.text, "plain");
+
+        // A plain failure is still a failure.
+        let (_, send) = fake_helper(|_| Err(anyhow!("speech-helper exited")));
+        assert!(transcribe_via(vec![0.5], &["Devansh".to_string()], send)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn no_audio_sends_nothing() {
+        let (sent, send) = fake_helper(|_| Ok(reply("never")));
+        let transcript = transcribe_via(Vec::new(), &["Devansh".to_string()], send)
+            .await
+            .unwrap();
+        assert_eq!(transcript, Transcript::default());
+        assert!(sent.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_skipped_boost_reads_as_such() {
+        let transcript: Transcript = serde_json::from_str(
+            r#"{"id":2,"text":"hi","words":[],"confidence":null,"ms":3,"vocabulary":{"skipped":"the vocabulary model is not downloaded"}}"#,
+        )
+        .unwrap();
+        let report = transcript.vocabulary.unwrap();
+        assert!(report.replaced.is_empty());
+        assert_eq!(
+            report.skipped.as_deref(),
+            Some("the vocabulary model is not downloaded")
+        );
     }
 
     #[test]
