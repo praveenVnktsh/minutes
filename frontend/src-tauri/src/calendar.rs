@@ -81,6 +81,10 @@ pub struct CalendarConfig {
     /// Whether to raise meeting reminders for upcoming events.
     #[serde(default = "default_true")]
     pub remind: bool,
+    /// The user's own address in invites (optional). An attendee with this
+    /// email is marked as "me" when nobody is yet.
+    #[serde(default)]
+    pub my_email: String,
 }
 
 impl Default for CalendarConfig {
@@ -91,6 +95,7 @@ impl Default for CalendarConfig {
             refresh_minutes: DEFAULT_REFRESH_MINUTES,
             lookahead_days: DEFAULT_LOOKAHEAD_DAYS,
             remind: true,
+            my_email: String::new(),
         }
     }
 }
@@ -98,6 +103,16 @@ impl Default for CalendarConfig {
 // ---------------------------------------------------------------------------
 // Data exposed to the frontend
 // ---------------------------------------------------------------------------
+
+/// Someone invited to an event: an `ATTENDEE` or the `ORGANIZER`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CalendarAttendee {
+    /// The `CN` parameter, when it is a real name (not the address again).
+    pub name: Option<String>,
+    /// Lowercased address from the `mailto:` value.
+    pub email: String,
+    pub organizer: bool,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CalendarEventOut {
@@ -107,6 +122,9 @@ pub struct CalendarEventOut {
     pub end: Option<DateTime<Utc>>,
     pub location: Option<String>,
     pub all_day: bool,
+    /// People invited, minus rooms, resources and those who declined.
+    #[serde(default)]
+    pub attendees: Vec<CalendarAttendee>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -134,6 +152,8 @@ struct Override {
     start: Option<DateTime<Utc>>,
     duration: Option<Duration>,
     title: Option<String>,
+    /// The occurrence's own guest list; empty means "same as the series".
+    attendees: Vec<CalendarAttendee>,
     cancelled: bool,
 }
 
@@ -215,6 +235,10 @@ fn validate_config(config: &CalendarConfig) -> Result<(), String> {
     }
     if config.lookahead_days == 0 || config.lookahead_days > 60 {
         return Err("Look-ahead must be between 1 and 60 days".to_string());
+    }
+    let my_email = config.my_email.trim();
+    if !my_email.is_empty() && !my_email.contains('@') {
+        return Err("My email must be an email address".to_string());
     }
     Ok(())
 }
@@ -324,6 +348,90 @@ fn is_cancelled(event: &Event) -> bool {
     matches!(event.get_status(), Some(EventStatus::Cancelled))
 }
 
+/// A parameter's value, matched case-insensitively, with any quotes removed.
+fn param<'a>(property: &'a icalendar::Property, key: &str) -> Option<&'a str> {
+    property
+        .params()
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(key))
+        .map(|(_, value)| value.value().trim().trim_matches('"').trim())
+        .filter(|value| !value.is_empty())
+}
+
+/// Reads one `ATTENDEE`/`ORGANIZER` line. `None` for rooms, resources and
+/// lines without an address.
+fn parse_attendee(property: &icalendar::Property, organizer: bool) -> Option<CalendarAttendee> {
+    if param(property, "CUTYPE").is_some_and(|kind| {
+        kind.eq_ignore_ascii_case("ROOM") || kind.eq_ignore_ascii_case("RESOURCE")
+    }) {
+        return None;
+    }
+    let value = property.value().trim();
+    let address = if value.len() > 7 && value[..7].eq_ignore_ascii_case("mailto:") {
+        Some(&value[7..])
+    } else {
+        None
+    }
+    .or_else(|| param(property, "EMAIL"))?
+    .trim()
+    .to_lowercase();
+    if !address.contains('@') {
+        return None;
+    }
+    let name = param(property, "CN")
+        .filter(|name| !name.eq_ignore_ascii_case(&address))
+        .map(str::to_string);
+    Some(CalendarAttendee {
+        name,
+        email: address,
+        organizer,
+    })
+}
+
+/// The organizer and attendees of an event, one entry per address. Rooms,
+/// resources and anyone who declined are left out.
+fn event_attendees(event: &Event) -> Vec<CalendarAttendee> {
+    let mut out: Vec<CalendarAttendee> = Vec::new();
+    let mut declined: HashSet<String> = HashSet::new();
+    let organizer = event
+        .properties()
+        .get("ORGANIZER")
+        .and_then(|property| parse_attendee(property, true));
+    let attendees = event
+        .multi_properties()
+        .get("ATTENDEE")
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let mut merge = |attendee: CalendarAttendee| match out
+        .iter_mut()
+        .find(|known| known.email == attendee.email)
+    {
+        Some(known) => {
+            known.organizer |= attendee.organizer;
+            if known.name.is_none() {
+                known.name = attendee.name;
+            }
+        }
+        None => out.push(attendee),
+    };
+    if let Some(organizer) = organizer {
+        merge(organizer);
+    }
+    for property in attendees {
+        let Some(attendee) = parse_attendee(property, false) else {
+            continue;
+        };
+        if param(property, "PARTSTAT").is_some_and(|status| status.eq_ignore_ascii_case("DECLINED"))
+        {
+            declined.insert(attendee.email);
+            continue;
+        }
+        merge(attendee);
+    }
+    out.retain(|attendee| !declined.contains(&attendee.email));
+    out
+}
+
 /// Parse an ICS document and expand it into concrete occurrences within
 /// `[window_start, window_end]`, applying recurrence overrides and
 /// cancellations.
@@ -355,6 +463,7 @@ pub fn expand_ics(
                         start: event.get_start().as_ref().and_then(to_utc),
                         duration: event_duration(event),
                         title: event.get_summary().map(str::to_string),
+                        attendees: event_attendees(event),
                         cancelled: is_cancelled(event),
                     },
                 );
@@ -376,6 +485,7 @@ pub fn expand_ics(
         let all_day = matches!(event.get_start(), Some(DatePerhapsTime::Date(_)));
         let base_duration = event_duration(event);
         let base_start = event.get_start().as_ref().and_then(to_utc);
+        let attendees = event_attendees(event);
 
         if is_recurring(event) {
             let recurrences = match calendar_event.get_recurrence() {
@@ -414,6 +524,11 @@ pub fn expand_ics(
                         end: duration.map(|value| start + value),
                         location: location.clone(),
                         all_day,
+                        attendees: if override_entry.attendees.is_empty() {
+                            attendees.clone()
+                        } else {
+                            override_entry.attendees.clone()
+                        },
                     });
                 } else {
                     output.push(CalendarEventOut {
@@ -423,6 +538,7 @@ pub fn expand_ics(
                         end: base_duration.map(|value| occurrence_start + value),
                         location: location.clone(),
                         all_day,
+                        attendees: attendees.clone(),
                     });
                 }
             }
@@ -440,6 +556,7 @@ pub fn expand_ics(
                 end: base_duration.map(|value| start + value),
                 location: location.clone(),
                 all_day,
+                attendees,
             });
         }
     }
@@ -711,6 +828,21 @@ pub async fn get_calendar_events() -> Result<Option<CalendarSnapshot>, String> {
     Ok(SNAPSHOT.lock().unwrap().clone())
 }
 
+/// What linking a new recording's meeting to an invite needs: the cached
+/// events and the user's own address. `None` when calendar sync is off or
+/// nothing has been fetched yet.
+pub fn linking_inputs<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Option<(CalendarSnapshot, Option<String>)> {
+    let config = load_config(app).ok()?;
+    if !config.enabled {
+        return None;
+    }
+    let snapshot = SNAPSHOT.lock().unwrap().clone()?;
+    let my_email = Some(config.my_email.trim().to_lowercase()).filter(|email| !email.is_empty());
+    Some((snapshot, my_email))
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -868,6 +1000,124 @@ END:VCALENDAR\r\n";
             .unwrap();
         assert!(holiday.all_day);
         assert_eq!(holiday.start, at(2026, 1, 20));
+    }
+
+    const INVITES: &str = "BEGIN:VCALENDAR\r\n\
+VERSION:2.0\r\n\
+PRODID:-//Minutes Test//EN\r\n\
+BEGIN:VEVENT\r\n\
+UID:planning@example.com\r\n\
+DTSTAMP:20260101T000000Z\r\n\
+DTSTART:20260115T150000Z\r\n\
+DTEND:20260115T160000Z\r\n\
+SUMMARY:Planning\r\n\
+ORGANIZER;CN=Priya Shah:mailto:Priya@Acme.com\r\n\
+ATTENDEE;CN=Priya Shah;PARTSTAT=ACCEPTED:mailto:priya@acme.com\r\n\
+ATTENDEE;CN=\"Patel, Dev\";PARTSTAT=NEEDS-ACTION:MAILTO:Dev.Patel@ACME.com\r\n\
+ATTENDEE;CN=sam@acme.com:mailto:sam@acme.com\r\n\
+ATTENDEE;CUTYPE=ROOM;CN=Room 4:mailto:room4@resource.acme.com\r\n\
+ATTENDEE;CUTYPE=RESOURCE;CN=Projector:mailto:projector@resource.acme.com\r\n\
+ATTENDEE;CN=Lee Wong;PARTSTAT=DECLINED:mailto:lee@acme.com\r\n\
+END:VEVENT\r\n\
+BEGIN:VEVENT\r\n\
+UID:sync@example.com\r\n\
+DTSTAMP:20260101T000000Z\r\n\
+DTSTART:20260105T140000Z\r\n\
+DTEND:20260105T150000Z\r\n\
+SUMMARY:Weekly sync\r\n\
+RRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=4\r\n\
+ORGANIZER;CN=Priya Shah:mailto:priya@acme.com\r\n\
+ATTENDEE;CN=Dev Patel:mailto:dev@acme.com\r\n\
+END:VEVENT\r\n\
+BEGIN:VEVENT\r\n\
+UID:sync@example.com\r\n\
+DTSTAMP:20260101T000000Z\r\n\
+RECURRENCE-ID:20260112T140000Z\r\n\
+DTSTART:20260112T170000Z\r\n\
+DTEND:20260112T180000Z\r\n\
+SUMMARY:Weekly sync moved\r\n\
+ORGANIZER;CN=Priya Shah:mailto:priya@acme.com\r\n\
+ATTENDEE;CN=Dev Patel:mailto:dev@acme.com\r\n\
+ATTENDEE;CN=Ana Ruiz:mailto:ana@acme.com\r\n\
+END:VEVENT\r\n\
+END:VCALENDAR\r\n";
+
+    fn emails(event: &CalendarEventOut) -> Vec<&str> {
+        event.attendees.iter().map(|a| a.email.as_str()).collect()
+    }
+
+    #[test]
+    fn parses_attendees_and_organizer() {
+        let events = expand_ics(INVITES, at(2026, 1, 15), at(2026, 1, 16)).unwrap();
+        let planning = events
+            .iter()
+            .find(|e| e.uid == "planning@example.com")
+            .unwrap();
+        // Rooms, resources and the declined guest are left out; the organizer
+        // who is also an attendee appears once.
+        assert_eq!(
+            planning.attendees,
+            vec![
+                CalendarAttendee {
+                    name: Some("Priya Shah".into()),
+                    email: "priya@acme.com".into(),
+                    organizer: true,
+                },
+                CalendarAttendee {
+                    name: Some("Patel, Dev".into()),
+                    email: "dev.patel@acme.com".into(),
+                    organizer: false,
+                },
+                // A CN that only repeats the address is not a name.
+                CalendarAttendee {
+                    name: None,
+                    email: "sam@acme.com".into(),
+                    organizer: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn recurrences_carry_attendees_to_every_occurrence() {
+        let events = expand_ics(INVITES, at(2026, 1, 5), at(2026, 1, 27)).unwrap();
+        let sync: Vec<_> = events
+            .iter()
+            .filter(|e| e.uid == "sync@example.com")
+            .collect();
+        assert_eq!(sync.len(), 4);
+        for occurrence in &sync {
+            if occurrence.title == "Weekly sync moved" {
+                // The override has its own guest list.
+                assert_eq!(
+                    emails(occurrence),
+                    vec!["priya@acme.com", "dev@acme.com", "ana@acme.com"]
+                );
+            } else {
+                assert_eq!(emails(occurrence), vec!["priya@acme.com", "dev@acme.com"]);
+                assert!(occurrence.attendees[0].organizer);
+            }
+        }
+        assert!(sync.iter().any(|e| e.title == "Weekly sync moved"));
+    }
+
+    #[test]
+    fn events_without_invites_have_no_attendees() {
+        let events = expand_ics(SAMPLE, at(2026, 1, 15), at(2026, 1, 16)).unwrap();
+        assert!(events.iter().all(|e| e.attendees.is_empty()));
+    }
+
+    #[test]
+    fn my_email_must_look_like_an_address() {
+        let mut config = CalendarConfig {
+            my_email: "me".into(),
+            ..CalendarConfig::default()
+        };
+        assert!(validate_config(&config).is_err());
+        config.my_email = " me@acme.com ".into();
+        assert!(validate_config(&config).is_ok());
+        config.my_email = String::new();
+        assert!(validate_config(&config).is_ok());
     }
 
     #[test]

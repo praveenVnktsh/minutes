@@ -13,6 +13,7 @@ import { Button } from '@/components/ui/button';
 import { DeleteMeetingDialog } from '@/components/DeleteMeetingDialog';
 import { TranscriptPanel } from '@/components/MeetingDetails/TranscriptPanel';
 import { MeetingWorkspace } from '@/components/MeetingDetails/MeetingWorkspace';
+import { MeetingAttendees } from '@/components/MeetingDetails/MeetingAttendees';
 import { MeetingAssistantPanel } from '@/components/MeetingDetails/MeetingAssistantPanel';
 import { CopilotPanel } from '@/components/MeetingDetails/CopilotPanel';
 import { MeetingNotesEditor } from '@/components/MeetingDetails/MeetingNotesEditor';
@@ -478,6 +479,7 @@ export default function PageContent({
           showAssistant
           assistantLabel="Copilot"
           peopleCount={0}
+          attendees={<MeetingAttendees meetingId={meeting.id} />}
           onTitleChange={handleTitleChange}
           titlePending={meetingMutations[meeting.id]?.rename?.status === 'pending'}
           titleError={meetingMutations[meeting.id]?.rename?.error}
@@ -500,6 +502,7 @@ export default function PageContent({
           createdAt={meeting.created_at}
           showAssistant={showAssistant}
           peopleCount={peopleCount}
+          attendees={<MeetingAttendees meetingId={meeting.id} />}
           statusBanner={statusBanner}
           toolbarActions={notesMenu}
           titleActions={continueRecording.available ? (

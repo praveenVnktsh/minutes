@@ -44,6 +44,7 @@ export function MeetingWorkspace({
   showAssistant,
   assistantLabel = 'Copilot',
   peopleCount,
+  attendees,
   toolbarActions,
   titleActions,
   onTitleChange,
@@ -66,6 +67,8 @@ export function MeetingWorkspace({
   /** The dock pill's label. The assistant is "Copilot" during and after a meeting. */
   assistantLabel?: string;
   peopleCount: number;
+  /** Attendee chips, beside the date and people count. */
+  attendees?: ReactNode;
   toolbarActions?: ReactNode;
   /** Actions beside the title (Continue recording). */
   titleActions?: ReactNode;
@@ -333,10 +336,15 @@ export function MeetingWorkspace({
             )}
             {titleActions}
           </div>
-          {(dateSubtitle || peopleCount > 0) && (
-            <p className="mt-0.5 text-xs text-ink-subtle">
-              {[dateSubtitle, peopleCount > 0 ? `${peopleCount} ${peopleCount === 1 ? 'person' : 'people'}` : ''].filter(Boolean).join(' · ')}
-            </p>
+          {(dateSubtitle || peopleCount > 0 || attendees) && (
+            <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1">
+              {(dateSubtitle || peopleCount > 0) && (
+                <p className="text-xs text-ink-subtle">
+                  {[dateSubtitle, peopleCount > 0 ? `${peopleCount} ${peopleCount === 1 ? 'person' : 'people'}` : ''].filter(Boolean).join(' · ')}
+                </p>
+              )}
+              {attendees}
+            </div>
           )}
           {(localTitleError || titleError) && <p role="alert" className="mt-1 text-xs text-error">Could not rename: {localTitleError || titleError}</p>}
         </div>

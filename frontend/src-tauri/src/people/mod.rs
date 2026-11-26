@@ -10,6 +10,7 @@
 //! a vocabulary of names and project terms for transcription. See
 //! `docs/superpowers/specs/2026-11-26-attendee-context-design.md`.
 
+pub mod calendar_link;
 pub mod commands;
 
 use chrono::Utc;
