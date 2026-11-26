@@ -330,6 +330,14 @@ impl SummaryService {
             .is_some_and(|entry| entry.started_at == started_at)
     }
 
+    /// True while this process runs any summary generation for the meeting.
+    pub(crate) fn is_generating(meeting_id: &str) -> bool {
+        CANCELLATION_REGISTRY
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains_key(meeting_id)
+    }
+
     /// Cancels only the active generation identified by `started_at`.
     pub fn cancel_summary(meeting_id: &str, started_at: DateTime<Utc>) -> bool {
         let registry = CANCELLATION_REGISTRY

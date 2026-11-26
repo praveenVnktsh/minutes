@@ -1,13 +1,14 @@
 'use client'
 
 import { useEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
-import { Archive, ArchiveRestore, BadgeCheck, CalendarDays, Mic, Pin, PinOff, Search, Upload, X } from 'lucide-react'
+import { Archive, ArchiveRestore, BadgeCheck, CalendarDays, Mic, Pin, PinOff, Search, Trash2, Upload, X } from 'lucide-react'
 import { useSidebar, type CurrentMeeting } from '@/components/Sidebar/SidebarProvider'
 import { handleShellActionError, useShell } from '@/contexts/ShellContext'
 import { useDebugMode } from '@/hooks/useDebugMode'
 import { useMeetingActivity } from '@/contexts/MeetingActivityContext'
 import { Button } from '@/components/ui/button'
 import { StatusFeedback } from '@/components/ui/status-feedback'
+import { DeleteMeetingDialog, type DeleteMeetingTarget } from '@/components/DeleteMeetingDialog'
 
 type LibraryFilter = 'all' | 'pinned' | 'archived'
 
@@ -47,6 +48,7 @@ export function MeetingsLibrary() {
   const debugMode = useDebugMode()
   const [filter, setFilter] = useState<LibraryFilter>('all')
   const [actionError, setActionError] = useState<string | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<DeleteMeetingTarget | null>(null)
   // The library owns its search: nothing else in the shell shares this query.
   const [query, setQuery] = useState('')
   const searchRef = useRef<HTMLInputElement>(null)
@@ -98,6 +100,11 @@ export function MeetingsLibrary() {
   const toggleArchive = (event: MouseEvent, meeting: CurrentMeeting) => {
     event.stopPropagation()
     void runMutation(() => setMeetingArchived(meeting.id, !meeting.archived))
+  }
+  const askToDelete = (event: MouseEvent, meeting: CurrentMeeting) => {
+    event.stopPropagation()
+    setActionError(null)
+    setDeleteTarget({ id: meeting.id, title: meeting.title })
   }
   const keepAsRealMeeting = (event: MouseEvent, meeting: CurrentMeeting) => {
     event.stopPropagation()
@@ -182,7 +189,7 @@ export function MeetingsLibrary() {
           <ul className="mt-6 grid gap-3 md:grid-cols-2 xl:grid-cols-3" aria-busy={isNavigating}>
             {visibleMeetings.map((meeting) => {
               const mutation = meetingMutations[meeting.id]
-              const pending = mutation?.pin?.status === 'pending' || mutation?.archive?.status === 'pending' || mutation?.debug?.status === 'pending'
+              const pending = mutation?.pin?.status === 'pending' || mutation?.archive?.status === 'pending' || mutation?.debug?.status === 'pending' || mutation?.delete?.status === 'pending'
               const activity = getMeetingActivities(meeting.id).find((item) => !['ready', 'cancelled'].includes(item.status))
               const active = meeting.id === activeMeetingId
               return (
@@ -211,6 +218,9 @@ export function MeetingsLibrary() {
                       <button type="button" disabled={pending} onClick={(event) => toggleArchive(event, meeting)} aria-label={meeting.archived ? `Unarchive ${meeting.title}` : `Archive ${meeting.title}`} className="rounded-lg p-2 text-ink-subtle hover:bg-surface-2 hover:text-ink disabled:opacity-50">
                         {meeting.archived ? <ArchiveRestore className="h-4 w-4" /> : <Archive className="h-4 w-4" />}
                       </button>
+                      <button type="button" disabled={pending} onClick={(event) => askToDelete(event, meeting)} aria-label={`Delete ${meeting.title}`} title="Delete" className="rounded-lg p-2 text-ink-subtle hover:bg-error-subtle hover:text-error disabled:opacity-50">
+                        <Trash2 className="h-4 w-4" />
+                      </button>
                     </div>
                     {(mutation?.pin?.status === 'error' || mutation?.archive?.status === 'error' || mutation?.debug?.status === 'error') && (
                       <StatusFeedback tone="error" className="mt-2 text-xs">{mutation.pin?.error ?? mutation.archive?.error ?? mutation.debug?.error}</StatusFeedback>
@@ -222,6 +232,7 @@ export function MeetingsLibrary() {
           </ul>
         )}
       </div>
+      <DeleteMeetingDialog meeting={deleteTarget} onOpenChange={(open) => { if (!open) setDeleteTarget(null) }} />
     </div>
   )
 }

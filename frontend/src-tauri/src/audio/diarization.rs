@@ -656,7 +656,7 @@ impl Drop for RunningSlot {
     }
 }
 
-fn is_running(meeting_id: &str) -> bool {
+pub(crate) fn is_running(meeting_id: &str) -> bool {
     RUNNING
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())

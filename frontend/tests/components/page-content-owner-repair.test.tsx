@@ -12,6 +12,7 @@ const originalRecordingController = { ...await import('../../src/contexts/Record
 let nativeSummary: SummaryProcessResponse;
 let startPromise: Promise<{ process_id: string }> | null = null;
 let renamePromise: Promise<unknown> | null = null;
+let discardOutcome: () => Promise<unknown> = async () => ({ folder_not_removed: null, folder_error: null });
 const catalog = [
   { id: 'meeting-a', title: 'Meeting A', created_at: '2026-09-19', pinned: false },
   { id: 'meeting-b', title: 'Meeting B', created_at: '2026-09-19', pinned: false },
@@ -29,6 +30,7 @@ const invoke = mock(async (command: string, args?: Record<string, unknown>): Pro
   if (command === 'api_save_meeting_summary') return { message: 'saved' };
   if (command === 'api_save_meeting_title') return renamePromise ?? true;
   if (command === 'api_set_meeting_pinned') return true;
+  if (command === 'api_discard_meeting') return discardOutcome();
   if (command === 'get_meeting_folder_path') return null;
   return undefined;
 });
@@ -42,7 +44,8 @@ mock.module('../../src/contexts/ConfigContext', () => ({
   }),
 }));
 const push = mock(() => {});
-mock.module('next/navigation', () => ({ useRouter: () => ({ push }) }));
+const replace = mock((_href: string) => {});
+mock.module('next/navigation', () => ({ useRouter: () => ({ push, replace }) }));
 mock.module('sonner', () => ({ toast: { info() {}, error() {}, success() {}, warning() {} } }));
 mock.module('../../src/contexts/RecordingStateContext', () => ({
   useRecordingState: () => ({ isRecording: false }),
@@ -109,6 +112,7 @@ mock.module('../../src/components/LiveNotesPad', () => ({ LiveNotesPad: () => nu
 const { SidebarProvider, useSidebar } = await import('../../src/components/Sidebar/SidebarProvider');
 const { meetingActivityStore } = await import('../../src/contexts/MeetingActivityContext');
 const { default: PageContent } = await import('../../src/app/meeting-details/page-content');
+const { notePersistenceService, meetingNotesTarget } = await import('../../src/services/notePersistenceService');
 
 afterAll(() => {
   mock.module('@tauri-apps/api/core', () => originalCore);
@@ -139,6 +143,8 @@ beforeEach(() => {
   nativeSummary = response('Fresh saved B');
   startPromise = null;
   renamePromise = null;
+  discardOutcome = async () => ({ folder_not_removed: null, folder_error: null });
+  replace.mockClear();
   invocations.length = 0;
   workspaceProps = null;
   eventTarget = new EventTarget();
@@ -282,5 +288,59 @@ describe('PageContent owner repair composition', () => {
     expect(sidebar.currentMeeting?.id).toBe('meeting-b');
     expect(sidebar.meetings.find((item) => item.id === 'meeting-b')?.pinned).toBe(true);
     expect(sidebar.meetings.some((item) => item.id === 'meeting-c')).toBe(true);
+  });
+
+  test('Delete meeting asks, deletes, forgets the notes and returns to the library', async () => {
+    await show();
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    expect(sidebar.meetings.some((item) => item.id === 'meeting-a')).toBe(true);
+    notePersistenceService.saveNotes(meetingNotesTarget('meeting-a'), {
+      version: 2, meetingStartedAtMs: 1, updatedAt: 'now', notes: [], rawMarkdown: 'unsaved',
+    });
+
+    await act(async () => { button('Delete meeting').props.onClick(); });
+    expect(rendered()).toContain('permanently deleted');
+    expect(invocations.some(([command]) => command === 'api_discard_meeting')).toBe(false);
+
+    await act(async () => {
+      renderer!.root.findByProps({ 'aria-label': 'Delete Meeting A permanently' }).props.onClick();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(invocations).toContainEqual(['api_discard_meeting', { meetingId: 'meeting-a' }]);
+    expect(sidebar.meetings.some((item) => item.id === 'meeting-a')).toBe(false);
+    expect(sidebar.meetings.some((item) => item.id === 'meeting-b')).toBe(true);
+    expect(replace).toHaveBeenCalledWith('/');
+    expect(notePersistenceService.getSnapshot(meetingNotesTarget('meeting-a')).document).toBeNull();
+    await notePersistenceService.flushNotes();
+    expect(invocations.some(([command]) => command === 'save_meeting_live_notes')).toBe(false);
+  });
+
+  test('cancelling Delete meeting changes nothing', async () => {
+    await show();
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    await act(async () => { button('Delete meeting').props.onClick(); });
+    await act(async () => { exactButton('Cancel').props.onClick(); });
+
+    expect(rendered()).not.toContain('permanently deleted');
+    expect(invocations.some(([command]) => command === 'api_discard_meeting')).toBe(false);
+    expect(sidebar.meetings.some((item) => item.id === 'meeting-a')).toBe(true);
+    expect(replace).not.toHaveBeenCalled();
+  });
+
+  test('a delete the core refuses keeps the meeting and says why', async () => {
+    discardOutcome = async () => { throw 'Wait for transcription to finish before deleting this meeting.'; };
+    await show();
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    await act(async () => { button('Delete meeting').props.onClick(); });
+    await act(async () => {
+      renderer!.root.findByProps({ 'aria-label': 'Delete Meeting A permanently' }).props.onClick();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(rendered()).toContain('Wait for transcription to finish');
+    expect(sidebar.meetings.some((item) => item.id === 'meeting-a')).toBe(true);
+    expect(sidebar.meetingMutations['meeting-a']?.delete).toBeUndefined();
+    expect(replace).not.toHaveBeenCalled();
   });
 });

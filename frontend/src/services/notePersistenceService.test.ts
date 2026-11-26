@@ -274,4 +274,27 @@ describe('NotePersistenceService', () => {
     await service.loadNotes(target);
     expect(service.getSnapshot(target).document?.rawMarkdown).toBe('valid disk copy');
   });
+
+  it('forgets a deleted meeting: no pending save, no draft, other meetings untouched', async () => {
+    const storage = memoryStorage();
+    const saved: string[] = [];
+    const service = new NotePersistenceService({
+      storage,
+      debounceMs: 60_000,
+      save: async (target) => { saved.push(target.kind === 'meeting' ? target.meetingId : target.sessionId); },
+    });
+    const deleted = meetingNotesTarget('deleted');
+    const kept = meetingNotesTarget('kept');
+    service.saveNotes(deleted, document('unsaved'));
+    service.saveNotes(kept, document('keep me'));
+    expect([...storage.values.keys()].some((key) => key.includes('deleted'))).toBe(true);
+
+    service.forgetNotes({ meetingId: 'deleted' });
+
+    expect([...storage.values.keys()].some((key) => key.includes('deleted'))).toBe(false);
+    expect([...storage.values.keys()].some((key) => key.includes('kept'))).toBe(true);
+    await service.flushNotes();
+    expect(saved).toEqual(['kept']);
+    expect(service.getSnapshot(deleted).document).toBeNull();
+  });
 });

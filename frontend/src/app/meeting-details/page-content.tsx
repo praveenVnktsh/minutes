@@ -6,10 +6,11 @@ import type { MeetingActivity, MeetingActivityStatus } from '@/types/meetingActi
 import { useSidebar } from '@/components/Sidebar/SidebarProvider';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { Copy, Download, Loader2, Mic, MoreHorizontal, Sparkles, Square } from 'lucide-react';
+import { Copy, Download, Loader2, Mic, MoreHorizontal, Sparkles, Square, Trash2 } from 'lucide-react';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
+import { DeleteMeetingDialog } from '@/components/DeleteMeetingDialog';
 import { TranscriptPanel } from '@/components/MeetingDetails/TranscriptPanel';
 import { MeetingWorkspace } from '@/components/MeetingDetails/MeetingWorkspace';
 import { MeetingAssistantPanel } from '@/components/MeetingDetails/MeetingAssistantPanel';
@@ -334,6 +335,8 @@ export default function PageContent({
     && !isModelConfigLoading;
   const hasAnyAiNotes = notesHaveAi || Boolean(storedAiNotes);
   const [confirmRegenerate, setConfirmRegenerate] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [notesMenuOpen, setNotesMenuOpen] = useState(false);
   // Set while a regeneration should replace the document's AI lines.
   const [replacingAiLines, setReplacingAiLines] = useState(false);
   const regenerationStartedRef = useRef(false);
@@ -394,7 +397,7 @@ export default function PageContent({
           <Sparkles className="h-3.5 w-3.5" /> {hasAnyAiNotes ? 'Regenerate AI notes' : 'Write AI notes'}
         </button>
       ))}
-      <Popover>
+      <Popover open={notesMenuOpen} onOpenChange={setNotesMenuOpen}>
         <PopoverTrigger asChild>
           <button
             type="button"
@@ -412,8 +415,24 @@ export default function PageContent({
           <button type="button" className={menuItem} onClick={() => void copyOperations.handleExportMarkdown()}>
             <Download className="h-3.5 w-3.5 text-ink-muted" /> Export{withoutAi}
           </button>
+          <div className="my-1 h-px bg-hairline" role="separator" />
+          <button
+            type="button"
+            className="flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-xs text-error hover:bg-error-subtle disabled:opacity-50"
+            onClick={() => {
+              setNotesMenuOpen(false);
+              setConfirmDelete(true);
+            }}
+          >
+            <Trash2 className="h-3.5 w-3.5" /> Delete meeting
+          </button>
         </PopoverContent>
       </Popover>
+      <DeleteMeetingDialog
+        meeting={confirmDelete ? { id: meeting.id, title: meetingData.meetingTitle } : null}
+        onOpenChange={setConfirmDelete}
+        onDeleted={() => router.replace('/')}
+      />
       <Dialog open={confirmRegenerate} onOpenChange={setConfirmRegenerate}>
         <DialogContent className="sm:max-w-[420px]">
           <DialogHeader>

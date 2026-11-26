@@ -92,6 +92,25 @@ impl ActivityStore {
             .and_then(|activity| activity.meeting_id.clone())
     }
 
+    /// What keeps a meeting from being deleted right now: a recording bound to
+    /// it, or an import, retranscription or final pass that has not finished.
+    fn busy_with(&self, meeting_id: &str) -> Option<MeetingBusy> {
+        if self
+            .recording
+            .as_ref()
+            .and_then(|recording| recording.meeting_id.as_deref())
+            == Some(meeting_id)
+        {
+            return Some(MeetingBusy::Recording);
+        }
+        self.activities
+            .iter()
+            .any(|activity| {
+                activity.meeting_id.as_deref() == Some(meeting_id) && !activity.status.is_terminal()
+            })
+            .then_some(MeetingBusy::Transcribing)
+    }
+
     fn trim_terminal(&mut self) {
         while self
             .activities
@@ -258,6 +277,22 @@ pub fn task_meeting_id(task_id: &str) -> Option<String> {
         .task_meeting_id(task_id)
 }
 
+/// Why a meeting is busy, as far as the activity store knows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MeetingBusy {
+    Recording,
+    Transcribing,
+}
+
+/// Whether a recording, import, retranscription or final pass is still working
+/// on this meeting.
+pub fn meeting_busy(meeting_id: &str) -> Option<MeetingBusy> {
+    STORE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .busy_with(meeting_id)
+}
+
 #[tauri::command]
 pub fn bind_active_recording_meeting<R: Runtime>(
     app: AppHandle<R>,
@@ -397,6 +432,61 @@ mod tests {
             Err("Recording session is stale".to_string())
         );
         assert_eq!(store.recording.unwrap().meeting_id, None);
+    }
+
+    fn activity(meeting_id: &str, status: ActivityStatus) -> MeetingActivity {
+        MeetingActivity {
+            task_id: format!("task-{meeting_id}-{status:?}"),
+            meeting_id: Some(meeting_id.to_string()),
+            kind: ActivityKind::Retranscription,
+            status,
+            title: "Improving transcript".to_string(),
+            stage: None,
+            progress_percentage: None,
+            message: None,
+            error: None,
+            warning: None,
+            controls_available: true,
+            revision: 1,
+        }
+    }
+
+    #[test]
+    fn a_meeting_bound_to_the_recording_is_busy_recording() {
+        let store = ActivityStore {
+            recording: Some(RecordingActivity {
+                session_id: "session".to_string(),
+                meeting_id: Some("meeting-1".to_string()),
+                status: ActivityStatus::Saving,
+                error: None,
+            }),
+            ..Default::default()
+        };
+
+        assert_eq!(store.busy_with("meeting-1"), Some(MeetingBusy::Recording));
+        assert_eq!(store.busy_with("meeting-2"), None);
+    }
+
+    #[test]
+    fn only_unfinished_tasks_keep_a_meeting_busy() {
+        let mut store = ActivityStore::default();
+        store
+            .activities
+            .push_back(activity("done", ActivityStatus::Ready));
+        store
+            .activities
+            .push_back(activity("failed", ActivityStatus::Failed));
+        store
+            .activities
+            .push_back(activity("queued", ActivityStatus::Queued));
+        store
+            .activities
+            .push_back(activity("running", ActivityStatus::Transcribing));
+
+        assert_eq!(store.busy_with("done"), None);
+        assert_eq!(store.busy_with("failed"), None);
+        assert_eq!(store.busy_with("queued"), Some(MeetingBusy::Transcribing));
+        assert_eq!(store.busy_with("running"), Some(MeetingBusy::Transcribing));
     }
 
     #[test]
