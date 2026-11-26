@@ -248,16 +248,33 @@ pub async fn rename_speaker(
     if display_name.is_empty() || display_name.len() > 100 {
         return Err("Speaker name must be between 1 and 100 characters".into());
     }
-    sqlx::query(
-        "INSERT INTO speaker_identities (meeting_id, speaker_id, display_name, merged_into, updated_at) VALUES (?, ?, ?, NULL, ?) ON CONFLICT(meeting_id, speaker_id) DO UPDATE SET display_name = excluded.display_name, updated_at = excluded.updated_at",
+    save_speaker_name(
+        state.db_manager.pool(),
+        &meeting_id,
+        &speaker_id,
+        display_name,
     )
-    .bind(&meeting_id)
-    .bind(&speaker_id)
+    .await
+    .map_err(|error| error.to_string())
+}
+
+/// Stores the user's name for a speaker. It becomes a `'user'` name, even
+/// when diarization had named the speaker, so no rerun replaces it.
+pub(crate) async fn save_speaker_name(
+    pool: &SqlitePool,
+    meeting_id: &str,
+    speaker_id: &str,
+    display_name: &str,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO speaker_identities (meeting_id, speaker_id, display_name, merged_into, updated_at, name_source) VALUES (?, ?, ?, NULL, ?, 'user') ON CONFLICT(meeting_id, speaker_id) DO UPDATE SET display_name = excluded.display_name, updated_at = excluded.updated_at, name_source = 'user'",
+    )
+    .bind(meeting_id)
+    .bind(speaker_id)
     .bind(display_name)
     .bind(Utc::now().to_rfc3339())
-    .execute(state.db_manager.pool())
-    .await
-    .map_err(|error| error.to_string())?;
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -295,12 +312,21 @@ pub async fn merge_speakers(
     .await
     .map_err(|error| error.to_string())?;
     sqlx::query(
-        "INSERT INTO speaker_identities (meeting_id, speaker_id, display_name, merged_into, updated_at) VALUES (?, ?, NULL, ?, ?) ON CONFLICT(meeting_id, speaker_id) DO UPDATE SET merged_into = excluded.merged_into, updated_at = excluded.updated_at",
+        "INSERT INTO speaker_identities (meeting_id, speaker_id, display_name, merged_into, updated_at, name_source) VALUES (?, ?, NULL, ?, ?, 'user') ON CONFLICT(meeting_id, speaker_id) DO UPDATE SET merged_into = excluded.merged_into, updated_at = excluded.updated_at, name_source = 'user'",
     )
     .bind(&meeting_id)
     .bind(&source_speaker_id)
     .bind(&target_speaker_id)
     .bind(&now)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| error.to_string())?;
+    // Merging into a speaker diarization named keeps that name as the user's.
+    sqlx::query(
+        "UPDATE speaker_identities SET name_source = 'user' WHERE meeting_id = ? AND speaker_id = ?",
+    )
+    .bind(&meeting_id)
+    .bind(&target_speaker_id)
     .execute(&mut *tx)
     .await
     .map_err(|error| error.to_string())?;

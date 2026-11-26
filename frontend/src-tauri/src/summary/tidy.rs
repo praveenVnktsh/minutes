@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::live_summary::facts::Figures;
+use crate::people::{resolve_name, MeetingContext};
 use crate::summary::live_outline::{
     format_transcript_clock, parse_transcript_clock, user_notes_in, LiveNote, NoteKind, TopicRun,
     UserNote,
@@ -567,6 +568,46 @@ pub fn drop_unnamed_owners(text: &str, transcript: &[String], user_notes: &[User
         .join("\n")
 }
 
+/// The answer with each action owner that is an attendee's first name or
+/// alias written as their full name (`- **Dev**: task` becomes
+/// `- **Dev Patel**: task`), only on a unique match (`people::resolve_name`).
+/// Runs after the checker, so the model's input and checks are unchanged;
+/// an item without an owner never gets one, and "You" stays "You".
+pub fn resolve_owners(text: &str, people: &MeetingContext) -> String {
+    if people.attendees.is_empty() {
+        return text.to_string();
+    }
+    let mut in_actions = false;
+    text.lines()
+        .map(|line| {
+            if let Some(head) = line.strip_prefix("## ") {
+                in_actions = head.trim() == "Action items";
+                return line.to_string();
+            }
+            let Some(c) = in_actions
+                .then(|| {
+                    line.strip_prefix("- ")
+                        .and_then(|item| OWNER.captures(item))
+                })
+                .flatten()
+            else {
+                return line.to_string();
+            };
+            let owner = c[1].trim();
+            if owner.eq_ignore_ascii_case("you") {
+                return line.to_string();
+            }
+            match resolve_name(people, owner) {
+                Some(person) if person.name.trim() != owner && !person.name.contains('*') => {
+                    format!("- **{}**: {}", person.name.trim(), c[2].trim())
+                }
+                _ => line.to_string(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// The wrap-up parts of checked final notes.
 pub fn wrap_up(text: &str) -> TidyWrapUp {
     let sections = sections_of(text);
@@ -602,6 +643,9 @@ pub struct TidyInputs<'a> {
     pub transcript_text: &'a str,
     /// The meeting's end (audio time).
     pub end_ms: i64,
+    /// The meeting's people, to write action owners' full names. Never part
+    /// of the model's input.
+    pub people: &'a MeetingContext,
 }
 
 /// The model call, so the pass can be tested without one.
@@ -664,6 +708,7 @@ pub async fn run(
         return None;
     }
     let markdown = drop_unnamed_owners(&markdown, &transcript, inputs.user_notes);
+    let markdown = resolve_owners(&markdown, inputs.people);
     info!(
         "Tidy pass wrote the final notes in {:.1}s",
         started.elapsed().as_secs_f64()
@@ -1067,6 +1112,13 @@ Kickoff for a new remote control that sells for 25 Euro, with production cost ca
     }
 
     async fn run_with(answer: Result<(String, bool), String>) -> (Option<TidyNotes>, Vec<String>) {
+        run_with_people(answer, &MeetingContext::default()).await
+    }
+
+    async fn run_with_people(
+        answer: Result<(String, bool), String>,
+        people: &MeetingContext,
+    ) -> (Option<TidyNotes>, Vec<String>) {
         let notes = [
             live(0, "point", "Price at 25 Euro", None, "Pricing"),
             live(0, "point", "Cost twelve fifty", None, "Pricing"),
@@ -1080,6 +1132,7 @@ Kickoff for a new remote control that sells for 25 Euro, with production cost ca
                 user_notes: &[],
                 transcript_text: "[00:10] [Others] It will sell for twenty five Euro.\n[00:20] [Others] Production cost is twelve fifty.",
                 end_ms: 300_000,
+                people,
             },
             &CancellationToken::new(),
         )
@@ -1109,6 +1162,101 @@ Kickoff for a new remote control that sells for 25 Euro, with production cost ca
         assert!(
             run_with(Err("helper died".into())).await.0.is_none(),
             "failed"
+        );
+    }
+
+    fn attendee(id: &str, name: &str, aliases: &[&str]) -> crate::people::Person {
+        crate::people::Person {
+            id: id.into(),
+            name: name.into(),
+            email: None,
+            role: None,
+            team: None,
+            aliases: aliases.iter().map(|a| a.to_string()).collect(),
+            projects: Vec::new(),
+            notes: None,
+            is_me: false,
+            locked_fields: Vec::new(),
+            sources: Vec::new(),
+        }
+    }
+
+    fn attendees(people: Vec<crate::people::Person>) -> MeetingContext {
+        MeetingContext {
+            attendees: people,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn owners_become_attendees_full_names_on_a_unique_match() {
+        let people = attendees(vec![
+            attendee("1", "Dev Patel", &[]),
+            attendee("2", "Priya Shah", &["PS"]),
+            attendee("3", "Sam Lee", &[]),
+            attendee("4", "Sam Ortiz", &[]),
+        ]);
+        let text = "## Decisions\n- **Dev**: not an action\n\n## Action items\n- **Dev**: Build the sample\n- **ps**: Pricing draft\n- **Sam**: Book the room\n- **You**: Send the deck\n- **Team**: Read the brief\n- Write the offline spec\n- **Dev Patel**: Already full\n\n## Pricing\n- **Dev**: a note";
+        assert_eq!(
+            resolve_owners(text, &people),
+            "## Decisions\n- **Dev**: not an action\n\n## Action items\n- **Dev Patel**: Build the sample\n- **Priya Shah**: Pricing draft\n- **Sam**: Book the room\n- **You**: Send the deck\n- **Team**: Read the brief\n- Write the offline spec\n- **Dev Patel**: Already full\n\n## Pricing\n- **Dev**: a note"
+        );
+        // No attendees: unchanged.
+        assert_eq!(resolve_owners(text, &MeetingContext::default()), text);
+    }
+
+    #[tokio::test]
+    async fn the_pass_writes_full_owner_names_after_the_checker() {
+        let people = attendees(vec![attendee("1", "David Mills", &[])]);
+        // An owner the meeting never names is dropped, and an attendee's
+        // full name is never put back in its place.
+        let (kept, _) = run_with_people(Ok((GOOD.to_string(), false)), &people).await;
+        assert_eq!(kept.unwrap().markdown, GOOD.replace("**David**: ", ""));
+
+        // A named owner: the checker sees the model's answer, the notes get
+        // the full name.
+        let transcript = "[00:10] [Others] It will sell for twenty five Euro.\n[00:20] [Others] Production cost is twelve fifty, David.";
+        assert_eq!(
+            check(GOOD, &transcript_lines(transcript), 300_000),
+            Vec::<String>::new()
+        );
+        let notes = [
+            live(0, "point", "Price at 25 Euro", None, "Pricing"),
+            live(0, "point", "Cost twelve fifty", None, "Pricing"),
+        ];
+        let runs = crate::summary::live_outline::topic_runs(&notes, 300_000);
+        let model = Answer(Ok((GOOD.to_string(), false)), Default::default());
+        let kept = run(
+            &model,
+            TidyInputs {
+                runs: &runs,
+                user_notes: &[],
+                transcript_text: transcript,
+                end_ms: 300_000,
+                people: &people,
+            },
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert!(kept
+            .markdown
+            .contains("- **David Mills**: Work on the working design"));
+        assert_eq!(
+            kept.wrap_up.action_items,
+            [
+                "David Mills — Work on the working design",
+                "Team — Read the brief"
+            ]
+        );
+        // The model's input carries no people.
+        assert!(!model.1.lock().unwrap()[0].contains("David Mills"));
+        // The checker still rejects what it rejected before.
+        assert!(
+            run_with_people(Ok(("## Summary\nToo short".into(), false)), &people)
+                .await
+                .0
+                .is_none()
         );
     }
 }

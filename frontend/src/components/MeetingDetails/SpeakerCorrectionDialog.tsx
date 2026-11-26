@@ -10,6 +10,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '../ui/dialog';
+import { AttendeeNameChoices } from './AttendeeNameChoices';
 
 export interface SpeakerIdentity {
   speaker_id: string;
@@ -23,6 +24,8 @@ interface SpeakerCorrectionDialogProps {
   onOpenChange: (open: boolean) => void;
   meetingId: string;
   speakers: SpeakerIdentity[];
+  /** The meeting's attendees, offered first as names. */
+  attendeeNames?: string[];
   onChanged: () => Promise<void>;
   /** Optional in-place rename handler (avoids a transcript refetch). */
   onRenamed?: (speakerId: string, displayName: string) => Promise<void>;
@@ -33,6 +36,7 @@ export function SpeakerCorrectionDialog({
   onOpenChange,
   meetingId,
   speakers,
+  attendeeNames = [],
   onChanged,
   onRenamed,
 }: SpeakerCorrectionDialogProps) {
@@ -126,6 +130,16 @@ export function SpeakerCorrectionDialog({
                     </Button>
                   </div>
                 </div>
+                {attendeeNames.length > 0 && (
+                  <div className="mb-2">
+                    <AttendeeNameChoices
+                      names={attendeeNames}
+                      current={names[speaker.speaker_id] ?? speaker.display_name}
+                      disabled={busy !== null}
+                      onPick={(name) => setNames((current) => ({ ...current, [speaker.speaker_id]: name }))}
+                    />
+                  </div>
+                )}
                 {speaker.samples && speaker.samples.length > 0 && (
                   <div className="mb-2 space-y-1 border-t border-hairline pt-2">
                     {speaker.samples.map((sample, index) => (

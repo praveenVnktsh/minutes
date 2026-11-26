@@ -10,6 +10,8 @@ use crate::summary::markdown::{clean_llm_markdown_detailed, contains_reasoning_m
 const TITLE_TRANSCRIPT_MAX_CHARS: usize = 12_000;
 const TITLE_MAX_WORDS: usize = 8;
 const TITLE_MAX_CHARS: usize = 80;
+/// Attendee names given to the title call, at most.
+const TITLE_MAX_ATTENDEES: usize = 12;
 
 static TITLE_LABEL_REGEX: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)^(?:meeting\s+)?title\s*:").unwrap());
@@ -23,6 +25,17 @@ Do not use a generic or placeholder title. Do not add quotes, Markdown, a "Title
 }
 
 pub fn build_title_user_prompt(transcript: &str, notes: Option<&str>) -> String {
+    build_title_user_prompt_with(transcript, notes, &[])
+}
+
+/// [`build_title_user_prompt`] with the meeting's attendees' names, so a
+/// name the transcript misheard is spelled right. The title call runs on the
+/// general summary model, never a fine-tuned adapter.
+pub fn build_title_user_prompt_with(
+    transcript: &str,
+    notes: Option<&str>,
+    attendees: &[String],
+) -> String {
     let transcript = transcript.trim();
     let transcript = match transcript.char_indices().nth(TITLE_TRANSCRIPT_MAX_CHARS) {
         Some((cut, _)) => &transcript[..cut],
@@ -31,6 +44,18 @@ pub fn build_title_user_prompt(transcript: &str, notes: Option<&str>) -> String 
     let mut prompt = String::from("Write a short title (max 6 words) for this meeting.\n\n");
     if let Some(notes) = notes.map(str::trim).filter(|notes| !notes.is_empty()) {
         prompt.push_str(&format!("<my_notes>\n{notes}\n</my_notes>\n\n"));
+    }
+    let names: Vec<&str> = attendees
+        .iter()
+        .map(|name| name.trim())
+        .filter(|name| !name.is_empty())
+        .take(TITLE_MAX_ATTENDEES)
+        .collect();
+    if !names.is_empty() {
+        prompt.push_str(&format!(
+            "People in this meeting (only to spell names right): {}\n\n",
+            names.join(", ")
+        ));
     }
     prompt.push_str(&format!(
         "<transcript>\n{transcript}\n</transcript>\n\nReturn ONLY the title."
@@ -129,6 +154,24 @@ mod tests {
             assert!(!prompt.contains("<my_notes>"));
             assert!(prompt.contains("<transcript>"));
         }
+    }
+
+    #[test]
+    fn title_user_prompt_lists_attendees_only_when_there_are_some() {
+        let names = vec![
+            "Dev Patel".to_string(),
+            " ".to_string(),
+            "Priya Shah".to_string(),
+        ];
+        let prompt = build_title_user_prompt_with("Dev: ship it", None, &names);
+        assert!(prompt.contains(
+            "People in this meeting (only to spell names right): Dev Patel, Priya Shah\n\n<transcript>"
+        ));
+        assert_eq!(
+            build_title_user_prompt_with("Dev: ship it", None, &[]),
+            build_title_user_prompt("Dev: ship it", None)
+        );
+        assert!(!build_title_user_prompt("Dev: ship it", None).contains("People in this meeting"));
     }
 
     #[test]

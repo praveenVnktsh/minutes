@@ -13,6 +13,7 @@ import { useTranscriptionProgress } from '@/hooks/useTranscriptionProgress';
 import { useDiarizationStatus } from '@/hooks/useDiarizationStatus';
 import { useMeetingActivity } from '@/contexts/MeetingActivityContext';
 import { SpeakerCorrectionDialog, SpeakerIdentity } from './SpeakerCorrectionDialog';
+import { AttendeeNamesContext, useMeetingAttendeeNames } from './AttendeeNameChoices';
 import { AudioScrubber } from './AudioScrubber';
 import { toneText } from '@/lib/theme-classes';
 import { FINAL_PASS_COMPLETE_EVENT, type FinalPassComplete } from '@/lib/liveTranscriptionModels';
@@ -122,6 +123,8 @@ export function TranscriptPanel({
 }: TranscriptPanelProps) {
   const [showSpeakerDialog, setShowSpeakerDialog] = useState(false);
   const [speakerOptions, setSpeakerOptions] = useState<SpeakerIdentity[]>([]);
+  // Offered first when naming a speaker; reloaded with the speakers.
+  const attendeeNames = useMeetingAttendeeNames(meetingId, speakerOptions);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchOpen, setSearchOpen] = useState(false);
   const [audioPath, setAudioPath] = useState<string | null>(null);
@@ -610,6 +613,7 @@ export function TranscriptPanel({
               </p>
             )}
             <div className="min-h-0 flex-1 overflow-hidden">
+              <AttendeeNamesContext.Provider value={attendeeNames}>
               <VirtualizedTranscriptView
                 segments={convertedSegments}
                 matchIds={matchIds}
@@ -632,6 +636,7 @@ export function TranscriptPanel({
                 onSeek={audioPath ? handleSeek : undefined}
                 activeSegmentId={activeSegmentId}
               />
+              </AttendeeNamesContext.Provider>
             </div>
           </div>
         )}
@@ -644,6 +649,7 @@ export function TranscriptPanel({
           onOpenChange={setShowSpeakerDialog}
           meetingId={meetingId}
           speakers={speakerOptions}
+          attendeeNames={attendeeNames}
           onChanged={handleSpeakersChanged}
           onRenamed={handleRenameSpeaker}
         />

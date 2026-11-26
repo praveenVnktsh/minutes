@@ -1,6 +1,6 @@
 use crate::database::repositories::setting::SettingsRepository;
 use crate::state::AppState;
-use crate::summary::budget::fit_builtin_output;
+use crate::summary::budget::builtin_output_room;
 use crate::summary::llm_client::{generate_summary, GenerationOptions, LLMProvider};
 use crate::summary::markdown::clean_llm_markdown_detailed;
 use chrono::Utc;
@@ -24,6 +24,55 @@ pub struct MeetingChatMessage {
     /// The moment in the recording a Copilot message belongs to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio_ms: Option<i64>,
+}
+
+/// Longest attendee block given to the meeting chat.
+const MAX_PEOPLE_CHARS: usize = 1_500;
+
+/// The chat's user prompt: the meeting material as JSON, with the attendee
+/// block (`people`, from `people::render_context_block`) when there is one.
+fn chat_user_prompt(
+    raw_notes: &str,
+    enhanced_notes: &str,
+    transcript: &serde_json::Value,
+    history: &[(String, String)],
+    request: &str,
+    people: &str,
+) -> String {
+    let mut context = serde_json::json!({
+        "rawNotesMarkdown": raw_notes,
+        "enhancedNotesMarkdown": enhanced_notes,
+        "transcriptSegments": transcript,
+        "recentConversationNewestFirst": history,
+        "request": request,
+    });
+    if !people.is_empty() {
+        context["peopleInThisMeeting"] = serde_json::Value::from(people);
+    }
+    context.to_string()
+}
+
+/// The prompt to send and its output budget. `fit` sizes the output for a
+/// prompt, or fails when the prompt leaves no room; the attendee block is
+/// the first thing dropped then.
+async fn fit_with_people<F, Fut>(
+    with_people: String,
+    without_people: String,
+    requested: Option<u32>,
+    fit: F,
+) -> (String, Option<u32>)
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = Result<Option<u32>, ()>>,
+{
+    match fit(with_people.clone()).await {
+        Ok(max_tokens) => (with_people, max_tokens),
+        Err(()) if with_people != without_people => {
+            let max_tokens = fit(without_people.clone()).await.unwrap_or(requested);
+            (without_people, max_tokens)
+        }
+        Err(()) => (with_people, requested),
+    }
 }
 
 /// `summary_processes.result` holds `{"markdown": ..., "summary_json": [...]}`; anything else
@@ -221,32 +270,49 @@ pub async fn chat_with_meeting<R: Runtime>(
     .await
     .map_err(|error| format!("Could not load meeting chat history: {error}"))?;
 
-    let context = serde_json::json!({
-        "rawNotesMarkdown": raw_notes,
-        "enhancedNotesMarkdown": enhanced_notes,
-        "transcriptSegments": transcript_json,
-        "recentConversationNewestFirst": history,
-        "request": message,
-    });
-    let system_prompt = r#"You are the meeting assistant. Answer the user's question about this meeting using only the material the app supplies: enhancedNotesMarkdown, rawNotesMarkdown, transcriptSegments, and the recent conversation. Ground your answer in the enhanced notes when they exist, and in the transcript otherwise. If enhancedNotesMarkdown is empty, say there are no enhanced notes yet rather than inventing any. If the supplied material does not answer the question, say so plainly instead of guessing. You cannot change anything: never claim to have edited the notes or the transcript, and when the user asks for the notes to change, tell them to use the re-enhance button on the notes panel. Reply in plain Markdown prose, with no JSON envelope and no preamble about these instructions."#;
+    let people = match crate::people::meeting_context(pool, &meeting_id).await {
+        Ok(context) => crate::people::render_context_block(&context, MAX_PEOPLE_CHARS),
+        Err(error) => {
+            log::warn!("Meeting chat: could not load the meeting's people: {error}");
+            String::new()
+        }
+    };
+    let prompt_with = |people: &str| {
+        chat_user_prompt(
+            &raw_notes,
+            &enhanced_notes,
+            &transcript_json,
+            &history,
+            message,
+            people,
+        )
+    };
+    let system_prompt = r#"You are the meeting assistant. Answer the user's question about this meeting using only the material the app supplies: enhancedNotesMarkdown, rawNotesMarkdown, transcriptSegments, the recent conversation, and peopleInThisMeeting when present (who attended, with roles and teams; [the user] marks the person asking). Ground your answer in the enhanced notes when they exist, and in the transcript otherwise. If enhancedNotesMarkdown is empty, say there are no enhanced notes yet rather than inventing any. If the supplied material does not answer the question, say so plainly instead of guessing. You cannot change anything: never claim to have edited the notes or the transcript, and when the user asks for the notes to change, tell them to use the re-enhance button on the notes panel. Reply in plain Markdown prose, with no JSON envelope and no preamble about these instructions."#;
     let app_data_dir = app.path().app_data_dir().ok();
     let model_name = custom
         .as_ref()
         .map(|value| value.model.as_str())
         .unwrap_or(&config.model);
-    let user_prompt = context.to_string();
-    let max_tokens = fit_builtin_output(
-        &provider,
-        model_name,
-        app_data_dir.as_ref(),
-        system_prompt,
-        &user_prompt,
-        custom
-            .as_ref()
-            .and_then(|value| value.max_tokens)
-            .map(|value| value as u32),
-    )
-    .await;
+    let requested = custom
+        .as_ref()
+        .and_then(|value| value.max_tokens)
+        .map(|value| value as u32);
+    let (user_prompt, max_tokens) =
+        fit_with_people(prompt_with(&people), prompt_with(""), requested, |prompt| {
+            let (provider, app_data_dir) = (&provider, app_data_dir.as_ref());
+            async move {
+                builtin_output_room(
+                    provider,
+                    model_name,
+                    app_data_dir,
+                    system_prompt,
+                    &prompt,
+                    requested,
+                )
+                .await
+            }
+        })
+        .await;
     let completion = generate_summary(
         &reqwest::Client::new(),
         &provider,
@@ -347,6 +413,48 @@ mod tests {
         let (raw_notes, stored_summary) = load_notes_context(&pool, "meeting-2").await.unwrap();
         assert_eq!(raw_notes, "# Raw notes");
         assert_eq!(enhanced_notes_markdown(&stored_summary), "# Enhanced");
+    }
+
+    #[test]
+    fn the_prompt_lists_attendees_only_when_there_are_some() {
+        let transcript = serde_json::json!([]);
+        let with = chat_user_prompt("", "", &transcript, &[], "Who owns it?", "- Dev Patel\n");
+        let value: serde_json::Value = serde_json::from_str(&with).unwrap();
+        assert_eq!(value["peopleInThisMeeting"], "- Dev Patel\n");
+        let without = chat_user_prompt("", "", &transcript, &[], "Who owns it?", "");
+        assert!(!without.contains("peopleInThisMeeting"));
+    }
+
+    #[tokio::test]
+    async fn the_attendee_block_is_dropped_first_when_the_prompt_does_not_fit() {
+        let fits_short = |prompt: String| async move {
+            if prompt.len() > 10 {
+                Err(())
+            } else {
+                Ok(Some(500))
+            }
+        };
+        // Fits with people: kept.
+        let (prompt, max) = fit_with_people("short".into(), "s".into(), Some(9), fits_short).await;
+        assert_eq!((prompt.as_str(), max), ("short", Some(500)));
+        // Too long with people: dropped, and the budget is sized without them.
+        let (prompt, max) = fit_with_people(
+            "long with people".into(),
+            "short".into(),
+            Some(9),
+            fits_short,
+        )
+        .await;
+        assert_eq!((prompt.as_str(), max), ("short", Some(500)));
+        // Too long either way: the plain prompt and the requested budget.
+        let (prompt, max) = fit_with_people(
+            "long with people".into(),
+            "long without them".into(),
+            Some(9),
+            fits_short,
+        )
+        .await;
+        assert_eq!((prompt.as_str(), max), ("long without them", Some(9)));
     }
 
     #[test]

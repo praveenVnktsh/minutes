@@ -9,7 +9,7 @@ use crate::summary::budget::{fit_builtin_output, ContextBudget};
 use crate::summary::llm_client::{generate_summary, GenerationOptions, LLMProvider};
 use crate::summary::markdown::{clean_llm_markdown_detailed, require_visible_markdown};
 use crate::summary::title::{
-    build_title_user_prompt, extract_meeting_name_from_markdown, sanitize_generated_title,
+    build_title_user_prompt_with, extract_meeting_name_from_markdown, sanitize_generated_title,
     title_system_prompt,
 };
 use chrono::{DateTime, Utc};
@@ -566,7 +566,17 @@ impl SummaryService {
         );
         let app_data_dir = app.path().app_data_dir().ok();
         let client = reqwest::Client::new();
-        let title_user_prompt = build_title_user_prompt(&transcript, notes.as_deref());
+        let attendees: Vec<String> = crate::people::meeting_attendees(pool, meeting_id)
+            .await
+            .unwrap_or_else(|e| {
+                warn!("Could not load attendees for {}: {}", meeting_id, e);
+                Vec::new()
+            })
+            .into_iter()
+            .map(|person| person.name)
+            .collect();
+        let title_user_prompt =
+            build_title_user_prompt_with(&transcript, notes.as_deref(), &attendees);
         let title_max_tokens = fit_builtin_output(
             &config.provider,
             &config.model_name,

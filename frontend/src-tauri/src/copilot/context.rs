@@ -6,6 +6,7 @@
 //! evaluating it again. Hard caps keep minute 60 as cheap as minute 5.
 
 use super::prompt::{format_time, Task};
+use crate::people::{render_context_block, MeetingContext};
 
 /// Who said a line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,6 +62,8 @@ const STABLE_ALIGN_MS: i64 = 30_000;
 pub const MAX_TIMELINE_CHARS: usize = 4_800;
 pub const MAX_TRANSCRIPT_CHARS: usize = 6_400;
 pub const MAX_NOTES_CHARS: usize = 1_600;
+/// The meeting's attendees, one line each (see `people::render_context_block`).
+pub const MAX_PEOPLE_CHARS: usize = 1_500;
 /// Character budgets for one prompt. The defaults are the hard caps; a
 /// model with a small context gets a shrunken budget (see [`Budget::shrink`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +71,9 @@ pub struct Budget {
     pub transcript_chars: usize,
     pub timeline_chars: usize,
     pub notes_chars: usize,
+    /// The attendee block: none by default, see [`Budget::with_people`].
+    /// Shrinking takes it first, down to nothing.
+    pub people_chars: usize,
 }
 
 impl Default for Budget {
@@ -76,6 +82,7 @@ impl Default for Budget {
             transcript_chars: MAX_TRANSCRIPT_CHARS,
             timeline_chars: MAX_TIMELINE_CHARS,
             notes_chars: MAX_NOTES_CHARS,
+            people_chars: 0,
         }
     }
 }
@@ -86,8 +93,18 @@ const MIN_TIMELINE_CHARS: usize = 600;
 const MIN_NOTES_CHARS: usize = 300;
 
 impl Budget {
-    /// A smaller budget that cuts `excess_chars`: the oldest transcript goes
-    /// first, then the live summary, then notes.
+    /// The default budget plus room for `people`'s attendee block: its
+    /// rendered length, at most [`MAX_PEOPLE_CHARS`], so shrinking it cuts
+    /// exactly what the prompt holds.
+    pub fn with_people(people: &MeetingContext) -> Self {
+        Self {
+            people_chars: render_context_block(people, MAX_PEOPLE_CHARS).len(),
+            ..Self::default()
+        }
+    }
+
+    /// A smaller budget that cuts `excess_chars`: the attendee block goes
+    /// first, then the oldest transcript, then the live summary, then notes.
     pub fn shrink(self, excess_chars: usize) -> Self {
         let mut left = excess_chars;
         let mut take = |value: usize, floor: usize| {
@@ -95,6 +112,7 @@ impl Budget {
             left -= cut;
             value - cut
         };
+        let people_chars = take(self.people_chars, 0);
         let transcript_chars = take(self.transcript_chars, MIN_TRANSCRIPT_CHARS);
         let timeline_chars = take(self.timeline_chars, MIN_TIMELINE_CHARS);
         let notes_chars = take(self.notes_chars, MIN_NOTES_CHARS);
@@ -102,12 +120,14 @@ impl Budget {
             transcript_chars,
             timeline_chars,
             notes_chars,
+            people_chars,
         }
     }
 
     /// Whether it cannot shrink any further.
     pub fn at_floor(&self) -> bool {
-        self.transcript_chars <= MIN_TRANSCRIPT_CHARS
+        self.people_chars == 0
+            && self.transcript_chars <= MIN_TRANSCRIPT_CHARS
             && self.timeline_chars <= MIN_TIMELINE_CHARS
             && self.notes_chars <= MIN_NOTES_CHARS
     }
@@ -215,14 +235,23 @@ pub fn window_bounds(latest_ms: i64) -> (i64, i64) {
 
 /// Builds the prompt for `task` from everything Copilot knows right now.
 pub fn build(lines: &[Line], timeline: &[TimelineItem], notes: &str, task: &Task) -> PromptParts {
-    build_with(lines, timeline, notes, task, Budget::default())
+    build_with(
+        lines,
+        timeline,
+        notes,
+        &MeetingContext::default(),
+        task,
+        Budget::default(),
+    )
 }
 
-/// [`build`] within `budget`.
+/// [`build`] within `budget`, with the meeting's attendees (`people`) first
+/// when it has any.
 pub fn build_with(
     lines: &[Line],
     timeline: &[TimelineItem],
     notes: &str,
+    people: &MeetingContext,
     task: &Task,
     budget: Budget,
 ) -> PromptParts {
@@ -237,6 +266,13 @@ pub fn build_with(
     }
 
     let mut stable = String::new();
+    // Attendees change rarely, so they lead the stable prefix.
+    let people = render_context_block(people, budget.people_chars);
+    if !people.is_empty() {
+        stable.push_str("PEOPLE IN THIS MEETING:\n");
+        stable.push_str(&people);
+        stable.push('\n');
+    }
     stable.push_str("LIVE SUMMARY SO FAR:\n");
     stable.push_str(&timeline_block(timeline, budget.timeline_chars));
     let anchor = stable.len();
@@ -442,6 +478,7 @@ mod tests {
             &lines,
             &timeline,
             "",
+            &MeetingContext::default(),
             &task(),
             Budget::default().shrink(6_000),
         );
@@ -468,6 +505,91 @@ mod tests {
         let parts = build(&[], &[], "", &task());
         assert!(parts.stable.contains("(nothing yet)"));
         assert!(parts.rest.contains("(no speech yet)"));
+    }
+
+    fn person(id: &str, name: &str, role: &str) -> crate::people::Person {
+        crate::people::Person {
+            id: id.into(),
+            name: name.into(),
+            email: None,
+            role: Some(role.into()),
+            team: None,
+            aliases: Vec::new(),
+            projects: Vec::new(),
+            notes: None,
+            is_me: false,
+            locked_fields: Vec::new(),
+            sources: Vec::new(),
+        }
+    }
+
+    fn people(count: usize) -> MeetingContext {
+        MeetingContext {
+            attendees: (0..count)
+                .map(|i| person(&format!("p{i}"), &format!("Person {i}"), "Engineer"))
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn attendees_lead_the_prompt_when_the_meeting_has_any() {
+        let lines = vec![line(5, Speaker::Others, "Can we ship Friday?")];
+        let ctx = MeetingContext {
+            attendees: vec![person("p1", "Priya Shah", "Product manager")],
+            ..Default::default()
+        };
+        let parts = build_with(&lines, &[], "", &ctx, &task(), Budget::with_people(&ctx));
+        assert!(parts.stable.starts_with(
+            "PEOPLE IN THIS MEETING:\n- Priya Shah (Product manager)\n\nLIVE SUMMARY SO FAR:\n"
+        ));
+        // The block is part of the most stable prefix.
+        assert!(parts.anchor > parts.stable.find("LIVE SUMMARY").unwrap());
+    }
+
+    #[test]
+    fn no_attendees_leaves_the_prompt_unchanged() {
+        let (lines, timeline) = meeting(5);
+        let plain = build(&lines, &timeline, "notes", &task());
+        let with_empty = build_with(
+            &lines,
+            &timeline,
+            "notes",
+            &MeetingContext::default(),
+            &task(),
+            Budget::default(),
+        );
+        assert_eq!(plain, with_empty);
+        assert!(!plain.user().contains("PEOPLE IN THIS MEETING"));
+    }
+
+    #[test]
+    fn the_attendee_block_is_capped_and_shrinks_first() {
+        let ctx = people(200);
+        let (lines, timeline) = meeting(5);
+        let full = Budget::with_people(&ctx);
+        assert!(full.people_chars > 0 && full.people_chars <= MAX_PEOPLE_CHARS);
+        let parts = build_with(&lines, &timeline, "", &ctx, &task(), full);
+        let block = &parts.stable[..parts.stable.find("LIVE SUMMARY").unwrap()];
+        assert!(block.len() <= MAX_PEOPLE_CHARS + "PEOPLE IN THIS MEETING:\n\n".len());
+
+        // A tight budget drops the attendees before any transcript.
+        let budget = full.shrink(full.people_chars);
+        assert_eq!(budget.people_chars, 0);
+        assert_eq!(budget.transcript_chars, MAX_TRANSCRIPT_CHARS);
+        assert_eq!(budget, Budget::default());
+        let tight = build_with(&lines, &timeline, "", &ctx, &task(), budget);
+        assert!(!tight.user().contains("PEOPLE IN THIS MEETING"));
+        assert_eq!(tight, build(&lines, &timeline, "", &task()));
+        // Partly shrunk, some attendees stay.
+        let half = build_with(&lines, &timeline, "", &ctx, &task(), full.shrink(700));
+        assert!(half.stable.starts_with("PEOPLE IN THIS MEETING:\n- Person"));
+        assert!(half.stable.len() < parts.stable.len());
+        assert!(!full.at_floor());
+        assert_eq!(
+            Budget::with_people(&MeetingContext::default()),
+            Budget::default()
+        );
     }
 
     #[test]
