@@ -1,6 +1,7 @@
 'use client';
 
 import { createContext, useContext, useEffect, useState } from 'react';
+import { listen } from '@tauri-apps/api/event';
 import { peopleApi, type Person } from '@/lib/people';
 
 /** The attendees' names, trimmed and deduplicated (case-insensitively), in order. */
@@ -17,12 +18,18 @@ export function attendeeNames(attendees: Pick<Person, 'name'>[]): string[] {
   return names;
 }
 
+/** Emitted by the Rust core whenever a meeting's attendees change. */
+export const MEETING_ATTENDEES_UPDATED_EVENT = 'meeting-attendees-updated';
+
 /**
- * The meeting's attendees' names, reloaded whenever `refreshKey` changes.
- * Empty when there are none or they cannot be read.
+ * The meeting's attendees' names, reloaded whenever `refreshKey` changes or
+ * the meeting's attendees change. Empty when there are none or they cannot
+ * be read.
  */
 export function useMeetingAttendeeNames(meetingId: string | undefined, refreshKey?: unknown): string[] {
   const [names, setNames] = useState<string[]>([]);
+  const [changes, setChanges] = useState(0);
+
   useEffect(() => {
     if (!meetingId) {
       setNames([]);
@@ -41,7 +48,28 @@ export function useMeetingAttendeeNames(meetingId: string | undefined, refreshKe
     return () => {
       cancelled = true;
     };
-  }, [meetingId, refreshKey]);
+  }, [meetingId, refreshKey, changes]);
+
+  useEffect(() => {
+    if (!meetingId) return;
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    listen<{ meeting_id: string }>(MEETING_ATTENDEES_UPDATED_EVENT, ({ payload }) => {
+      if (payload?.meeting_id === meetingId) setChanges((count) => count + 1);
+    })
+      .then((dispose) => {
+        if (disposed) dispose();
+        else unlisten = dispose;
+      })
+      .catch(() => {
+        /* not running in Tauri */
+      });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [meetingId]);
+
   return names;
 }
 
