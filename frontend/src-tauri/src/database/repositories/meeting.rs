@@ -382,6 +382,34 @@ impl MeetingsRepository {
     }
 }
 
+/// Every table holding a meeting's data, keyed by `meeting_id`, in the order
+/// `delete_meeting` clears them. A new meeting-keyed table belongs here; the
+/// `every_meeting_keyed_table_is_listed_for_delete` test (api.rs) fails until it is.
+pub(crate) const MEETING_TABLES: &[&str] = &[
+    // Transcript edits and speaker fixes point at transcript rows.
+    "transcript_revisions",
+    "speaker_segment_overrides",
+    "speaker_identities",
+    "transcripts",
+    "transcript_chunks",
+    // Summary processes (and the summary model provenance they record).
+    "summary_processes",
+    // Notes: the live notes / editor document.
+    "meeting_notes",
+    // Live summary timeline and the enhanced notes sections.
+    "meeting_timeline_entries",
+    "meeting_enhanced_sections",
+    // The AI chat thread, including live Copilot moments.
+    "meeting_chat_messages",
+    // Speaker identification runs (the diarization model provenance) and state.
+    "diarization_runs",
+    "diarization_state",
+    // A queued or waiting final pass, so it is not resumed for a gone meeting.
+    "pending_final_passes",
+    // Webhook deliveries still carrying the meeting's content.
+    "webhook_deliveries",
+];
+
 async fn delete_meeting_with_transaction(
     transaction: &mut SqliteConnection,
     meeting_id: &str,
@@ -397,47 +425,17 @@ async fn delete_meeting_with_transaction(
         return Ok(false);
     }
 
-    // Delete from related tables in proper order
-    // 1. Delete from transcript_chunks
-    sqlx::query("DELETE FROM transcript_chunks WHERE meeting_id = ?")
-        .bind(meeting_id)
-        .execute(&mut *transaction)
-        .await?;
-
-    // 2. Delete from summary_processes
-    sqlx::query("DELETE FROM summary_processes WHERE meeting_id = ?")
-        .bind(meeting_id)
-        .execute(&mut *transaction)
-        .await?;
-
-    // 3. Delete from transcripts
-    sqlx::query("DELETE FROM transcripts WHERE meeting_id = ?")
-        .bind(meeting_id)
-        .execute(&mut *transaction)
-        .await?;
-
-    // 4. Delete live summary timeline entries. The foreign key cascades too;
+    // Every table keyed by meeting_id. Their foreign keys cascade too, but
     // deleting explicitly keeps this independent of the foreign_keys pragma.
-    sqlx::query("DELETE FROM meeting_timeline_entries WHERE meeting_id = ?")
-        .bind(meeting_id)
-        .execute(&mut *transaction)
-        .await?;
+    // Rows that reference transcripts go before the transcripts.
+    for table in MEETING_TABLES {
+        sqlx::query(&format!("DELETE FROM {table} WHERE meeting_id = ?"))
+            .bind(meeting_id)
+            .execute(&mut *transaction)
+            .await?;
+    }
 
-    // 4b. Enhanced notes sections written during the meeting (the foreign
-    // key cascades too).
-    sqlx::query("DELETE FROM meeting_enhanced_sections WHERE meeting_id = ?")
-        .bind(meeting_id)
-        .execute(&mut *transaction)
-        .await?;
-
-    // 5. The AI chat thread, including live Copilot moments (the foreign
-    // key cascades as well).
-    sqlx::query("DELETE FROM meeting_chat_messages WHERE meeting_id = ?")
-        .bind(meeting_id)
-        .execute(&mut *transaction)
-        .await?;
-
-    // 6. Finally, delete the meeting
+    // Finally, delete the meeting
     let result = sqlx::query("DELETE FROM meetings WHERE id = ?")
         .bind(meeting_id)
         .execute(&mut *transaction)

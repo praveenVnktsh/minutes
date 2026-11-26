@@ -349,37 +349,106 @@ pub async fn save_text_export<R: Runtime>(
     Ok(path.to_string_lossy().to_string())
 }
 
-/// Delete a meeting and its recording folder (used to discard short recordings).
+/// What deleting a meeting did beyond its database rows.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiscardMeetingResult {
+    /// The recording folder that could not be removed. The meeting's rows are
+    /// gone either way; the folder is left on disk for the user to remove.
+    pub folder_not_removed: Option<String>,
+    /// Why the folder could not be removed.
+    pub folder_error: Option<String>,
+}
+
+pub const DELETE_BLOCKED_RECORDING: &str =
+    "This meeting is still recording. Stop the recording before deleting it.";
+pub const DELETE_BLOCKED_TRANSCRIBING: &str =
+    "Wait for transcription to finish before deleting this meeting.";
+pub const DELETE_BLOCKED_SPEAKERS: &str =
+    "Wait for speaker identification to finish before deleting this meeting.";
+pub const DELETE_BLOCKED_SUMMARY: &str =
+    "Wait for the AI notes to finish before deleting this meeting.";
+
+/// Why a meeting cannot be deleted right now: something in this process is
+/// still writing to it (a recording, a transcription or final pass, speaker
+/// identification, or an AI notes job).
+pub(crate) fn meeting_delete_blocker(meeting_id: &str) -> Option<&'static str> {
+    use crate::meeting_activity::{meeting_busy, MeetingBusy};
+    match meeting_busy(meeting_id) {
+        Some(MeetingBusy::Recording) => return Some(DELETE_BLOCKED_RECORDING),
+        Some(MeetingBusy::Transcribing) => return Some(DELETE_BLOCKED_TRANSCRIBING),
+        None => {}
+    }
+    if crate::audio::diarization::is_running(meeting_id) {
+        return Some(DELETE_BLOCKED_SPEAKERS);
+    }
+    if crate::summary::SummaryService::is_generating(meeting_id) {
+        return Some(DELETE_BLOCKED_SUMMARY);
+    }
+    None
+}
+
+/// Removes a meeting's recording folder. One that is already gone counts as
+/// removed.
+fn remove_meeting_folder(folder: &std::path::Path) -> std::io::Result<()> {
+    match std::fs::remove_dir_all(folder) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        result => result,
+    }
+}
+
+/// Deletes a meeting's rows (in one transaction) and then its recording folder.
+/// Refused while the meeting is busy. A folder that cannot be removed does not
+/// undo the delete: it is reported in the result.
+pub(crate) async fn discard_meeting(
+    pool: &sqlx::SqlitePool,
+    meeting_id: &str,
+) -> Result<DiscardMeetingResult, String> {
+    if meeting_id.trim().is_empty() {
+        return Err("Meeting ID cannot be empty".to_string());
+    }
+    if let Some(reason) = meeting_delete_blocker(meeting_id) {
+        log_info!("Refused to delete meeting {}: {}", meeting_id, reason);
+        return Err(reason.to_string());
+    }
+
+    let folder: Option<String> =
+        sqlx::query_scalar::<_, Option<String>>("SELECT folder_path FROM meetings WHERE id = ?")
+            .bind(meeting_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| e.to_string())?
+            .flatten()
+            .filter(|folder| !folder.trim().is_empty());
+
+    MeetingsRepository::delete_meeting(pool, meeting_id)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let mut result = DiscardMeetingResult::default();
+    if let Some(folder) = folder {
+        if let Err(error) = remove_meeting_folder(std::path::Path::new(&folder)) {
+            log_warn!(
+                "Deleted meeting {} but could not remove its folder {}: {}",
+                meeting_id,
+                folder,
+                error
+            );
+            result.folder_not_removed = Some(folder);
+            result.folder_error = Some(error.to_string());
+        }
+    }
+    Ok(result)
+}
+
+/// Permanently delete a meeting and its recording folder: the library's and
+/// meeting page's Delete action, and the short-recording auto-discard.
 #[tauri::command]
 pub async fn api_discard_meeting<R: Runtime>(
     _app: AppHandle<R>,
     state: tauri::State<'_, AppState>,
     meeting_id: String,
-) -> Result<(), String> {
-    let pool = state.db_manager.pool();
-
-    let folder: Option<String> =
-        sqlx::query_scalar::<_, Option<String>>("SELECT folder_path FROM meetings WHERE id = ?")
-            .bind(&meeting_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|e| e.to_string())?
-            .flatten();
-
-    MeetingsRepository::delete_meeting(pool, &meeting_id)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    if let Some(folder) = folder {
-        if let Err(error) = std::fs::remove_dir_all(&folder) {
-            log_warn!(
-                "Could not remove discarded meeting folder {}: {}",
-                folder,
-                error
-            );
-        }
-    }
-    Ok(())
+) -> Result<DiscardMeetingResult, String> {
+    discard_meeting(state.db_manager.pool(), &meeting_id).await
 }
 
 /// Resolve the playable audio file for a meeting (inside its recording folder).
@@ -1652,5 +1721,185 @@ mod tests {
         ));
         assert!(!is_browser_url_allowed("  https://example.com"));
         assert!(!is_browser_url_allowed(""));
+    }
+}
+
+#[cfg(test)]
+mod discard_meeting_tests {
+    use super::*;
+    use crate::database::repositories::meeting::MEETING_TABLES;
+    use sqlx::SqlitePool;
+
+    async fn migrated_pool() -> SqlitePool {
+        // One connection: each in-memory connection is its own database.
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        pool
+    }
+
+    async fn meeting(pool: &SqlitePool, folder: Option<String>) -> String {
+        MeetingsRepository::create_meeting(pool, "Board prep", folder, false)
+            .await
+            .unwrap()
+    }
+
+    /// One row in every meeting-keyed table.
+    async fn fill(pool: &SqlitePool, id: &str) {
+        let now = "2026-11-25T10:00:00Z";
+        let statements = [
+            "INSERT INTO transcripts (id, meeting_id, transcript, timestamp) VALUES (?1 || '-t', ?1, 'Hello', ?2)",
+            "INSERT INTO transcript_revisions (id, meeting_id, transcript_id, previous_text, revised_text, instruction, created_at) VALUES (?1 || '-r', ?1, ?1 || '-t', 'Hello', 'Hi', 'shorter', ?2)",
+            "INSERT INTO speaker_identities (meeting_id, speaker_id, display_name, updated_at) VALUES (?1, 'S1', 'Ana', ?2)",
+            "INSERT INTO speaker_segment_overrides (id, meeting_id, transcript_id, speaker_id, updated_at) VALUES (?1 || '-o', ?1, ?1 || '-t', 'S1', ?2)",
+            "INSERT INTO transcript_chunks (meeting_id, transcript_text, model, model_name, created_at) VALUES (?1, 'Hello', 'ollama', 'gemma', ?2)",
+            "INSERT INTO summary_processes (meeting_id, status, created_at, updated_at, result) VALUES (?1, 'completed', ?2, ?2, '{\"model\":{\"provider\":\"ollama\",\"model\":\"gemma\"}}')",
+            "INSERT INTO meeting_notes (meeting_id, notes_markdown, created_at, updated_at) VALUES (?1, 'my notes', ?2, ?2)",
+            "INSERT INTO meeting_timeline_entries (id, meeting_id, start_ms, end_ms, kind, text, provider, model, created_at) VALUES (?1 || '-e', ?1, 0, 1000, 'point', 'A point', 'ollama', 'gemma', ?2)",
+            "INSERT INTO meeting_enhanced_sections (meeting_id, start_ms, end_ms, title, body, provider, model, created_at) VALUES (?1, 0, 1000, 'Intro', '- hi', 'ollama', 'gemma', ?2)",
+            "INSERT INTO meeting_chat_messages (id, meeting_id, role, content, created_at) VALUES (?1 || '-c', ?1, 'user', 'What next?', ?2)",
+            "INSERT INTO diarization_runs (id, meeting_id, engine, segmentation_model, embedding_model, result_json, created_at) VALUES (?1 || '-d', ?1, 'pyannote', 'seg', 'emb', '{}', ?2)",
+            "INSERT INTO diarization_state (meeting_id, status, updated_at) VALUES (?1, 'complete', ?2)",
+            "INSERT INTO pending_final_passes (meeting_id, meeting_folder_path, queued_at) VALUES (?1, '/nonexistent/x', ?2)",
+            "INSERT INTO webhook_deliveries (event_id, event_type, meeting_id, payload, next_attempt_at, created_at) VALUES (?1 || '-w', 'meeting.completed', ?1, '{}', ?2, ?2)",
+        ];
+        for statement in statements {
+            sqlx::query(statement)
+                .bind(id)
+                .bind(now)
+                .execute(pool)
+                .await
+                .unwrap_or_else(|error| panic!("{statement}: {error}"));
+        }
+    }
+
+    async fn rows(pool: &SqlitePool, table: &str, id: &str) -> i64 {
+        sqlx::query_scalar(&format!(
+            "SELECT COUNT(*) FROM {table} WHERE meeting_id = ?"
+        ))
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn meeting_exists(pool: &SqlitePool, id: &str) -> bool {
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM meetings WHERE id = ?")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+            > 0
+    }
+
+    #[tokio::test]
+    async fn every_meeting_keyed_table_is_listed_for_delete() {
+        let pool = migrated_pool().await;
+        let tables: Vec<String> = sqlx::query_scalar(
+            "SELECT m.name FROM sqlite_master m, pragma_table_info(m.name) c \
+             WHERE m.type = 'table' AND c.name = 'meeting_id' AND m.name NOT LIKE '_sqlx%'",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert!(!tables.is_empty());
+        for table in &tables {
+            assert!(
+                MEETING_TABLES.contains(&table.as_str()),
+                "{table} holds meeting data but deleting a meeting leaves it behind"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn deleting_a_meeting_clears_every_meeting_keyed_table() {
+        let pool = migrated_pool().await;
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("Board prep");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("audio.mp4"), b"audio").unwrap();
+        std::fs::write(folder.join("metadata.json"), b"{}").unwrap();
+
+        let deleted = meeting(&pool, Some(folder.to_string_lossy().to_string())).await;
+        let kept = meeting(&pool, None).await;
+        fill(&pool, &deleted).await;
+        fill(&pool, &kept).await;
+        for table in MEETING_TABLES {
+            assert_eq!(
+                rows(&pool, table, &deleted).await,
+                1,
+                "{table} was not filled"
+            );
+        }
+
+        let result = discard_meeting(&pool, &deleted).await.unwrap();
+
+        assert_eq!(result, DiscardMeetingResult::default());
+        assert!(!meeting_exists(&pool, &deleted).await);
+        for table in MEETING_TABLES {
+            assert_eq!(rows(&pool, table, &deleted).await, 0, "{table} kept rows");
+            assert_eq!(
+                rows(&pool, table, &kept).await,
+                1,
+                "{table} lost another meeting's rows"
+            );
+        }
+        assert!(meeting_exists(&pool, &kept).await);
+        assert!(!folder.exists(), "the recording folder is gone");
+    }
+
+    #[tokio::test]
+    async fn a_folder_that_cannot_be_removed_is_reported_after_the_rows_go() {
+        let pool = migrated_pool().await;
+        let dir = tempfile::tempdir().unwrap();
+        // A file where the folder should be: remove_dir_all refuses it.
+        let folder = dir.path().join("not-a-folder");
+        std::fs::write(&folder, b"x").unwrap();
+        let folder = folder.to_string_lossy().to_string();
+        let id = meeting(&pool, Some(folder.clone())).await;
+        fill(&pool, &id).await;
+
+        let result = discard_meeting(&pool, &id).await.unwrap();
+
+        assert_eq!(result.folder_not_removed.as_deref(), Some(folder.as_str()));
+        assert!(result.folder_error.is_some());
+        assert!(!meeting_exists(&pool, &id).await);
+        assert_eq!(rows(&pool, "transcripts", &id).await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_folder_already_gone_counts_as_removed() {
+        let pool = migrated_pool().await;
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("never-made").to_string_lossy().to_string();
+        let id = meeting(&pool, Some(folder)).await;
+
+        let result = discard_meeting(&pool, &id).await.unwrap();
+
+        assert_eq!(result, DiscardMeetingResult::default());
+        assert!(!meeting_exists(&pool, &id).await);
+    }
+
+    #[tokio::test]
+    async fn a_meeting_writing_its_ai_notes_is_not_deleted() {
+        let pool = migrated_pool().await;
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("Busy");
+        std::fs::create_dir_all(&folder).unwrap();
+        let id = meeting(&pool, Some(folder.to_string_lossy().to_string())).await;
+        fill(&pool, &id).await;
+        let started_at = chrono::Utc::now();
+        let _token = crate::summary::SummaryService::register_cancellation_token(&id, started_at);
+
+        let error = discard_meeting(&pool, &id).await.unwrap_err();
+
+        crate::summary::SummaryService::cancel_summary(&id, started_at);
+        assert_eq!(error, DELETE_BLOCKED_SUMMARY);
+        assert!(meeting_exists(&pool, &id).await);
+        assert_eq!(rows(&pool, "transcripts", &id).await, 1);
+        assert!(folder.exists());
     }
 }

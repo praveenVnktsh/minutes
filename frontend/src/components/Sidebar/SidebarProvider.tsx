@@ -4,7 +4,8 @@ import React, { createContext, useContext, useState, useEffect } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import { invoke } from '@tauri-apps/api/core';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
-import { flushNotes } from '@/services/notePersistenceService';
+import { flushNotes, forgetNotes } from '@/services/notePersistenceService';
+import type { DiscardMeetingResult } from '@/lib/meetingDeletion';
 import type { SummaryProcessResponse } from '@/types';
 import { meetingActivityStore } from '@/contexts/MeetingActivityContext';
 import {
@@ -37,7 +38,7 @@ export type TranscriptSearchResult = MeetingSearchResult;
 
 export type CatalogStatus = 'loading' | 'refreshing' | 'ready' | 'error';
 export type SearchStatus = 'idle' | 'searching' | 'success' | 'error';
-export type MeetingMutationKind = 'rename' | 'pin' | 'archive' | 'debug';
+export type MeetingMutationKind = 'rename' | 'pin' | 'archive' | 'debug' | 'delete';
 
 export interface MeetingMutationStatus {
   status: 'pending' | 'error';
@@ -94,6 +95,10 @@ interface SidebarContextType {
   setMeetingPinned: (meetingId: string, pinned: boolean) => Promise<void>;
   setMeetingArchived: (meetingId: string, archived: boolean) => Promise<void>;
   setMeetingDebug: (meetingId: string, debug: boolean) => Promise<void>;
+  // Permanently deletes a meeting, then drops it from the catalog, search
+  // results and the notes cache. Rejects (changing nothing) when the core
+  // refuses, e.g. while the meeting is still recording or transcribing.
+  deleteMeeting: (meetingId: string) => Promise<DiscardMeetingResult>;
   meetingMutations: MeetingMutationStates;
   // Compatibility API: c6 will migrate summary polling to the activity owner.
   startSummaryPolling: (
@@ -139,6 +144,9 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
   const nextMutationRequestRef = React.useRef(0);
   const mutationSuccessRevisionRef = React.useRef(0);
   const navigationRequestRef = React.useRef(0);
+  // Meetings deleted in this session, so a catalog response that was already
+  // in flight cannot bring one back.
+  const deletedMeetingIdsRef = React.useRef(new Set<string>());
 
   // Use recording state from RecordingStateContext (single source of truth)
   const { isRecording } = useRecordingState();
@@ -151,7 +159,10 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
     preserveSuccessesAfter = Number.POSITIVE_INFINITY,
   ) => {
     const currentById = new Map(meetingsRef.current.map((meeting) => [meeting.id, meeting]));
-    const merged = mergeMeetingCatalog(meetingsRef.current, nextMeetings);
+    const merged = mergeMeetingCatalog(
+      meetingsRef.current,
+      nextMeetings.filter((meeting) => !deletedMeetingIdsRef.current.has(meeting.id)),
+    );
     const protectedMeetingIds = new Set<string>();
 
     for (const meeting of merged) {
@@ -420,6 +431,38 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
     mutateMeeting(meetingId, 'debug', debug, 'debug', 'api_set_meeting_debug', { meetingId, debug })
   ), [mutateMeeting]);
 
+  const deleteMeeting = React.useCallback(async (meetingId: string): Promise<DiscardMeetingResult> => {
+    setMutationStatus(meetingId, 'delete', { status: 'pending', error: null });
+    let result: DiscardMeetingResult | null;
+    try {
+      result = await invoke<DiscardMeetingResult | null>('api_discard_meeting', { meetingId });
+    } catch (error) {
+      setMutationStatus(meetingId, 'delete');
+      throw error;
+    }
+
+    deletedMeetingIdsRef.current.add(meetingId);
+    forgetNotes({ meetingId });
+    for (const key of [...mutationQueuesRef.current.keys()]) {
+      if (key.startsWith(`${meetingId}:`)) mutationQueuesRef.current.delete(key);
+    }
+    updateMeetings((current) => current.filter((meeting) => meeting.id !== meetingId));
+    setSearchResults((current) => current.filter((meeting) => meeting.id !== meetingId));
+    setMeetingMutations((current) => {
+      const { [meetingId]: _removed, ...rest } = current;
+      return rest;
+    });
+    setCurrentMeeting((current) => current?.id === meetingId ? { id: 'intro-call', title: '+ New Call' } : current);
+    const subscription = summarySubscriptionsRef.current.get(meetingId);
+    if (subscription) {
+      subscription.unsubscribe();
+      summarySubscriptionsRef.current.delete(meetingId);
+    }
+    // Resync with the core; the deleted id stays filtered out.
+    void fetchMeetings();
+    return result ?? { folder_not_removed: null, folder_error: null };
+  }, [fetchMeetings, setMutationStatus, updateMeetings]);
+
   const selectCatalogMeetings = React.useCallback(
     (visibility?: MeetingVisibility) => selectMeetings(meetings, visibility),
     [meetings],
@@ -485,6 +528,7 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
       setMeetingPinned,
       setMeetingArchived,
       setMeetingDebug,
+      deleteMeeting,
       meetingMutations,
       startSummaryPolling,
       stopSummaryPolling,

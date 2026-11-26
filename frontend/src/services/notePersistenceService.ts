@@ -202,6 +202,37 @@ export class NotePersistenceService {
     if (failed) throw failed.reason;
   };
 
+  /**
+   * Drops everything held for a deleted meeting's notes: the in-memory entry,
+   * any pending save, and the recovery draft in storage. Without this a later
+   * flush (on navigation) would try to save notes for a meeting that no longer
+   * exists, and a stale draft could reappear.
+   */
+  forgetNotes = (scope: FlushNotesScope | NoteDocumentTarget): void => {
+    for (const [id, entry] of [...this.entries.entries()]) {
+      if (!this.matches(entry.target, scope)) continue;
+      if (entry.saveTimer) {
+        clearTimeout(entry.saveTimer);
+        entry.saveTimer = null;
+      }
+      // Nothing left to write, so an in-flight drain stops after this write.
+      entry.acknowledgedRevision = entry.revision;
+      entry.draftPersistPending = false;
+      this.entries.delete(id);
+      this.removeDraft(entry.target);
+    }
+    if ('kind' in scope) this.removeDraft(scope);
+    else if (scope.meetingId) this.removeDraft(meetingNotesTarget(scope.meetingId));
+  };
+
+  private removeDraft(target: NoteDocumentTarget): void {
+    try {
+      this.storage?.removeItem(draftKey(target));
+    } catch {
+      // Storage being unavailable leaves nothing to clean up.
+    }
+  }
+
   private entry(target: NoteDocumentTarget): NoteEntry {
     const id = noteDocumentId(target);
     const current = this.entries.get(id);
@@ -351,3 +382,4 @@ export const subscribeNotes = notePersistenceService.subscribeNotes;
 export const saveNotes = notePersistenceService.saveNotes;
 export const retryNotes = notePersistenceService.retryNotes;
 export const flushNotes = notePersistenceService.flushNotes;
+export const forgetNotes = notePersistenceService.forgetNotes;
