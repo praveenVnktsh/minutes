@@ -15,6 +15,7 @@ interface CalendarConfig {
   refresh_minutes: number;
   lookahead_days: number;
   remind: boolean;
+  my_email: string;
 }
 
 interface CalendarEvent {
@@ -32,6 +33,7 @@ const DEFAULT_CONFIG: CalendarConfig = {
   refresh_minutes: 15,
   lookahead_days: 7,
   remind: true,
+  my_email: '',
 };
 
 function formatEventTime(event: CalendarEvent): string {
@@ -173,6 +175,23 @@ export function CalendarSettings() {
         <p className="text-xs text-ink-muted">
           Google Calendar: Settings → your calendar → <em>Integrate calendar</em> → “Secret address
           in iCal format”. Treat this link like a password.
+        </p>
+      </div>
+
+      <div className="space-y-2">
+        <label htmlFor="calendar-my-email" className="text-sm font-medium">My email (optional)</label>
+        <input
+          id="calendar-my-email"
+          type="email"
+          value={config.my_email}
+          onChange={event => setConfig(current => ({ ...current, my_email: event.target.value }))}
+          placeholder="you@example.com"
+          autoComplete="email"
+          className="w-full rounded-md border border-hairline bg-surface-raised px-3 py-2 text-sm outline-none focus:border-focus focus:ring-2 focus:ring-focus/30"
+        />
+        <p className="text-xs text-ink-muted">
+          The address your invites are sent to. When you record during a calendar event, its
+          guests become the meeting&apos;s attendees, and this address tells Minutes which one is you.
         </p>
       </div>
 

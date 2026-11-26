@@ -129,7 +129,9 @@ impl ActivityStore {
         }
     }
 
-    fn bind_recording(&mut self, session_id: &str, meeting_id: String) -> Result<(), String> {
+    /// Binds the active recording to its meeting. `Ok(true)` when this call
+    /// made the binding, `Ok(false)` when it was already bound to that meeting.
+    fn bind_recording(&mut self, session_id: &str, meeting_id: String) -> Result<bool, String> {
         let recording = self
             .recording
             .as_ref()
@@ -139,7 +141,7 @@ impl ActivityStore {
         }
         if let Some(bound_id) = recording.meeting_id.as_deref() {
             return if bound_id == meeting_id {
-                Ok(())
+                Ok(false)
             } else {
                 Err("Recording session is already bound to another meeting".to_string())
             };
@@ -147,7 +149,7 @@ impl ActivityStore {
 
         self.next_revision();
         self.recording.as_mut().expect("checked above").meeting_id = Some(meeting_id);
-        Ok(())
+        Ok(true)
     }
 
     fn finish_recording(&mut self, session_id: &str, error: Option<String>) -> bool {
@@ -303,12 +305,17 @@ pub fn bind_active_recording_meeting<R: Runtime>(
         return Err("Meeting ID cannot be empty".to_string());
     }
 
-    let snapshot = {
+    let (snapshot, newly_bound) = {
         let mut store = STORE.lock().unwrap_or_else(|error| error.into_inner());
-        store.bind_recording(&session_id, meeting_id)?;
-        store.snapshot()
+        let newly_bound = store.bind_recording(&session_id, meeting_id.clone())?;
+        (store.snapshot(), newly_bound)
     };
     let _ = app.emit("meeting-activity-updated", &snapshot);
+    if newly_bound {
+        // The recording's meeting now exists: take its attendees from the
+        // calendar invite it overlaps. Runs in the background and only logs.
+        crate::people::calendar_link::spawn_for_recording(&app, meeting_id);
+    }
     Ok(snapshot)
 }
 
