@@ -6,6 +6,7 @@ import { Pencil, Plus, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { useConfig } from '@/contexts/ConfigContext';
 import {
   PEOPLE_SYNC_EVENT,
   peopleApi,
@@ -33,6 +34,7 @@ const DISCONNECTED: PeopleSourceStatus[] = (['linear', 'notion'] as const).map(s
   last_synced_at: null,
   last_attempt_at: null,
   last_error: null,
+  last_warning: null,
   last_count: null,
   notion: null,
 }));
@@ -56,6 +58,8 @@ function sourcesOf(person: Person): string[] {
 }
 
 export function PeopleSettings() {
+  const { betaFeatures } = useConfig();
+  const integrationsOn = betaFeatures.peopleIntegrations;
   const [statuses, setStatuses] = useState<PeopleSourceStatus[]>(DISCONNECTED);
   const [people, setPeople] = useState<Person[]>([]);
   const [loading, setLoading] = useState(true);
@@ -73,6 +77,7 @@ export function PeopleSettings() {
   }, []);
 
   useEffect(() => {
+    // Statuses come from the local database; no request leaves the Mac.
     Promise.all([
       peopleSyncApi.status().then(setStatuses).catch(error => toast.error('Could not load people sync settings', { description: String(error) })),
       loadPeople(),
@@ -132,17 +137,23 @@ export function PeopleSettings() {
       <div>
         <h2 className="text-xl font-semibold">People</h2>
         <p className="mt-1 text-sm text-ink-muted">
-          Who you meet with, so transcripts spell names right and notes know who owns what. Linear and Notion
-          are read with your own key and token, once a day or when you press Sync now. The directory stays on
-          this Mac, and no meeting content is ever sent to Linear or Notion.
+          Who you meet with, so transcripts spell names right and notes know who owns what. The directory
+          stays on this Mac. When Linear and Notion sync is on, they are read with your own key and token, once
+          a day or when you press Sync now, and no meeting content is ever sent to them.
         </p>
       </div>
 
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        {statuses.map(status => (
-          <PeopleSourceCard key={status.source} status={status} onStatuses={setStatuses} onPeopleChanged={() => void loadPeople()} />
-        ))}
-      </div>
+      {integrationsOn ? (
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+          {statuses.map(status => (
+            <PeopleSourceCard key={status.source} status={status} onStatuses={setStatuses} onPeopleChanged={() => void loadPeople()} />
+          ))}
+        </div>
+      ) : (
+        <p className="text-sm text-ink-muted">
+          Linear and Notion sync is a beta feature. Turn it on in Settings → Labs & Developer.
+        </p>
+      )}
 
       <section aria-label="People directory" className="space-y-3">
         <div className="flex flex-wrap items-center gap-2">

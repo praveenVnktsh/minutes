@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::http::{HttpError, Method, Request, Transport};
-use super::sync::ConnectionTest;
+use super::sync::{ConnectionTest, Fetched};
 use super::{PersonInput, Project, SOURCE_NOTION};
 
 pub const NOTION_API: &str = "https://api.notion.com/v1";
@@ -480,8 +480,9 @@ impl<'a, T: Transport> NotionClient<'a, T> {
     }
 
     /// Titles of related pages, at most [`MAX_RELATION_LOOKUPS`]. A failed or
-    /// rate-limited lookup stops further lookups but never fails the sync.
-    async fn related_pages(&self, ids: Vec<String>) -> RelatedPages {
+    /// rate-limited lookup stops further lookups but never fails the sync; its
+    /// reason comes back as a warning.
+    async fn related_pages(&self, ids: Vec<String>) -> (RelatedPages, Option<String>) {
         let mut related = RelatedPages::new();
         for (index, id) in ids.into_iter().take(MAX_RELATION_LOOKUPS).enumerate() {
             if index > 0 && !self.pace.is_zero() {
@@ -498,15 +499,18 @@ impl<'a, T: Transport> NotionClient<'a, T> {
                     }
                 }
                 Err(error) => {
-                    log::warn!(
-                        "Stopped resolving Notion related pages: {}",
-                        describe_error(&error)
+                    let reason = describe_error(&error);
+                    log::warn!("Stopped resolving Notion related pages: {reason}");
+                    return (
+                        related,
+                        Some(format!(
+                            "Some related page titles couldn't be read: {reason}"
+                        )),
                     );
-                    break;
                 }
             }
         }
-        related
+        (related, None)
     }
 
     /// Every named page of the database as a [`PersonInput`].
@@ -514,7 +518,7 @@ impl<'a, T: Transport> NotionClient<'a, T> {
         &self,
         database_id: &str,
         overrides: &NotionOverrides,
-    ) -> Result<Vec<PersonInput>, String> {
+    ) -> Result<Fetched, String> {
         let database = self.database(database_id).await?;
         let mapping = resolve_mapping(&database.properties, overrides)?;
         let pages = self.pages(database_id).await?;
@@ -542,17 +546,20 @@ impl<'a, T: Transport> NotionClient<'a, T> {
                 }
             }
         }
-        let related = if wanted.is_empty() {
-            RelatedPages::new()
+        let (related, warning) = if wanted.is_empty() {
+            (RelatedPages::new(), None)
         } else {
             self.related_pages(wanted).await
         };
 
-        Ok(pages
-            .iter()
-            .filter(|p| p.get("archived").and_then(Value::as_bool) != Some(true))
-            .filter_map(|p| page_to_input(p, &mapping, &related))
-            .collect())
+        Ok(Fetched {
+            people: pages
+                .iter()
+                .filter(|p| p.get("archived").and_then(Value::as_bool) != Some(true))
+                .filter_map(|p| page_to_input(p, &mapping, &related))
+                .collect(),
+            warnings: warning.into_iter().collect(),
+        })
     }
 
     /// The workspace name, and the number of rows in the chosen database.
@@ -769,7 +776,8 @@ mod tests {
         let people = client
             .fetch_people("db-1", &NotionOverrides::default())
             .await
-            .unwrap();
+            .unwrap()
+            .people;
         assert_eq!(people.len(), 2);
         let priya = &people[0];
         assert_eq!(priya.source, "notion");
@@ -822,7 +830,8 @@ mod tests {
             .with_pace(Duration::ZERO)
             .fetch_people("db-1", &overrides)
             .await
-            .unwrap();
+            .unwrap()
+            .people;
         let titles: Vec<&str> = people[0]
             .projects
             .iter()
@@ -846,13 +855,19 @@ mod tests {
                 message: "rate limited".into(),
             }),
         ]);
-        let people = NotionClient::new(&transport, "t")
+        let fetched = NotionClient::new(&transport, "t")
             .with_pace(Duration::ZERO)
             .fetch_people("db-1", &NotionOverrides::default())
             .await
             .unwrap();
-        assert_eq!(people.len(), 1);
-        assert!(people[0].projects.is_empty());
+        assert_eq!(fetched.people.len(), 1);
+        assert!(fetched.people[0].projects.is_empty());
+        assert_eq!(fetched.warnings.len(), 1);
+        assert!(
+            fetched.warnings[0].contains("rate limiting"),
+            "{:?}",
+            fetched.warnings
+        );
         assert_eq!(
             transport.requests().len(),
             3,

@@ -929,6 +929,7 @@ pub fn run() {
             people::commands::meeting_attendees_remove,
             people::commands::meeting_people_context,
             // people sync (Linear, Notion)
+            people::sync_commands::set_people_integrations_enabled,
             people::sync_commands::people_sync_status,
             people::sync_commands::people_connect,
             people::sync_commands::people_test_connection,

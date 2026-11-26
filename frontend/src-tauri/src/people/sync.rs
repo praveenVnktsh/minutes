@@ -7,8 +7,13 @@
 //! source's API and are never logged. Syncs send the token and read-only
 //! queries; no meeting content ever leaves the Mac.
 //!
+//! The whole feature sits behind the "Linear & Notion people sync" beta flag,
+//! mirrored here by [`set_integrations_enabled`]. It starts off: until the
+//! frontend turns it on, the worker and the network commands make no request.
+//!
 //! [`upsert_from_source`]: super::upsert_from_source
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::LazyLock;
 use std::time::Duration as StdDuration;
 
@@ -36,6 +41,29 @@ const RETRY_AFTER_HOURS: i64 = 1;
 /// The worker waits this long after app start, then checks hourly.
 const WORKER_START_DELAY: StdDuration = StdDuration::from_secs(90);
 const WORKER_TICK: StdDuration = StdDuration::from_secs(60 * 60);
+
+/// The beta flag, mirrored from the frontend. Off until it says otherwise.
+static INTEGRATIONS_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// The error the network commands return while the flag is off.
+pub const TURNED_OFF: &str = "Linear and Notion sync is turned off. Turn it on in Settings → Labs & Developer.";
+
+pub fn integrations_enabled() -> bool {
+    INTEGRATIONS_ENABLED.load(Ordering::SeqCst)
+}
+
+pub fn set_integrations_enabled(enabled: bool) {
+    INTEGRATIONS_ENABLED.store(enabled, Ordering::SeqCst);
+}
+
+/// `Err(TURNED_OFF)` unless `enabled`.
+pub fn ensure_enabled(enabled: bool) -> Result<(), String> {
+    if enabled {
+        Ok(())
+    } else {
+        Err(TURNED_OFF.to_string())
+    }
+}
 
 /// One sync at a time, whether started by the user or the worker.
 static SYNC_LOCK: LazyLock<tokio::sync::Mutex<()>> = LazyLock::new(|| tokio::sync::Mutex::new(()));
@@ -69,6 +97,9 @@ pub struct SourceStatus {
     pub last_synced_at: Option<String>,
     pub last_attempt_at: Option<String>,
     pub last_error: Option<String>,
+    /// A non-fatal note from the last successful sync, e.g. "Projects
+    /// couldn't be read: ...".
+    pub last_warning: Option<String>,
     pub last_count: Option<i64>,
     /// Notion only.
     pub notion: Option<NotionConfig>,
@@ -83,6 +114,16 @@ pub struct SourceSyncResult {
     /// People the store refused (e.g. no name).
     pub failed: usize,
     pub error: Option<String>,
+    /// Non-fatal notes: parts of the source that couldn't be read this time.
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+/// What a source returned: people, and notes about anything it had to skip.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Fetched {
+    pub people: Vec<super::PersonInput>,
+    pub warnings: Vec<String>,
 }
 
 struct Integration {
@@ -203,7 +244,7 @@ pub async fn statuses(pool: &SqlitePool) -> Result<Vec<SourceStatus>, String> {
     let mut out = Vec::new();
     for source in SYNC_SOURCES {
         let row = sqlx::query(
-            "SELECT config, workspace, last_synced_at, last_attempt_at, last_error, last_count
+            "SELECT config, workspace, last_synced_at, last_attempt_at, last_error, last_warning, last_count
              FROM people_integrations WHERE source = ?",
         )
         .bind(source)
@@ -218,6 +259,7 @@ pub async fn statuses(pool: &SqlitePool) -> Result<Vec<SourceStatus>, String> {
                 last_synced_at: row.get("last_synced_at"),
                 last_attempt_at: row.get("last_attempt_at"),
                 last_error: row.get("last_error"),
+                last_warning: row.get("last_warning"),
                 last_count: row.get("last_count"),
                 notion: (source == SOURCE_NOTION).then(|| {
                     serde_json::from_str(&row.get::<String, _>("config")).unwrap_or_default()
@@ -236,10 +278,11 @@ async fn record(pool: &SqlitePool, result: &SourceSyncResult) -> Result<(), Stri
     let stamp = now();
     match &result.error {
         None => sqlx::query(
-            "UPDATE people_integrations SET last_synced_at = ?, last_attempt_at = ?, last_error = NULL, last_count = ? WHERE source = ?",
+            "UPDATE people_integrations SET last_synced_at = ?, last_attempt_at = ?, last_error = NULL, last_warning = ?, last_count = ? WHERE source = ?",
         )
         .bind(&stamp)
         .bind(&stamp)
+        .bind((!result.warnings.is_empty()).then(|| result.warnings.join(" ")))
         .bind(result.synced as i64)
         .bind(&result.source),
         Some(error) => sqlx::query(
@@ -259,7 +302,7 @@ async fn fetch<T: Transport>(
     transport: &T,
     source: &str,
     integration: &Integration,
-) -> Result<Vec<super::PersonInput>, String> {
+) -> Result<Fetched, String> {
     match source {
         SOURCE_LINEAR => {
             LinearClient::new(transport, &integration.token)
@@ -312,8 +355,9 @@ async fn sync_source_locked<T: Transport>(
         }
     };
     match fetch(transport, source, &integration).await {
-        Ok(people) => {
-            for person in &people {
+        Ok(fetched) => {
+            result.warnings = fetched.warnings;
+            for person in &fetched.people {
                 match super::upsert_from_source(pool, person).await {
                     Ok(_) => result.synced += 1,
                     Err(error) => {
@@ -419,38 +463,62 @@ pub fn init_worker<R: Runtime>(app: &AppHandle<R>) {
                 continue;
             };
             let pool = state.db_manager.pool().clone();
-            let mut due = Vec::new();
-            for source in SYNC_SOURCES {
-                match load(&pool, source).await {
-                    Ok(Some(integration))
-                        if is_due(
-                            integration.last_synced_at.as_deref(),
-                            integration.last_attempt_at.as_deref(),
-                            Utc::now(),
-                        ) =>
-                    {
-                        due.push(source)
-                    }
-                    Ok(_) => {}
-                    Err(error) => log::warn!("People sync worker: {error}"),
-                }
+            let results = scheduled_sync(
+                &pool,
+                integrations_enabled(),
+                Utc::now(),
+                ReqwestTransport::new,
+            )
+            .await;
+            if !results.is_empty() {
+                emit_status(&app, &pool).await;
             }
-            if due.is_empty() {
-                continue;
-            }
-            let transport = match ReqwestTransport::new() {
-                Ok(transport) => transport,
-                Err(error) => {
-                    log::warn!("People sync worker: {error}");
-                    continue;
-                }
-            };
-            for source in due {
-                sync_source(&pool, &transport, source).await;
-            }
-            emit_status(&app, &pool).await;
         }
     });
+}
+
+/// One worker pass: syncs every connected source that [`is_due`]. Makes no
+/// request at all (and builds no transport) while the beta flag is off.
+pub async fn scheduled_sync<T: Transport>(
+    pool: &SqlitePool,
+    enabled: bool,
+    now: DateTime<Utc>,
+    transport: impl FnOnce() -> Result<T, String>,
+) -> Vec<SourceSyncResult> {
+    if !enabled {
+        return Vec::new();
+    }
+    let mut due = Vec::new();
+    for source in SYNC_SOURCES {
+        match load(pool, source).await {
+            Ok(Some(integration))
+                if is_due(
+                    integration.last_synced_at.as_deref(),
+                    integration.last_attempt_at.as_deref(),
+                    now,
+                ) =>
+            {
+                due.push(source)
+            }
+            Ok(_) => {}
+            Err(error) => log::warn!("People sync worker: {error}"),
+        }
+    }
+    if due.is_empty() {
+        return Vec::new();
+    }
+    let transport = match transport() {
+        Ok(transport) => transport,
+        Err(error) => {
+            log::warn!("People sync worker: {error}");
+            return Vec::new();
+        }
+    };
+    let mut results = Vec::new();
+    for source in due {
+        results.push(sync_source(pool, &transport, source).await);
+    }
+    results
 }
 
 #[cfg(test)]
@@ -478,8 +546,97 @@ mod tests {
     fn linear_responses(users: serde_json::Value) -> Vec<serde_json::Value> {
         vec![
             json!({ "data": { "users": { "nodes": users, "pageInfo": { "hasNextPage": false, "endCursor": null } } } }),
+            json!({ "data": { "users": { "nodes": [], "pageInfo": { "hasNextPage": false, "endCursor": null } } } }),
             json!({ "data": { "projects": { "nodes": [], "pageInfo": { "hasNextPage": false, "endCursor": null } } } }),
         ]
+    }
+
+    #[tokio::test]
+    async fn a_projects_error_still_syncs_people_and_notes_it() {
+        let pool = pool().await;
+        save_token(&pool, "linear", "k", None).await.unwrap();
+        let rejected = json!({ "errors": [{ "message": "Cannot query field \"status\" on type \"Project\"." }] });
+        let transport = FakeTransport::ok(vec![
+            json!({ "data": { "users": { "nodes": [
+                { "id": "u1", "name": "Priya Shah", "email": "priya@example.com", "active": true,
+                  "teams": { "nodes": [{ "name": "Growth" }] } }
+            ], "pageInfo": { "hasNextPage": false, "endCursor": null } } } }),
+            json!({ "data": { "users": { "nodes": [
+                { "id": "u1", "assignedIssues": { "nodes": [{ "title": "Fix pricing page" }] } }
+            ], "pageInfo": { "hasNextPage": false, "endCursor": null } } } }),
+            rejected.clone(),
+            rejected,
+        ]);
+        let result = sync_source(&pool, &transport, "linear").await;
+        assert_eq!(result.error, None, "projects are not fatal");
+        assert_eq!(result.synced, 1);
+        assert_eq!(result.warnings.len(), 1);
+        assert!(result.warnings[0].starts_with("Projects couldn't be read: "));
+
+        let people = list_people(&pool).await.unwrap();
+        assert_eq!(people[0].team.as_deref(), Some("Growth"));
+        assert_eq!(people[0].projects.len(), 1, "issues still arrive");
+
+        let status = &statuses(&pool).await.unwrap()[0];
+        assert_eq!(status.last_error, None);
+        assert!(status.last_synced_at.is_some());
+        assert_eq!(
+            status.last_warning.as_deref(),
+            Some(result.warnings[0].as_str())
+        );
+
+        // A clean sync clears the note.
+        let clean = FakeTransport::ok(linear_responses(json!([
+            { "id": "u1", "name": "Priya Shah", "email": "priya@example.com", "active": true }
+        ])));
+        sync_source(&pool, &clean, "linear").await;
+        assert_eq!(statuses(&pool).await.unwrap()[0].last_warning, None);
+    }
+
+    #[test]
+    fn the_flag_starts_off_and_refuses() {
+        // No test turns the flag on, so this is the app's starting state.
+        assert!(!integrations_enabled());
+        assert_eq!(ensure_enabled(false).unwrap_err(), TURNED_OFF);
+        assert!(ensure_enabled(true).is_ok());
+    }
+
+    #[tokio::test]
+    async fn the_worker_makes_no_request_while_off() {
+        let pool = pool().await;
+        save_token(&pool, "linear", "k", None).await.unwrap();
+        let transport = FakeTransport::default();
+        let mut built = false;
+        let results = scheduled_sync(&pool, false, Utc::now(), || {
+            built = true;
+            Ok::<_, String>(&transport)
+        })
+        .await;
+        assert!(results.is_empty());
+        assert!(!built, "no transport is even built");
+        assert!(transport.requests().is_empty());
+        assert_eq!(
+            token(&pool, "linear").await.unwrap().as_deref(),
+            Some("k"),
+            "tokens are kept"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_worker_syncs_due_sources_while_on() {
+        let pool = pool().await;
+        save_token(&pool, "linear", "k", None).await.unwrap();
+        let transport = FakeTransport::ok(linear_responses(json!([
+            { "id": "u1", "name": "Priya Shah", "email": "priya@example.com", "active": true }
+        ])));
+        let results = scheduled_sync(&pool, true, Utc::now(), || Ok::<_, String>(&transport)).await;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].synced, 1);
+        // Synced just now: the next pass does nothing.
+        let idle = FakeTransport::default();
+        let results = scheduled_sync(&pool, true, Utc::now(), || Ok::<_, String>(&idle)).await;
+        assert!(results.is_empty());
+        assert!(idle.requests().is_empty());
     }
 
     #[tokio::test]
@@ -505,7 +662,8 @@ mod tests {
                 source: "linear".into(),
                 synced: 1,
                 failed: 1,
-                error: None
+                error: None,
+                warnings: vec![],
             }]
         );
         let people = list_people(&pool).await.unwrap();

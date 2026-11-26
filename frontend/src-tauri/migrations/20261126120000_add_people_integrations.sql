@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS people_integrations (
     last_synced_at TEXT,             -- last successful sync (RFC 3339)
     last_attempt_at TEXT,
     last_error TEXT,                 -- NULL after a successful sync
+    last_warning TEXT,               -- non-fatal note from the last sync
     last_count INTEGER,              -- people synced last time
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL

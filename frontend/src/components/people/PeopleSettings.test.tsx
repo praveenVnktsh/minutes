@@ -7,9 +7,12 @@ const originalCore = { ...(await import('@tauri-apps/api/core')) }
 const originalEvent = { ...(await import('@tauri-apps/api/event')) }
 const originalDialog = { ...(await import('@/components/ui/dialog')) }
 const originalToast = { ...(await import('sonner')) }
+const originalConfig = { ...(await import('@/contexts/ConfigContext')) }
 
 const toastSuccess = mock((_message: string, _options?: unknown) => {})
 const toastError = mock((_message: string, _options?: unknown) => {})
+const toastWarning = mock((_message: string, _options?: unknown) => {})
+let integrationsOn = true
 const eventHandlers = new Map<string, (event: { payload: unknown }) => void>()
 
 mock.module('@tauri-apps/api/event', () => ({
@@ -28,7 +31,11 @@ mock.module('@/components/ui/dialog', () => ({
   DialogTitle: ({ children }: { children?: React.ReactNode }) => <h2>{children}</h2>,
   DialogDescription: ({ children }: { children?: React.ReactNode }) => <p>{children}</p>,
 }))
-mock.module('sonner', () => ({ ...originalToast, toast: { success: toastSuccess, error: toastError } }))
+mock.module('sonner', () => ({ ...originalToast, toast: { success: toastSuccess, error: toastError, warning: toastWarning } }))
+mock.module('@/contexts/ConfigContext', () => ({
+  ...originalConfig,
+  useConfig: () => ({ betaFeatures: { liveTranscription: true, micEchoCancellation: false, peopleIntegrations: integrationsOn } }),
+}))
 
 function status(source: 'linear' | 'notion', patch: Partial<PeopleSourceStatus> = {}): PeopleSourceStatus {
   return {
@@ -38,6 +45,7 @@ function status(source: 'linear' | 'notion', patch: Partial<PeopleSourceStatus> 
     last_synced_at: null,
     last_attempt_at: null,
     last_error: null,
+    last_warning: null,
     last_count: null,
     notion: null,
     ...patch,
@@ -65,6 +73,7 @@ let statuses: PeopleSourceStatus[]
 let people: Person[]
 let syncedPeople: Person[]
 let connectError: string | null = null
+let syncWarnings: string[] = []
 const calls: Array<{ command: string; args?: Record<string, unknown> }> = []
 
 mock.module('@tauri-apps/api/core', () => ({
@@ -85,7 +94,7 @@ mock.module('@tauri-apps/api/core', () => ({
       case 'people_sync_now':
         people = syncedPeople
         statuses = statuses.map((s) => (s.source === args!.source ? { ...s, last_synced_at: '2026-11-25T10:00:00Z', last_count: syncedPeople.length } : s))
-        return [{ source: args!.source, synced: syncedPeople.length, failed: 0, error: null }]
+        return [{ source: args!.source, synced: syncedPeople.length, failed: 0, error: null, warnings: syncWarnings }]
       case 'people_disconnect':
         statuses = statuses.map((s) => (s.source === args!.source ? status(s.source) : s))
         people = []
@@ -129,6 +138,7 @@ afterAll(() => {
   mock.module('@tauri-apps/api/event', () => originalEvent)
   mock.module('@/components/ui/dialog', () => originalDialog)
   mock.module('sonner', () => originalToast)
+  mock.module('@/contexts/ConfigContext', () => originalConfig)
 })
 
 type TextNode = { children: Array<TextNode | string> }
@@ -187,10 +197,13 @@ describe('PeopleSettings', () => {
     ]
     syncedPeople = people
     connectError = null
+    syncWarnings = []
+    integrationsOn = true
     calls.length = 0
     eventHandlers.clear()
     toastSuccess.mockClear()
     toastError.mockClear()
+    toastWarning.mockClear()
   })
 
   test('connects Linear with a key and shows the workspace', async () => {
@@ -334,6 +347,41 @@ describe('PeopleSettings', () => {
     expect(lastCall('people_connect')?.args).toEqual({ source: 'notion', token: 'ntn_abc' })
     expect(lastCall('people_notion_databases')).toBeTruthy()
     expect(field(card(renderer, 'Notion'), 'Notion database', 'select').props.value).toBe('db1')
+  })
+
+  test('with the beta flag off, hides the Linear and Notion cards but keeps the directory', async () => {
+    integrationsOn = false
+    statuses = [status('linear', { connected: true, workspace: 'Acme' }), status('notion')]
+    const renderer = await render()
+    expect(renderer.root.findAll((node) => node.type === 'section' && /people sync$/.test(node.props['aria-label'] ?? ''))).toHaveLength(0)
+    expect(text(renderer)).toContain('Linear and Notion sync is a beta feature. Turn it on in Settings → Labs & Developer.')
+    // The directory still works: list, add, edit, delete.
+    expect(text(renderer)).toContain('Priya Shah')
+    expect(button(renderer.root, 'Add person')).toBeTruthy()
+    expect(button(renderer.root, 'Edit Priya Shah')).toBeTruthy()
+    expect(button(renderer.root, 'Delete Priya Shah')).toBeTruthy()
+    // Nothing that would reach Linear or Notion was invoked.
+    for (const command of ['people_connect', 'people_test_connection', 'people_sync_now', 'people_notion_databases']) {
+      expect(calls.some((call) => call.command === command)).toBe(false)
+    }
+  })
+
+  test('with the beta flag on, shows both cards and no hint', async () => {
+    const renderer = await render()
+    expect(card(renderer, 'Linear')).toBeTruthy()
+    expect(card(renderer, 'Notion')).toBeTruthy()
+    expect(text(renderer)).not.toContain('is a beta feature')
+  })
+
+  test('a partial sync shows its note on the card and warns', async () => {
+    statuses = [status('linear', { connected: true, workspace: 'Acme' }), status('notion')]
+    syncWarnings = ["Projects couldn't be read: Linear returned an error: bad field"]
+    const renderer = await render()
+    statuses = [status('linear', { connected: true, workspace: 'Acme', last_warning: syncWarnings[0] }), status('notion')]
+    await click(button(card(renderer, 'Linear'), 'Sync now'))
+    expect(toastWarning).toHaveBeenCalled()
+    const note = card(renderer, 'Linear').find((node) => node.props.role === 'status' && node.type === 'div')
+    expect(textOf(note as unknown as TextNode)).toContain("Projects couldn't be read")
   })
 
   test('refreshes when a background sync finishes', async () => {

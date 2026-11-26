@@ -120,7 +120,12 @@ export function PeopleSourceCard({ status, onStatuses, onPeopleChanged }: People
     if (result?.error) {
       toast.error(`${copy.title} sync failed`, { description: result.error });
     } else if (result) {
-      toast.success(`Synced ${result.synced} ${result.synced === 1 ? 'person' : 'people'} from ${copy.title}`);
+      const message = `Synced ${result.synced} ${result.synced === 1 ? 'person' : 'people'} from ${copy.title}`;
+      if (result.warnings.length > 0) {
+        toast.warning(message, { description: result.warnings.join(' ') });
+      } else {
+        toast.success(message);
+      }
     }
   }, `${copy.title} sync failed`);
 
@@ -184,6 +189,9 @@ export function PeopleSourceCard({ status, onStatuses, onPeopleChanged }: People
           </div>
           {status.last_error && (
             <div role="alert" className={cn('rounded-md p-3 text-sm', panel.error)}>{status.last_error}</div>
+          )}
+          {!status.last_error && status.last_warning && (
+            <div role="status" className={cn('rounded-md p-3 text-sm', panel.warning)}>{status.last_warning}</div>
           )}
           <div className="flex flex-wrap gap-2">
             <Button size="sm" variant="outline" onClick={test} disabled={busy !== null}>

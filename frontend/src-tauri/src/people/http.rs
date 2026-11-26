@@ -38,6 +38,12 @@ pub trait Transport: Send + Sync {
     fn send(&self, request: Request) -> impl Future<Output = Result<Value, HttpError>> + Send;
 }
 
+impl<T: Transport> Transport for &T {
+    fn send(&self, request: Request) -> impl Future<Output = Result<Value, HttpError>> + Send {
+        (**self).send(request)
+    }
+}
+
 /// The real transport: reqwest with a 20 second timeout.
 pub struct ReqwestTransport {
     client: reqwest::Client,

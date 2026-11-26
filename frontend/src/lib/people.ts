@@ -91,6 +91,8 @@ export interface PeopleSourceStatus {
   last_synced_at: string | null;
   last_attempt_at: string | null;
   last_error: string | null;
+  /** A non-fatal note from the last successful sync, e.g. "Projects couldn't be read: …". */
+  last_warning: string | null;
   last_count: number | null;
   notion: NotionConfig | null;
 }
@@ -114,6 +116,8 @@ export interface PeopleSyncResult {
   synced: number;
   failed: number;
   error: string | null;
+  /** Non-fatal notes: parts of the source that couldn't be read this time. */
+  warnings: string[];
 }
 
 export const peopleSyncApi = {

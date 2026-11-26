@@ -313,6 +313,6 @@ describe('retired setting', () => {
 
   test('the old import flag is dropped and the stored live transcription value is kept', () => {
     const features = parseBetaFeatures({ importAndRetranscribe: false, liveTranscription: false, micEchoCancellation: true });
-    expect(features).toEqual({ liveTranscription: false, micEchoCancellation: true });
+    expect(features).toEqual({ liveTranscription: false, micEchoCancellation: true, peopleIntegrations: false });
   });
 });

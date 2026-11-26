@@ -40,6 +40,19 @@ async fn stored_token(state: &AppState, source: &str) -> Result<String, String> 
         .ok_or_else(|| format!("{} is not connected", sync::display_name(source)))
 }
 
+/// Mirrors the "Linear & Notion people sync" beta flag from the frontend.
+/// Turning it off stops all requests but keeps tokens and people.
+#[tauri::command]
+pub async fn set_people_integrations_enabled(enabled: bool) -> Result<(), String> {
+    log::info!("Linear & Notion people sync (beta) enabled: {enabled}");
+    sync::set_integrations_enabled(enabled);
+    Ok(())
+}
+
+fn ensure_enabled() -> Result<(), String> {
+    sync::ensure_enabled(sync::integrations_enabled())
+}
+
 #[tauri::command]
 pub async fn people_sync_status(
     state: tauri::State<'_, AppState>,
@@ -55,6 +68,7 @@ pub async fn people_connect<R: Runtime>(
     source: String,
     token: String,
 ) -> Result<ConnectResult, String> {
+    ensure_enabled()?;
     let source = sync::check_source(&source)?;
     let token = token.trim().to_string();
     if token.is_empty() {
@@ -83,6 +97,7 @@ pub async fn people_test_connection(
     source: String,
     token: Option<String>,
 ) -> Result<ConnectionTest, String> {
+    ensure_enabled()?;
     let source = sync::check_source(&source)?;
     let token = match token
         .map(|t| t.trim().to_string())
@@ -106,6 +121,7 @@ pub async fn people_test_connection(
 pub async fn people_notion_databases(
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<NotionDatabase>, String> {
+    ensure_enabled()?;
     let token = stored_token(&state, SOURCE_NOTION).await?;
     let transport = ReqwestTransport::new()?;
     NotionClient::new(&transport, &token).list_databases().await
@@ -145,6 +161,7 @@ pub async fn people_sync_now<R: Runtime>(
     state: tauri::State<'_, AppState>,
     source: Option<String>,
 ) -> Result<Vec<SourceSyncResult>, String> {
+    ensure_enabled()?;
     let pool = state.db_manager.pool();
     let transport = ReqwestTransport::new()?;
     let results = sync::sync_all(pool, &transport, source.as_deref()).await?;

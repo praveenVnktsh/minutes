@@ -1,9 +1,13 @@
 //! People from Linear, through its GraphQL API and a personal API key.
 //!
 //! Requests send the key and these read-only queries, nothing else: active
-//! users (name, display name, email, teams, up to five in-progress assigned
-//! issues) and projects (name, state, lead, members). Each active user becomes
-//! a [`PersonInput`] with source `linear`.
+//! users (name, display name, email, teams), their in-progress assigned issues
+//! (up to five each) and projects (name, status, lead, members). Each active
+//! user becomes a [`PersonInput`] with source `linear`.
+//!
+//! Only the users query can fail a sync. Issues and projects are separate
+//! queries: if Linear rejects one, that run goes without them and the sync
+//! carries a warning instead.
 
 use std::collections::{HashMap, HashSet};
 
@@ -11,7 +15,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::http::{graphql_error, HttpError, Method, Request, Transport};
-use super::sync::ConnectionTest;
+use super::sync::{ConnectionTest, Fetched};
 use super::{PersonInput, Project, SOURCE_LINEAR};
 
 pub const LINEAR_API: &str = "https://api.linear.app/graphql";
@@ -34,6 +38,16 @@ pub const USERS_QUERY: &str = r#"query MinutesPeople($after: String) {
       email
       active
       teams(first: 20) { nodes { name } }
+    }
+    pageInfo { hasNextPage endCursor }
+  }
+}"#;
+
+/// Each user's in-progress assigned issues, most recently updated first.
+pub const ISSUES_QUERY: &str = r#"query MinutesIssues($after: String) {
+  users(first: 50, after: $after) {
+    nodes {
+      id
       assignedIssues(first: 5, orderBy: updatedAt, filter: { state: { type: { eq: "started" } } }) {
         nodes { title url }
       }
@@ -42,7 +56,37 @@ pub const USERS_QUERY: &str = r#"query MinutesPeople($after: String) {
   }
 }"#;
 
+/// [`ISSUES_QUERY`] without the ordering, in case Linear rejects it.
+pub const ISSUES_QUERY_UNORDERED: &str = r#"query MinutesIssues($after: String) {
+  users(first: 50, after: $after) {
+    nodes {
+      id
+      assignedIssues(first: 5, filter: { state: { type: { eq: "started" } } }) {
+        nodes { title url }
+      }
+    }
+    pageInfo { hasNextPage endCursor }
+  }
+}"#;
+
+/// Projects with their current `status`.
 pub const PROJECTS_QUERY: &str = r#"query MinutesProjects($after: String) {
+  projects(first: 25, after: $after) {
+    nodes {
+      id
+      name
+      url
+      status { type }
+      lead { id }
+      members(first: 50) { nodes { id } }
+    }
+    pageInfo { hasNextPage endCursor }
+  }
+}"#;
+
+/// [`PROJECTS_QUERY`] with the older, deprecated `state` field, for when
+/// `status` isn't available.
+pub const PROJECTS_QUERY_LEGACY: &str = r#"query MinutesProjects($after: String) {
   projects(first: 25, after: $after) {
     nodes {
       id
@@ -116,8 +160,23 @@ pub struct LinearUser {
     pub active: bool,
     #[serde(default)]
     teams: Option<Nodes<Named>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UserIssues {
+    id: String,
     #[serde(default)]
     assigned_issues: Option<Nodes<LinearIssue>>,
+}
+
+/// In-progress assigned issues by Linear user id.
+pub type IssuesByUser = HashMap<String, Vec<LinearIssue>>;
+
+#[derive(Debug, Clone, Deserialize)]
+struct ProjectStatus {
+    #[serde(rename = "type", default)]
+    kind: Option<String>,
 }
 
 fn yes() -> bool {
@@ -131,6 +190,9 @@ pub struct LinearProject {
     #[serde(default)]
     pub url: Option<String>,
     #[serde(default)]
+    status: Option<ProjectStatus>,
+    /// Deprecated in Linear; read only when `status` isn't available.
+    #[serde(default)]
     pub state: Option<String>,
     #[serde(default)]
     lead: Option<IdOnly>,
@@ -140,8 +202,10 @@ pub struct LinearProject {
 
 impl LinearProject {
     fn is_active(&self) -> bool {
-        self.state
-            .as_deref()
+        self.status
+            .as_ref()
+            .and_then(|s| s.kind.as_deref())
+            .or(self.state.as_deref())
             .map(|s| ACTIVE_PROJECT_STATES.contains(&s.to_lowercase().as_str()))
             .unwrap_or(false)
     }
@@ -243,8 +307,8 @@ impl<'a, T: Transport> LinearClient<'a, T> {
             .collect()
     }
 
-    pub async fn projects(&self) -> Result<Vec<LinearProject>, String> {
-        self.paginate(PROJECTS_QUERY, "projects")
+    async fn projects_with(&self, query: &str) -> Result<Vec<LinearProject>, String> {
+        self.paginate(query, "projects")
             .await?
             .into_iter()
             .map(|v| {
@@ -253,11 +317,78 @@ impl<'a, T: Transport> LinearClient<'a, T> {
             .collect()
     }
 
-    /// Every active user as a [`PersonInput`].
-    pub async fn fetch_people(&self) -> Result<Vec<PersonInput>, String> {
+    /// Projects, read with `status`, or with the older `state` when Linear
+    /// rejects `status`. The error is the first attempt's.
+    pub async fn projects(&self) -> Result<Vec<LinearProject>, String> {
+        match self.projects_with(PROJECTS_QUERY).await {
+            Ok(projects) => Ok(projects),
+            Err(first) => {
+                log::warn!("Linear projects query failed ({first}); retrying with `state`");
+                self.projects_with(PROJECTS_QUERY_LEGACY)
+                    .await
+                    .map_err(|_| first)
+            }
+        }
+    }
+
+    async fn issues_with(&self, query: &str) -> Result<IssuesByUser, String> {
+        let mut by_user = IssuesByUser::new();
+        for node in self.paginate(query, "users").await? {
+            let user: UserIssues = serde_json::from_value(node)
+                .map_err(|e| format!("Unexpected Linear issues: {e}"))?;
+            let issues: Vec<LinearIssue> = user
+                .assigned_issues
+                .map(|i| i.nodes)
+                .unwrap_or_default()
+                .into_iter()
+                .take(MAX_ISSUES_PER_PERSON)
+                .collect();
+            if !issues.is_empty() {
+                by_user.insert(user.id, issues);
+            }
+        }
+        Ok(by_user)
+    }
+
+    /// In-progress assigned issues per user, ordered by last update when
+    /// Linear allows it.
+    pub async fn issues(&self) -> Result<IssuesByUser, String> {
+        match self.issues_with(ISSUES_QUERY).await {
+            Ok(issues) => Ok(issues),
+            Err(first) => {
+                log::warn!("Linear issues query failed ({first}); retrying unordered");
+                self.issues_with(ISSUES_QUERY_UNORDERED)
+                    .await
+                    .map_err(|_| first)
+            }
+        }
+    }
+
+    /// Every active user as a [`PersonInput`]. Only the users query is
+    /// required: failed issue or project queries become warnings.
+    pub async fn fetch_people(&self) -> Result<Fetched, String> {
         let users = self.users().await?;
-        let projects = self.projects().await?;
-        Ok(to_inputs(&users, &projects))
+        let mut warnings = Vec::new();
+        let issues = match self.issues().await {
+            Ok(issues) => issues,
+            Err(error) => {
+                log::warn!("Linear sync continues without issues: {error}");
+                warnings.push(format!("Issues couldn't be read: {error}"));
+                IssuesByUser::new()
+            }
+        };
+        let projects = match self.projects().await {
+            Ok(projects) => projects,
+            Err(error) => {
+                log::warn!("Linear sync continues without projects: {error}");
+                warnings.push(format!("Projects couldn't be read: {error}"));
+                Vec::new()
+            }
+        };
+        Ok(Fetched {
+            people: to_inputs(&users, &projects, &issues),
+            warnings,
+        })
     }
 
     /// The workspace name and how many active users it has.
@@ -281,7 +412,11 @@ impl<'a, T: Transport> LinearClient<'a, T> {
 
 /// Maps Linear users (and the projects they lead or belong to) to people.
 /// Inactive users are skipped.
-pub fn to_inputs(users: &[LinearUser], projects: &[LinearProject]) -> Vec<PersonInput> {
+pub fn to_inputs(
+    users: &[LinearUser],
+    projects: &[LinearProject],
+    issues: &IssuesByUser,
+) -> Vec<PersonInput> {
     let mut by_user: HashMap<&str, Vec<&LinearProject>> = HashMap::new();
     for project in projects.iter().filter(|p| p.is_active()) {
         let mut seen = HashSet::new();
@@ -323,10 +458,10 @@ pub fn to_inputs(users: &[LinearUser], projects: &[LinearProject]) -> Vec<Person
                     });
                 }
             }
-            for issue in user
-                .assigned_issues
-                .iter()
-                .flat_map(|i| i.nodes.iter())
+            for issue in issues
+                .get(&user.id)
+                .into_iter()
+                .flatten()
                 .take(MAX_ISSUES_PER_PERSON)
             {
                 if titles.insert(issue.title.to_lowercase()) {
@@ -378,15 +513,7 @@ mod tests {
             "displayName": "priya",
             "email": "Priya@Example.com",
             "active": true,
-            "teams": { "nodes": [{ "name": "Growth" }, { "name": "Platform" }] },
-            "assignedIssues": { "nodes": [
-                { "title": "Fix pricing page", "url": "https://linear.app/x/issue/GRO-1" },
-                { "title": "Offline mode", "url": "https://linear.app/x/issue/GRO-2" },
-                { "title": "Three", "url": null },
-                { "title": "Four" },
-                { "title": "Five" },
-                { "title": "Six" }
-            ]}
+            "teams": { "nodes": [{ "name": "Growth" }, { "name": "Platform" }] }
         })
     }
 
@@ -397,8 +524,7 @@ mod tests {
             "displayName": "Dev Patel",
             "email": "dev@example.com",
             "active": true,
-            "teams": { "nodes": [] },
-            "assignedIssues": { "nodes": [] }
+            "teams": { "nodes": [] }
         })
     }
 
@@ -406,28 +532,57 @@ mod tests {
         json!({ "id": "u-gone", "name": "Former", "email": "f@example.com", "active": false })
     }
 
+    /// The issues query's page: users with their assigned issues.
+    fn issues() -> Value {
+        json!([
+            { "id": "u-priya", "assignedIssues": { "nodes": [
+                { "title": "Fix pricing page", "url": "https://linear.app/x/issue/GRO-1" },
+                { "title": "Offline mode", "url": "https://linear.app/x/issue/GRO-2" },
+                { "title": "Three", "url": null },
+                { "title": "Four" },
+                { "title": "Five" },
+                { "title": "Six" }
+            ]}},
+            { "id": "u-dev", "assignedIssues": { "nodes": [] } }
+        ])
+    }
+
     fn projects() -> Value {
         json!([
             { "id": "p1", "name": "Offline mode", "url": "https://linear.app/x/project/offline",
-              "state": "started", "lead": { "id": "u-priya" },
+              "status": { "type": "started" }, "lead": { "id": "u-priya" },
               "members": { "nodes": [{ "id": "u-priya" }, { "id": "u-dev" }] } },
-            { "id": "p2", "name": "Pricing", "url": null, "state": "planned", "lead": null,
+            { "id": "p2", "name": "Pricing", "url": null, "status": { "type": "planned" }, "lead": null,
               "members": { "nodes": [{ "id": "u-dev" }] } },
-            { "id": "p3", "name": "Old launch", "state": "completed", "lead": { "id": "u-priya" },
+            { "id": "p3", "name": "Old launch", "status": { "type": "completed" }, "lead": { "id": "u-priya" },
               "members": { "nodes": [] } }
         ])
+    }
+
+    fn graphql_error(message: &str) -> Value {
+        json!({ "errors": [{ "message": message }] })
+    }
+
+    fn query_of(request: &Request) -> String {
+        request.body.as_ref().unwrap()["query"]
+            .as_str()
+            .unwrap()
+            .to_string()
     }
 
     #[tokio::test]
     async fn maps_users_teams_projects_and_issues() {
         let transport = FakeTransport::ok(vec![
             users_page(json!([priya(), dev(), gone()]), None),
+            users_page(issues(), None),
             projects_page(projects(), None),
         ]);
-        let people = LinearClient::new(&transport, "lin_api_secret")
+        let fetched = LinearClient::new(&transport, "lin_api_secret")
             .fetch_people()
             .await
             .unwrap();
+        assert!(fetched.warnings.is_empty());
+        let people = fetched.people;
         assert_eq!(people.len(), 2, "inactive users are skipped");
 
         let priya = &people[0];
@@ -466,42 +621,142 @@ mod tests {
         let transport = FakeTransport::ok(vec![
             users_page(json!([priya()]), Some("cursor-1")),
             users_page(json!([dev()]), None),
+            users_page(json!([]), Some("cursor-i")),
+            users_page(issues(), None),
             projects_page(json!([]), Some("cursor-p")),
             projects_page(projects(), None),
         ]);
         let people = LinearClient::new(&transport, " lin_api_secret ")
             .fetch_people()
             .await
-            .unwrap();
+            .unwrap()
+            .people;
         assert_eq!(people.len(), 2);
         assert_eq!(people[1].projects.len(), 2);
+        assert_eq!(people[0].projects.len(), 5);
 
         let requests = transport.requests();
-        assert_eq!(requests.len(), 4);
+        assert_eq!(requests.len(), 6);
         assert!(requests
             .iter()
             .all(|r| r.url == LINEAR_API && r.method == Method::Post));
         assert!(requests.iter().all(|r| r
             .headers
             .contains(&("Authorization".to_string(), "lin_api_secret".to_string()))));
-        assert_eq!(
-            requests[0].body.as_ref().unwrap()["variables"]["after"],
-            Value::Null
-        );
-        assert_eq!(
-            requests[1].body.as_ref().unwrap()["variables"]["after"],
-            "cursor-1"
-        );
-        assert_eq!(
-            requests[3].body.as_ref().unwrap()["variables"]["after"],
-            "cursor-p"
-        );
+        let after = |i: usize| requests[i].body.as_ref().unwrap()["variables"]["after"].clone();
+        assert_eq!(after(0), Value::Null);
+        assert_eq!(after(1), "cursor-1");
+        assert_eq!(after(3), "cursor-i");
+        assert_eq!(after(5), "cursor-p");
+        assert_eq!(query_of(&requests[2]), ISSUES_QUERY);
+        assert_eq!(query_of(&requests[4]), PROJECTS_QUERY);
         for request in &requests {
             let body = request.body.as_ref().unwrap().as_object().unwrap();
             let mut keys: Vec<&str> = body.keys().map(String::as_str).collect();
             keys.sort();
             assert_eq!(keys, vec!["query", "variables"]);
         }
+    }
+
+    #[tokio::test]
+    async fn falls_back_to_legacy_project_state() {
+        let legacy = json!([
+            { "id": "p1", "name": "Offline mode", "state": "started",
+              "lead": { "id": "u-dev" }, "members": { "nodes": [] } },
+            { "id": "p2", "name": "Done thing", "state": "completed",
+              "lead": { "id": "u-dev" }, "members": { "nodes": [] } }
+        ]);
+        let transport = FakeTransport::ok(vec![
+            users_page(json!([dev()]), None),
+            users_page(json!([]), None),
+            graphql_error("Cannot query field \"status\" on type \"Project\"."),
+            projects_page(legacy, None),
+        ]);
+        let fetched = LinearClient::new(&transport, "k")
+            .fetch_people()
+            .await
+            .unwrap();
+        assert!(fetched.warnings.is_empty());
+        let titles: Vec<&str> = fetched.people[0]
+            .projects
+            .iter()
+            .map(|p| p.title.as_str())
+            .collect();
+        assert_eq!(titles, vec!["Offline mode"]);
+        assert_eq!(query_of(&transport.requests()[3]), PROJECTS_QUERY_LEGACY);
+    }
+
+    #[tokio::test]
+    async fn a_failed_projects_query_keeps_people_and_issues() {
+        let transport = FakeTransport::ok(vec![
+            users_page(json!([priya(), dev()]), None),
+            users_page(issues(), None),
+            graphql_error("Cannot query field \"status\" on type \"Project\"."),
+            graphql_error("Field \"state\" is not available."),
+        ]);
+        let fetched = LinearClient::new(&transport, "k")
+            .fetch_people()
+            .await
+            .unwrap();
+        assert_eq!(fetched.people.len(), 2);
+        assert_eq!(fetched.people[0].team.as_deref(), Some("Growth, Platform"));
+        let titles: Vec<&str> = fetched.people[0]
+            .projects
+            .iter()
+            .map(|p| p.title.as_str())
+            .collect();
+        assert_eq!(
+            titles,
+            vec!["Fix pricing page", "Offline mode", "Three", "Four", "Five"],
+            "issues survive without projects"
+        );
+        assert_eq!(fetched.warnings.len(), 1);
+        assert!(
+            fetched.warnings[0].starts_with("Projects couldn't be read: "),
+            "{:?}",
+            fetched.warnings
+        );
+        assert!(
+            fetched.warnings[0].contains("status"),
+            "reports the first error"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_issues_query_keeps_people_and_projects() {
+        let transport = FakeTransport::ok(vec![
+            users_page(json!([dev()]), None),
+            graphql_error("Unknown argument \"orderBy\""),
+            graphql_error("Unknown argument \"filter\""),
+            projects_page(projects(), None),
+        ]);
+        let fetched = LinearClient::new(&transport, "k")
+            .fetch_people()
+            .await
+            .unwrap();
+        assert_eq!(fetched.people.len(), 1);
+        assert_eq!(fetched.people[0].projects.len(), 2);
+        assert_eq!(fetched.warnings.len(), 1);
+        assert!(fetched.warnings[0].starts_with("Issues couldn't be read: "));
+        let requests = transport.requests();
+        assert_eq!(query_of(&requests[1]), ISSUES_QUERY);
+        assert_eq!(query_of(&requests[2]), ISSUES_QUERY_UNORDERED);
+    }
+
+    #[tokio::test]
+    async fn unordered_issues_are_used_when_ordering_is_rejected() {
+        let transport = FakeTransport::ok(vec![
+            users_page(json!([priya()]), None),
+            graphql_error("Unknown argument \"orderBy\""),
+            users_page(issues(), None),
+            projects_page(json!([]), None),
+        ]);
+        let fetched = LinearClient::new(&transport, "k")
+            .fetch_people()
+            .await
+            .unwrap();
+        assert!(fetched.warnings.is_empty());
+        assert_eq!(fetched.people[0].projects.len(), 5);
     }
 
     #[tokio::test]
