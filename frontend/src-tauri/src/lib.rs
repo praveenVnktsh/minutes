@@ -61,6 +61,7 @@ pub mod ollama;
 pub mod onboarding;
 pub mod openai;
 pub mod openrouter;
+pub mod people;
 pub mod quiet_work;
 pub mod replay;
 pub mod shortcuts;
@@ -916,6 +917,14 @@ pub fn run() {
             calendar::test_calendar_feed,
             calendar::refresh_calendar_now,
             calendar::get_calendar_events,
+            people::commands::people_list,
+            people::commands::people_create,
+            people::commands::people_update,
+            people::commands::people_delete,
+            people::commands::meeting_attendees_get,
+            people::commands::meeting_attendees_add,
+            people::commands::meeting_attendees_remove,
+            people::commands::meeting_people_context,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

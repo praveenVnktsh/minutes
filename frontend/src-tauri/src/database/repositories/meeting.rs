@@ -408,6 +408,8 @@ pub(crate) const MEETING_TABLES: &[&str] = &[
     "pending_final_passes",
     // Webhook deliveries still carrying the meeting's content.
     "webhook_deliveries",
+    // Who attended (the people themselves outlive the meeting).
+    "meeting_attendees",
 ];
 
 async fn delete_meeting_with_transaction(

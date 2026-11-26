@@ -1765,6 +1765,8 @@ mod discard_meeting_tests {
             "INSERT INTO diarization_state (meeting_id, status, updated_at) VALUES (?1, 'complete', ?2)",
             "INSERT INTO pending_final_passes (meeting_id, meeting_folder_path, queued_at) VALUES (?1, '/nonexistent/x', ?2)",
             "INSERT INTO webhook_deliveries (event_id, event_type, meeting_id, payload, next_attempt_at, created_at) VALUES (?1 || '-w', 'meeting.completed', ?1, '{}', ?2, ?2)",
+            "INSERT INTO people (id, name, created_at, updated_at) VALUES (?1 || '-p', 'Dev', ?2, ?2)",
+            "INSERT INTO meeting_attendees (meeting_id, person_id, source, created_at) VALUES (?1, ?1 || '-p', 'manual', ?2)",
         ];
         for statement in statements {
             sqlx::query(statement)
