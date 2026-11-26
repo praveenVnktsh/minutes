@@ -53,11 +53,20 @@ private final class FakeBatch: BatchEngine {
     var lastSamples: [Float] = []
     var lastPath = ""
     var lastMaxSpeakers: Int?
+    var lastVocabulary: [String]?
+    var boosted = Transcription(text: "", words: [], confidence: nil)
+    var outcome = BoostOutcome.boosted(replaced: [])
 
     func transcribe(_ samples: [Float]) async throws -> Transcription {
         if let error { throw error }
         lastSamples = samples
         return transcription
+    }
+    func transcribe(_ samples: [Float], vocabulary: [String]) async throws -> BoostedTranscription {
+        if let error { throw error }
+        lastSamples = samples
+        lastVocabulary = vocabulary
+        return BoostedTranscription(transcription: boosted, outcome: outcome)
     }
     func vadSegments(path: String) async throws -> [Span] {
         if let error { throw error }
@@ -73,6 +82,17 @@ private final class FakeBatch: BatchEngine {
         progressSteps.forEach(progress)
         return speakers
     }
+}
+
+/// An engine without vocabulary boosting (the protocol's default).
+private final class PlainBatch: BatchEngine {
+    func transcribe(_ samples: [Float]) async throws -> Transcription {
+        Transcription(text: "plain \(samples.count)", words: [], confidence: nil)
+    }
+    func vadSegments(path: String) async throws -> [Span] { [] }
+    func diarize(path: String, maxSpeakers: Int?, progress: @escaping @Sendable (Double) -> Void)
+        async throws -> [LabeledSpan]
+    { [] }
 }
 
 /// Lines a request emitted before its reply.
@@ -313,6 +333,73 @@ final class BatchServerTests: XCTestCase {
         XCTAssertEqual(failed["error"] as? String, "missing /models/parakeet-tdt-0.6b-v2-coreml/Encoder.mlmodelc")
     }
 
+    func testVocabularyRequestsRoundTrip() throws {
+        let request = VocabularyTranscribeRequest(
+            terms: ["Priya Shah", " Devansh ", "", "priya shah", "Offline mode"], samples: [0.5, -1, 0.25])
+        XCTAssertEqual(request.terms, ["Priya Shah", "Devansh", "Offline mode"])
+        let payload = request.encoded()
+        let length = Int(UInt32(littleEndian: payload.prefix(4).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }))
+        let json = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: payload.subdata(in: 4..<(4 + length))) as? [String: [String]])
+        XCTAssertEqual(json, ["vocabulary": ["Priya Shah", "Devansh", "Offline mode"]])
+        XCTAssertEqual(payload.count, 4 + length + 3 * 4)
+        XCTAssertEqual(try VocabularyTranscribeRequest.parse(payload), request)
+        // What the app writes: the JSON by hand, then the samples.
+        let appJson = Data(#"{"vocabulary":["Ana","Dev"]}"#.utf8)
+        let app = rate(UInt32(appJson.count)) + appJson + floats([0.125])
+        let parsed = try VocabularyTranscribeRequest.parse(app)
+        XCTAssertEqual(parsed.terms, ["Ana", "Dev"])
+        XCTAssertEqual(parsed.samples, [0.125])
+        XCTAssertEqual(VocabularyTranscribeRequest(terms: (0..<300).map { "term \($0)" }, samples: []).terms.count, 200)
+    }
+
+    func testMalformedVocabularyRequestsAreRejected() {
+        XCTAssertThrowsError(try VocabularyTranscribeRequest.parse(Data([1, 0])))
+        XCTAssertThrowsError(try VocabularyTranscribeRequest.parse(rate(50) + Data("{}".utf8)))
+        XCTAssertThrowsError(try VocabularyTranscribeRequest.parse(rate(8) + Data("not json".utf8)))
+        XCTAssertThrowsError(try VocabularyTranscribeRequest.parse(rate(2) + Data("{}".utf8)), "no list")
+    }
+
+    func testAVocabularyTranscriptionRepliesWithWhatWasReplaced() async throws {
+        let engine = FakeBatch()
+        engine.boosted = Transcription(
+            text: "thanks Devansh,", words: [Word(text: "thanks", start: 0, end: 0.3), Word(text: "Devansh,", start: 0.3, end: 0.9)],
+            confidence: 0.9)
+        engine.outcome = .boosted(replaced: [Replacement(from: "Dev,", to: "Devansh,")])
+        let server = Server(batch: engine)
+        let payload = VocabularyTranscribeRequest(terms: ["Devansh"], samples: [0.5, 0.25]).encoded()
+        let reply = try object(
+            await server.handle(Request(op: .transcribeWithVocabulary, id: 9, payload: payload)))
+        XCTAssertEqual(engine.lastVocabulary, ["Devansh"])
+        XCTAssertEqual(engine.lastSamples, [0.5, 0.25])
+        XCTAssertEqual(reply["id"] as? Int, 9)
+        XCTAssertEqual(reply["text"] as? String, "thanks Devansh,")
+        XCTAssertEqual((reply["words"] as? [[String: Any]])?.last?["text"] as? String, "Devansh,")
+        let vocabulary = try XCTUnwrap(reply["vocabulary"] as? [String: Any])
+        XCTAssertEqual(vocabulary["replaced"] as? [[String: String]], [["from": "Dev,", "to": "Devansh,"]])
+    }
+
+    func testAVocabularyTranscriptionWithoutTermsOrBoostingIsPlain() async throws {
+        let engine = FakeBatch()
+        engine.transcription = Transcription(text: "plain", words: [], confidence: nil)
+        let server = Server(batch: engine)
+        let empty = VocabularyTranscribeRequest(terms: ["  "], samples: [0.5]).encoded()
+        let reply = try object(await server.handle(Request(op: .transcribeWithVocabulary, id: 3, payload: empty)))
+        XCTAssertNil(engine.lastVocabulary)
+        XCTAssertEqual(reply["text"] as? String, "plain")
+        XCTAssertEqual((reply["vocabulary"] as? [String: String])?["skipped"], "no terms")
+
+        let plain = Server(batch: PlainBatch())
+        let terms = VocabularyTranscribeRequest(terms: ["Devansh"], samples: [0.5, 0.5]).encoded()
+        let fallback = try object(await plain.handle(Request(op: .transcribeWithVocabulary, id: 4, payload: terms)))
+        XCTAssertEqual(fallback["text"] as? String, "plain 2")
+        XCTAssertNotNil((fallback["vocabulary"] as? [String: String])?["skipped"])
+
+        let bad = try object(await server.handle(Request(op: .transcribeWithVocabulary, id: 5, payload: Data([7]))))
+        XCTAssertEqual(bad["id"] as? Int, 5)
+        XCTAssertNotNil(bad["error"])
+    }
+
     func testLiveRequestsToTheBatchHelperFail() async throws {
         let server = Server(batch: FakeBatch())
         _ = await server.handle(Request(op: .open, id: 1, payload: rate(16_000)))
@@ -332,6 +419,7 @@ final class ModelLayoutTests: XCTestCase {
         XCTAssertEqual(layout.parakeet.path, "/m/parakeet-tdt-0.6b-v2-coreml")
         XCTAssertEqual(layout.vad.path, "/m/silero-vad-coreml")
         XCTAssertEqual(layout.diarizer.path, "/m/speaker-diarization-coreml")
+        XCTAssertEqual(layout.ctc.path, "/m/parakeet-ctc-110m-coreml")
     }
 
     func testAMissingFileIsNamed() throws {
@@ -400,5 +488,57 @@ final class ResamplerTests: XCTestCase {
     func test16kHzPassesThrough() {
         let resampler = Resampler(inputRate: 16_000)
         XCTAssertEqual(resampler.process([0.1, 0.2, 0.3]), [0.1, 0.2, 0.3])
+    }
+}
+
+final class VocabularyTests: XCTestCase {
+    private let words = [
+        Word(text: "So", start: 0, end: 0.2),
+        Word(text: "pre", start: 0.2, end: 0.4),
+        Word(text: "ya", start: 0.4, end: 0.6),
+        Word(text: "and", start: 0.7, end: 0.8),
+        Word(text: "dev,", start: 0.8, end: 1.1),
+        Word(text: "(offline", start: 1.2, end: 1.5),
+        Word(text: "mode).", start: 1.5, end: 1.9),
+    ]
+
+    func testReplacementsMergeWordsAndKeepTimingsAndPunctuation() {
+        let (out, replaced) = VocabularyBooster.apply(
+            [
+                WordReplacement(range: 5..<7, term: "Offline Mode"),
+                WordReplacement(range: 1..<3, term: "Priya"),
+                WordReplacement(range: 4..<5, term: "Devansh"),
+            ], to: words)
+        XCTAssertEqual(out.map(\.text), ["So", "Priya", "and", "Devansh,", "(Offline Mode)."])
+        XCTAssertEqual(out[1], Word(text: "Priya", start: 0.2, end: 0.6))
+        XCTAssertEqual(out[4], Word(text: "(Offline Mode).", start: 1.2, end: 1.9))
+        XCTAssertEqual(
+            replaced,
+            [
+                Replacement(from: "pre ya", to: "Priya"),
+                Replacement(from: "dev,", to: "Devansh,"),
+                Replacement(from: "(offline mode).", to: "(Offline Mode)."),
+            ])
+    }
+
+    func testACapitalisedWordKeepsItsCapital() {
+        let (out, _) = VocabularyBooster.apply([WordReplacement(range: 0..<1, term: "sonar")], to: words)
+        XCTAssertEqual(out.first?.text, "Sonar")
+    }
+
+    func testBadOrOverlappingReplacementsAreIgnored() {
+        let (out, replaced) = VocabularyBooster.apply(
+            [
+                WordReplacement(range: 1..<3, term: "Priya"),
+                WordReplacement(range: 2..<4, term: "Yanda"),
+                WordReplacement(range: 6..<9, term: "Past the end"),
+                WordReplacement(range: 3..<3, term: "Empty"),
+                WordReplacement(range: 3..<4, term: ""),
+            ], to: words)
+        XCTAssertEqual(out.count, words.count - 1)
+        XCTAssertEqual(replaced.map(\.to), ["Priya"])
+        XCTAssertEqual(VocabularyBooster.apply([], to: words).words, words)
+        // A term that only re-states the word is no replacement.
+        XCTAssertTrue(VocabularyBooster.apply([WordReplacement(range: 3..<4, term: "and")], to: words).replaced.isEmpty)
     }
 }

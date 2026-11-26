@@ -33,18 +33,29 @@ import Foundation
 ///
 /// Batch role (`id` is a request id; one request in flight at a time):
 ///
-/// | op | name       | payload                                      |
-/// |----|------------|----------------------------------------------|
-/// | 8  | transcribe | f32 samples, 16 kHz mono                     |
-/// | 9  | vad        | JSON `{"path":"/abs/16k-mono.wav"}`          |
-/// | 10 | diarize    | JSON `{"path":"...","max_speakers":0}`       |
-/// | 7  | shutdown   | none, exits                                  |
+/// | op | name                       | payload                                 |
+/// |----|----------------------------|-----------------------------------------|
+/// | 8  | transcribe                 | f32 samples, 16 kHz mono                |
+/// | 9  | vad                        | JSON `{"path":"/abs/16k-mono.wav"}`     |
+/// | 10 | diarize                    | JSON `{"path":"...","max_speakers":0}`  |
+/// | 11 | transcribe_with_vocabulary | u32 n, n bytes of JSON `{"vocabulary":["Priya Shah",...]}`, then f32 samples, 16 kHz mono |
+/// | 7  | shutdown                   | none, exits                             |
 ///
 /// Replies: `{"id":N,"text":...,"words":[{"text","start","end"}],"confidence":0.93,"ms":120}`,
 /// `{"id":N,"segments":[{"start","end"}],"ms":...}`, and for diarize any
 /// number of `{"id":N,"progress":0.42}` lines then
 /// `{"id":N,"segments":[{"speaker":0,"start","end"}],"ms":...}`. Errors are
 /// `{"id":N,"error":"..."}`.
+///
+/// `transcribe_with_vocabulary` is `transcribe` plus FluidAudio's CTC
+/// vocabulary boosting: a separate Parakeet CTC 110M encoder scores the terms
+/// against the audio, and a term replaces the words it beats. The reply is a
+/// transcribe reply plus `"vocabulary":{"replaced":[{"from":"Dev","to":"Devansh"}]}`,
+/// or `"vocabulary":{"skipped":"..."}` when boosting did not run (no terms,
+/// the CTC model is not downloaded, or it failed): the text is then exactly
+/// what `transcribe` returns. It is a separate op so `transcribe` stays as it
+/// was: an older helper answers op 11 with `unknown op 11`, and the app falls
+/// back to `transcribe`.
 public enum Op: UInt8 {
     case open = 1
     case audio = 2
@@ -56,6 +67,7 @@ public enum Op: UInt8 {
     case transcribe = 8
     case vad = 9
     case diarize = 10
+    case transcribeWithVocabulary = 11
 }
 
 public struct Request {
@@ -114,6 +126,61 @@ public struct FileRequest: Equatable {
         }
         let max = (object["max_speakers"] as? NSNumber)?.intValue ?? 0
         return FileRequest(path: path, maxSpeakers: max > 0 ? max : nil)
+    }
+}
+
+/// The payload of `transcribe_with_vocabulary`: a little-endian u32 length,
+/// that many bytes of JSON `{"vocabulary":[...]}`, then the f32 samples.
+public struct VocabularyTranscribeRequest: Equatable {
+    /// At most this many terms are kept (the app sends at most 200).
+    public static let maxTerms = 200
+
+    /// Trimmed, non-empty and without case-insensitive repeats, in order.
+    public let terms: [String]
+    public let samples: [Float]
+
+    public init(terms: [String], samples: [Float]) {
+        self.terms = Self.clean(terms)
+        self.samples = samples
+    }
+
+    static func clean(_ terms: [String]) -> [String] {
+        var seen = Set<String>()
+        var out: [String] = []
+        for term in terms {
+            let trimmed = term.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, seen.insert(trimmed.lowercased()).inserted else { continue }
+            out.append(trimmed)
+            if out.count == maxTerms { break }
+        }
+        return out
+    }
+
+    public static func parse(_ payload: Data) throws -> VocabularyTranscribeRequest {
+        let bytes = [UInt8](payload)
+        guard bytes.count >= 4 else { throw HelperError.badRequest("no vocabulary length") }
+        let length = Int(UInt32(bytes[0]) | UInt32(bytes[1]) << 8 | UInt32(bytes[2]) << 16 | UInt32(bytes[3]) << 24)
+        guard length <= bytes.count - 4 else { throw HelperError.badRequest("the vocabulary runs past the payload") }
+        let json = Data(bytes[4..<(4 + length)])
+        guard let object = try? JSONSerialization.jsonObject(with: json) as? [String: Any] else {
+            throw HelperError.badRequest("the vocabulary is not a JSON object")
+        }
+        guard let list = object["vocabulary"] as? [Any] else {
+            throw HelperError.badRequest("no \"vocabulary\" list")
+        }
+        let audio = Request(op: .transcribe, id: 0, payload: Data(bytes[(4 + length)...]))
+        return VocabularyTranscribeRequest(terms: list.compactMap { $0 as? String }, samples: audio.samples)
+    }
+
+    public func encoded() -> Data {
+        let json = (try? JSONSerialization.data(withJSONObject: ["vocabulary": terms])) ?? Data()
+        var data = Data()
+        withUnsafeBytes(of: UInt32(json.count).littleEndian) { data.append(contentsOf: $0) }
+        data.append(json)
+        for sample in samples {
+            withUnsafeBytes(of: sample.bitPattern.littleEndian) { data.append(contentsOf: $0) }
+        }
+        return data
     }
 }
 
@@ -211,10 +278,60 @@ public struct SpeakerSpan: Equatable, Sendable {
 /// The models behind the batch role.
 public protocol BatchEngine: AnyObject {
     func transcribe(_ samples: [Float]) async throws -> Transcription
+    /// `transcribe` with vocabulary boosting. Never fails because of the
+    /// boosting: when it cannot run, the plain transcription comes back with
+    /// the reason.
+    func transcribe(_ samples: [Float], vocabulary: [String]) async throws -> BoostedTranscription
     func vadSegments(path: String) async throws -> [Span]
     /// `progress` gets the fraction done, 0...1.
     func diarize(path: String, maxSpeakers: Int?, progress: @escaping @Sendable (Double) -> Void)
         async throws -> [LabeledSpan]
+}
+
+extension BatchEngine {
+    /// Engines without boosting transcribe as usual.
+    public func transcribe(_ samples: [Float], vocabulary: [String]) async throws -> BoostedTranscription {
+        BoostedTranscription(
+            transcription: try await transcribe(samples), outcome: .skipped("vocabulary boosting is not available"))
+    }
+}
+
+/// A word (or run of words) the vocabulary boosting replaced.
+public struct Replacement: Equatable, Sendable {
+    public let from: String
+    public let to: String
+
+    public init(from: String, to: String) {
+        self.from = from
+        self.to = to
+    }
+}
+
+/// What vocabulary boosting did to a transcription.
+public enum BoostOutcome: Equatable, Sendable {
+    /// It ran; `replaced` is empty when every word stood.
+    case boosted(replaced: [Replacement])
+    /// It did not run, and why.
+    case skipped(String)
+
+    var json: [String: Any] {
+        switch self {
+        case .boosted(let replaced):
+            return ["replaced": replaced.map { ["from": $0.from, "to": $0.to] }]
+        case .skipped(let reason):
+            return ["skipped": reason]
+        }
+    }
+}
+
+public struct BoostedTranscription: Equatable, Sendable {
+    public let transcription: Transcription
+    public let outcome: BoostOutcome
+
+    public init(transcription: Transcription, outcome: BoostOutcome) {
+        self.transcription = transcription
+        self.outcome = outcome
+    }
 }
 
 /// Holds the open streams (live) or the engines (batch) and answers requests.
@@ -245,7 +362,7 @@ public final class Server {
     /// one; `emit` carries lines sent before it (diarize progress).
     public func handle(_ request: Request, emit: @escaping Emit = { _ in }) async -> String? {
         switch request.op {
-        case .transcribe, .vad, .diarize:
+        case .transcribe, .vad, .diarize, .transcribeWithVocabulary:
             return await handleBatch(request, emit: emit)
         default:
             return await handleLive(request)
@@ -299,7 +416,7 @@ public final class Server {
                 return await decode()
             case .shutdown:
                 await closeAll()
-            case .transcribe, .vad, .diarize:
+            case .transcribe, .vad, .diarize, .transcribeWithVocabulary:
                 break
             }
         } catch {
@@ -356,15 +473,19 @@ public final class Server {
             switch request.op {
             case .transcribe:
                 let result = try await batch.transcribe(request.samples)
-                return Self.json([
-                    "id": id,
-                    "text": result.text,
-                    "words": result.words.map {
-                        ["text": $0.text, "start": Self.rounded($0.start), "end": Self.rounded($0.end)]
-                    },
-                    "confidence": result.confidence.map { Self.rounded($0) as Any } ?? NSNull(),
-                    "ms": millis(since: started),
-                ])
+                return Self.json(Self.transcriptionReply(id: id, result, started: started))
+            case .transcribeWithVocabulary:
+                let parsed = try VocabularyTranscribeRequest.parse(request.payload)
+                let result: BoostedTranscription
+                if parsed.terms.isEmpty {
+                    result = BoostedTranscription(
+                        transcription: try await batch.transcribe(parsed.samples), outcome: .skipped("no terms"))
+                } else {
+                    result = try await batch.transcribe(parsed.samples, vocabulary: parsed.terms)
+                }
+                var reply = Self.transcriptionReply(id: id, result.transcription, started: started)
+                reply["vocabulary"] = result.outcome.json
+                return Self.json(reply)
             case .vad:
                 let file = try FileRequest.parse(request.payload)
                 let spans = try await batch.vadSegments(path: file.path)
@@ -397,6 +518,18 @@ public final class Server {
     }
 
     // MARK: - JSON
+
+    static func transcriptionReply(id: UInt32, _ result: Transcription, started: Date) -> [String: Any] {
+        [
+            "id": id,
+            "text": result.text,
+            "words": result.words.map {
+                ["text": $0.text, "start": Self.rounded($0.start), "end": Self.rounded($0.end)]
+            },
+            "confidence": result.confidence.map { Self.rounded($0) as Any } ?? NSNull(),
+            "ms": millis(since: started),
+        ]
+    }
 
     /// Seconds to the millisecond, so replies stay short.
     static func rounded(_ value: Double) -> Double {

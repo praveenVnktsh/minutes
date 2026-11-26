@@ -10,7 +10,13 @@
 //!   parakeet-tdt-0.6b-v2-coreml/...                       (transcript after meetings)
 //!   silero-vad-coreml/...                                 (speech detection)
 //!   speaker-diarization-coreml/...                        (speaker labels)
+//!   parakeet-ctc-110m-coreml/...         (optional: names in the transcript)
 //! ```
+//!
+//! The last one is optional and outside [`ModelKind::ALL`]: it is not part of
+//! onboarding, the background download, [`batch_ready`] or the settings list.
+//! It downloads on its own (see [`spawn_vocabulary_download`]) the first time
+//! a meeting's transcript has names or terms to boost.
 //!
 //! Each folder is named after the last path component of its repo and holds
 //! the files the helper needs at their repo-relative paths. Which files those
@@ -41,6 +47,10 @@ use crate::download_eta::DownloadEta;
 
 /// Event carrying download progress to the frontend.
 pub const DOWNLOAD_PROGRESS_EVENT: &str = "speech-model-download-progress";
+/// The same payload for the optional vocabulary model, on its own event so
+/// onboarding and the model list (which track the required models) never see
+/// it.
+pub const VOCABULARY_DOWNLOAD_PROGRESS_EVENT: &str = "vocabulary-model-download-progress";
 
 /// Written last into a bundle's folder, holding the revision it came from.
 const COMPLETE_MARKER: &str = ".minutes-complete";
@@ -70,6 +80,9 @@ pub enum ModelKind {
     FinalAsr,
     Vad,
     Diarization,
+    /// Optional: the CTC encoder that boosts a meeting's names and terms in
+    /// the final transcript. Not in [`ModelKind::ALL`].
+    VocabularyCtc,
 }
 
 impl ModelKind {
@@ -81,6 +94,14 @@ impl ModelKind {
         ModelKind::Diarization,
         ModelKind::LiveAsr,
     ];
+
+    /// The event its download progress goes out on.
+    pub fn progress_event(self) -> &'static str {
+        match self {
+            ModelKind::VocabularyCtc => VOCABULARY_DOWNLOAD_PROGRESS_EVENT,
+            _ => DOWNLOAD_PROGRESS_EVENT,
+        }
+    }
 }
 
 /// One downloadable model: a Hugging Face repo pinned to a revision.
@@ -176,6 +197,32 @@ const DIARIZATION: Bundle = Bundle {
     fluidaudio_pinned: true,
 };
 
+const VOCABULARY_CTC: Bundle = Bundle {
+    id: "parakeet-ctc-110m-coreml",
+    kind: ModelKind::VocabularyCtc,
+    // FluidAudio's `Repo.parakeetCtc110m` (`CtcModelVariant.ctc110m`), the
+    // separate CTC encoder of its vocabulary boosting for Parakeet TDT 0.6B
+    // ("Approach 2"). FluidAudio itself follows `main`; this is main's commit
+    // when it was pinned.
+    repo: "FluidInference/parakeet-ctc-110m-coreml",
+    revision: "accdafd8cf8a2ff1cabe3c11e54416b405d409aa",
+    dir_name: "parakeet-ctc-110m-coreml",
+    display_name: "Parakeet CTC 110M (names in transcripts)",
+    approx_bytes: 102_803_869,
+    // `ModelNames.CTC.requiredModels`; `vocab.json` and `tokenizer.json`
+    // (what `CtcModels.loadDirect` and `CtcTokenizer.load` read) are root
+    // files. The repo's `CtcHead` is Approach 1's, for another model.
+    include: &[
+        "MelSpectrogram.mlmodelc/",
+        "AudioEncoder.mlmodelc/",
+        "vocab.json",
+        "tokenizer.json",
+    ],
+    fluidaudio_pinned: false,
+};
+
+/// The models in the settings list and onboarding: every kind but the
+/// optional vocabulary model.
 pub const BUNDLES: [Bundle; 4] = [LIVE_ASR, FINAL_ASR, VAD, DIARIZATION];
 
 /// The bundle of `kind`.
@@ -185,6 +232,7 @@ pub fn bundle(kind: ModelKind) -> &'static Bundle {
         ModelKind::FinalAsr => &FINAL_ASR,
         ModelKind::Vad => &VAD,
         ModelKind::Diarization => &DIARIZATION,
+        ModelKind::VocabularyCtc => &VOCABULARY_CTC,
     }
 }
 
@@ -255,6 +303,12 @@ pub fn batch_ready<R: Runtime>(app: &AppHandle<R>) -> bool {
 /// Whether speaker labels can run.
 pub fn diarization_ready<R: Runtime>(app: &AppHandle<R>) -> bool {
     helper::os_supported() && is_downloaded(app, ModelKind::Diarization)
+}
+
+/// Whether the final transcript can boost a meeting's names and terms: the
+/// optional vocabulary model is on disk.
+pub fn vocabulary_ready<R: Runtime>(app: &AppHandle<R>) -> bool {
+    helper::os_supported() && is_downloaded(app, ModelKind::VocabularyCtc)
 }
 
 /// The kinds the transcript after a meeting needs.
@@ -454,6 +508,9 @@ pub fn is_downloading() -> bool {
 
 /// Whether the running download includes `kind` and has not finished it.
 pub fn is_downloading_kind(kind: ModelKind) -> bool {
+    if kind == ModelKind::VocabularyCtc && VOCABULARY_DOWNLOADING.load(Ordering::SeqCst) {
+        return true;
+    }
     QUEUE
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -477,7 +534,7 @@ pub struct DownloadProgressEvent {
 }
 
 fn emit<R: Runtime>(app: &AppHandle<R>, event: DownloadProgressEvent) {
-    if let Err(error) = app.emit(DOWNLOAD_PROGRESS_EVENT, event) {
+    if let Err(error) = app.emit(event.kind.progress_event(), event) {
         warn!("Failed to emit speech model download progress: {error}");
     }
 }
@@ -908,6 +965,71 @@ fn on_models_ready<R: Runtime>(app: &AppHandle<R>) {
     if diarization_ready(app) {
         crate::audio::diarization::spawn_resume(app);
     }
+}
+
+static VOCABULARY_DOWNLOADING: AtomicBool = AtomicBool::new(false);
+
+/// Whether the optional vocabulary model should start downloading now: on a
+/// macOS that runs the helper, missing, not already on its way, and the user
+/// has not turned automatic downloads off (by cancelling one).
+pub fn should_download_vocabulary(
+    os_supported: bool,
+    downloaded: bool,
+    downloading: bool,
+    auto_download_disabled: bool,
+) -> bool {
+    os_supported && !downloaded && !downloading && !auto_download_disabled
+}
+
+/// Download the optional vocabulary model in the background, once, if
+/// [`should_download_vocabulary`]. Called when a meeting's final transcript
+/// first has names or terms to boost; that transcript goes ahead without
+/// them, and later ones use the model. It runs beside any other model
+/// download (its own folder and flag), reports progress on
+/// [`VOCABULARY_DOWNLOAD_PROGRESS_EVENT`], and a failure is only logged: the
+/// next meeting with a vocabulary tries again.
+pub fn spawn_vocabulary_download<R: Runtime>(app: &AppHandle<R>) {
+    let wanted = should_download_vocabulary(
+        helper::os_supported(),
+        is_downloaded(app, ModelKind::VocabularyCtc),
+        VOCABULARY_DOWNLOADING.load(Ordering::SeqCst),
+        auto_download_disabled(app),
+    );
+    if !wanted || VOCABULARY_DOWNLOADING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let bundle = &VOCABULARY_CTC;
+        info!(
+            "Downloading {} ({:.0} MB) for names and terms in transcripts",
+            bundle.id,
+            bundle.approx_bytes as f64 / MB
+        );
+        let result = async {
+            let root = dir(&app)?;
+            let client = reqwest::Client::builder()
+                .connect_timeout(CONNECT_TIMEOUT)
+                .build()?;
+            download_bundle(&app, &client, &root, bundle).await
+        }
+        .await;
+        match result {
+            Ok(()) => {
+                info!("Speech model {} downloaded and verified", bundle.id);
+                emit(&app, terminal_event(bundle, "completed", None));
+            }
+            Err(error) => {
+                warn!("Speech model {} download failed: {error:#}", bundle.id);
+                remove_partials(&app, bundle);
+                emit(
+                    &app,
+                    terminal_event(bundle, "error", Some(format!("{error:#}"))),
+                );
+            }
+        }
+        VOCABULARY_DOWNLOADING.store(false, Ordering::SeqCst);
+    });
 }
 
 /// Remove the `.part` files an interrupted download left in `bundle`'s folder.
@@ -1382,6 +1504,53 @@ mod tests {
             "https://huggingface.co/FluidInference/nemotron-speech-streaming-en-0.6b-coreml/resolve/e673531caa6d25ab7baf5a8c14c9b99ba1551838/nemotron_coreml_560ms/encoder/encoder_int8.mlmodelc/weights/weight.bin"
         );
         assert_eq!(encode_path("a b/c#d"), "a%20b/c%23d");
+    }
+
+    #[test]
+    fn the_vocabulary_model_is_pinned_optional_and_reports_on_its_own_event() {
+        let bundle = bundle(ModelKind::VocabularyCtc);
+        assert_eq!(bundle.kind, ModelKind::VocabularyCtc);
+        assert_eq!(bundle.id, bundle.dir_name);
+        assert_eq!(bundle.repo.rsplit('/').next(), Some(bundle.dir_name));
+        assert_eq!(bundle.revision.len(), 40);
+        assert!(bundle.revision.chars().all(|c| c.is_ascii_hexdigit()));
+        // What the helper's `ModelLayout.ctcFiles` requires.
+        for path in [
+            "MelSpectrogram.mlmodelc/model.mil",
+            "AudioEncoder.mlmodelc/weights/weight.bin",
+            "vocab.json",
+            "tokenizer.json",
+        ] {
+            assert!(bundle.wants(path), "{path}");
+        }
+        assert!(!bundle.wants("CtcHead.mlmodelc/model.mil"));
+        assert!(!bundle.wants("convert/parakeet-tdt-ctc-110m/coreml/convert-parakeet.py"));
+        // Not required anywhere: not downloaded by default, not listed.
+        assert!(!ModelKind::ALL.contains(&ModelKind::VocabularyCtc));
+        assert!(BUNDLES.iter().all(|b| b.kind != ModelKind::VocabularyCtc));
+        assert!(!BATCH_KINDS.contains(&ModelKind::VocabularyCtc));
+        assert!(missing_in_order(&[ModelKind::VocabularyCtc], |_| false).is_empty());
+        assert_eq!(
+            ModelKind::VocabularyCtc.progress_event(),
+            VOCABULARY_DOWNLOAD_PROGRESS_EVENT
+        );
+        assert_eq!(
+            ModelKind::FinalAsr.progress_event(),
+            DOWNLOAD_PROGRESS_EVENT
+        );
+        assert_eq!(
+            serde_json::to_value(ModelKind::VocabularyCtc).unwrap(),
+            "vocabulary-ctc"
+        );
+    }
+
+    #[test]
+    fn the_vocabulary_model_downloads_only_when_wanted() {
+        assert!(should_download_vocabulary(true, false, false, false));
+        assert!(!should_download_vocabulary(false, false, false, false));
+        assert!(!should_download_vocabulary(true, true, false, false));
+        assert!(!should_download_vocabulary(true, false, true, false));
+        assert!(!should_download_vocabulary(true, false, false, true));
     }
 
     #[test]

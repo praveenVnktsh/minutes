@@ -1,5 +1,6 @@
 // Retranscription module - re-processes a meeting's stored audio with the
-// batch speech-helper (Silero VAD + Parakeet TDT v2), then diarizes it
+// batch speech-helper (Silero VAD + Parakeet TDT v2, with the meeting's names
+// and terms boosted when the vocabulary model is downloaded), then diarizes it
 
 use super::common::{
     create_transcript_segments, split_segment_at_silence, write_transcripts_json, FINAL_MODEL,
@@ -352,6 +353,10 @@ async fn run_retranscription<R: Runtime>(
         processable_count
     );
 
+    // The meeting's names and terms, boosted in each segment when the
+    // optional vocabulary model is on disk (best effort; see final_pass).
+    let vocabulary = super::final_pass::boost_vocabulary(&app, &meeting_id).await;
+
     // Process each speech segment with progress updates
     let mut all_transcripts: Vec<(String, f64, f64)> = Vec::new(); // (text, start_ms, end_ms)
     let mut total_confidence = 0.0f32;
@@ -397,7 +402,7 @@ async fn run_retranscription<R: Runtime>(
 
         // Transcribe this segment
         let (start_ms, end_ms) = (segment.start_timestamp_ms, segment.end_timestamp_ms);
-        let transcript = speech_batch::transcribe(segment.samples)
+        let transcript = speech_batch::transcribe_with_vocabulary(segment.samples, &vocabulary)
             .await
             .map_err(|e| anyhow!("Transcription failed on segment {}: {}", i, e))?;
         let (text, conf) = (transcript.text, transcript.confidence);

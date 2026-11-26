@@ -111,7 +111,10 @@ pub async fn speech_models_delete<R: Runtime>(
                 crate::audio::live_streaming::engine::unload();
             }
         }
-        ModelKind::FinalAsr | ModelKind::Vad | ModelKind::Diarization => {
+        ModelKind::FinalAsr
+        | ModelKind::Vad
+        | ModelKind::Diarization
+        | ModelKind::VocabularyCtc => {
             // Fail fast rather than wait out a transcription or a diarization
             // (minutes) for the helper to come free.
             let busy = crate::audio::transcription_queue::get_queue()

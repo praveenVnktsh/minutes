@@ -6,7 +6,7 @@
 //! exits. Requests are binary frames on its stdin,
 //! `op: u8, id: u32 LE, length: u32 LE, payload` (payload at most 64 MiB);
 //! replies are JSON lines on its stdout. The live role (op 1-7) answers only
-//! `decode`, so feeding audio costs a pipe write; the batch role (op 7-10)
+//! `decode`, so feeding audio costs a pipe write; the batch role (op 7-11)
 //! answers every request with a line carrying its id. The protocol is
 //! documented in `speech-helper/Sources/SpeechCore/Protocol.swift`.
 
@@ -37,6 +37,9 @@ pub mod op {
     pub const TRANSCRIBE: u8 = 8;
     pub const VAD: u8 = 9;
     pub const DIARIZE: u8 = 10;
+    /// `transcribe` with vocabulary boosting; an older helper answers it
+    /// with `unknown op 11`.
+    pub const TRANSCRIBE_WITH_VOCABULARY: u8 = 11;
 }
 
 /// The largest payload the helper accepts in one frame.

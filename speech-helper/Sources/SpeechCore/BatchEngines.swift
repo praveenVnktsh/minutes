@@ -1,7 +1,9 @@
 // The batch role's models, through FluidAudio: Parakeet TDT 0.6B v2 for the
 // final transcript, Silero VAD, and the offline pyannote community-1 +
 // WeSpeaker diarizer. Each loads on first use, from the app's directory
-// (see ModelLayout), with Core ML directly.
+// (see ModelLayout), with Core ML directly. When the optional Parakeet CTC
+// 110M model is downloaded, a transcription can also be vocabulary-boosted
+// (see Vocabulary.swift).
 
 import AVFoundation
 import CoreML
@@ -15,6 +17,7 @@ public final class FluidBatchEngine: BatchEngine {
     private var asr: AsrManager?
     private var vad: VadManager?
     private var diarizerModels: OfflineDiarizerModels?
+    private var booster: VocabularyBooster?
 
     /// Silero hysteresis as the app used before FluidAudio: enter at 0.5,
     /// leave at 0.35 (FluidAudio's exit offset is 0.15).
@@ -103,7 +106,46 @@ public final class FluidBatchEngine: BatchEngine {
     // MARK: - Requests
 
     public func transcribe(_ samples: [Float]) async throws -> Transcription {
-        if samples.isEmpty { return Transcription(text: "", words: [], confidence: nil) }
+        guard let (result, _) = try await recognize(samples) else {
+            return Transcription(text: "", words: [], confidence: nil)
+        }
+        return Self.transcription(from: result)
+    }
+
+    public func transcribe(_ samples: [Float], vocabulary: [String]) async throws -> BoostedTranscription {
+        guard let (result, audio) = try await recognize(samples) else {
+            return BoostedTranscription(
+                transcription: Transcription(text: "", words: [], confidence: nil), outcome: .skipped("no audio"))
+        }
+        let plain = Self.transcription(from: result)
+        guard ModelLayout.hasAll(ModelLayout.ctcFiles, in: layout.ctc) else {
+            return BoostedTranscription(transcription: plain, outcome: .skipped("the vocabulary model is not downloaded"))
+        }
+        // Boosting never fails the transcription: any error keeps Parakeet's text.
+        let replacements: [WordReplacement]
+        do {
+            let booster = booster ?? VocabularyBooster(directory: layout.ctc)
+            self.booster = booster
+            replacements = try await booster.replacements(
+                text: result.text, tokenTimings: result.tokenTimings ?? [], audio: audio, terms: vocabulary)
+        } catch {
+            logLine("vocabulary boosting failed; keeping the plain transcript: \(error)")
+            return BoostedTranscription(transcription: plain, outcome: .skipped("vocabulary boosting failed: \(error)"))
+        }
+        let (words, replaced) = VocabularyBooster.apply(replacements, to: plain.words)
+        guard !replaced.isEmpty else {
+            return BoostedTranscription(transcription: plain, outcome: .boosted(replaced: []))
+        }
+        return BoostedTranscription(
+            transcription: Transcription(
+                text: words.map(\.text).joined(separator: " "), words: words, confidence: plain.confidence),
+            outcome: .boosted(replaced: replaced))
+    }
+
+    /// Parakeet's result for `samples`, and the audio it heard (padded to
+    /// FluidAudio's minimum). nil for no samples.
+    private func recognize(_ samples: [Float]) async throws -> (ASRResult, [Float])? {
+        if samples.isEmpty { return nil }
         let asr = try loadAsr()
         // FluidAudio rejects audio under 0.3 s; trailing silence does not
         // change what is said.
@@ -115,6 +157,10 @@ public final class FluidBatchEngine: BatchEngine {
         // Every request is its own utterance: a fresh decoder state.
         var state = TdtDecoderState.make(decoderLayers: AsrModelVersion.v2.decoderLayers)
         let result = try await asr.transcribe(audio, decoderState: &state)
+        return (result, audio)
+    }
+
+    static func transcription(from result: ASRResult) -> Transcription {
         let words = buildWordTimings(from: result.tokenTimings ?? []).map {
             Word(text: $0.word, start: $0.startTime, end: $0.endTime)
         }
