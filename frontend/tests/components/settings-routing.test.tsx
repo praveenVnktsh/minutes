@@ -27,6 +27,7 @@ mock.module('../../src/components/ui/tabs', () => ({
 for (const name of ['AppearanceSetting', 'PreferenceSettings', 'RecordingSettings', 'SummaryModelSettings', 'BetaSettings', 'WebhookSettings', 'CalendarSettings', 'DebugSettings', 'DeveloperSettings', 'TranscriptSettings']) {
   mock.module(`../../src/components/${name}`, () => ({ [name]: () => <div>{name}</div> }));
 }
+mock.module('../../src/components/people/PeopleSettings', () => ({ PeopleSettings: () => <div>PeopleSettings</div> }));
 
 const { SettingsPageContent } = await import('../../src/components/settings/SettingsPageContent');
 const { resolveSettingsSection, settingsHref } = await import('../../src/components/settings/settingsSections');

@@ -59,3 +59,72 @@ export const peopleApi = {
     invoke<Person[]>('meeting_attendees_remove', { meetingId, personId }),
   context: (meetingId: string) => invoke<MeetingPeopleContext>('meeting_people_context', { meetingId }),
 };
+
+/**
+ * Linear and Notion syncs (Rust: `src/people/sync.rs`). Keys and tokens go in
+ * and are never returned; they are sent only to their own source's API.
+ */
+export type PeopleSyncSource = 'linear' | 'notion';
+
+/** Emitted with the new `PeopleSourceStatus[]` after a sync or a change. */
+export const PEOPLE_SYNC_EVENT = 'people-sync-updated';
+
+export type NotionField = 'name' | 'email' | 'role' | 'team' | 'projects';
+
+/** Which Notion property feeds each field; `null` when unmapped. */
+export type NotionMapping = Record<NotionField, string | null>;
+
+/** Per field: `null`/absent uses the detected property, `''` maps nothing, a name picks that property. */
+export type NotionOverrides = Partial<Record<NotionField, string | null>>;
+
+export interface NotionConfig {
+  database_id: string | null;
+  database_title: string | null;
+  mapping: NotionOverrides;
+}
+
+export interface PeopleSourceStatus {
+  source: PeopleSyncSource;
+  connected: boolean;
+  workspace: string | null;
+  /** Last successful sync (RFC 3339). */
+  last_synced_at: string | null;
+  last_attempt_at: string | null;
+  last_error: string | null;
+  last_count: number | null;
+  notion: NotionConfig | null;
+}
+
+export interface PeopleConnectionTest {
+  workspace: string | null;
+  /** Linear: active users. Notion: rows in the chosen database. */
+  user_count: number | null;
+}
+
+export interface NotionDatabase {
+  id: string;
+  title: string;
+  url: string | null;
+  properties: { name: string; type: string }[];
+  detected: NotionMapping;
+}
+
+export interface PeopleSyncResult {
+  source: PeopleSyncSource;
+  synced: number;
+  failed: number;
+  error: string | null;
+}
+
+export const peopleSyncApi = {
+  status: () => invoke<PeopleSourceStatus[]>('people_sync_status'),
+  connect: (source: PeopleSyncSource, token: string) =>
+    invoke<{ test: PeopleConnectionTest; statuses: PeopleSourceStatus[] }>('people_connect', { source, token }),
+  test: (source: PeopleSyncSource, token?: string) =>
+    invoke<PeopleConnectionTest>('people_test_connection', { source, token: token ?? null }),
+  notionDatabases: () => invoke<NotionDatabase[]>('people_notion_databases'),
+  saveNotionMapping: (databaseId: string, databaseTitle: string | null, mapping: NotionOverrides) =>
+    invoke<PeopleSourceStatus[]>('people_notion_save_mapping', { databaseId, databaseTitle, mapping }),
+  syncNow: (source?: PeopleSyncSource) => invoke<PeopleSyncResult[]>('people_sync_now', { source: source ?? null }),
+  disconnect: (source: PeopleSyncSource) => invoke<number>('people_disconnect', { source }),
+};

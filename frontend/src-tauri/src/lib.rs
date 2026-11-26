@@ -682,6 +682,9 @@ pub fn run() {
             // Poll the subscribed calendar feed and raise meeting reminders.
             optional_setup_step("calendar", || calendar::init_worker(_app.handle()));
 
+            // Sync people from Linear and Notion once a day.
+            optional_setup_step("people sync", || people::sync::init_worker(_app.handle()));
+
             // Initialize bundled templates directory for dynamic template discovery
             log::info!("Initializing bundled templates directory...");
             if let Ok(resource_path) = _app.handle().path().resource_dir() {
@@ -925,6 +928,14 @@ pub fn run() {
             people::commands::meeting_attendees_add,
             people::commands::meeting_attendees_remove,
             people::commands::meeting_people_context,
+            // people sync (Linear, Notion)
+            people::sync_commands::people_sync_status,
+            people::sync_commands::people_connect,
+            people::sync_commands::people_test_connection,
+            people::sync_commands::people_notion_databases,
+            people::sync_commands::people_notion_save_mapping,
+            people::sync_commands::people_sync_now,
+            people::sync_commands::people_disconnect,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
