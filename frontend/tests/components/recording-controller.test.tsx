@@ -219,7 +219,8 @@ mock.module('../../src/components/Sidebar/SidebarProvider', () => ({
   useSidebar: () => ({ setCurrentMeeting, setIsMeetingActive, refetchMeetings }),
 }));
 mock.module('../../src/lib/debugMode', () => ({ cachedDebugMode: () => false }));
-mock.module('../../src/lib/recordingNotification', () => ({ showRecordingNotification: mock(async () => {}) }));
+const showRecordingNotification = mock(async (): Promise<void> => {});
+mock.module('../../src/lib/recordingNotification', () => ({ showRecordingNotification }));
 mock.module('../../src/lib/autoSummary', () => ({ markDeferredMeetingForAutoSummary: () => {} }));
 mock.module('../../src/services/notePersistenceService', () => ({
   flushNotes,
@@ -309,7 +310,7 @@ beforeEach(() => {
     invoke, listen, rehydrate, setStatus, push, refetchMeetings, setCurrentMeeting,
     setIsMeetingActive, clearTranscripts, setMeetingTitle, markMeetingAsSaved,
     flushBuffer, flushNotes, startRecordingWithDevices, stopRecording,
-    pauseRecording, resumeRecording, createMeeting, saveMeeting,
+    pauseRecording, resumeRecording, createMeeting, saveMeeting, showRecordingNotification,
     bindActiveRecordingMeeting, claimRecordingRequest, acknowledgeRecordingRequest,
     onRecordingStartRequested, onRecordingStopped,
     onTranscriptionError, getPendingRecordingRequest, getActivitySnapshot,
@@ -339,6 +340,35 @@ describe('RecordingControllerProvider', () => {
     await act(async () => { await first; });
 
     expect(bindActiveRecordingMeeting).toHaveBeenCalledWith('native-session-exact', 'meeting-created');
+    expect(push).toHaveBeenCalledWith('/meeting-details?id=meeting-created');
+  });
+
+  test('creates and opens the meeting even when the recording toast never settles', async () => {
+    showRecordingNotification.mockImplementationOnce(() => new Promise<void>(() => {}));
+    await mount();
+    const start = controller.startRecording({ source: 'app_shell' });
+    startResult.resolve({ session_id: 'toast-hangs-session' });
+    await act(async () => {
+      await Promise.race([start, new Promise((resolve) => setTimeout(resolve, 50))]);
+    });
+
+    expect(createMeeting).toHaveBeenCalledTimes(1);
+    expect(bindActiveRecordingMeeting).toHaveBeenCalledWith('toast-hangs-session', 'meeting-created');
+    expect(push).toHaveBeenCalledWith('/meeting-details?id=meeting-created');
+  });
+
+  test('Return creates the meeting a recording is missing instead of failing', async () => {
+    createMeeting.mockImplementationOnce(async () => { throw new Error('database busy'); });
+    await mount();
+    const start = controller.startRecording({ source: 'app_shell' });
+    startResult.resolve({ session_id: 'missing-meeting-session' });
+    await act(async () => { await start; });
+    expect(push).not.toHaveBeenCalledWith('/meeting-details?id=meeting-created');
+
+    await act(async () => { await controller.returnToRecording(); });
+
+    expect(createMeeting).toHaveBeenCalledTimes(2);
+    expect(bindActiveRecordingMeeting).toHaveBeenCalledWith('missing-meeting-session', 'meeting-created');
     expect(push).toHaveBeenCalledWith('/meeting-details?id=meeting-created');
   });
 

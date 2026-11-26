@@ -605,10 +605,12 @@ export function RecordingControllerProvider({
       }
       clearTranscripts();
       setIsMeetingActive(true);
-      await showRecordingNotification().catch((error) => {
+      // The meeting row comes first. The toast is cosmetic and once stalled
+      // here, leaving an active recording with no meeting to open.
+      await persistStartedSession(session);
+      void showRecordingNotification().catch((error) => {
         console.warn('Could not show the recording notification:', error);
       });
-      await persistStartedSession(session);
       await rehydrate();
     } catch (error) {
       const text = messageOf(error);
@@ -1134,7 +1136,18 @@ export function RecordingControllerProvider({
       ?? (latestSessionId ? sessionsRef.current.get(latestSessionId)?.meetingId : null)
       ?? null;
     if (!meetingId) {
-      reportError('persistence', 'Recording workspace unavailable', 'The recording is active, but its meeting row has not been created yet.');
+      // The meeting was never created (its creation failed or stalled).
+      // Create it now and open it; the recording keeps going either way.
+      const session = latestSessionId ? sessionsRef.current.get(latestSessionId) : undefined;
+      if (session) {
+        await persistStartedSession(session);
+        return;
+      }
+      reportError(
+        'persistence',
+        'Recording workspace unavailable',
+        'The recording is still going and is saved to disk. Its meeting will be created when you stop it.',
+      );
       return;
     }
     try {
@@ -1143,7 +1156,7 @@ export function RecordingControllerProvider({
       console.warn('Could not save notes before returning to the recording:', error);
     }
     router.push(`/meeting-details?id=${encodeURIComponent(meetingId)}`);
-  }, [authoritativeMeetingId, recording?.session_id, reportError, router]);
+  }, [authoritativeMeetingId, persistStartedSession, recording?.session_id, reportError, router]);
 
   requestHandlerRef.current = (request) => {
     if (handledRequestsRef.current.has(request.request_id)) return;
