@@ -14,7 +14,7 @@ export function BetaSettings() {
 
   // Only these flags are shown here. liveTranscription is still stored with the
   // beta flags for backward compatibility, but its switch lives in Settings › Recording.
-  const featureOrder: BetaFeatureKey[] = ['micEchoCancellation'];
+  const featureOrder: BetaFeatureKey[] = ['micEchoCancellation', 'peopleIntegrations'];
 
   return (
     <div className="space-y-6">

@@ -1,12 +1,13 @@
 'use client';
 
 import { useEffect } from 'react';
-import { ArrowLeft, Database, FlaskConical, Mic, Settings2, Sparkles, Webhook } from 'lucide-react';
+import { ArrowLeft, Database, FlaskConical, Mic, Settings2, Sparkles, Users, Webhook } from 'lucide-react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { AppearanceSetting } from '@/components/AppearanceSetting';
 import { BetaSettings } from '@/components/BetaSettings';
 import { CalendarSettings } from '@/components/CalendarSettings';
 import { DeveloperSettings } from '@/components/DeveloperSettings';
+import { PeopleSettings } from '@/components/people/PeopleSettings';
 import { PreferenceSettings } from '@/components/PreferenceSettings';
 import { RecordingSettings } from '@/components/RecordingSettings';
 import { SummaryModelSettings } from '@/components/SummaryModelSettings';
@@ -22,6 +23,7 @@ const TABS = [
   // The id stays 'summary' so existing settingsHref('summary') deep links keep working.
   { value: 'summary', label: 'AI notes', icon: Sparkles },
   { value: 'integrations', label: 'Integrations', icon: Webhook },
+  { value: 'people', label: 'People', icon: Users },
   // Beta and Developer were one tab's worth each; the old 'beta' id still lands here.
   { value: 'developer', label: 'Labs & Developer', icon: FlaskConical },
 ] as const;
@@ -81,6 +83,7 @@ export function SettingsPageContent() {
             <TabsContent value="transcription" className="mt-6"><TranscriptSettings /></TabsContent>
             <TabsContent value="summary" className="mt-6"><SummaryModelSettings /></TabsContent>
             <TabsContent value="integrations" className="mt-6"><CalendarSettings /><WebhookSettings /></TabsContent>
+            <TabsContent value="people" className="mt-6"><PeopleSettings /></TabsContent>
             <TabsContent value="developer" className="mt-6 space-y-10">
               <section aria-label="Labs" className="space-y-4">
                 <h2 className="text-lg font-semibold">Labs</h2>

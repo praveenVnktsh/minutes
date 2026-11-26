@@ -4,6 +4,7 @@ export const SETTINGS_SECTIONS = [
   'transcription',
   'summary',
   'integrations',
+  'people',
   'developer',
 ] as const;
 

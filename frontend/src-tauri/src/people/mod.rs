@@ -12,6 +12,11 @@
 
 pub mod calendar_link;
 pub mod commands;
+pub mod http;
+pub mod linear;
+pub mod notion;
+pub mod sync;
+pub mod sync_commands;
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};

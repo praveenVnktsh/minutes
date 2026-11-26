@@ -2,8 +2,8 @@ import { describe, expect, test } from 'bun:test';
 import { isSettingsSection, resolveSettingsSection, SETTINGS_SECTIONS, settingsHref } from './settingsSections';
 
 describe('settings sections', () => {
-  test('has six tabs, with Labs & Developer under the developer id', () => {
-    expect(SETTINGS_SECTIONS).toEqual(['general', 'recording', 'transcription', 'summary', 'integrations', 'developer']);
+  test('has seven tabs, with Labs & Developer under the developer id', () => {
+    expect(SETTINGS_SECTIONS).toEqual(['general', 'recording', 'transcription', 'summary', 'integrations', 'people', 'developer']);
     expect(settingsHref('developer')).toBe('/settings?section=developer');
   });
 

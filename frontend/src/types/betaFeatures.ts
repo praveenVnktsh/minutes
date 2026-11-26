@@ -29,11 +29,18 @@ export interface BetaFeatures {
    * @since v1.5
    */
   micEchoCancellation: boolean;
+  /**
+   * Sync people, roles and projects from Linear and Notion (Settings › People).
+   * Off by default: when off, no request is made to either service.
+   * @since v1.5
+   */
+  peopleIntegrations: boolean;
 }
 
 export const DEFAULT_BETA_FEATURES: BetaFeatures = {
   liveTranscription: true, // Deferred transcription mode is available by default
   micEchoCancellation: false, // Opt-in until it has been proven on real calls
+  peopleIntegrations: false, // Opt-in: talks to Linear and Notion with the user's keys
 };
 
 
@@ -43,6 +50,7 @@ export const DEFAULT_BETA_FEATURES: BetaFeatures = {
 export const BETA_FEATURE_NAMES: Record<keyof BetaFeatures, string> = {
   liveTranscription: 'Live transcription switch',
   micEchoCancellation: 'Mic Echo Cancellation',
+  peopleIntegrations: 'Linear & Notion people sync',
 };
 
 /**
@@ -51,6 +59,7 @@ export const BETA_FEATURE_NAMES: Record<keyof BetaFeatures, string> = {
 export const BETA_FEATURE_DESCRIPTIONS: Record<keyof BetaFeatures, string> = {
   liveTranscription: 'Show a toggle to enable/disable live transcription during recording. When off, audio is still recorded but transcription is skipped to save resources.',
   micEchoCancellation: 'When the other side plays through your speakers, remove their voice from the microphone before transcribing, so it is not transcribed twice. Takes effect from the next recording.',
+  peopleIntegrations: 'Sync people, their roles and projects from Linear and Notion, so names come out right in transcripts and notes. Only directory lookups are sent to Linear and Notion, never meeting content. Connect them in Settings › People.',
 };
 
 /**

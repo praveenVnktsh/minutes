@@ -179,6 +179,13 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
       .catch(err => console.error('[ConfigContext] Failed to sync mic echo cancellation flag:', err));
   }, [betaFeatures.micEchoCancellation]);
 
+  // Mirror the Linear & Notion people sync flag into Rust the same way. Rust
+  // starts with it off, and its worker and sync commands refuse while it is.
+  useEffect(() => {
+    invoke('set_people_integrations_enabled', { enabled: betaFeatures.peopleIntegrations })
+      .catch(err => console.error('[ConfigContext] Failed to sync people integrations flag:', err));
+  }, [betaFeatures.peopleIntegrations]);
+
   const cacheProviderModel = useCallback((config: ModelConfig) => {
     if (typeof window === 'undefined' || !config.model) return;
     try {
