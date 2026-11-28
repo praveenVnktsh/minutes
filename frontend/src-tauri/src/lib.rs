@@ -57,6 +57,7 @@ pub mod meeting_detection;
 pub mod meeting_prompt;
 pub mod model_catalog;
 pub mod notifications;
+pub mod obsidian;
 pub mod ollama;
 pub mod onboarding;
 pub mod openai;
@@ -914,6 +915,12 @@ pub fn run() {
             webhooks::get_webhook_config,
             webhooks::set_webhook_config,
             webhooks::test_webhook,
+            obsidian::get_obsidian_export_config,
+            obsidian::set_obsidian_export_config,
+            obsidian::pick_obsidian_vault,
+            obsidian::pick_obsidian_folder,
+            obsidian::save_obsidian_note,
+            obsidian::open_obsidian_note,
             // Calendar subscription (ICS/iCal) integration
             calendar::get_calendar_config,
             calendar::set_calendar_config,

@@ -305,6 +305,29 @@ pub async fn api_set_meeting_debug<R: Runtime>(
         .map_err(|e| e.to_string())
 }
 
+/// A file name safe to join onto a directory: anything but ASCII letters,
+/// digits, `-`, `_`, `.` and spaces becomes `_`, so no separator or `..` path
+/// can escape the directory. An empty or all-dot result falls back to
+/// `meeting-export.md`.
+pub fn sanitize_export_file_name(file_name: &str) -> String {
+    let sanitized: String = file_name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ' ') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let sanitized = sanitized.trim();
+    if sanitized.trim_matches('.').is_empty() {
+        "meeting-export.md".to_string()
+    } else {
+        sanitized.to_string()
+    }
+}
+
 /// Write a text export (e.g. Markdown) to the user's Downloads folder.
 ///
 /// Returns the absolute path that was written. The filename is sanitized so the
@@ -325,24 +348,7 @@ pub async fn save_text_export<R: Runtime>(
 
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
 
-    let sanitized: String = file_name
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ' ') {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    let sanitized = sanitized.trim();
-    let sanitized = if sanitized.is_empty() {
-        "meeting-export.md"
-    } else {
-        sanitized
-    };
-
-    let path = dir.join(sanitized);
+    let path = dir.join(sanitize_export_file_name(&file_name));
     std::fs::write(&path, contents).map_err(|e| e.to_string())?;
 
     log_info!("Saved text export to {}", path.display());

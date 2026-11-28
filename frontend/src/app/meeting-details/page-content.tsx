@@ -6,7 +6,7 @@ import type { MeetingActivity, MeetingActivityStatus } from '@/types/meetingActi
 import { useSidebar } from '@/components/Sidebar/SidebarProvider';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { Copy, Download, Loader2, Mic, MoreHorizontal, Sparkles, Square, Trash2 } from 'lucide-react';
+import { Copy, Download, Loader2, Mic, MoreHorizontal, NotebookPen, Sparkles, Square, Trash2 } from 'lucide-react';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
@@ -198,6 +198,7 @@ export default function PageContent({
     aiSummary: meetingData.aiSummary,
     showAiNotes,
     notesTarget: isRecordingThisMeeting && liveFolderPath ? liveNotesTarget(liveFolderPath) : undefined,
+    onOpenSettings: (href) => router.push(href),
   });
 
   const meetingOperations = useMeetingOperations({
@@ -415,6 +416,9 @@ export default function PageContent({
           </button>
           <button type="button" className={menuItem} onClick={() => void copyOperations.handleExportMarkdown()}>
             <Download className="h-3.5 w-3.5 text-ink-muted" /> Export{withoutAi}
+          </button>
+          <button type="button" className={menuItem} onClick={() => void copyOperations.handleSaveToObsidian()}>
+            <NotebookPen className="h-3.5 w-3.5 text-ink-muted" /> Save to Obsidian{withoutAi}
           </button>
           <div className="my-1 h-px bg-hairline" role="separator" />
           <button
