@@ -10,8 +10,8 @@ const originalPersistence = { ...await import('../../src/services/notePersistenc
 const originalNavigator = globalThis.navigator;
 
 const invoke = mock(async (_command: string, _args?: Record<string, unknown>): Promise<unknown> => undefined);
-const success = mock(() => {});
-const errorToast = mock(() => {});
+const success = mock((_message?: string, _options?: unknown) => {});
+const errorToast = mock((_message?: string, _options?: unknown) => {});
 const flushNotes = mock(async () => {});
 const loadNotes = mock(async (): Promise<{
   loadState: string;
@@ -52,6 +52,7 @@ const mixedDocument: LiveNotesDocument = {
 };
 
 let operations!: ReturnType<typeof useCopyOperations>;
+const onOpenSettings = mock((_href: string) => {});
 function Probe({
   summary = null,
   showAiNotes = true,
@@ -71,6 +72,7 @@ function Probe({
     showAiNotes,
     notesTarget,
     currentNotesDocument,
+    onOpenSettings,
   });
   return null;
 }
@@ -97,6 +99,7 @@ beforeEach(async () => {
   errorToast.mockClear();
   flushNotes.mockClear();
   loadNotes.mockClear();
+  onOpenSettings.mockClear();
   loadNotes.mockImplementation(async () => ({
     loadState: 'ready',
     loadError: null,
@@ -232,6 +235,111 @@ describe('useCopyOperations', () => {
     expect(success).not.toHaveBeenCalled();
     expect(errorToast).toHaveBeenCalledTimes(1);
     expect(errorToast).toHaveBeenCalledWith('Failed to copy transcript');
+  });
+
+  test('export adds frontmatter with tags and people, and follows the transcript toggle', async () => {
+    let includeTranscript = true;
+    invoke.mockImplementation(async (command) => {
+      if (command === 'get_obsidian_export_config') {
+        return {
+          config: { vault_path: null, folder: '', tags: ['minutes-app', 'work'], include_transcript: includeTranscript },
+          vault_warning: null,
+          vault_error: null,
+        };
+      }
+      if (command === 'meeting_attendees_get') return [{ name: 'Dale Lewis' }];
+      if (command === 'get_speaker_identities') {
+        return [
+          { speaker_id: 'speaker_00', display_name: 'Dale Lewis' },
+          { speaker_id: 'speaker_01', display_name: 'Howard Frederick' },
+        ];
+      }
+      if (command === 'api_get_meeting_transcripts') {
+        return {
+          transcripts: [{ id: 'one', text: 'Hello', timestamp: '10:00:00', audio_start_time: 0, audio_end_time: 90 }],
+          total_count: 1,
+          has_more: false,
+        };
+      }
+      if (command === 'save_text_export') return '/tmp/Planning.md';
+      return undefined;
+    });
+
+    await act(async () => { await operations.handleExportMarkdown(); });
+    const contents = exported();
+    expect(contents.startsWith('---\ntitle: "Planning"\n')).toBe(true);
+    expect(contents).toContain('attendees:\n  - "Dale Lewis"\n  - "Howard Frederick"\n');
+    expect(contents).toContain('tags:\n  - "minutes-app"\n  - "work"\n');
+    expect(contents).toContain('duration_minutes: 2\n');
+    expect(contents).toContain('minutes_link: "minutes://meeting/meeting-1"');
+    expect(contents).toContain('## Transcript');
+
+    invoke.mockClear();
+    includeTranscript = false;
+    await act(async () => { await operations.handleExportMarkdown(); });
+    expect(exported()).not.toContain('## Transcript');
+  });
+
+  test('export still works when the export settings cannot be read', async () => {
+    invoke.mockImplementation(async (command) => {
+      if (command === 'get_obsidian_export_config') throw new Error('store unavailable');
+      if (command === 'api_get_meeting_transcripts') return { transcripts: [], total_count: 0, has_more: false };
+      if (command === 'save_text_export') return '/tmp/Planning.md';
+      return undefined;
+    });
+    await act(async () => { await operations.handleExportMarkdown(); });
+    expect(exported()).toContain('tags:\n  - "minutes-app"\n');
+    expect(success).toHaveBeenCalledTimes(1);
+  });
+
+  test('save to Obsidian without a vault points to the settings and saves nothing', async () => {
+    invoke.mockImplementation(async (command) => {
+      if (command === 'get_obsidian_export_config') {
+        return {
+          config: { vault_path: null, folder: '', tags: ['minutes-app'], include_transcript: true },
+          vault_warning: null,
+          vault_error: null,
+        };
+      }
+      return undefined;
+    });
+    await act(async () => { await operations.handleSaveToObsidian(); });
+    expect(invoke.mock.calls.some(([command]) => command === 'save_obsidian_note')).toBe(false);
+    expect(errorToast).toHaveBeenCalledTimes(1);
+    const [message, options] = errorToast.mock.calls[0] as [string, { action: { onClick: () => void } }];
+    expect(message).toBe('Choose an Obsidian vault first');
+    options.action.onClick();
+    expect(onOpenSettings).toHaveBeenCalledWith('/settings?section=integrations');
+  });
+
+  test('save to Obsidian writes the note and offers to open it', async () => {
+    invoke.mockImplementation(async (command) => {
+      if (command === 'get_obsidian_export_config') {
+        return {
+          config: { vault_path: '/vault', folder: 'Meetings', tags: ['minutes-app'], include_transcript: true },
+          vault_warning: null,
+          vault_error: null,
+        };
+      }
+      if (command === 'api_get_meeting_transcripts') return { transcripts: [], total_count: 0, has_more: false };
+      if (command === 'save_obsidian_note') {
+        return { path: '/vault/Meetings/Planning-2026-09-18 v2.md', relative_path: 'Meetings/Planning-2026-09-18 v2.md', vault_name: 'vault', version: 2 };
+      }
+      return undefined;
+    });
+    await act(async () => { await operations.handleSaveToObsidian(); });
+    const save = invoke.mock.calls.find(([command]) => command === 'save_obsidian_note');
+    expect((save?.[1] as { fileName: string }).fileName).toMatch(/^Planning-2026-09-1[89]\.md$/);
+    expect((save?.[1] as { contents: string }).contents).toContain('## Notes\n\nOnly note');
+    expect(errorToast).not.toHaveBeenCalled();
+    const [message, options] = success.mock.calls[0] as [string, { description: string; action: { onClick: () => void } }];
+    expect(message).toBe('Saved to Obsidian');
+    expect(options.description).toContain('saved as v2');
+    options.action.onClick();
+    expect(invoke).toHaveBeenCalledWith('open_obsidian_note', {
+      vaultName: 'vault',
+      relativePath: 'Meetings/Planning-2026-09-18 v2.md',
+    });
   });
 
   test('flushes an optional live target and exports its supplied current document', async () => {

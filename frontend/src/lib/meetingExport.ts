@@ -240,12 +240,122 @@ function formatTranscriptTimestamp(seconds: number | undefined, fallback: string
   return bracketedClock(seconds, undefined, { padHours: true });
 }
 
+export interface FrontmatterMeta {
+  title: string;
+  meetingId: string;
+  /** When the meeting started; omitted from the frontmatter when unknown. */
+  createdAt?: Date;
+  durationSeconds?: number;
+  attendees?: string[];
+  tags?: string[];
+  exportedAt: Date;
+}
+
+const pad = (value: number) => String(value).padStart(2, '0');
+
+/** `YYYY-MM-DD` in the local time zone, as Obsidian's daily notes name days. */
+export function localDate(date: Date): string {
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+/** ISO 8601 in local time with its offset, e.g. `2026-11-27T09:30:00+01:00`. */
+export function localIsoTimestamp(date: Date): string {
+  const offset = -date.getTimezoneOffset();
+  const sign = offset >= 0 ? '+' : '-';
+  const abs = Math.abs(offset);
+  return `${localDate(date)}T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+    + `${sign}${pad(Math.floor(abs / 60))}:${pad(abs % 60)}`;
+}
+
+/** A JSON string is a valid YAML double-quoted scalar, so `:`, `#`, quotes
+ * and newlines in a title can't break the frontmatter. */
+const yamlString = (value: string) => JSON.stringify(value);
+
+function yamlList(key: string, values: string[]): string[] {
+  return [`${key}:`, ...values.map((value) => `  - ${yamlString(value)}`)];
+}
+
+/** Tags as Obsidian accepts them: no leading `#`, spaces as `-`, only
+ * letters, digits, `_`, `/` and `-`, not purely numeric, each once. Matches
+ * `normalise_tags` in `obsidian.rs`. */
+export function normaliseTags(input: string[]): string[] {
+  const seen = new Set<string>();
+  const tags: string[] = [];
+  for (const raw of input) {
+    const tag = raw.trim().replace(/^#+/, '').split(/\s+/).filter(Boolean).join('-')
+      .replace(/[^\p{L}\p{N}_/-]/gu, '')
+      .replace(/^\/+|\/+$/g, '');
+    if (!tag || /^[0-9]+$/.test(tag)) continue;
+    const key = tag.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    tags.push(tag);
+  }
+  return tags;
+}
+
+/** A YAML frontmatter block for Obsidian's Properties, Dataview and Bases. */
+export function buildFrontmatter(meta: FrontmatterMeta): string {
+  const lines = ['---', `title: ${yamlString(meta.title || 'Untitled meeting')}`];
+  if (meta.createdAt && !Number.isNaN(meta.createdAt.getTime())) {
+    lines.push(`date: ${localDate(meta.createdAt)}`, `created: ${yamlString(localIsoTimestamp(meta.createdAt))}`);
+  }
+  if (meta.durationSeconds && meta.durationSeconds > 0) {
+    lines.push(`duration_minutes: ${Math.max(1, Math.round(meta.durationSeconds / 60))}`);
+  }
+  const attendees = (meta.attendees ?? []).map((name) => name.trim()).filter(Boolean);
+  if (attendees.length) lines.push(...yamlList('attendees', attendees));
+  const tags = normaliseTags(meta.tags ?? []);
+  if (tags.length) lines.push(...yamlList('tags', tags));
+  lines.push(
+    `minutes_id: ${yamlString(meta.meetingId)}`,
+    `minutes_link: ${yamlString(`minutes://meeting/${meta.meetingId}`)}`,
+    `exported_at: ${yamlString(localIsoTimestamp(meta.exportedAt))}`,
+    '---',
+  );
+  return `${lines.join('\n')}\n\n`;
+}
+
+/** A diarised voice, as `get_speaker_identities` returns it. Its display name
+ * is its id (`speaker_00`, `mic`) until diarisation or the user names it. */
+export interface SpeakerName {
+  speaker_id: string;
+  display_name: string;
+}
+
+/** Who was in the meeting: its linked attendees, then each speaker the user
+ * (or diarisation) named who isn't one of them already. */
+export function meetingPeopleNames(attendees: string[], speakers: SpeakerName[]): string[] {
+  const seen = new Set<string>();
+  const names: string[] = [];
+  const add = (raw: string) => {
+    const name = raw.trim();
+    const key = name.toLocaleLowerCase();
+    if (!name || seen.has(key)) return;
+    seen.add(key);
+    names.push(name);
+  };
+  attendees.forEach(add);
+  speakers
+    .filter((speaker) => speaker.display_name.trim() && speaker.display_name.trim() !== speaker.speaker_id)
+    .forEach((speaker) => add(speaker.display_name));
+  return names;
+}
+
+/** The recording's length: where its last segment ends. */
+export function transcriptDurationSeconds(transcripts: Transcript[]): number | undefined {
+  const end = transcripts.reduce((max, segment) => Math.max(max, segment.audio_end_time ?? 0), 0);
+  return end > 0 ? end : undefined;
+}
+
 export function buildMeetingExport({
   title,
   createdAt,
   notes,
   aiNotes = '',
   transcripts,
+  frontmatter,
+  includeTranscript = true,
 }: {
   title: string;
   createdAt?: string;
@@ -254,16 +364,20 @@ export function buildMeetingExport({
   /** An old meeting's Enhanced notes, when they are shown below its notes. */
   aiNotes?: string;
   transcripts: Transcript[];
+  /** A `buildFrontmatter` block; it carries the date, so the date line goes. */
+  frontmatter?: string;
+  includeTranscript?: boolean;
 }): string {
   const lines = [`# ${title || 'Untitled meeting'}`, ''];
-  if (createdAt) lines.push(`_${new Date(createdAt).toLocaleString()}_`, '');
+  if (createdAt && !frontmatter) lines.push(`_${new Date(createdAt).toLocaleString()}_`, '');
   if (notes.trim()) lines.push('## Notes', '', notes.trim(), '');
   if (aiNotes.trim()) lines.push('## AI notes', '', aiNotes.trim(), '');
-  if (transcripts.length) lines.push('## Transcript', '', transcriptMarkdown(transcripts), '');
-  return lines.join('\n').trimEnd() + '\n';
+  if (includeTranscript && transcripts.length) lines.push('## Transcript', '', transcriptMarkdown(transcripts), '');
+  return (frontmatter ?? '') + lines.join('\n').trimEnd() + '\n';
 }
 
+/** `<Title>-YYYY-MM-DD.md`, dated in local time. */
 export function exportFileName(title: string, date = new Date()): string {
   const safeTitle = (title || 'meeting').replace(/[^\w\- ]+/g, '').trim().replace(/\s+/g, '-') || 'meeting';
-  return `${safeTitle}-${date.toISOString().slice(0, 10)}.md`;
+  return `${safeTitle}-${localDate(date)}.md`;
 }

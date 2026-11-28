@@ -7,6 +7,7 @@ import { AppearanceSetting } from '@/components/AppearanceSetting';
 import { BetaSettings } from '@/components/BetaSettings';
 import { CalendarSettings } from '@/components/CalendarSettings';
 import { DeveloperSettings } from '@/components/DeveloperSettings';
+import { ObsidianSettings } from '@/components/ObsidianSettings';
 import { PeopleSettings } from '@/components/people/PeopleSettings';
 import { PreferenceSettings } from '@/components/PreferenceSettings';
 import { RecordingSettings } from '@/components/RecordingSettings';
@@ -82,7 +83,7 @@ export function SettingsPageContent() {
             <TabsContent value="recording" className="mt-6"><RecordingSettings /></TabsContent>
             <TabsContent value="transcription" className="mt-6"><TranscriptSettings /></TabsContent>
             <TabsContent value="summary" className="mt-6"><SummaryModelSettings /></TabsContent>
-            <TabsContent value="integrations" className="mt-6"><CalendarSettings /><WebhookSettings /></TabsContent>
+            <TabsContent value="integrations" className="mt-6"><CalendarSettings /><ObsidianSettings /><WebhookSettings /></TabsContent>
             <TabsContent value="people" className="mt-6"><PeopleSettings /></TabsContent>
             <TabsContent value="developer" className="mt-6 space-y-10">
               <section aria-label="Labs" className="space-y-4">
